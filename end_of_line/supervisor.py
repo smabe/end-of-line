@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from . import state as st
+from . import notify, state as st
 from .config import ProjectConfig
 from .plan_parser import parse_sessions_index
 
@@ -33,9 +33,22 @@ class TickResult:
     detail: str = ""
     phase_id: str | None = None
     token: str | None = None
+    # Rendered iMessage body, populated for actions that should ping the
+    # user. cmd_tick dispatches AFTER tick() exits the state lock so a hung
+    # Messages.app can't hold the lock.
+    notify_body: str | None = None
 
     def __str__(self) -> str:
         return f"[{self.action}] {self.detail}" if self.detail else f"[{self.action}]"
+
+
+# Maps the actions that produce a notification to the notify-kind tag used
+# for quiet-hours classification. Adding an action here is the one-line
+# change a future contributor needs to make a tick path notify.
+ACTION_NOTIFY_KIND: dict[Action, str] = {
+    "stalled": notify.KIND_STALLED,
+    "plan_done": notify.KIND_COMPLETED,
+}
 
 
 def _detect_stalled(data: dict) -> TickResult | None:
@@ -65,6 +78,7 @@ def _detect_stalled(data: dict) -> TickResult | None:
         f"phase={claim['phase_id']} age={age:.0f}s",
         phase_id=claim["phase_id"],
         token=token,
+        notify_body=notify.render_stalled(claim["phase_id"], age),
     )
 
 
@@ -157,7 +171,18 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             if not pending_tasks:
                 data["status"] = st.STATUS_DONE
                 st.append_event(data, st.EVENT_PLAN_COMPLETED)
-                return TickResult("plan_done", data["plan_slug"])
+                commit_count = sum(
+                    len(evt.get("commits") or [])
+                    for evt in data["events"]
+                    if evt.get("type") == st.EVENT_PHASE_COMPLETED
+                )
+                return TickResult(
+                    "plan_done",
+                    data["plan_slug"],
+                    notify_body=notify.render_completed(
+                        data["plan_slug"], commit_count,
+                    ),
+                )
             return TickResult(
                 "idle", f"phases done; {len(pending_tasks)} spawned task(s) pending",
             )

@@ -62,7 +62,7 @@ return _die(ExitCode.CLAIM_MISMATCH, str(exc))
 ```
 
 ### Worker callback contract (load-bearing)
-Every worker-side CLI command (`complete`, `block`, `spawn`, `task-done`) requires `--token` matching the live claim. Don't add a worker command that skips this — it breaks the whole security model. See `state.assert_claim_match` and `state.release_claim`.
+Every worker-side CLI command (`complete`, `block`, `spawn`, `task-done`, `heartbeat`) requires `--token` matching the live claim. Don't add a worker command that skips this — it breaks the whole security model. New worker commands should use the `@_translate_claim_mismatch` decorator and let `ClaimMismatch` propagate. See `state.assert_claim_match` and `state.release_claim`.
 
 ### Slugs
 `args.plan` and any parsed `phase_id` MUST go through `st.validate_slug()` before they touch a filesystem path. Regex: `^[a-z0-9][a-z0-9_-]{0,63}$`. Don't add a code path that bypasses.
@@ -85,14 +85,16 @@ Never write raw event-type strings. Use `state.EVENT_*`. A typo silently breaks 
 - Dispatch fast-fail with per-token logs + pid stamping
 - ExitCode enum + `_die` helper
 
+**Day 2 in progress:**
+- 2.1 (shipped `ef01756`): Worker heartbeat → `stalled` status (Cliff 1)
+- 2.2 (shipped this commit): iMessage outbound via osascript + quiet hours 22-08 default. Wired to blocker/stalled/plan_completed events.
+
 **Day 2 ahead** (see `brainstorm/clu-master.md` for ranked list):
-1. Worker heartbeat → `stalled` status (end-user Cliff 1)
-2. iMessage adapter — outbound osascript + LaunchAgent polling `chat.db` for inbound replies (Cliff 2)
-3. `clu` no-args fleet view (Cliff 3)
-4. Quiet hours 22:00–08:00 + SLA-pauses-during-quiet
-5. Victory ping on `plan_completed`
-6. `clu retry` / `clu pause` / `clu resume`
-7. Halt-reason as first-class field in `clu status`
+1. iMessage inbound LaunchAgent — poll `~/Library/Messages/chat.db` and exec `clu answer` on numeric replies (Cliff 2 reply loop)
+2. `clu` no-args fleet view (Cliff 3)
+3. SLA-pauses-during-quiet (escalations should also respect quiet hours)
+4. `clu retry` / `clu pause` / `clu resume`
+5. Halt-reason as first-class field in `clu status`
 
 **Locked config decisions** (from the brainstorm — don't re-litigate):
 - Notifications: iMessage to **self-chat** handle, NO Pushover (user picked iMessage-only)

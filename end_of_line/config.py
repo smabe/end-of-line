@@ -18,11 +18,17 @@ class DispatchSpec:
 
 
 @dataclass
+class NotifySpec:
+    imessage_to: str | None = None
+    quiet_hours: tuple[str, str] | None = None
+
+
+@dataclass
 class ProjectConfig:
     project_root: Path
     plan_dir: str = "plans"
     dispatch: DispatchSpec = field(default_factory=DispatchSpec)
-    notify: dict = field(default_factory=dict)
+    notify: NotifySpec = field(default_factory=NotifySpec)
 
     def state_path(self, plan_slug: str) -> Path:
         path = self.project_root / self.plan_dir / ORCHESTRATOR_DIR / f"{plan_slug}.state.json"
@@ -45,6 +51,8 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         return ProjectConfig(project_root=project_root)
     raw = json.loads(cfg_path.read_text())
     disp = raw.get("dispatch", {})
+    notify_raw = raw.get("notify", {})
+    quiet = notify_raw.get("quiet_hours")
     return ProjectConfig(
         project_root=project_root,
         plan_dir=raw.get("plan_dir", "plans"),
@@ -52,5 +60,8 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             kind=disp.get("kind", "shell"),
             command=disp.get("command", ""),
         ),
-        notify=raw.get("notify", {}),
+        notify=NotifySpec(
+            imessage_to=(notify_raw.get("imessage") or {}).get("to"),
+            quiet_hours=tuple(quiet) if quiet and len(quiet) == 2 else None,
+        ),
     )

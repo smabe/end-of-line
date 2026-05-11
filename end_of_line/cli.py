@@ -26,9 +26,9 @@ import sys
 from enum import IntEnum
 from pathlib import Path
 
-from . import state as st
+from . import notify, state as st
 from .config import ProjectConfig, load_project_config
-from .supervisor import tick
+from .supervisor import ACTION_NOTIFY_KIND, tick
 
 
 class ExitCode(IntEnum):
@@ -201,6 +201,8 @@ def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.dispatch and result.action == "dispatch":
         from .dispatch import dispatch_for_tick
         dispatch_for_tick(result, cfg, args.plan, state_path)
+    if result.notify_body and (kind := ACTION_NOTIFY_KIND.get(result.action)):
+        notify.notify(cfg.notify, kind, result.notify_body)
     return 0
 
 
@@ -383,6 +385,10 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
             data, args.phase, args.question, args.options,
             args.context, args.type,
         )
+    notify.notify(
+        cfg.notify, notify.KIND_BLOCKER,
+        notify.render_blocker(blocker_id, args.phase, args.question, args.options),
+    )
     print(f"Blocked {blocker_id} on phase {args.phase}")
     return ExitCode.OK
 

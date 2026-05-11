@@ -40,9 +40,14 @@ In your project repo, drop a `.orchestrator.json`:
     "kind": "shell",
     "command": "claude --print '/plan {plan_slug}'"
   },
-  "notify": {"push": true}
+  "notify": {
+    "imessage": {"to": "+15551234567"},
+    "quiet_hours": ["22:00", "08:00"]
+  }
 }
 ```
+
+`notify.imessage.to` is the iMessage handle clu will message on a new blocker, stalled phase, or plan completion. Use your own number or iCloud email for a self-chat. `quiet_hours` is `[start, end]` in local time and wraps overnight; omit for "always loud". Outbound goes via `osascript` so Messages.app must be installed and signed in.
 
 Then:
 
