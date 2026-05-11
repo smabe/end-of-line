@@ -42,6 +42,8 @@ class OpenBlocker:
     project_root: Path
     plan_slug: str
     blocker_id: str  # q-N
+    options_count: int
+    last_notified_at: str  # ISO ts of most recent EVENT_PHASE_BLOCKED, "" if none
 
 
 Dispatcher = Callable[["OpenBlocker", str], None]
@@ -63,12 +65,21 @@ def open_blockers_for_host(
         if data is None:
             continue
         open_qs = st.open_blockers(data)
-        if open_qs:
-            out.append(OpenBlocker(
-                project_root=Path(row.project_root),
-                plan_slug=row.plan_slug,
-                blocker_id=open_qs[0]["id"],
-            ))
+        if not open_qs:
+            continue
+        first = open_qs[0]
+        last_notified = ""
+        for evt in reversed(data["events"]):
+            if evt.get("type") == st.EVENT_PHASE_BLOCKED:
+                last_notified = evt.get("ts", "")
+                break
+        out.append(OpenBlocker(
+            project_root=Path(row.project_root),
+            plan_slug=row.plan_slug,
+            blocker_id=first["id"],
+            options_count=len(first.get("options", [])),
+            last_notified_at=last_notified,
+        ))
     return out
 
 
@@ -77,9 +88,11 @@ def route_reply(
 ) -> tuple[OpenBlocker, str] | None:
     """Return (target, option-index-str) if `text` resolves to a single blocker.
 
-    Returns None when the text doesn't match the grammar, the slug is
-    unknown, or the reply is bare-digit and multiple plans have open
-    blockers (forces disambiguation rather than guessing).
+    Bare-digit replies with multiple open blockers route to the
+    most-recently-pinged plan whose blocker has that digit in range
+    (issue #3). Slug-prefixed replies always win. Returns None when the
+    text doesn't match the grammar, the slug is unknown, no plan has a
+    valid index for the digit, or the top two candidates tie on ping ts.
     """
     m = REPLY_RE.match(text)
     if not m:
@@ -90,9 +103,31 @@ def route_reply(
             if ob.plan_slug == slug:
                 return ob, digit
         return None
+    if not open_blockers:
+        return None
     if len(open_blockers) == 1:
         return open_blockers[0], digit
-    return None
+    picked = _pick_by_last_pinged(open_blockers, digit)
+    return (picked, digit) if picked else None
+
+
+def _pick_by_last_pinged(
+    open_blockers: list[OpenBlocker], digit: str,
+) -> OpenBlocker | None:
+    """Bare-digit ambiguity → most-recently-pinged plan with the digit in range.
+
+    Filters to plans where `digit` is a valid option index, then picks the
+    unique max-`last_notified_at`. Returns None if no plan is eligible or
+    the top two tie on timestamp (refuse rather than silently misroute).
+    """
+    idx = int(digit)
+    eligible = [b for b in open_blockers if idx < b.options_count]
+    if not eligible:
+        return None
+    eligible.sort(key=lambda b: b.last_notified_at, reverse=True)
+    if len(eligible) >= 2 and eligible[0].last_notified_at == eligible[1].last_notified_at:
+        return None
+    return eligible[0]
 
 
 def _cli_dispatch(target: OpenBlocker, answer: str) -> None:

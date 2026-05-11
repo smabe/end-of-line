@@ -26,20 +26,25 @@ def _make_chat_db(path: Path, rows: list[tuple[int, int, str | None]]) -> None:
     conn.close()
 
 
+def _ob(slug: str, *, blocker_id: str = "q-1", options: int = 2,
+        root: str | Path = "/p", ts: str = "") -> OpenBlocker:
+    """Factory keeps tests readable as OpenBlocker grows fields."""
+    return OpenBlocker(
+        project_root=Path(root), plan_slug=slug, blocker_id=blocker_id,
+        options_count=options, last_notified_at=ts,
+    )
+
+
 class ReplyRouteTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.a = OpenBlocker(Path("/p"), "plan-a", "q-1")
-        self.b = OpenBlocker(Path("/q"), "plan-b", "q-3")
+        self.a = _ob("plan-a", blocker_id="q-1", root="/p")
+        self.b = _ob("plan-b", blocker_id="q-3", root="/q")
 
     def test_bare_digit_routes_when_only_one_open(self) -> None:
         self.assertEqual(
             notify_inbound.route_reply("0", [self.a]),
             (self.a, "0"),
         )
-
-    def test_bare_digit_rejected_when_multiple_open(self) -> None:
-        # Conservative: require disambiguation rather than guess which plan.
-        self.assertIsNone(notify_inbound.route_reply("0", [self.a, self.b]))
 
     def test_slug_prefix_disambiguates(self) -> None:
         self.assertEqual(
@@ -66,6 +71,58 @@ class ReplyRouteTestCase(unittest.TestCase):
                 notify_inbound.route_reply(line, [self.a]),
                 msg=f"line {line!r} unexpectedly routed",
             )
+
+
+class LastPingedRoutingTestCase(unittest.TestCase):
+    """Bare-digit + multiple plans → route to most-recently-pinged plan."""
+
+    def test_bare_digit_picks_most_recent_of_two(self) -> None:
+        older = _ob("plan-a", ts="2026-05-10T12:00:00Z")
+        newer = _ob("plan-b", ts="2026-05-11T09:00:00Z")
+        self.assertEqual(
+            notify_inbound.route_reply("0", [older, newer]),
+            (newer, "0"),
+        )
+
+    def test_bare_digit_picks_most_recent_of_three(self) -> None:
+        oldest = _ob("plan-a", ts="2026-05-09T00:00:00Z")
+        middle = _ob("plan-b", ts="2026-05-10T00:00:00Z")
+        newest = _ob("plan-c", ts="2026-05-11T00:00:00Z")
+        self.assertEqual(
+            notify_inbound.route_reply("1", [oldest, newest, middle]),
+            (newest, "1"),
+        )
+
+    def test_slug_prefix_overrides_last_pinged(self) -> None:
+        # Explicit beats inferred — even if plan-b was pinged later.
+        a = _ob("plan-a", ts="2026-05-10T00:00:00Z")
+        b = _ob("plan-b", ts="2026-05-11T00:00:00Z")
+        self.assertEqual(
+            notify_inbound.route_reply("plan-a 1", [a, b]),
+            (a, "1"),
+        )
+
+    def test_falls_through_when_top_index_out_of_range(self) -> None:
+        # plan-b pinged last but only has 2 options; "5" falls through to plan-a.
+        a = _ob("plan-a", options=6, ts="2026-05-10T00:00:00Z")
+        b = _ob("plan-b", options=2, ts="2026-05-11T00:00:00Z")
+        self.assertEqual(
+            notify_inbound.route_reply("5", [a, b]),
+            (a, "5"),
+        )
+
+    def test_tie_on_last_notified_refuses(self) -> None:
+        # Theoretical: two plans pinged at the same ts → ambiguous, refuse.
+        same = "2026-05-11T09:00:00Z"
+        a = _ob("plan-a", ts=same)
+        b = _ob("plan-b", ts=same)
+        self.assertIsNone(notify_inbound.route_reply("0", [a, b]))
+
+    def test_no_eligible_plan_returns_none(self) -> None:
+        # Digit out of range for every plan → no route.
+        a = _ob("plan-a", options=2, ts="2026-05-10T00:00:00Z")
+        b = _ob("plan-b", options=3, ts="2026-05-11T00:00:00Z")
+        self.assertIsNone(notify_inbound.route_reply("9", [a, b]))
 
 
 class PollOnceTestCase(unittest.TestCase):
@@ -101,7 +158,7 @@ class PollOnceTestCase(unittest.TestCase):
             (12, 0, "lol"),
         ])
         conn = notify_inbound.open_chat_db(self.db_path)
-        target = OpenBlocker(Path("/p"), "plan-a", "q-1")
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
         self.assertEqual(last, 12)
         self.assertEqual(self.dispatched, [(target, "0")])
@@ -118,7 +175,7 @@ class PollOnceTestCase(unittest.TestCase):
     def test_skips_already_seen(self) -> None:
         _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "0")])
         conn = notify_inbound.open_chat_db(self.db_path)
-        target = OpenBlocker(Path("/p"), "plan-a", "q-1")
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 1, blockers=[target])
         self.assertEqual(last, 2)
         self.assertEqual(len(self.dispatched), 1)
@@ -135,7 +192,7 @@ class PollOnceTestCase(unittest.TestCase):
         proj.mkdir()
         _make_chat_db(self.db_path, [(1, 0, "0")])
         conn = notify_inbound.open_chat_db(self.db_path)
-        target = OpenBlocker(proj, "plan-a", "q-1")
+        target = _ob("plan-a", blocker_id="q-1", root=proj)
         self._poll(conn, 0, blockers=[target])
         self.assertEqual(self.ticks, [(proj, "plan-a")])
 
@@ -148,7 +205,7 @@ class PollOnceTestCase(unittest.TestCase):
         }))
         _make_chat_db(self.db_path, [(1, 0, "0")])
         conn = notify_inbound.open_chat_db(self.db_path)
-        target = OpenBlocker(proj, "plan-a", "q-1")
+        target = _ob("plan-a", blocker_id="q-1", root=proj)
         self._poll(conn, 0, blockers=[target])
         self.assertEqual(self.dispatched, [(target, "0")])
         self.assertEqual(self.ticks, [])
@@ -159,7 +216,7 @@ class PollOnceTestCase(unittest.TestCase):
         proj.mkdir()
         _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "hey")])
         conn = notify_inbound.open_chat_db(self.db_path)
-        target = OpenBlocker(proj, "plan-a", "q-1")
+        target = _ob("plan-a", blocker_id="q-1", root=proj)
 
         def boom(_t, _a):
             raise RuntimeError("clu answer failed")
@@ -174,7 +231,7 @@ class PollOnceTestCase(unittest.TestCase):
         proj.mkdir()
         _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "0")])
         conn = notify_inbound.open_chat_db(self.db_path)
-        target = OpenBlocker(proj, "plan-a", "q-1")
+        target = _ob("plan-a", blocker_id="q-1", root=proj)
 
         def angry_tick(_p, _s):
             raise OSError("no clu on PATH")
@@ -277,6 +334,29 @@ class OpenBlockersForHostTestCase(unittest.TestCase):
             sorted((ob.plan_slug, ob.blocker_id) for ob in out),
             [("plan-a", "q-1"), ("plan-b", "q-7")],
         )
+
+    def test_last_notified_at_from_most_recent_phase_blocked(self) -> None:
+        # Bare-digit routing leans on this — the ts must come from the
+        # plan's own EVENT_PHASE_BLOCKED, not from anywhere else.
+        project = self.tmp / "proj"
+        project.mkdir()
+        sp = project / "plans" / ".orchestrator" / "plan-a.state.json"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        with st.locked(sp):
+            data = st.empty_state("plan-a", "plans")
+            data["blockers"] = [self._open_blocker("q-1")]
+            data["events"] = [
+                {"ts": "2026-05-09T00:00:00Z", "type": st.EVENT_PHASE_BLOCKED,
+                 "phase": "p", "blocker_id": "q-0"},
+                {"ts": "2026-05-11T12:34:56Z", "type": st.EVENT_PHASE_BLOCKED,
+                 "phase": "p", "blocker_id": "q-1"},
+            ]
+            st.save_atomic(sp, data)
+        registry.register(project, "plan-a", path=self.reg_path)
+        out = notify_inbound.open_blockers_for_host(registry.entries(self.reg_path))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].last_notified_at, "2026-05-11T12:34:56Z")
+        self.assertEqual(out[0].options_count, 2)
 
     def test_missing_state_file_skipped(self) -> None:
         # Registered but never `clu init`-ed → no state file. Don't crash.
