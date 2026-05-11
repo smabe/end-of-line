@@ -21,6 +21,7 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     "claimed_by": "session-abcd1234",
     "lease_expires": "ISO8601",
     "started_at": "ISO8601",
+    "last_heartbeat_at": "ISO8601",
     "attempts": 1
   },
 
@@ -55,7 +56,9 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
   "config": {
     "lease_ttl_minutes": 30,
     "blocked_question_sla_hours": 24,
-    "max_attempts_per_phase": 3
+    "max_attempts_per_phase": 3,
+    "max_spawns_per_phase": 10,
+    "stalled_heartbeat_minutes": 10
   },
 
   "events": [
@@ -107,6 +110,13 @@ A worker is a fresh process that runs ONE phase. It must:
 
 1. **Read minimally.** The phase plan file at `<phase_plan_file>`. Any prior phases' commit SHAs from the most recent `phase_completed` events for those phases. The blockers for *this* phase that have been answered (treat them as facts).
 2. **Execute the phase plan.** Follow project conventions (TDD, `/review`, `/commit`).
+   While running, ping the supervisor every ~2 minutes so it knows the worker
+   is still alive (default stalled threshold: 10 min):
+   ```bash
+   clu heartbeat --project P --plan S --phase X --token <token>
+   ```
+   Without heartbeats the supervisor can't tell "running" from "dead" until
+   the 30-min lease expires.
 3. **On success**, before exit:
    ```bash
    clu complete --project P --plan S --phase X --commit <sha> [...]

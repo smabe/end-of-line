@@ -47,6 +47,7 @@ DEFAULT_LEASE_TTL_MIN = 30
 DEFAULT_SLA_HOURS = 24
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_SPAWNS_PER_PHASE = 10
+DEFAULT_STALLED_HEARTBEAT_MIN = 10
 
 # Plan status (`data["status"]`)
 STATUS_RUNNING = "running"
@@ -72,6 +73,7 @@ EVENT_TASK_SPAWNED = "task_spawned"
 EVENT_TASK_COMPLETED = "task_completed"
 EVENT_PLAN_COMPLETED = "plan_completed"
 EVENT_DISPATCH_FAILED = "dispatch_failed"
+EVENT_PHASE_STALLED = "phase_stalled"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
@@ -105,6 +107,7 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
             "blocked_question_sla_hours": DEFAULT_SLA_HOURS,
             "max_attempts_per_phase": DEFAULT_MAX_ATTEMPTS,
             "max_spawns_per_phase": DEFAULT_MAX_SPAWNS_PER_PHASE,
+            "stalled_heartbeat_minutes": DEFAULT_STALLED_HEARTBEAT_MIN,
         },
         "events": [],
         "created_at": utcnow(),
@@ -226,11 +229,13 @@ def claim_phase(
         1 for evt in data["events"]
         if evt.get("type") == EVENT_PHASE_STARTED and evt.get("phase") == phase_id
     ) + 1
+    started = utcnow()
     data["current_claim"] = {
         "phase_id": phase_id,
         "claimed_by": token,
         "lease_expires": expires.strftime(_ISO_FMT),
-        "started_at": utcnow(),
+        "started_at": started,
+        "last_heartbeat_at": started,
         "attempts": attempts,
     }
     append_event(data, EVENT_PHASE_STARTED, phase=phase_id, claimed_by=token)
@@ -256,6 +261,40 @@ def assert_claim_match(data: dict, expected_token: str, expected_phase: str) -> 
             f"phase mismatch: claim is {claim.get('phase_id')!r}, "
             f"got {expected_phase!r}"
         )
+
+
+def record_heartbeat(data: dict, expected_token: str, expected_phase: str) -> str:
+    """Stamp last_heartbeat_at on the live claim. Returns the new timestamp.
+
+    No event is appended — heartbeats fire every ~2 min and would flood the
+    event log. The supervisor derives stalled state from the single field.
+    """
+    assert_claim_match(data, expected_token, expected_phase)
+    ts = utcnow()
+    data["current_claim"]["last_heartbeat_at"] = ts
+    return ts
+
+
+def heartbeat_age_seconds(claim: dict, now: _dt.datetime | None = None) -> float | None:
+    if not claim:
+        return None
+    last = claim.get("last_heartbeat_at") or claim.get("started_at")
+    if not last:
+        return None
+    try:
+        last_dt = parse_iso(last)
+    except ValueError:
+        return None
+    return ((now or _now_utc()) - last_dt).total_seconds()
+
+
+def is_claim_stalled(
+    claim: dict, threshold_minutes: int, now: _dt.datetime | None = None,
+) -> bool:
+    age = heartbeat_age_seconds(claim, now)
+    if age is None:
+        return False
+    return age >= threshold_minutes * 60
 
 
 def release_claim(

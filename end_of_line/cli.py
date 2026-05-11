@@ -10,6 +10,8 @@ Subcommands (worker-side, called by phase-runner sessions):
   block     — record a blocker question + release claim
   answer    — answer a pending blocker (user-side)
   spawn     — append a dynamic task (e.g. /simplify finding)
+  heartbeat — stamp last_heartbeat_at so the supervisor knows the worker
+              is still alive (called every ~2 min by the worker)
 
 Worker-side commands require `--token` matching the live claim. Tokens come
 from `{token}` in the dispatch command template.
@@ -17,6 +19,7 @@ from `{token}` in the dispatch command template.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import subprocess
 import sys
@@ -41,6 +44,22 @@ class ExitCode(IntEnum):
 def _die(rc: ExitCode | int, msg: str) -> int:
     print(f"error: {msg}", file=sys.stderr)
     return int(rc)
+
+
+def _translate_claim_mismatch(fn):
+    """Turn a leaked ClaimMismatch into ExitCode.CLAIM_MISMATCH.
+
+    Every worker-side command does the same dance — try the claim check,
+    catch ClaimMismatch, call _die. The decorator keeps the command bodies
+    focused on the work and forces a uniform exit-code for forged callers.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except st.ClaimMismatch as exc:
+            return _die(ExitCode.CLAIM_MISMATCH, str(exc))
+    return wrapper
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -117,6 +136,14 @@ def main(argv: list[str] | None = None) -> int:
         "--commit", action="append", default=[], dest="commits",
     )
 
+    p_heartbeat = sub.add_parser(
+        "heartbeat",
+        help="Worker pings to prove it's still alive (stamps last_heartbeat_at)",
+    )
+    add_common(p_heartbeat)
+    p_heartbeat.add_argument("--token", required=True, help="Worker claim token")
+    p_heartbeat.add_argument("--phase", required=True)
+
     p_block = sub.add_parser(
         "block", help="Worker reports a blocker + releases claim",
     )
@@ -151,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         "complete": cmd_complete,
         "block": cmd_block,
         "task-done": cmd_task_done,
+        "heartbeat": cmd_heartbeat,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -194,6 +222,7 @@ def cmd_status(args, cfg: ProjectConfig, state_path: Path) -> int:
             f"(by {claim['claimed_by']}, lease {claim['lease_expires']}, "
             f"attempt {claim['attempts']})"
         )
+        print(f"         {_format_heartbeat(data, claim)}")
     else:
         print("Active:  none")
 
@@ -218,6 +247,26 @@ def cmd_status(args, cfg: ProjectConfig, state_path: Path) -> int:
     return 0
 
 
+def _format_heartbeat(data: dict, claim: dict) -> str:
+    age = st.heartbeat_age_seconds(claim)
+    if age is None:
+        return "Heartbeat: unknown"
+    threshold = data["config"].get(
+        "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
+    )
+    label = "STALLED" if st.is_claim_stalled(claim, threshold) else "Heartbeat:"
+    return f"{label} {_humanize_age(age)} ago"
+
+
+def _humanize_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.0f}m"
+    return f"{minutes / 60:.1f}h"
+
+
 def cmd_answer(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         resolved = st.resolve_blocker_answer(data, args.blocker_id, args.answer)
@@ -226,12 +275,10 @@ def cmd_answer(args, cfg: ProjectConfig, state_path: Path) -> int:
     return 0
 
 
+@_translate_claim_mismatch
 def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
-        try:
-            st.assert_claim_match(data, args.token, args.phase)
-        except st.ClaimMismatch as exc:
-            return _die(ExitCode.CLAIM_MISMATCH, str(exc))
+        st.assert_claim_match(data, args.token, args.phase)
         cap = data["config"].get("max_spawns_per_phase", st.DEFAULT_MAX_SPAWNS_PER_PHASE)
         existing = sum(
             1 for t in data["spawned_tasks"]
@@ -261,6 +308,7 @@ def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
     return 0
 
 
+@_translate_claim_mismatch
 def cmd_task_done(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.force and args.token:
         return _die(ExitCode.CLAIM_MISMATCH, "--force and --token are mutually exclusive")
@@ -280,10 +328,7 @@ def cmd_task_done(args, cfg: ProjectConfig, state_path: Path) -> int:
                     ExitCode.CLAIM_MISMATCH,
                     "--token required (or pass --force for manual cleanup)",
                 )
-            try:
-                st.assert_claim_match(data, args.token, match["spawned_by_phase"])
-            except st.ClaimMismatch as exc:
-                return _die(ExitCode.CLAIM_MISMATCH, str(exc))
+            st.assert_claim_match(data, args.token, match["spawned_by_phase"])
         match["status"] = "done"
         match["completed_at"] = st.utcnow()
         st.append_event(
@@ -307,15 +352,13 @@ def _verify_commit_shas(project_root: Path, shas: list[str]) -> str | None:
     return None
 
 
+@_translate_claim_mismatch
 def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.commits:
         if err := _verify_commit_shas(cfg.project_root, args.commits):
             return _die(ExitCode.BAD_SHA, err)
     with st.mutate(state_path) as data:
-        try:
-            st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
-        except st.ClaimMismatch as exc:
-            return _die(ExitCode.CLAIM_MISMATCH, str(exc))
+        st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
         st.append_event(
             data, st.EVENT_PHASE_COMPLETED,
             phase=args.phase, commits=list(args.commits),
@@ -324,12 +367,18 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     return ExitCode.OK
 
 
+@_translate_claim_mismatch
+def cmd_heartbeat(args, cfg: ProjectConfig, state_path: Path) -> int:
+    with st.mutate(state_path) as data:
+        ts = st.record_heartbeat(data, args.token, args.phase)
+    print(f"heartbeat {args.phase} @ {ts}")
+    return ExitCode.OK
+
+
+@_translate_claim_mismatch
 def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
-        try:
-            st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
-        except st.ClaimMismatch as exc:
-            return _die(ExitCode.CLAIM_MISMATCH, str(exc))
+        st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
         blocker_id = st.add_blocker(
             data, args.phase, args.question, args.options,
             args.context, args.type,
