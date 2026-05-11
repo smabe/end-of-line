@@ -78,7 +78,7 @@ def _detect_stalled(data: dict) -> TickResult | None:
         f"phase={claim['phase_id']} age={age:.0f}s",
         phase_id=claim["phase_id"],
         token=token,
-        notify_body=notify.render_stalled(claim["phase_id"], age),
+        notify_body=notify.render_stalled(data["plan_slug"], claim["phase_id"], age),
     )
 
 

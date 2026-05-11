@@ -12,6 +12,7 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.supervisor import tick
+from tests import isolate_registry
 
 
 PLAN_BODY = """\
@@ -97,6 +98,7 @@ class HeartbeatCliTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
+        isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         subprocess.run(["git", "init", "-q"], cwd=self.project, check=True)

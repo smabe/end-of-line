@@ -147,13 +147,15 @@ def mutate(state_path: Path) -> Iterator[dict]:
         save_atomic(state_path, data)
 
 
-def load(state_path: Path) -> dict:
+def load(state_path: Path, *, expected_version: int = SCHEMA_VERSION) -> dict:
+    """Read + schema-check a clu JSON file. `expected_version` lets sibling
+    schemas (e.g. registry.json) reuse the same loader."""
     data = json.loads(state_path.read_text())
     actual = data.get("schema_version")
-    if actual != SCHEMA_VERSION:
+    if actual != expected_version:
         raise SchemaVersionMismatch(
             f"{state_path} has schema_version={actual!r}, "
-            f"clu expects {SCHEMA_VERSION}"
+            f"clu expects {expected_version}"
         )
     return data
 

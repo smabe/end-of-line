@@ -13,6 +13,7 @@ from end_of_line import notify, state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
+from tests import isolate_registry
 
 
 PLAN_BODY = """\
@@ -161,6 +162,7 @@ class NotifyIntegrationTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
+        isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         (self.project / ".orchestrator.json").write_text(json.dumps({
@@ -249,7 +251,8 @@ class StalledNotifyTestCase(unittest.TestCase):
             data["current_claim"]["last_heartbeat_at"] = "2020-01-01T00:00:00Z"
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "stalled")
-        self.assertIn("phase a stalled", result.notify_body)
+        # Slug-prefixed so multi-plan recipients can disambiguate.
+        self.assertIn("test-plan/a stalled", result.notify_body)
 
 
 if __name__ == "__main__":

@@ -6,12 +6,14 @@ import unittest
 from pathlib import Path
 
 from end_of_line.cli import main
+from tests import isolate_registry
 
 
 class TestSlugValidation(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
+        isolate_registry(self, self.project)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()

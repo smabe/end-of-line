@@ -26,7 +26,7 @@ import sys
 from enum import IntEnum
 from pathlib import Path
 
-from . import notify, state as st
+from . import notify, registry, state as st
 from .config import ProjectConfig, load_project_config
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
@@ -84,6 +84,19 @@ def main(argv: list[str] | None = None) -> int:
 
     p_init = sub.add_parser("init", help="Bootstrap orchestrator state for a plan")
     add_common(p_init)
+
+    p_register = sub.add_parser(
+        "register",
+        help="Add a (project, plan) pair to the host registry (auto-runs on init)",
+    )
+    add_common(p_register)
+
+    p_unregister = sub.add_parser(
+        "unregister", help="Remove a (project, plan) pair from the host registry",
+    )
+    add_common(p_unregister)
+
+    sub.add_parser("list", help="List all registered plans on this host")
 
     p_status = sub.add_parser("status", help="Show current state")
     add_common(p_status)
@@ -162,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    # `list` is host-scoped — it has no --project / --plan and shouldn't
+    # trigger ProjectConfig load (which requires a project root).
+    if args.cmd == "list":
+        return cmd_list(args)
+
     try:
         st.validate_slug(args.plan, kind="plan slug")
         cfg = load_project_config(args.project)
@@ -179,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
         "block": cmd_block,
         "task-done": cmd_task_done,
         "heartbeat": cmd_heartbeat,
+        "register": cmd_register,
+        "unregister": cmd_unregister,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -191,7 +211,34 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
             print(f"State already exists: {state_path}", file=sys.stderr)
             return 1
         st.save_atomic(state_path, st.empty_state(args.plan, cfg.plan_dir))
+    # Auto-register so fleet view / inbound routing can find the plan
+    # without a separate setup step.
+    registry.register(cfg.project_root, args.plan)
     print(f"Initialized {state_path}")
+    return 0
+
+
+def cmd_register(args, cfg: ProjectConfig, state_path: Path) -> int:
+    added = registry.register(cfg.project_root, args.plan)
+    msg = "Registered" if added else "Already registered"
+    print(f"{msg}: {cfg.project_root}  →  {args.plan}")
+    return 0
+
+
+def cmd_unregister(args, cfg: ProjectConfig, state_path: Path) -> int:
+    removed = registry.unregister(cfg.project_root, args.plan)
+    msg = "Unregistered" if removed else "Not in registry"
+    print(f"{msg}: {cfg.project_root}  →  {args.plan}")
+    return 0
+
+
+def cmd_list(args) -> int:
+    rows = registry.entries()
+    if not rows:
+        print("No plans registered. Run `clu init` or `clu register` to add one.")
+        return 0
+    for row in rows:
+        print(f"  {row.plan_slug:<30}  {row.project_root}")
     return 0
 
 
@@ -387,7 +434,9 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
         )
     notify.notify(
         cfg.notify, notify.KIND_BLOCKER,
-        notify.render_blocker(blocker_id, args.phase, args.question, args.options),
+        notify.render_blocker(
+            args.plan, blocker_id, args.phase, args.question, args.options,
+        ),
     )
     print(f"Blocked {blocker_id} on phase {args.phase}")
     return ExitCode.OK

@@ -11,6 +11,7 @@ from end_of_line.cli import main
 from end_of_line.config import ProjectConfig, DispatchSpec
 from end_of_line.dispatch import dispatch_for_tick
 from end_of_line.supervisor import TickResult
+from tests import isolate_registry
 
 
 PLAN = """\
@@ -28,6 +29,7 @@ class DispatchTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
+        isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "t.md").write_text(PLAN)
         main(["init", "--project", str(self.project), "--plan", "t"])

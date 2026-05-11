@@ -112,14 +112,20 @@ def _in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:
     return is_quiet_hours(now, start, end)
 
 
-def render_blocker(blocker_id: str, phase: str, question: str, options: list[str]) -> str:
+def render_blocker(
+    plan_slug: str, blocker_id: str, phase: str, question: str, options: list[str],
+) -> str:
     opts = "\n".join(f"[{i}] {o}" for i, o in enumerate(options))
-    return f"❓ {blocker_id} [{phase}]\n{question}\n{opts}\n\nReply with the number."
+    return (
+        f"❓ {plan_slug}/{blocker_id} [{phase}]\n{question}\n{opts}\n\n"
+        f"Reply: `{plan_slug} <number>` or just the number if this is the "
+        f"only open question."
+    )
 
 
-def render_stalled(phase: str, age_seconds: float) -> str:
+def render_stalled(plan_slug: str, phase: str, age_seconds: float) -> str:
     minutes = int(age_seconds // 60)
-    return f"⚠️  phase {phase} stalled — no heartbeat for {minutes} min."
+    return f"⚠️  {plan_slug}/{phase} stalled — no heartbeat for {minutes} min."
 
 
 def render_completed(plan_slug: str, commit_count: int) -> str:
