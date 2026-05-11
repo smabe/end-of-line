@@ -142,6 +142,24 @@ class NotifyDispatchTestCase(unittest.TestCase):
         )
         self.assertFalse(ok)
 
+    def test_halted_bypasses_quiet_hours(self) -> None:
+        ok = notify.notify(
+            self._spec(), notify.KIND_HALTED, "boom",
+            now=_dt.datetime(2026, 5, 11, 3, 0),
+            sender=self._sender,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(self.sent, [("+15551234567", "boom")])
+
+    def test_blocker_still_gated_during_quiet_hours(self) -> None:
+        ok = notify.notify(
+            self._spec(), notify.KIND_BLOCKER, "boom",
+            now=_dt.datetime(2026, 5, 11, 3, 0),
+            sender=self._sender,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(self.sent, [])
+
     def test_osascript_send_uses_argv_form(self) -> None:
         """The `--` separator + argv is what keeps Messages.app safe against
         user-controlled text in the body. Lock the invocation shape."""

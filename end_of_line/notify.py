@@ -24,7 +24,7 @@ KIND_STALLED = "stalled"
 KIND_COMPLETED = "completed"
 KIND_HALTED = "halted"
 
-QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset()
+QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({KIND_HALTED})
 
 # osascript-friendly AppleScript: argv carries the handle + body so we
 # don't have to escape user-controlled text into the script source.
