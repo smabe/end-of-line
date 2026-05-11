@@ -30,15 +30,9 @@ case "$PHASE" in
         # Resume-aware: clu re-dispatches a phase after its blocker is
         # answered (expecting the worker to continue from the answer). On
         # first invocation we open the blocker; on the re-dispatched run
-        # we see the answered blocker in state and complete instead.
-        ANSWERED=$(python3 -c "
-import json, sys
-data = json.load(open('$STATE_FILE'))
-for b in data['blockers']:
-    if b['phase_id'] == '$PHASE' and b.get('answer') is not None:
-        print('yes'); sys.exit(0)
-")
-        if [ "$ANSWERED" = "yes" ]; then
+        # `clu prior-blocker` reports the answered blocker, so we complete.
+        if "${CLU[@]}" prior-blocker --project "$PROJECT" --plan "$PLAN" \
+                --phase "$PHASE" >/dev/null 2>&1; then
             "${CLU[@]}" complete --project "$PROJECT" --plan "$PLAN" \
                 --phase "$PHASE" --token "$TOKEN"
         else

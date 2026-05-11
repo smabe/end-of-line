@@ -182,6 +182,14 @@ def main(argv: list[str] | None = None) -> int:
     p_heartbeat.add_argument("--token", required=True, help="Worker claim token")
     p_heartbeat.add_argument("--phase", required=True)
 
+    p_prior_blocker = sub.add_parser(
+        "prior-blocker",
+        help="Print the answer for the phase's most recent answered blocker (exit 0); "
+             "non-zero if none. Used by worker resume-after-answer detection.",
+    )
+    add_common(p_prior_blocker)
+    p_prior_blocker.add_argument("--phase", required=True)
+
     p_block = sub.add_parser(
         "block", help="Worker reports a blocker + releases claim",
     )
@@ -230,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         "pause": cmd_pause,
         "resume": cmd_resume,
         "retry": cmd_retry,
+        "prior-blocker": cmd_prior_blocker,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -287,6 +296,27 @@ def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
     if result.notify_body and (kind := ACTION_NOTIFY_KIND.get(result.action)):
         notify.notify(cfg.notify, kind, result.notify_body)
     return 0
+
+
+def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:
+    try:
+        st.validate_slug(args.phase, kind="phase id")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+    if not state_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
+    data = st.load(state_path)
+    answered = [
+        b for b in data.get("blockers", [])
+        if b["phase_id"] == args.phase and b.get("answer") is not None
+    ]
+    if not answered:
+        return _die(
+            ExitCode.UNKNOWN_TASK,
+            f"no answered blocker for phase {args.phase!r}",
+        )
+    print(answered[-1]["answer"])
+    return ExitCode.OK
 
 
 def cmd_status(args, cfg: ProjectConfig, state_path: Path) -> int:

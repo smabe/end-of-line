@@ -51,18 +51,15 @@ If you exit without calling one of these:
 
 ## Resume-after-answer
 
-If a prior blocker on this phase has been answered, clu has re-dispatched you to continue. Check the state file:
+If a prior blocker on this phase has been answered, clu has re-dispatched you to continue. Ask clu:
 
 ```bash
-python3 -c "
-import json
-data = json.load(open('<state_file>'))
-for b in data['blockers']:
-    if b['phase_id'] == '<phase_id>' and b.get('answer') is not None:
-        print(f\"prior blocker {b['id']}: {b['question']}\")
-        print(f\"  answer: {b['answer']}\")
-"
+if answer=$(clu prior-blocker --project "$PROJECT" --plan "$PLAN" --phase "$PHASE"); then
+    echo "resuming with prior answer: $answer"
+fi
 ```
+
+`clu prior-blocker` exits 0 and prints the answer text on stdout when an answered blocker exists for the phase; exits non-zero (no output on stdout) when there isn't one.
 
 If you see an answered blocker, that means: you asked a question previously, the user replied, and now you're resuming with their choice in hand. Use the answer to inform the rest of the work, then complete (or block again on the next thing).
 
