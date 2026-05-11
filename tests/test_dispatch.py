@@ -60,8 +60,9 @@ class DispatchTestCase(unittest.TestCase):
         self.assertIn("dispatch_failed", types)
 
     def test_fast_fail_releases_claim(self) -> None:
-        # Command that exits immediately with rc=127 (command not found inside shell)
-        cfg = self._cfg("no-such-binary-eol-test")
+        # Plain non-zero exit that doesn't match a systemic signature
+        # (those route through the pause branch — see test_systemic_failure).
+        cfg = self._cfg("exit 42")
         ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertFalse(ok)
         data = json.loads(self.state_path.read_text())

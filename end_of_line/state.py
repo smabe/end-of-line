@@ -80,6 +80,7 @@ EVENT_TASK_SPAWNED = "task_spawned"
 EVENT_TASK_COMPLETED = "task_completed"
 EVENT_PLAN_COMPLETED = "plan_completed"
 EVENT_DISPATCH_FAILED = "dispatch_failed"
+EVENT_SYSTEMIC_FAILURE = "systemic_failure"
 EVENT_PHASE_STALLED = "phase_stalled"
 EVENT_PAUSED = "paused"
 EVENT_RESUMED = "resumed"
@@ -426,14 +427,27 @@ def attempts_for_phase(data: dict, phase_id: str) -> int:
     Durable across claim clears. `clu retry` appends EVENT_RETRY_REQUESTED to
     move the floor — only phase_starteds after that point count, so the
     supervisor's max-attempts cap doesn't re-halt the plan on the next tick.
+
+    Systemic failures (PATH bug, rate limit, auth) emit EVENT_SYSTEMIC_FAILURE
+    naming the token that hit them. The corresponding phase_started is
+    subtracted: the phase isn't at fault, so its attempt budget isn't burned.
     """
     floor = -1
     for i, evt in enumerate(data["events"]):
         if evt.get("type") == EVENT_RETRY_REQUESTED and evt.get("phase") == phase_id:
             floor = i
+    systemic_tokens = {
+        evt.get("token")
+        for evt in data["events"][floor + 1:]
+        if evt.get("type") == EVENT_SYSTEMIC_FAILURE
+        and evt.get("phase") == phase_id
+        and evt.get("token")
+    }
     return sum(
         1 for evt in data["events"][floor + 1:]
-        if evt.get("type") == EVENT_PHASE_STARTED and evt.get("phase") == phase_id
+        if evt.get("type") == EVENT_PHASE_STARTED
+        and evt.get("phase") == phase_id
+        and evt.get("claimed_by") not in systemic_tokens
     )
 
 

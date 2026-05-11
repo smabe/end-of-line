@@ -138,3 +138,10 @@ def render_halted(plan_slug: str, phase: str, attempts: int) -> str:
         f"🛑 {plan_slug}/{phase} halted — {attempts} attempts. "
         f"`clu retry --plan {plan_slug}` to resume."
     )
+
+
+def render_systemic_failure(plan_slug: str, phase: str, signature: str) -> str:
+    return (
+        f"🚨 {plan_slug}/{phase} paused — systemic failure: {signature}. "
+        f"Run `clu resume --plan {plan_slug}` once cleared."
+    )

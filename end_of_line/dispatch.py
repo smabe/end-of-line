@@ -9,12 +9,13 @@ waiting 30 minutes for the lease to expire silently.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-from . import state as st
+from . import notify, state as st
 from .config import ProjectConfig
 from .supervisor import TickResult
 
@@ -27,6 +28,47 @@ _FAST_FAIL_WAIT_SEC = 0.5
 
 # Exceptions that are recoverable in dispatch fallback paths.
 _DISPATCH_FALLBACK_ERRORS = (OSError, json.JSONDecodeError, st.SchemaVersionMismatch)
+
+# Inspect only the tail of the worker log — a 50k-line stack trace
+# shouldn't slow the supervisor, and the relevant signal is always at
+# the end (rc was just observed).
+_SYSTEMIC_TAIL_LINES = 50
+
+# Hard-coded signature list. Grows via PR only; no config field. Order
+# matters — first match wins, so put the most specific (rc-gated) one
+# first.
+_RATE_LIMIT_RE = re.compile(
+    r"(rate[\s_-]?limit|RateLimitError)", re.IGNORECASE,
+)
+_AUTH_FAILURE_RE = re.compile(
+    r"(401\s+Unauthorized|AuthenticationError|invalid\s+api\s+key)",
+    re.IGNORECASE,
+)
+_MISSING_BINARY_RE = re.compile(r"command not found", re.IGNORECASE)
+
+
+def _match_systemic_signature(log_path: Path, *, rc: int) -> str | None:
+    """Return the matching signature name, or None.
+
+    rc is the worker's exit code; missing_binary requires rc==127 to avoid
+    matching a `command not found` substring that shows up inside a benign
+    traceback. The other signatures don't care about rc — auth/rate-limit
+    errors surface as rc=1 from the SDK and rc=2 from a wrapped shell, both
+    legitimate.
+    """
+    try:
+        with open(log_path, "r", errors="replace") as fh:
+            lines = fh.readlines()
+    except (FileNotFoundError, OSError):
+        return None
+    tail = "".join(lines[-_SYSTEMIC_TAIL_LINES:])
+    if rc == 127 and _MISSING_BINARY_RE.search(tail):
+        return "missing_binary"
+    if _RATE_LIMIT_RE.search(tail):
+        return "rate_limit"
+    if _AUTH_FAILURE_RE.search(tail):
+        return "auth_failure"
+    return None
 
 
 def dispatch_for_tick(
@@ -77,6 +119,17 @@ def dispatch_for_tick(
     except subprocess.TimeoutExpired:
         rc = None  # still running — the healthy case
     if rc is not None and rc != 0:
+        signature = _match_systemic_signature(log_path, rc=rc)
+        if signature is not None:
+            _pause_for_systemic_failure(
+                state_file, result, cfg,
+                plan_slug=plan_slug, signature=signature, log_path=log_path,
+            )
+            print(
+                f"dispatch: systemic-failure {signature} rc={rc}, log={log_path}",
+                file=sys.stderr,
+            )
+            return False
         _release_with_failure(
             state_file, result,
             reason=f"worker exited rc={rc} within {_FAST_FAIL_WAIT_SEC}s "
@@ -94,6 +147,53 @@ def dispatch_for_tick(
         file=sys.stderr,
     )
     return True
+
+
+def _pause_for_systemic_failure(
+    state_file: Path,
+    result: TickResult,
+    cfg: ProjectConfig,
+    *,
+    plan_slug: str,
+    signature: str,
+    log_path: Path,
+) -> None:
+    """Flip the plan to paused + emit EVENT_SYSTEMIC_FAILURE + halt-bypass ping.
+
+    Reuses STATUS_PAUSED (no new constant) and KIND_HALTED (no new gate); the
+    only new vocabulary is the event itself. `attempts_for_phase` subtracts
+    the phase_started that this token produced, so the budget isn't burned.
+    """
+    try:
+        with st.mutate(state_file) as data:
+            st.append_event(
+                data, st.EVENT_SYSTEMIC_FAILURE,
+                phase=result.phase_id,
+                token=result.token,
+                signature=signature,
+                log_path=str(log_path),
+            )
+            try:
+                st.release_claim(
+                    data,
+                    expected_token=result.token,
+                    expected_phase=result.phase_id,
+                )
+            except st.ClaimMismatch:
+                # Concurrent operator action already swapped the claim;
+                # don't clobber it. The event is still recorded.
+                pass
+            data["status"] = st.STATUS_PAUSED
+    except _DISPATCH_FALLBACK_ERRORS as exc:
+        print(
+            f"dispatch: failed to record systemic_failure: {exc}",
+            file=sys.stderr,
+        )
+        return
+    notify.notify(
+        cfg.notify, notify.KIND_HALTED,
+        notify.render_systemic_failure(plan_slug, result.phase_id or "", signature),
+    )
 
 
 def _release_with_failure(state_file: Path, result: TickResult, *, reason: str) -> None:

@@ -300,6 +300,32 @@ clu retry --project P --plan S --phase X     # clears the attempts cap
 attempts floor — the supervisor will dispatch the phase again on its
 next tick.
 
+### Systemic failures clu detects
+
+Some worker fast-fails aren't the phase's fault — a missing binary, a
+rate-limited API, an expired token. When the post-spawn fast-fail
+(0.5 s after dispatch) catches a worker exit, the dispatcher scans the
+**last 50 lines** of `<project>/plans/.orchestrator/logs/<phase>.<token>.log`
+against a hard-coded signature list. On match, the plan flips to
+`paused`, an `EVENT_SYSTEMIC_FAILURE` event is appended (carrying the
+matched signature, phase, token, and log path), the phase's attempt
+budget is **not** burned, and an iMessage fires through the halt-bypass
+gate so a 3am rate-limit doesn't sit silent until morning.
+
+| Signature | Trigger | Operator action |
+|---|---|---|
+| `missing_binary` | rc == 127 AND log contains `command not found` | Fix `$PATH` for the dispatch context (LaunchAgent uses a stub PATH — hard-code `/opt/homebrew/bin` or absolute paths). Then `clu resume --plan S`. |
+| `rate_limit` | log contains `rate limit` or `RateLimitError` (case-insensitive) | Wait for the window to refresh, or roll the key. Then `clu resume --plan S`. |
+| `auth_failure` | log contains `401 Unauthorized`, `AuthenticationError`, or `invalid api key` | Fix the credential (re-export `ANTHROPIC_API_KEY` in the LaunchAgent plist, or refresh whatever auth backs the worker). Then `clu resume --plan S`. |
+
+The signature list is hard-coded in `dispatch.py` — no
+`.orchestrator.json` knob. A new failure mode lands via PR with a test
+in `tests/test_systemic_failure.py`. Each plan observes systemic
+failure independently; there's no cross-plan preemption in v1, so if
+plan A flags `rate_limit`, plan B's next tick will hit the same
+failure and ping you separately. That's accepted noise — the operator
+sees the same fix-once action either way.
+
 ### Stuck claim that won't release
 
 If the state file shows a live claim whose worker is definitely dead
