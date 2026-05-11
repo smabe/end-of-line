@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent template for the clu tick driver.
+
+  Install:
+    1. Copy to ~/Library/LaunchAgents/com.clu.tick.plist
+    2. Edit ProgramArguments to point at the path of your tick-all.sh
+       (the absolute path of examples/clu-tick-all.sh in your clone).
+       LaunchAgents do NOT inherit $PATH, so use absolute paths.
+    3. launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
+    4. Tail /tmp/clu-tick.{out,err} to watch each 5-minute tick.
+
+  StartInterval=300 fires the script every 5 minutes. The script itself
+  iterates over `clu list` and ticks each registered plan once. Plans
+  with no pending work return [idle]; plans with a phase ready spawn a
+  worker via the configured dispatch.command. Costs roughly: one claude
+  --print session per active plan per 5 minutes, capped at the budget in
+  .orchestrator.json.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.clu.tick</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/smabe/projects/end-of-line/examples/clu-tick-all.sh</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/clu-tick.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/clu-tick.err</string>
+</dict>
+</plist>
