@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from . import registry, state as st
+from .config import load_project_config
 
 DEFAULT_CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 DEFAULT_SEEN_PATH = Path.home() / ".clu" / "seen_msg_rowid"
@@ -45,6 +46,7 @@ class OpenBlocker:
 
 Dispatcher = Callable[["OpenBlocker", str], None]
 OpenBlockersFn = Callable[[], list["OpenBlocker"]]
+TickSpawner = Callable[[Path, str], None]
 
 
 def open_blockers_for_host(
@@ -94,8 +96,9 @@ def route_reply(
 
 
 def _cli_dispatch(target: OpenBlocker, answer: str) -> None:
-    """Fire `clu answer` as a subprocess so a crash in cli.main can't tank
-    the poller."""
+    """Fire `clu answer` as a subprocess. Raises CalledProcessError on rc!=0
+    so callers know whether to auto-tick; the outer poll loop catches it so a
+    bad `clu answer` can't tank the poller."""
     subprocess.run(
         [
             sys.executable, "-m", "end_of_line.cli", "answer",
@@ -103,7 +106,24 @@ def _cli_dispatch(target: OpenBlocker, answer: str) -> None:
             "--plan", target.plan_slug,
             target.blocker_id, answer,
         ],
-        check=False,
+        check=True,
+    )
+
+
+def _spawn_tick(project_root: Path, plan_slug: str) -> None:
+    """Fire-and-forget `clu tick --dispatch` for the plan whose blocker was just
+    answered, so the next phase dispatches immediately instead of waiting for
+    the next cron firing. Mirrors `dispatch.py`'s Popen pattern."""
+    subprocess.Popen(
+        [
+            sys.executable, "-m", "end_of_line.cli", "tick",
+            "--project", str(project_root),
+            "--plan", plan_slug,
+            "--dispatch",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
 
 
@@ -113,6 +133,7 @@ def poll_once(
     *,
     open_blockers_fn: OpenBlockersFn,
     dispatcher: Dispatcher = _cli_dispatch,
+    tick_spawner: TickSpawner = _spawn_tick,
 ) -> int:
     """Scan chat.db for inbound rows after `last_rowid`. Returns new high-water.
 
@@ -136,10 +157,34 @@ def poll_once(
     blockers = open_blockers_fn()
     for _rowid, text in rows:
         match = route_reply(text, blockers)
-        if match is not None:
-            target, answer = match
+        if match is None:
+            continue
+        target, answer = match
+        try:
             dispatcher(target, answer)
+        except Exception as exc:
+            # `clu answer` failed — don't auto-tick on stale state. The cursor
+            # still advances so a wedged reply can't re-fire forever.
+            print(f"notify_inbound: dispatch failed: {exc}", file=sys.stderr)
+            continue
+        if not _auto_tick_enabled(target.project_root):
+            continue
+        try:
+            tick_spawner(target.project_root, target.plan_slug)
+        except Exception as exc:
+            # Auto-tick is a latency optimization, not a correctness boundary;
+            # cron will pick up the answered blocker on the next firing.
+            print(f"notify_inbound: tick spawn failed: {exc}", file=sys.stderr)
     return rows[-1][0]
+
+
+def _auto_tick_enabled(project_root: Path) -> bool:
+    """Resolve the per-project opt-out. Defaults True; config errors fall back
+    to True so a malformed `.orchestrator.json` doesn't silently disable UX."""
+    try:
+        return load_project_config(project_root).notify.inbound_auto_tick
+    except Exception:
+        return True
 
 
 def read_seen(path: Path) -> int:

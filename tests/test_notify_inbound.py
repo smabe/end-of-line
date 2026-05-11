@@ -1,6 +1,7 @@
 """Inbound iMessage poller tests."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -73,12 +74,25 @@ class PollOnceTestCase(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
         self.db_path = self.tmp / "chat.db"
         self.dispatched: list[tuple[OpenBlocker, str]] = []
+        self.ticks: list[tuple[Path, str]] = []
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
     def _dispatch(self, target: OpenBlocker, answer: str) -> None:
         self.dispatched.append((target, answer))
+
+    def _tick(self, project_root: Path, plan_slug: str) -> None:
+        self.ticks.append((project_root, plan_slug))
+
+    def _poll(self, conn, last, *, blockers, **kw) -> int:
+        kw.setdefault("tick_spawner", self._tick)
+        return notify_inbound.poll_once(
+            conn, last,
+            open_blockers_fn=lambda: blockers,
+            dispatcher=kw.pop("dispatcher", self._dispatch),
+            **kw,
+        )
 
     def test_dispatches_matched_inbound_only(self) -> None:
         _make_chat_db(self.db_path, [
@@ -88,11 +102,7 @@ class PollOnceTestCase(unittest.TestCase):
         ])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = OpenBlocker(Path("/p"), "plan-a", "q-1")
-        last = notify_inbound.poll_once(
-            conn, 0,
-            open_blockers_fn=lambda: [target],
-            dispatcher=self._dispatch,
-        )
+        last = self._poll(conn, 0, blockers=[target])
         self.assertEqual(last, 12)
         self.assertEqual(self.dispatched, [(target, "0")])
 
@@ -101,11 +111,7 @@ class PollOnceTestCase(unittest.TestCase):
         # unrelated message re-trigger if a blocker later opened.
         _make_chat_db(self.db_path, [(7, 0, "hey")])
         conn = notify_inbound.open_chat_db(self.db_path)
-        last = notify_inbound.poll_once(
-            conn, 0,
-            open_blockers_fn=lambda: [],
-            dispatcher=self._dispatch,
-        )
+        last = self._poll(conn, 0, blockers=[])
         self.assertEqual(last, 7)
         self.assertEqual(self.dispatched, [])
 
@@ -113,23 +119,69 @@ class PollOnceTestCase(unittest.TestCase):
         _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "0")])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = OpenBlocker(Path("/p"), "plan-a", "q-1")
-        last = notify_inbound.poll_once(
-            conn, 1,
-            open_blockers_fn=lambda: [target],
-            dispatcher=self._dispatch,
-        )
+        last = self._poll(conn, 1, blockers=[target])
         self.assertEqual(last, 2)
         self.assertEqual(len(self.dispatched), 1)
 
     def test_returns_last_rowid_when_no_new_rows(self) -> None:
         _make_chat_db(self.db_path, [(5, 0, "0")])
         conn = notify_inbound.open_chat_db(self.db_path)
-        last = notify_inbound.poll_once(
-            conn, 5,
-            open_blockers_fn=lambda: [],
-            dispatcher=self._dispatch,
-        )
+        last = self._poll(conn, 5, blockers=[])
         self.assertEqual(last, 5)
+
+    def test_auto_ticks_after_successful_dispatch(self) -> None:
+        # Project root is a fresh tmp dir → no .orchestrator.json → default True.
+        proj = self.tmp / "proj"
+        proj.mkdir()
+        _make_chat_db(self.db_path, [(1, 0, "0")])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = OpenBlocker(proj, "plan-a", "q-1")
+        self._poll(conn, 0, blockers=[target])
+        self.assertEqual(self.ticks, [(proj, "plan-a")])
+
+    def test_auto_tick_skipped_when_config_opt_out(self) -> None:
+        # `.orchestrator.json` with `inbound_auto_tick: false` wins over default.
+        proj = self.tmp / "proj"
+        proj.mkdir()
+        (proj / ".orchestrator.json").write_text(json.dumps({
+            "notify": {"inbound_auto_tick": False},
+        }))
+        _make_chat_db(self.db_path, [(1, 0, "0")])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = OpenBlocker(proj, "plan-a", "q-1")
+        self._poll(conn, 0, blockers=[target])
+        self.assertEqual(self.dispatched, [(target, "0")])
+        self.assertEqual(self.ticks, [])
+
+    def test_no_tick_when_dispatcher_raises(self) -> None:
+        # rc!=0 from `clu answer` → raise → no auto-tick (stale state guard).
+        proj = self.tmp / "proj"
+        proj.mkdir()
+        _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "hey")])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = OpenBlocker(proj, "plan-a", "q-1")
+
+        def boom(_t, _a):
+            raise RuntimeError("clu answer failed")
+
+        last = self._poll(conn, 0, blockers=[target], dispatcher=boom)
+        self.assertEqual(last, 2)  # cursor still advances past the bad row
+        self.assertEqual(self.ticks, [])
+
+    def test_tick_spawner_failure_does_not_stall_poller(self) -> None:
+        # Auto-tick is fire-and-forget; an OSError from Popen must be swallowed.
+        proj = self.tmp / "proj"
+        proj.mkdir()
+        _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "0")])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = OpenBlocker(proj, "plan-a", "q-1")
+
+        def angry_tick(_p, _s):
+            raise OSError("no clu on PATH")
+
+        last = self._poll(conn, 0, blockers=[target], tick_spawner=angry_tick)
+        self.assertEqual(last, 2)
+        self.assertEqual(len(self.dispatched), 2)  # both rows still dispatched
 
 
 class SeenRowidTestCase(unittest.TestCase):

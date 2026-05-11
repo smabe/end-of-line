@@ -21,6 +21,7 @@ class DispatchSpec:
 class NotifySpec:
     imessage_to: str | None = None
     quiet_hours: tuple[str, str] | None = None
+    inbound_auto_tick: bool = True
 
 
 @dataclass
@@ -63,5 +64,6 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         notify=NotifySpec(
             imessage_to=(notify_raw.get("imessage") or {}).get("to"),
             quiet_hours=tuple(quiet) if quiet and len(quiet) == 2 else None,
+            inbound_auto_tick=bool(notify_raw.get("inbound_auto_tick", True)),
         ),
     )
