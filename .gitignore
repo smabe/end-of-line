@@ -13,3 +13,6 @@ dist/
 # Use examples/HealthData.orchestrator.json as the template.
 .orchestrator.json
 **/.orchestrator/
+
+# Claude Code session state (transcripts, snapshots). Not source.
+.claude/
