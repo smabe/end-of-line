@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import state as st
+
 CONFIG_FILENAME = ".orchestrator.json"
 ORCHESTRATOR_DIR = ".orchestrator"
 
@@ -32,7 +34,7 @@ class ProjectConfig:
         try:
             resolved.relative_to(base)
         except ValueError as exc:
-            raise ValueError(f"state_path escapes orchestrator dir: {resolved}") from exc
+            raise st.InvalidSlug(f"state_path escapes orchestrator dir: {resolved}") from exc
         return path
 
 

@@ -20,11 +20,27 @@ import argparse
 import json
 import subprocess
 import sys
+from enum import IntEnum
 from pathlib import Path
 
 from . import state as st
 from .config import ProjectConfig, load_project_config
 from .supervisor import tick
+
+
+class ExitCode(IntEnum):
+    OK = 0
+    GENERIC = 1
+    INVALID_SLUG = 2
+    BAD_SHA = 3
+    CLAIM_MISMATCH = 4
+    SPAWN_CAP = 5
+    UNKNOWN_TASK = 6
+
+
+def _die(rc: ExitCode | int, msg: str) -> int:
+    print(f"error: {msg}", file=sys.stderr)
+    return int(rc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,11 +137,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         st.validate_slug(args.plan, kind="plan slug")
+        cfg = load_project_config(args.project)
+        state_path = cfg.state_path(args.plan)
     except st.InvalidSlug as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    cfg = load_project_config(args.project)
-    state_path = cfg.state_path(args.plan)
+        return _die(ExitCode.INVALID_SLUG, str(exc))
 
     dispatchers = {
         "init": cmd_init,
@@ -216,20 +231,17 @@ def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
         try:
             st.assert_claim_match(data, args.token, args.phase)
         except st.ClaimMismatch as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 4
+            return _die(ExitCode.CLAIM_MISMATCH, str(exc))
         cap = data["config"].get("max_spawns_per_phase", st.DEFAULT_MAX_SPAWNS_PER_PHASE)
         existing = sum(
             1 for t in data["spawned_tasks"]
             if t.get("spawned_by_phase") == args.phase
         )
         if existing >= cap:
-            print(
-                f"error: phase {args.phase} already spawned {existing} task(s); "
-                f"cap is {cap}",
-                file=sys.stderr,
+            return _die(
+                ExitCode.SPAWN_CAP,
+                f"phase {args.phase} already spawned {existing} task(s); cap is {cap}",
             )
-            return 5
         task_id = f"task-{len(data['spawned_tasks']) + 1}"
         data["spawned_tasks"].append({
             "id": task_id,
@@ -250,29 +262,28 @@ def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
 
 
 def cmd_task_done(args, cfg: ProjectConfig, state_path: Path) -> int:
+    if args.force and args.token:
+        return _die(ExitCode.CLAIM_MISMATCH, "--force and --token are mutually exclusive")
     with st.mutate(state_path) as data:
         match = next(
             (t for t in data["spawned_tasks"] if t["id"] == args.task_id),
             None,
         )
         if match is None:
-            print(f"error: no task {args.task_id!r}", file=sys.stderr)
-            return 6
+            return _die(ExitCode.UNKNOWN_TASK, f"no task {args.task_id!r}")
         if match["status"] == "done":
             print(f"task {args.task_id} already done")
-            return 0
+            return ExitCode.OK
         if not args.force:
             if not args.token:
-                print(
-                    "error: --token required (or pass --force for manual cleanup)",
-                    file=sys.stderr,
+                return _die(
+                    ExitCode.CLAIM_MISMATCH,
+                    "--token required (or pass --force for manual cleanup)",
                 )
-                return 4
             try:
                 st.assert_claim_match(data, args.token, match["spawned_by_phase"])
             except st.ClaimMismatch as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 4
+                return _die(ExitCode.CLAIM_MISMATCH, str(exc))
         match["status"] = "done"
         match["completed_at"] = st.utcnow()
         st.append_event(
@@ -299,36 +310,32 @@ def _verify_commit_shas(project_root: Path, shas: list[str]) -> str | None:
 def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.commits:
         if err := _verify_commit_shas(cfg.project_root, args.commits):
-            print(f"error: {err}", file=sys.stderr)
-            return 3
+            return _die(ExitCode.BAD_SHA, err)
     with st.mutate(state_path) as data:
         try:
             st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
         except st.ClaimMismatch as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 4
+            return _die(ExitCode.CLAIM_MISMATCH, str(exc))
         st.append_event(
             data, st.EVENT_PHASE_COMPLETED,
             phase=args.phase, commits=list(args.commits),
         )
     print(f"Completed phase {args.phase}")
-    return 0
+    return ExitCode.OK
 
 
 def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         try:
-            st.assert_claim_match(data, args.token, args.phase)
+            st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
         except st.ClaimMismatch as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 4
+            return _die(ExitCode.CLAIM_MISMATCH, str(exc))
         blocker_id = st.add_blocker(
             data, args.phase, args.question, args.options,
             args.context, args.type,
         )
-        st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
     print(f"Blocked {blocker_id} on phase {args.phase}")
-    return 0
+    return ExitCode.OK
 
 
 if __name__ == "__main__":

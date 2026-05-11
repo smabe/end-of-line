@@ -212,7 +212,6 @@ def claim_phase(
     claimed_by: str | None = None,
 ) -> str:
     """Claim a phase. Returns the claim token. Raises if a live claim exists."""
-    prior_phase = (data.get("current_claim") or {}).get("phase_id")
     release_if_expired(data)
     if data.get("current_claim") is not None:
         existing = data["current_claim"]
@@ -227,7 +226,6 @@ def claim_phase(
         1 for evt in data["events"]
         if evt.get("type") == EVENT_PHASE_STARTED and evt.get("phase") == phase_id
     ) + 1
-    _ = prior_phase  # kept for future "reclaim-after-expiry" hooks
     data["current_claim"] = {
         "phase_id": phase_id,
         "claimed_by": token,
@@ -265,22 +263,21 @@ def release_claim(
     expected_token: str | None = None,
     expected_phase: str | None = None,
 ) -> None:
-    """Clear current_claim. If expected_* are given, mismatch raises ClaimMismatch."""
-    claim = data.get("current_claim")
-    if claim is None:
-        if expected_token is not None or expected_phase is not None:
-            raise ClaimMismatch("no active claim to release")
+    """Clear current_claim. If both expected_* are given, mismatch raises ClaimMismatch.
+
+    Passing neither clears unconditionally — only the supervisor (which holds
+    the lock and just inspected the claim) should do this. Passing only one
+    is a programming error: callers either prove they own the claim with both
+    pieces or they don't validate at all.
+    """
+    if expected_token is None and expected_phase is None:
+        data["current_claim"] = None
         return
-    if expected_token is not None and claim.get("claimed_by") != expected_token:
-        raise ClaimMismatch(
-            f"token mismatch: claim is {claim.get('claimed_by')!r}, "
-            f"got {expected_token!r}"
+    if expected_token is None or expected_phase is None:
+        raise ValueError(
+            "release_claim: expected_token and expected_phase must be passed together"
         )
-    if expected_phase is not None and claim.get("phase_id") != expected_phase:
-        raise ClaimMismatch(
-            f"phase mismatch: claim is {claim.get('phase_id')!r}, "
-            f"got {expected_phase!r}"
-        )
+    assert_claim_match(data, expected_token, expected_phase)
     data["current_claim"] = None
 
 

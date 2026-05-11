@@ -8,19 +8,25 @@ waiting 30 minutes for the lease to expire silently.
 """
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from . import state as st
 from .config import ProjectConfig
 from .supervisor import TickResult
 
-# How long to wait before declaring a fast-fail. Long enough for shell
-# resolution + exec; short enough not to noticeably slow ticks.
+# How long to wait for a fast-fail before declaring the worker healthy.
+# `proc.wait(timeout=)` returns immediately if the worker exited sooner —
+# we only pay this latency for the genuinely-still-running case. Plenty
+# of headroom for fork+exec; longer than this and we'd be re-implementing
+# the lease.
 _FAST_FAIL_WAIT_SEC = 0.5
+
+# Exceptions that are recoverable in dispatch fallback paths.
+_DISPATCH_FALLBACK_ERRORS = (OSError, json.JSONDecodeError, st.SchemaVersionMismatch)
 
 
 def dispatch_for_tick(
@@ -56,8 +62,7 @@ def dispatch_for_tick(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{result.phase_id}.{result.token}.log"
 
-    log_fh = open(log_path, "ab")
-    try:
+    with open(log_path, "ab") as log_fh:
         proc = subprocess.Popen(
             cmd,
             shell=True,
@@ -66,11 +71,11 @@ def dispatch_for_tick(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    finally:
-        log_fh.close()
 
-    time.sleep(_FAST_FAIL_WAIT_SEC)
-    rc = proc.poll()
+    try:
+        rc = proc.wait(timeout=_FAST_FAIL_WAIT_SEC)
+    except subprocess.TimeoutExpired:
+        rc = None  # still running — the healthy case
     if rc is not None and rc != 0:
         _release_with_failure(
             state_file, result,
@@ -108,7 +113,7 @@ def _release_with_failure(state_file: Path, result: TickResult, *, reason: str) 
             except st.ClaimMismatch:
                 # Someone else already changed the claim — leave it alone.
                 pass
-    except Exception as exc:
+    except _DISPATCH_FALLBACK_ERRORS as exc:
         print(f"dispatch: failed to record dispatch_failed: {exc}", file=sys.stderr)
 
 
@@ -121,5 +126,5 @@ def _stamp_pid(state_file: Path, result: TickResult, pid: int, log_path: Path) -
                 claim["pid"] = pid
                 claim["log_path"] = str(log_path)
                 data["current_claim"] = claim
-    except Exception as exc:
+    except _DISPATCH_FALLBACK_ERRORS as exc:
         print(f"dispatch: failed to stamp pid: {exc}", file=sys.stderr)
