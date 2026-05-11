@@ -88,19 +88,19 @@ Any test that calls `main(["init", ...])` (or otherwise touches `registry.regist
 - Dispatch fast-fail with per-token logs + pid stamping
 - ExitCode enum + `_die` helper
 
-**Day 2 in progress** (89 tests, all green, ~1s suite):
+**Day 2 in progress** (108 tests, all green, ~1s suite):
 - 2.1 (shipped `ef01756`): Worker heartbeat → `stalled` status (Cliff 1).
 - 2.2 (shipped `738fcb8`): iMessage outbound via osascript + quiet hours 22-08 default. Wired to blocker/stalled/plan_completed events.
 - 2.3 (shipped `95f9f7c`): Host-level registry at `~/.config/clu/registry.json`; `clu init` auto-registers; `clu register/unregister/list` commands; notifications now slug-prefixed (`❓ <plan>/q-1`) for multi-plan disambiguation.
+- 2.4 (in progress): iMessage inbound poller in `end_of_line/notify_inbound.py` + LaunchAgent template at `examples/clu.inbound.plist`. Polls `chat.db` read-only, routes via `^\s*(<plan-slug>\s+)?[0-9]\s*$`; bare digit only honored when exactly one plan has an open blocker (multi-plan: require slug prefix — last-pinged routing deferred). Seen-rowid persisted at `~/.clu/seen_msg_rowid`; rowid advances even on no-match to prevent stuck-cursor resurrection.
 
-**Pick up here:** iMessage inbound LaunchAgent. Registry now exists so multi-plan routing is tractable. Sketch from `brainstorm/clu-notifications.md`: poll `~/Library/Messages/chat.db` for new rows where `is_from_me=0`, regex-match `^\s*(<plan-slug>\s+)?[0-9]\s*$`, look up the latest open blocker for that plan (or any if bare number + only one plan has an open blocker), exec `clu answer`. New file: `end_of_line/notify_inbound.py`. New file: `examples/clu.inbound.plist` (LaunchAgent template). Tests: poll/match/dispatch/seen-rowid persistence in `~/.clu/seen_msg_rowid`.
+**Pick up here:** `clu` no-args fleet view (Cliff 3). Walk `registry.entries()`, render one line per plan: slug, status, current phase, open-blocker count, age of last event. Bare `clu` invokes this; existing `clu list` is the dumb name-only listing. Code: `cli.py` `cmd_list` enrichment + maybe a small `summarize_plan` helper. Tests: empty registry, single plan running, plan with open blocker, plan halted.
 
 **Day 2 backlog after that:**
-1. `clu` no-args fleet view (Cliff 3 — also uses the registry)
-2. SLA-pauses-during-quiet (stale-blocker escalations should respect quiet hours)
-3. `clu retry` / `clu pause` / `clu resume`
-4. Halt-reason as first-class field in `clu status`
-5. Halt notification (user explicitly de-selected this from Day 2.2 — re-confirm before adding)
+1. SLA-pauses-during-quiet (stale-blocker escalations should respect quiet hours)
+2. `clu retry` / `clu pause` / `clu resume`
+3. Halt-reason as first-class field in `clu status`
+4. Halt notification (user explicitly de-selected this from Day 2.2 — re-confirm before adding)
 
 **Locked config decisions** (from the brainstorm — don't re-litigate):
 - Notifications: iMessage to **self-chat** handle, NO Pushover (user picked iMessage-only)

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent template for the clu inbound iMessage poller.
+
+  Install:
+    1. Copy to ~/Library/LaunchAgents/com.clu.inbound.plist
+    2. Edit ProgramArguments: replace /usr/bin/python3 with the python that
+       has end_of_line installed (e.g. `which python3` from the venv where
+       you ran `pip install -e .`). LaunchAgents do NOT inherit your shell
+       PATH — full paths are mandatory.
+    3. launchctl load ~/Library/LaunchAgents/com.clu.inbound.plist
+       (or `launchctl bootstrap gui/$UID …` on macOS 10.11+)
+    4. Tail /tmp/clu-inbound.{out,err} to confirm the loop is running.
+
+  KeepAlive=true restarts the poller if it crashes; ThrottleInterval
+  prevents a crash-loop from saturating launchd if e.g. chat.db is
+  inaccessible.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.clu.inbound</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>end_of_line.notify_inbound</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/clu-inbound.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/clu-inbound.err</string>
+</dict>
+</plist>

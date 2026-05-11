@@ -18,7 +18,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# Fragment (no anchors) so other modules can compose it into larger patterns
+# without redefining the character class — drift here is a security invariant
+# (path traversal + unmatched inbound replies).
+SLUG_PATTERN = r"[a-z0-9][a-z0-9_-]{0,63}"
+_SLUG_RE = re.compile(rf"^{SLUG_PATTERN}$")
 
 
 class InvalidSlug(ValueError):
