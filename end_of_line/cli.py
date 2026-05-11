@@ -309,29 +309,37 @@ def cmd_fleet(args) -> int:
     return 0
 
 
-def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
+def _tick_one_plan(
+    plan_slug: str, cfg: ProjectConfig, state_path: Path, *, dispatch: bool,
+):
+    """Run one supervisor tick + optional dispatch + optional notify.
+
+    Side-effect helper shared by `cmd_tick` (single-plan) and `cmd_tick_all`
+    (host-scoped). Printing is the caller's prerogative — single-plan wants
+    the result plain; tick-all wants it prefixed with plan id + project.
+    """
     result = tick(state_path, cfg)
-    print(result)
-    if args.dispatch and result.action == "dispatch":
+    if dispatch and result.action == "dispatch":
         from .dispatch import dispatch_for_tick
-        dispatch_for_tick(result, cfg, args.plan, state_path)
+        dispatch_for_tick(result, cfg, plan_slug, state_path)
     if result.notify_body and (kind := ACTION_NOTIFY_KIND.get(result.action)):
         notify.notify(cfg.notify, kind, result.notify_body)
+    return result
+
+
+def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
+    result = _tick_one_plan(args.plan, cfg, state_path, dispatch=args.dispatch)
+    print(result)
     return 0
 
 
 def cmd_tick_all(args) -> int:
-    from .dispatch import dispatch_for_tick
     for row in registry.entries():
         try:
             cfg = load_project_config(Path(row.project_root))
             state_path = cfg.state_path(row.plan_slug)
-            result = tick(state_path, cfg)
+            result = _tick_one_plan(row.plan_slug, cfg, state_path, dispatch=True)
             print(f"tick {row.plan_slug} @ {row.project_root}: {result}")
-            if result.action == "dispatch":
-                dispatch_for_tick(result, cfg, row.plan_slug, state_path)
-            if result.notify_body and (kind := ACTION_NOTIFY_KIND.get(result.action)):
-                notify.notify(cfg.notify, kind, result.notify_body)
         except Exception as exc:
             # Per-plan exceptions must not abort the loop — a single broken
             # plan can't be allowed to poison the 5-minute cron cadence.
