@@ -88,19 +88,23 @@ Any test that calls `main(["init", ...])` (or otherwise touches `registry.regist
 - Dispatch fast-fail with per-token logs + pid stamping
 - ExitCode enum + `_die` helper
 
-**Day 2 in progress** (122 tests, all green, ~1s suite):
+**Day 2 shipped** (149 tests, all green, ~1.2s suite):
 - 2.1 (shipped `ef01756`): Worker heartbeat → `stalled` status (Cliff 1).
 - 2.2 (shipped `738fcb8`): iMessage outbound via osascript + quiet hours 22-08 default. Wired to blocker/stalled/plan_completed events.
 - 2.3 (shipped `95f9f7c`): Host-level registry at `~/.config/clu/registry.json`; `clu init` auto-registers; `clu register/unregister/list` commands; notifications now slug-prefixed (`❓ <plan>/q-1`) for multi-plan disambiguation.
 - 2.4 (shipped `22c412a`): iMessage inbound poller in `end_of_line/notify_inbound.py` + LaunchAgent template at `examples/clu.inbound.plist`. Polls `chat.db` read-only, routes via `^\s*(<plan-slug>\s+)?[0-9]\s*$`; bare digit only honored when exactly one plan has an open blocker (multi-plan: require slug prefix — last-pinged routing deferred). Seen-rowid persisted at `~/.clu/seen_msg_rowid`.
-- 2.5 (in progress): Bare `clu` fleet view (Cliff 3) in `end_of_line/fleet.py`. Stalled status is derived (claim heartbeat older than threshold), `missing` for registered-but-uninit plans. Rule-of-three extractions: `state.open_blockers(data)` (replaces 4 duplicated open-blocker scans), `registry.load_entry_state(entry)` (replaces clone in fleet + notify_inbound).
+- 2.5 (shipped `e93e93d`): Bare `clu` fleet view (Cliff 3) in `end_of_line/fleet.py`. Stalled is derived (claim heartbeat older than threshold), `missing` for registered-but-uninit plans. Rule-of-three extractions: `state.open_blockers(data)`, `registry.load_entry_state(entry)`.
+- 2.6 (shipped `10b1dff`): SLA-during-quiet gating. `supervisor.tick` defers blocker-SLA escalation when wall-clock is inside the quiet window; the next loud tick re-checks and escalates if still aged. `notify._in_quiet_window` promoted to public.
+- 2.7 (shipped `2ab6711`): `clu pause / resume / retry` operator commands. New events `EVENT_PAUSED` (with reason payload), `EVENT_RESUMED`, `EVENT_RETRY_REQUESTED`. `attempts_for_phase` treats retry events as per-phase reset floors so the cap doesn't re-halt the plan immediately. New `ExitCode.STATUS_TRANSITION` (7) and reusable `state.latest_event` helper.
+- 2.8 (shipped `d5d7e34`): `clu status` shows a `Reason:` line for paused/halted plans, derived from the event log via `state.status_reason`. Tie-breaks `EVENT_PAUSED` vs `EVENT_BLOCKER_SLA_EXCEEDED` by recency. Uses `evt[...]` (not `.get(...)`) so schema drift fails loudly.
+- 2.9 (shipped `cd4f72e`): Halt notification. `notify.render_halted` + `KIND_HALTED`; `supervisor.tick` populates `notify_body` on the halt-transition tick. Fires exactly once per transition because `TERMINAL_STATUSES` short-circuits subsequent ticks to idle. Pruned a dead `if status != HALTED` guard in the halt branch.
 
-**Pick up here:** SLA-pauses-during-quiet. `supervisor.tick`'s stale-question SLA check at `supervisor.py:100-118` fires when blocker age ≥ 24h regardless of wall-clock; this lights up the user at 3am if a blocker rolls over overnight. Gate the check on `not _in_quiet_window(cfg.notify, now)`. Quiet-hour helper already lives in `notify.py`. Tests: SLA-hit-during-loud-hours still escalates; SLA-hit-during-quiet defers until first non-quiet tick.
-
-**Day 2 backlog after that:**
-1. `clu retry` / `clu pause` / `clu resume`
-2. Halt-reason as first-class field in `clu status`
-3. Halt notification (user explicitly de-selected this from Day 2.2 — re-confirm before adding)
+**Pick up here:** Day 2 backlog is empty. Open question: what's Day 3? Likely candidates (none chosen yet — talk to the user before starting):
+- **Wire to a real plan**: `clu init --project ~/projects/HealthData --plan watch-start-workout` + LaunchAgent for `clu tick` + LaunchAgent for inbound poller. The integration test the brainstorm calls for. Risk: surfaces real-world bugs the unit suite doesn't.
+- **Halt notification escape hatch**: halt is in `QUIET_HOURS_BYPASS_KINDS`? Currently it's gated. User decision.
+- **Replan path**: `STATUS_HALTED_REPLAN` exists in the enum but nothing sets it. Worker-side `clu replan` callback? Or an operator command? Underspecified.
+- **Multi-plan inbound routing**: Day 2.4 deferred "last-pinged routing" (bare digit when multiple plans have open blockers). Track which plan most recently sent a notification; route ambiguous replies to that one.
+- **Observability**: `clu logs <plan>` to tail `.orchestrator/logs/<token>`. Currently you have to know the token to find the log.
 
 **Locked config decisions** (from the brainstorm — don't re-litigate):
 - Notifications: iMessage to **self-chat** handle, NO Pushover (user picked iMessage-only)
