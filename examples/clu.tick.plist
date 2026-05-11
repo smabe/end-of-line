@@ -8,14 +8,20 @@
        (pipx installs to ~/.local/bin/clu by default). LaunchAgents do
        NOT inherit $PATH, so the absolute path is required.
     3. launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
-    4. Tail /tmp/clu-tick.{out,err} to watch each 5-minute tick.
+    4. Tail /tmp/clu-tick.{out,err} to watch each tick.
 
-  StartInterval=300 fires `clu tick-all` every 5 minutes. The subcommand
+  StartInterval=60 fires `clu tick-all` every minute. The subcommand
   iterates the host registry and ticks each registered plan once. Plans
-  with no pending work return [idle]; plans with a phase ready spawn a
-  worker via the configured dispatch.command. Costs roughly: one claude
-  --print session per active plan per 5 minutes, capped at the budget in
-  .orchestrator.json.
+  with no pending work return [idle] (cheap — registry walk + state read);
+  plans with a phase ready spawn a worker via the configured
+  dispatch.command. Costs roughly: one claude --print session per active
+  plan per dispatch, capped at the budget in .orchestrator.json. Idle
+  ticks are essentially free, so tightening the cadence speeds up phase-
+  to-phase chaining without meaningful resource cost.
+
+  Dial up to 300 if you prefer the legacy 5-minute cadence (lower log
+  noise in /tmp/clu-tick.out) or down to 30 for tighter feedback during
+  active development.
 
   Pre-Day-3.5 installs used examples/clu-tick-all.sh as ProgramArguments.
   That path now exec's `clu tick-all` as a back-compat shim; re-bootstrap
@@ -34,7 +40,7 @@
     </array>
 
     <key>StartInterval</key>
-    <integer>300</integer>
+    <integer>60</integer>
 
     <key>RunAtLoad</key>
     <false/>
