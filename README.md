@@ -1,125 +1,161 @@
 # End of Line
 
-Plan orchestrator for the `/plan` skill. Cron-driven supervisor, file-state, cold-context phase workers.
-
-> "End of line."  
+> "End of line."
 > — Master Control Program
 
-## What it does
+A cron-driven plan orchestrator. You write a multi-phase plan as markdown; `clu` dispatches each phase to a fresh Claude session, tracks state in atomic JSON, and pings you on iMessage when it hits a question. Workers run cold (no carried-over context), report back via CLI callbacks, and the supervisor advances the plan one tick at a time.
 
-Your `/plan` skill encodes a multi-phase plan as a master `.md` file plus per-phase plan files. Today, each phase requires manual intervention — you `/clear` between phases and prompt the next one. End of Line automates the gap: a tiny supervisor wakes up on a cron, reads a durable state file, and dispatches the next phase to a fresh Claude session. Workers run cold (no crusty context), report back via the CLI (`clu complete`, `clu block`), and the supervisor advances the plan.
+The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-of-line/commit/aef2b81) that decided whether halts should bypass quiet hours was shipped by clu — a worker opened the blocker, I answered via iMessage, the worker resumed, edited `notify.py`, wrote tests, and committed.
 
-When a worker hits genuine ambiguity, it writes a blocker question to state and exits clean. You answer async (`clu answer`); the supervisor unblocks on the next tick. Blockers older than the SLA escalate.
+## Status
 
-`/simplify` findings that get deferred during a phase are appended as `spawned_tasks` and processed before the plan can finish — tech debt never escapes the plan.
+v0.1, working. 151 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — Linux would need different notification + inbound channels.
 
-## Design
+## How it works
 
-- **State lives outside sessions.** `<project>/plans/.orchestrator/<slug>.state.json` is the single source of orchestration truth. Workers are stateless.
-- **Atomic writes.** Every mutation is `tmp + fsync + rename` under a `flock`-serialized lock.
-- **Append-only event log.** Phase completion, claims, lease expirations, blockers — all derivable from `events[]`. Corruption-resistant.
-- **/plan is the contract.** Phase declarations come from the master plan's `## Sessions index` table. No reinvention.
-- **System cron is the heartbeat.** No long-running orchestrator process. Each tick is ~50ms of Python; the supervisor itself burns zero LLM tokens.
+- **State lives outside sessions.** Each plan owns `<project>/plans/.orchestrator/<slug>.state.json`. Workers don't carry context; they read state on startup.
+- **Atomic writes under a lock.** Every mutation is `tmp + fsync + rename` under `flock`. Two ticks colliding is safe.
+- **Append-only event log.** Phase claims, completions, lease expirations, blockers — all derivable from `events[]`. State corruption is recoverable by replaying.
+- **`/plan` convention.** Phase declarations come from the master plan's `## Sessions index` markdown table. The parser is 80 lines.
+- **System cron is the heartbeat.** No long-running orchestrator process. Each tick is ~50ms of Python; the supervisor itself burns zero LLM tokens. Workers are the only thing that costs API money.
+- **iMessage round-trips.** Outbound via `osascript`; inbound via a tiny LaunchAgent that polls `chat.db` and routes replies back into `clu answer`. Quiet hours (default 22:00–08:00) gate non-halt notifications.
 
 ## Install
 
 ```bash
-cd ~/projects/end-of-line
-pip install -e .
-# Or: pipx install .
+git clone https://github.com/smabe/end-of-line.git
+cd end-of-line
+pipx install -e .          # puts `clu` on $PATH via its own venv
 ```
 
-## Bootstrap a project
+On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path that works without `--break-system-packages`.
 
-In your project repo, drop a `.orchestrator.json`:
+For the inbound iMessage poller, grant Full Disk Access to the pipx venv python (System Settings → Privacy & Security → Full Disk Access → add `~/.local/pipx/venvs/end-of-line/bin/python3`). Without it, the poller can't open `chat.db`.
+
+## Configure a project
+
+Drop a `.orchestrator.json` at your project root (it's gitignored by example since it holds your iMessage handle):
 
 ```json
 {
   "plan_dir": "plans",
   "dispatch": {
     "kind": "shell",
-    "command": "claude --print '/plan {plan_slug}'"
+    "command": "claude --print --permission-mode bypassPermissions --max-budget-usd 1.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'"
   },
   "notify": {
-    "imessage": {"to": "+15551234567"},
+    "imessage": {"to": "you@example.com"},
     "quiet_hours": ["22:00", "08:00"]
   }
 }
 ```
 
-`notify.imessage.to` is the iMessage handle clu will message on a new blocker, stalled phase, or plan completion. Use your own number or iCloud email for a self-chat. `quiet_hours` is `[start, end]` in local time and wraps overnight; omit for "always loud". Outbound goes via `osascript` so Messages.app must be installed and signed in.
+- `dispatch.command` gets `{plan_slug}`, `{phase_id}`, `{token}`, `{state_file}`, `{project}` substituted (all shlex-quoted) before launching.
+- `notify.imessage.to` should be your iMessage self-chat handle (your own number or Apple ID email) — clu DMs you when a worker opens a blocker, when a phase stalls, when the plan halts, or when it completes.
+- `quiet_hours` is `[start, end]` in local wall-clock time; wraps overnight. Halt notifications bypass it (see `notify.QUIET_HOURS_BYPASS_KINDS`).
 
-Then:
+The dispatch command above launches Claude with the `/clu-phase` skill. Copy `examples/clu-phase-skill.md` to `~/.claude/skills/clu-phase/SKILL.md` so it's discoverable, or write your own equivalent — anything that honors the worker callback contract (always call `clu complete` or `clu block` before exiting) will work.
+
+## Bootstrap a plan
+
+Write a master plan with a `## Sessions index` table (this is the `/plan` skill's convention):
+
+```markdown
+# my-feature
+
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| Design | `my-feature-design-block.md` | Decide approach | 30m |
+| Implement | `my-feature-impl.md` | Write the thing | 1h |
+```
+
+Then init and let cron drive:
 
 ```bash
-# Initialize state for a plan (auto-registers in ~/.config/clu/registry.json)
-clu init --project /path/to/project --plan my-plan
-
-# Run the cron loop manually
-clu tick --project /path/to/project --plan my-plan --dispatch
-
-# Inspect state
-clu status --project /path/to/project --plan my-plan
-
-# List every plan registered on this host
-clu list
-
-# Remove a plan from the host registry
-clu unregister --project /path/to/project --plan my-plan
+clu init --project ~/projects/my-repo --plan my-feature
+clu              # bare command = fleet view across every registered plan
 ```
 
-Add cron:
+## macOS LaunchAgents
 
-```cron
-*/5 * * * * /usr/local/bin/clu tick --project /path/to/project --plan my-plan --dispatch >> /tmp/clu.log 2>&1
+Two daemons:
+
+```bash
+# Inbound iMessage poller — watches chat.db for your replies to blockers
+cp examples/clu.inbound.plist ~/Library/LaunchAgents/com.clu.inbound.plist
+# Edit ProgramArguments[0] to point at your pipx venv python
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.inbound.plist
+
+# Tick driver — fires every 5 min, advances every registered plan
+cp examples/clu.tick.plist ~/Library/LaunchAgents/com.clu.tick.plist
+# Edit ProgramArguments[0] to point at your clone's examples/clu-tick-all.sh
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
 ```
+
+Logs land at `/tmp/clu-inbound.{out,err}` and `/tmp/clu-tick.{out,err}`.
 
 ## Worker contract
 
-A phase worker is a fresh Claude session (or any process) that:
+A worker is a process clu spawns for one phase. The included `/clu-phase` skill (a Claude Code skill) handles the contract automatically; if you want to plug a different worker in, the rules are:
 
-1. Reads its phase plan file from `<project>/<plan_dir>/<phase_plan_file>.md`
-2. Runs `/plan` (Mode 2 / resume) or equivalent.  
-   Every ~2 min while running: `clu heartbeat --project P --plan S --phase X --token <token>` so the supervisor doesn't mark the phase stalled.
-3. On success:  
-   `clu complete --project P --plan S --phase X --token <token> --commit <sha> [--commit <sha>...]`
-4. On a /simplify finding it can't fix this phase:  
-   `clu spawn --project P --plan S --phase X --token <token> --source simplify --title "…"`
-5. On blocked ambiguity:  
-   `clu block --project P --plan S --phase X --token <token> --question "…" --option A --option B --context "…"`
-6. On unrecoverable failure: just exit — lease expires, supervisor retries.
+| Step | Call |
+|---|---|
+| Success | `clu complete --project P --plan S --phase X --token T [--commit SHA ...]` |
+| Need user input | `clu block --project P --plan S --phase X --token T --question "..." --option A --option B [--context "..."]` |
+| Spawn a follow-up | `clu spawn --project P --plan S --phase X --token T --source <kind> --title "..."` |
+| Still alive (long phases) | `clu heartbeat --project P --plan S --phase X --token T` |
 
-All worker-side commands require `--token` matching the live claim (see `docs/contract.md`).
+Every worker callback validates `--token` against the live claim — `clu` rejects forged tokens with exit code 4 (`CLAIM_MISMATCH`). Never exit without calling `complete` or `block`, or the lease expires after 30 min and your phase's attempts counter ticks toward the halt cap.
 
-## Commands
+If a worker calls `clu block`, clu releases the claim and sends an iMessage. When you reply, the inbound poller routes the answer back, the supervisor consumes it on the next tick, and re-dispatches the phase — the resume-aware worker reads the answered blocker from state and continues with your choice.
 
-| Command | Side | Purpose |
-|---|---|---|
-| `clu init` | bootstrap | Create state.json for a new plan |
-| `clu tick` | supervisor (cron) | One decision step |
-| `clu status` | human | Pretty-print current state |
-| `clu answer <id> <text\|index>` | human | Unblock a worker |
-| `clu complete --phase X` | worker | Mark phase done + record commits |
-| `clu block --phase X` | worker | Record blocker + release claim |
-| `clu spawn` | worker | Append a dynamic follow-up task |
+## Operator commands
+
+| Command | Purpose |
+|---|---|
+| `clu` | Fleet view across every registered plan |
+| `clu init` | Create state.json for a new plan (auto-registers) |
+| `clu list` | List plans on this host (name + project path) |
+| `clu register` / `clu unregister` | Manual registry edits |
+| `clu status` | Pretty-print one plan's current state, with a `Reason:` line for paused/halted plans |
+| `clu tick --dispatch` | One supervisor decision step; spawn a worker if a phase is ready |
+| `clu answer <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |
+| `clu pause [--reason ...]` | Halt dispatching new phases |
+| `clu resume` | Un-pause |
+| `clu retry [--phase X]` | Clear max-attempts on a halted phase and resume |
+| `clu task-done <task_id>` | Mark a spawned follow-up done |
 
 ## State schema
 
-See `docs/contract.md`. Minimal sketch:
+Sketch — see `docs/contract.md` for the full schema:
 
 ```json
 {
   "schema_version": 1,
-  "plan_slug": "watch-start-workout",
+  "plan_slug": "my-feature",
   "status": "running",
-  "current_claim": {"phase_id": "...", "claimed_by": "...", "lease_expires": "..."},
-  "blockers": [{"id": "q-1", "phase_id": "...", "question": "...", "answer": null}],
+  "current_claim": {"phase_id": "design", "claimed_by": "session-...", "lease_expires": "..."},
+  "blockers": [{"id": "q-1", "phase_id": "design", "question": "...", "answer": null}],
   "spawned_tasks": [{"id": "task-1", "source": "simplify", "title": "...", "status": "pending"}],
-  "events": [{"ts": "...", "type": "phase_completed", "phase": "..."}],
-  "config": {"lease_ttl_minutes": 30, "blocked_question_sla_hours": 24}
+  "events": [{"ts": "...", "type": "phase_completed", "phase": "design"}],
+  "config": {"lease_ttl_minutes": 30, "blocked_question_sla_hours": 24, "max_attempts_per_phase": 3, "stalled_heartbeat_minutes": 10}
 }
 ```
 
-## Status
+## Repo layout
 
-v0.1 — working MVP. Tested against the `/plan` skill's Sessions-index convention. Notification adapters are stubs (print to stderr); plug real channels (osascript, Pushover, iMessage) in `notify.py`.
+```
+end_of_line/          # the package (cli, supervisor, state, notify, dispatch, …)
+tests/                # unittest suite
+plans/                # the project's own plans (dogfooded — this repo uses clu on itself)
+examples/             # .orchestrator.json template, LaunchAgent plists, clu-phase skill,
+                      # clu-tick-all.sh, fake-worker.sh for smoke testing
+docs/contract.md      # state schema + worker callback contract
+brainstorm/           # design docs that informed Day 1 / Day 2 / Day 3
+```
+
+## Naming
+
+[Tron](https://en.wikipedia.org/wiki/Tron). The binary is `clu` after the supervisor program; "end of line" is what MCP says when terminating a process.
