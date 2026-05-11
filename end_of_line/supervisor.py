@@ -13,6 +13,7 @@ Action priority (first match wins):
 """
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,11 @@ from typing import Literal
 from . import notify, state as st
 from .config import ProjectConfig
 from .plan_parser import parse_sessions_index
+
+
+def _local_now() -> _dt.datetime:
+    """Wall-clock local time. Indirection exists so tests can pin the hour."""
+    return _dt.datetime.now()
 
 Action = Literal[
     "dispatch", "idle", "lease_expired", "escalate",
@@ -97,25 +103,29 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         if stalled := _detect_stalled(data):
             return stalled
 
-        sla_hours = data["config"].get("blocked_question_sla_hours", st.DEFAULT_SLA_HOURS)
-        now = st._now_utc()
-        for b in data["blockers"]:
-            if b["answer"] is not None:
-                continue
-            try:
-                asked = st.parse_iso(b["asked_at"])
-            except (KeyError, ValueError):
-                continue
-            age_hours = (now - asked).total_seconds() / 3600.0
-            if age_hours >= sla_hours and data["status"] != st.STATUS_PAUSED:
-                data["status"] = st.STATUS_PAUSED
-                st.append_event(
-                    data, st.EVENT_BLOCKER_SLA_EXCEEDED,
-                    blocker_id=b["id"], age_hours=round(age_hours, 1),
-                )
-                return TickResult(
-                    "escalate", f"blocker={b['id']} age_hours={age_hours:.1f}",
-                )
+        # Defer SLA escalation during quiet hours — an overnight rollover would
+        # otherwise ping the user at 3am. The blocker stays aged for the next
+        # loud tick.
+        if not notify.in_quiet_window(config.notify, _local_now()):
+            sla_hours = data["config"].get(
+                "blocked_question_sla_hours", st.DEFAULT_SLA_HOURS,
+            )
+            now = st._now_utc()
+            for b in st.open_blockers(data):
+                try:
+                    asked = st.parse_iso(b["asked_at"])
+                except (KeyError, ValueError):
+                    continue
+                age_hours = (now - asked).total_seconds() / 3600.0
+                if age_hours >= sla_hours and data["status"] != st.STATUS_PAUSED:
+                    data["status"] = st.STATUS_PAUSED
+                    st.append_event(
+                        data, st.EVENT_BLOCKER_SLA_EXCEEDED,
+                        blocker_id=b["id"], age_hours=round(age_hours, 1),
+                    )
+                    return TickResult(
+                        "escalate", f"blocker={b['id']} age_hours={age_hours:.1f}",
+                    )
 
         # Newly-answered blocker → mark consumed (worker sees on next dispatch)
         for b in data["blockers"]:

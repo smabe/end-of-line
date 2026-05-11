@@ -1,13 +1,15 @@
 """Integration-ish tests for the supervisor tick logic."""
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from end_of_line import state as st
-from end_of_line.config import ProjectConfig, DispatchSpec
+from end_of_line.config import ProjectConfig, DispatchSpec, NotifySpec
 from end_of_line.supervisor import tick
 
 
@@ -104,6 +106,60 @@ class SupervisorTestCase(unittest.TestCase):
         # Should not dispatch a; should dispatch b instead
         self.assertEqual(result.action, "dispatch")
         self.assertEqual(result.phase_id, "b")
+
+    def _age_blocker_past_sla(self) -> str:
+        """Add a blocker on phase 'a' and backdate it past the 24h SLA."""
+        with st.locked(self.state_path):
+            data = st.load(self.state_path)
+            blocker_id = st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
+            stale = (st._now_utc() - _dt.timedelta(hours=25)).strftime(st._ISO_FMT)
+            for b in data["blockers"]:
+                if b["id"] == blocker_id:
+                    b["asked_at"] = stale
+            st.save_atomic(self.state_path, data)
+        return blocker_id
+
+    def test_sla_during_loud_hours_escalates(self) -> None:
+        self._age_blocker_past_sla()
+        self.cfg.notify = NotifySpec(quiet_hours=("22:00", "08:00"))
+        # Force "loud" wall-clock (noon local) regardless of when tests run.
+        loud = _dt.datetime(2026, 5, 11, 12, 0, 0)
+        with mock.patch("end_of_line.supervisor._local_now", return_value=loud):
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "escalate")
+        self.assertEqual(self._read()["status"], st.STATUS_PAUSED)
+
+    def test_sla_during_quiet_hours_defers(self) -> None:
+        self._age_blocker_past_sla()
+        self.cfg.notify = NotifySpec(quiet_hours=("22:00", "08:00"))
+        # 3am local — squarely inside the default 22:00–08:00 quiet window.
+        quiet = _dt.datetime(2026, 5, 11, 3, 0, 0)
+        with mock.patch("end_of_line.supervisor._local_now", return_value=quiet):
+            result = tick(self.state_path, self.cfg)
+        self.assertNotEqual(result.action, "escalate")
+        data = self._read()
+        self.assertNotEqual(data["status"], st.STATUS_PAUSED)
+        # SLA event must not be emitted while we're still quiet — otherwise we'd
+        # only escalate once and silently miss the user's wake-up window.
+        types = [e["type"] for e in data["events"]]
+        self.assertNotIn(st.EVENT_BLOCKER_SLA_EXCEEDED, types)
+
+    def test_sla_resumes_when_quiet_ends(self) -> None:
+        self._age_blocker_past_sla()
+        self.cfg.notify = NotifySpec(quiet_hours=("22:00", "08:00"))
+        # First tick at 3am — deferred.
+        with mock.patch(
+            "end_of_line.supervisor._local_now",
+            return_value=_dt.datetime(2026, 5, 11, 3, 0, 0),
+        ):
+            tick(self.state_path, self.cfg)
+        # Next tick at 9am — quiet window over, escalation fires.
+        with mock.patch(
+            "end_of_line.supervisor._local_now",
+            return_value=_dt.datetime(2026, 5, 11, 9, 0, 0),
+        ):
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "escalate")
 
     def test_max_attempts_halts_plan(self) -> None:
         # Simulate two prior failed attempts via phase_started events

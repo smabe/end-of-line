@@ -89,7 +89,7 @@ def notify(
     # Quiet hours are user-facing wall-clock semantics — local time is the
     # whole point. Don't switch this to UTC to match state.py.
     now = now or _dt.datetime.now()
-    if _in_quiet_window(spec, now) and kind not in QUIET_HOURS_BYPASS_KINDS:
+    if in_quiet_window(spec, now) and kind not in QUIET_HOURS_BYPASS_KINDS:
         return False
     if not spec.imessage_to:
         return False
@@ -101,7 +101,7 @@ def notify(
         return False
 
 
-def _in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:
+def in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:
     if not spec.quiet_hours:
         return False
     try:
