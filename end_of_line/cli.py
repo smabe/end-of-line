@@ -39,6 +39,7 @@ class ExitCode(IntEnum):
     CLAIM_MISMATCH = 4
     SPAWN_CAP = 5
     UNKNOWN_TASK = 6
+    STATUS_TRANSITION = 7
 
 
 def _die(rc: ExitCode | int, msg: str) -> int:
@@ -105,6 +106,27 @@ def main(argv: list[str] | None = None) -> int:
     add_common(p_status)
     p_status.add_argument(
         "--json", action="store_true", help="Dump raw state JSON",
+    )
+
+    p_pause = sub.add_parser("pause", help="Pause the plan (operator)")
+    add_common(p_pause)
+    p_pause.add_argument(
+        "--reason", default="", help="Why paused (recorded in event log)",
+    )
+
+    p_resume = sub.add_parser(
+        "resume", help="Resume a paused plan (operator). Use `retry` for halted.",
+    )
+    add_common(p_resume)
+
+    p_retry = sub.add_parser(
+        "retry",
+        help="Clear max-attempts on the halted phase and resume (operator)",
+    )
+    add_common(p_retry)
+    p_retry.add_argument(
+        "--phase",
+        help="Phase to clear attempts on. Defaults to the most-recent halt.",
     )
 
     p_answer = sub.add_parser("answer", help="Answer a pending blocker")
@@ -205,6 +227,9 @@ def main(argv: list[str] | None = None) -> int:
         "heartbeat": cmd_heartbeat,
         "register": cmd_register,
         "unregister": cmd_unregister,
+        "pause": cmd_pause,
+        "resume": cmd_resume,
+        "retry": cmd_retry,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -325,6 +350,58 @@ def _humanize_age(seconds: float) -> str:
     if minutes < 60:
         return f"{minutes:.0f}m"
     return f"{minutes / 60:.1f}h"
+
+
+def cmd_pause(args, cfg: ProjectConfig, state_path: Path) -> int:
+    with st.mutate(state_path) as data:
+        if data["status"] == st.STATUS_DONE:
+            return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to pause")
+        if data["status"] == st.STATUS_PAUSED:
+            print("Already paused.")
+            return ExitCode.OK
+        data["status"] = st.STATUS_PAUSED
+        st.append_event(data, st.EVENT_PAUSED, reason=args.reason)
+    print(f"Paused {args.plan}.")
+    return ExitCode.OK
+
+
+def cmd_resume(args, cfg: ProjectConfig, state_path: Path) -> int:
+    with st.mutate(state_path) as data:
+        status = data["status"]
+        if status == st.STATUS_RUNNING:
+            print("Already running.")
+            return ExitCode.OK
+        if status in (st.STATUS_HALTED, st.STATUS_HALTED_REPLAN):
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"plan is {status} — use `clu retry` to clear attempts",
+            )
+        if status == st.STATUS_DONE:
+            return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to resume")
+        data["status"] = st.STATUS_RUNNING
+        st.append_event(data, st.EVENT_RESUMED)
+    print(f"Resumed {args.plan}.")
+    return ExitCode.OK
+
+
+def cmd_retry(args, cfg: ProjectConfig, state_path: Path) -> int:
+    with st.mutate(state_path) as data:
+        if data["status"] == st.STATUS_DONE:
+            return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to retry")
+        phase = args.phase or st.most_recent_halted_phase(data)
+        if phase is None:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                "no halted phase to retry — pass --phase or use `clu resume`",
+            )
+        try:
+            st.validate_slug(phase, kind="phase id")
+        except st.InvalidSlug as exc:
+            return _die(ExitCode.INVALID_SLUG, str(exc))
+        data["status"] = st.STATUS_RUNNING
+        st.append_event(data, st.EVENT_RETRY_REQUESTED, phase=phase)
+    print(f"Retrying {args.plan}/{phase}.")
+    return ExitCode.OK
 
 
 def cmd_answer(args, cfg: ProjectConfig, state_path: Path) -> int:

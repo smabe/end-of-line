@@ -81,6 +81,9 @@ EVENT_TASK_COMPLETED = "task_completed"
 EVENT_PLAN_COMPLETED = "plan_completed"
 EVENT_DISPATCH_FAILED = "dispatch_failed"
 EVENT_PHASE_STALLED = "phase_stalled"
+EVENT_PAUSED = "paused"
+EVENT_RESUMED = "resumed"
+EVENT_RETRY_REQUESTED = "retry_requested"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
@@ -399,9 +402,42 @@ def phase_has_open_blocker(data: dict, phase_id: str) -> bool:
     return any(b["phase_id"] == phase_id for b in open_blockers(data))
 
 
+def latest_event(
+    data: dict, event_type: str, *, phase: str | None = None,
+) -> dict | None:
+    """Most recent event of `event_type`, optionally constrained by phase.
+
+    Centralizes the "find the last X" reverse-scan so the EVENT_* literal
+    lives next to its siblings — a typo here silently breaks any caller that
+    used to find a match.
+    """
+    for evt in reversed(data["events"]):
+        if evt.get("type") != event_type:
+            continue
+        if phase is not None and evt.get("phase") != phase:
+            continue
+        return evt
+    return None
+
+
 def attempts_for_phase(data: dict, phase_id: str) -> int:
-    """Count phase_started events for this phase (durable across claim clears)."""
+    """Count phase_started events for this phase, scoped to the most recent retry.
+
+    Durable across claim clears. `clu retry` appends EVENT_RETRY_REQUESTED to
+    move the floor — only phase_starteds after that point count, so the
+    supervisor's max-attempts cap doesn't re-halt the plan on the next tick.
+    """
+    floor = -1
+    for i, evt in enumerate(data["events"]):
+        if evt.get("type") == EVENT_RETRY_REQUESTED and evt.get("phase") == phase_id:
+            floor = i
     return sum(
-        1 for evt in data["events"]
+        1 for evt in data["events"][floor + 1:]
         if evt.get("type") == EVENT_PHASE_STARTED and evt.get("phase") == phase_id
     )
+
+
+def most_recent_halted_phase(data: dict) -> str | None:
+    """Phase id from the most recent max-attempts halt, if any."""
+    evt = latest_event(data, EVENT_PHASE_MAX_ATTEMPTS)
+    return evt["phase"] if evt and "phase" in evt else None
