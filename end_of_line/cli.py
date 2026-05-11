@@ -301,6 +301,8 @@ def cmd_status(args, cfg: ProjectConfig, state_path: Path) -> int:
 
     print(f"Plan:    {data['plan_slug']}")
     print(f"Status:  {data['status']}")
+    if reason := st.status_reason(data):
+        print(f"Reason:  {reason}")
     if claim := data.get("current_claim"):
         print(
             f"Active:  {claim['phase_id']} "

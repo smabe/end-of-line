@@ -441,3 +441,41 @@ def most_recent_halted_phase(data: dict) -> str | None:
     """Phase id from the most recent max-attempts halt, if any."""
     evt = latest_event(data, EVENT_PHASE_MAX_ATTEMPTS)
     return evt["phase"] if evt and "phase" in evt else None
+
+
+_PAUSE_CAUSE_TYPES: frozenset[str] = frozenset(
+    {EVENT_PAUSED, EVENT_BLOCKER_SLA_EXCEEDED},
+)
+
+
+def status_reason(data: dict) -> str | None:
+    """One-line human reason for the current status, or None when running/done.
+
+    Derived from the event log so the status string can't drift out of sync
+    with the transition that caused it. `clu status` uses this; future
+    notifications can hang off it too.
+    """
+    status = data["status"]
+    if status == STATUS_PAUSED:
+        # Most recent of {operator pause, SLA escalation} wins — both can
+        # land the plan in PAUSED, and the one that did it last is the one
+        # the user wants to read about.
+        for evt in reversed(data["events"]):
+            if evt.get("type") not in _PAUSE_CAUSE_TYPES:
+                continue
+            if evt["type"] == EVENT_PAUSED:
+                reason = evt.get("reason") or ""
+                return f"operator pause: {reason}" if reason else "operator pause"
+            return (
+                f"SLA exceeded — blocker {evt['blocker_id']} "
+                f"age {evt['age_hours']}h"
+            )
+        return None
+    if status == STATUS_HALTED:
+        evt = latest_event(data, EVENT_PHASE_MAX_ATTEMPTS)
+        if evt:
+            return f"phase {evt['phase']} hit max attempts ({evt['attempts']})"
+        return None
+    if status == STATUS_HALTED_REPLAN:
+        return "worker requested replan"
+    return None

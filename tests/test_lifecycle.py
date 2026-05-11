@@ -1,9 +1,11 @@
 """Tests for operator-side lifecycle commands: pause / resume / retry."""
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from end_of_line import state as st
@@ -180,6 +182,82 @@ class LifecycleTestCase(unittest.TestCase):
             if e["type"] == st.EVENT_RETRY_REQUESTED
         ]
         self.assertEqual([e["phase"] for e in evts], ["a"])
+
+    # ---- status reason ---------------------------------------------------
+
+    def _status_output(self) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(self._argv("status"))
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def test_status_shows_pause_reason(self) -> None:
+        main(self._argv("pause", "--reason", "investigating slow phase"))
+        out = self._status_output()
+        self.assertIn("investigating slow phase", out)
+
+    def test_status_shows_pause_without_reason(self) -> None:
+        main(self._argv("pause"))
+        out = self._status_output()
+        # Some marker that the plan is paused manually should appear, not
+        # just "Status: paused" with no explanation.
+        self.assertIn("Reason:", out)
+        self.assertIn("operator pause", out.lower())
+
+    def test_status_shows_sla_pause_blocker(self) -> None:
+        # Simulate SLA escalation by writing the event directly.
+        def mut(d: dict) -> None:
+            d["status"] = st.STATUS_PAUSED
+            st.add_blocker(d, "a", "Q?", ["X"], "ctx")
+            blocker_id = d["blockers"][-1]["id"]
+            st.append_event(
+                d, st.EVENT_BLOCKER_SLA_EXCEEDED,
+                blocker_id=blocker_id, age_hours=25.3,
+            )
+        self._write(mut)
+        out = self._status_output()
+        self.assertIn("Reason:", out)
+        self.assertIn("SLA", out)
+        self.assertIn("25.3", out)
+
+    def test_status_shows_halt_reason_with_phase_and_attempts(self) -> None:
+        self._halt_plan_on_phase_a()
+        out = self._status_output()
+        self.assertIn("Reason:", out)
+        self.assertIn("phase a", out)
+        self.assertIn("max attempts", out.lower())
+
+    def test_status_no_reason_when_running(self) -> None:
+        out = self._status_output()
+        self.assertNotIn("Reason:", out)
+
+    def test_status_no_reason_when_done(self) -> None:
+        self._write(lambda d: d.__setitem__("status", st.STATUS_DONE))
+        out = self._status_output()
+        self.assertNotIn("Reason:", out)
+
+    def test_status_pause_after_sla_shows_operator_reason(self) -> None:
+        # Locks down the load-bearing "most-recent wins" tie-breaker: a fresh
+        # operator pause that follows an earlier SLA escalation should be the
+        # reported reason. Realistic shape: SLA fired in history, blocker was
+        # answered, now operator manually pauses again.
+        def mut(d: dict) -> None:
+            st.add_blocker(d, "a", "Q?", ["X"], "ctx")
+            blocker_id = d["blockers"][-1]["id"]
+            st.append_event(
+                d, st.EVENT_BLOCKER_SLA_EXCEEDED,
+                blocker_id=blocker_id, age_hours=25.0,
+            )
+            # Status stays running so cmd_pause actually emits EVENT_PAUSED
+            # rather than short-circuiting on the "already paused" branch.
+        self._write(mut)
+        rc = main(self._argv("pause", "--reason", "operator override"))
+        self.assertEqual(rc, 0)
+        out = self._status_output()
+        self.assertIn("operator pause", out.lower())
+        self.assertIn("operator override", out)
+        self.assertNotIn("SLA", out)
 
 
 if __name__ == "__main__":
