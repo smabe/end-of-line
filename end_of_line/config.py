@@ -23,7 +23,17 @@ class ProjectConfig:
     notify: dict = field(default_factory=dict)
 
     def state_path(self, plan_slug: str) -> Path:
-        return self.project_root / self.plan_dir / ORCHESTRATOR_DIR / f"{plan_slug}.state.json"
+        path = self.project_root / self.plan_dir / ORCHESTRATOR_DIR / f"{plan_slug}.state.json"
+        # Defense in depth — even after slug validation, refuse paths that
+        # would resolve outside the project. Project_root isn't checked for
+        # symlink escape because the user owns it; the slug is the attacker.
+        resolved = path.resolve()
+        base = (self.project_root / self.plan_dir / ORCHESTRATOR_DIR).resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError as exc:
+            raise ValueError(f"state_path escapes orchestrator dir: {resolved}") from exc
+        return path
 
 
 def load_project_config(project_root: Path) -> ProjectConfig:

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from end_of_line import state as st
 from end_of_line.plan_parser import parse_sessions_index
 
 
@@ -47,6 +48,22 @@ class TestSessionsIndex(unittest.TestCase):
     def test_returns_empty_when_no_sessions_index(self) -> None:
         p = self._write("# Plain plan\n\n## Goal\nThing.\n")
         self.assertEqual(parse_sessions_index(p), [])
+
+    def test_rejects_metachar_phase_id(self) -> None:
+        # Path.stem collapses ../../etc/passwd.md to "passwd" (which is valid),
+        # so the real attack vector is shell metachars surviving stem extraction.
+        body = """\
+# Plan
+
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| A | `bad;rm-rf.md` | bad | 1h |
+"""
+        p = self._write(body, name="plan.md")
+        with self.assertRaises(st.InvalidSlug):
+            parse_sessions_index(p)
 
     def test_handles_no_backticks(self) -> None:
         body = """\

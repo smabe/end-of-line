@@ -11,21 +11,42 @@ import datetime as _dt
 import fcntl
 import json
 import os
+import re
 import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+class InvalidSlug(ValueError):
+    """Raised when a plan slug or phase id fails validation (path-traversal guard)."""
+
+
+def validate_slug(slug: str, *, kind: str = "slug") -> None:
+    """Reject anything that isn't a safe path component."""
+    if not isinstance(slug, str) or not _SLUG_RE.match(slug):
+        raise InvalidSlug(
+            f"invalid {kind} {slug!r}: must match {_SLUG_RE.pattern}"
+        )
+
 SCHEMA_VERSION = 1
 
+
+class SchemaVersionMismatch(Exception):
+    """Raised when state.json was written by a different clu schema version."""
+
+
 _ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
-_TOKEN_LEN = 8
+_TOKEN_LEN = 16  # 64 bits, enough for token-auth use (red team L1).
 
 # Defaults — also embedded in empty_state(); changing here updates both.
 DEFAULT_LEASE_TTL_MIN = 30
 DEFAULT_SLA_HOURS = 24
 DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_SPAWNS_PER_PHASE = 10
 
 # Plan status (`data["status"]`)
 STATUS_RUNNING = "running"
@@ -48,7 +69,9 @@ EVENT_BLOCKER_CONSUMED = "blocker_consumed"
 EVENT_BLOCKER_SLA_EXCEEDED = "blocker_sla_exceeded"
 EVENT_PHASE_MAX_ATTEMPTS = "phase_max_attempts"
 EVENT_TASK_SPAWNED = "task_spawned"
+EVENT_TASK_COMPLETED = "task_completed"
 EVENT_PLAN_COMPLETED = "plan_completed"
+EVENT_DISPATCH_FAILED = "dispatch_failed"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
@@ -81,6 +104,7 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
             "lease_ttl_minutes": DEFAULT_LEASE_TTL_MIN,
             "blocked_question_sla_hours": DEFAULT_SLA_HOURS,
             "max_attempts_per_phase": DEFAULT_MAX_ATTEMPTS,
+            "max_spawns_per_phase": DEFAULT_MAX_SPAWNS_PER_PHASE,
         },
         "events": [],
         "created_at": utcnow(),
@@ -89,15 +113,22 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
 
 @contextmanager
 def locked(state_path: Path) -> Iterator[None]:
-    """Serialize read-modify-write across processes via a sibling lock file."""
+    """Serialize read-modify-write across processes via a sibling lock file.
+
+    O_NOFOLLOW refuses to open if the lockfile path is a symlink — defeats
+    a pre-seeded symlink attack that would otherwise truncate the target.
+    """
     state_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = state_path.with_name(state_path.name + ".lock")
-    with open(lock_path, "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 @contextmanager
@@ -114,7 +145,14 @@ def mutate(state_path: Path) -> Iterator[dict]:
 
 
 def load(state_path: Path) -> dict:
-    return json.loads(state_path.read_text())
+    data = json.loads(state_path.read_text())
+    actual = data.get("schema_version")
+    if actual != SCHEMA_VERSION:
+        raise SchemaVersionMismatch(
+            f"{state_path} has schema_version={actual!r}, "
+            f"clu expects {SCHEMA_VERSION}"
+        )
+    return data
 
 
 def save_atomic(state_path: Path, data: dict) -> None:
@@ -201,19 +239,48 @@ def claim_phase(
     return token
 
 
+class ClaimMismatch(RuntimeError):
+    """Worker callback didn't match the live claim — stale or forged."""
+
+
+def assert_claim_match(data: dict, expected_token: str, expected_phase: str) -> None:
+    """Raise ClaimMismatch unless current_claim matches token AND phase."""
+    claim = data.get("current_claim")
+    if claim is None:
+        raise ClaimMismatch("no active claim")
+    if claim.get("claimed_by") != expected_token:
+        raise ClaimMismatch(
+            f"token mismatch: claim is {claim.get('claimed_by')!r}, "
+            f"got {expected_token!r}"
+        )
+    if claim.get("phase_id") != expected_phase:
+        raise ClaimMismatch(
+            f"phase mismatch: claim is {claim.get('phase_id')!r}, "
+            f"got {expected_phase!r}"
+        )
+
+
 def release_claim(
     data: dict,
     expected_token: str | None = None,
     expected_phase: str | None = None,
 ) -> None:
-    """Clear current_claim. Pass token OR phase to guard against stale releases."""
+    """Clear current_claim. If expected_* are given, mismatch raises ClaimMismatch."""
     claim = data.get("current_claim")
     if claim is None:
+        if expected_token is not None or expected_phase is not None:
+            raise ClaimMismatch("no active claim to release")
         return
     if expected_token is not None and claim.get("claimed_by") != expected_token:
-        raise RuntimeError("claim token mismatch — refusing to release")
+        raise ClaimMismatch(
+            f"token mismatch: claim is {claim.get('claimed_by')!r}, "
+            f"got {expected_token!r}"
+        )
     if expected_phase is not None and claim.get("phase_id") != expected_phase:
-        return  # different phase claimed; leave alone
+        raise ClaimMismatch(
+            f"phase mismatch: claim is {claim.get('phase_id')!r}, "
+            f"got {expected_phase!r}"
+        )
     data["current_claim"] = None
 
 

@@ -10,11 +10,15 @@ Subcommands (worker-side, called by phase-runner sessions):
   block     — record a blocker question + release claim
   answer    — answer a pending blocker (user-side)
   spawn     — append a dynamic task (e.g. /simplify finding)
+
+Worker-side commands require `--token` matching the live claim. Tokens come
+from `{token}` in the dispatch command template.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         "spawn", help="Append a dynamic follow-up task to the plan",
     )
     add_common(p_spawn)
+    p_spawn.add_argument("--token", required=True, help="Worker claim token")
     p_spawn.add_argument("--source", default="manual")
     p_spawn.add_argument("--phase", required=True, help="Phase that spawned this task")
     p_spawn.add_argument("--title", required=True)
@@ -72,16 +77,35 @@ def main(argv: list[str] | None = None) -> int:
         "complete", help="Worker marks a phase complete",
     )
     add_common(p_complete)
+    p_complete.add_argument("--token", required=True, help="Worker claim token")
     p_complete.add_argument("--phase", required=True)
     p_complete.add_argument(
         "--commit", action="append", default=[], dest="commits",
-        help="Commit SHA produced by this phase (repeatable)",
+        help="Commit SHA produced by this phase (repeatable, validated against git)",
+    )
+
+    p_task_done = sub.add_parser(
+        "task-done", help="Mark a spawned task done (user or worker)",
+    )
+    add_common(p_task_done)
+    p_task_done.add_argument("task_id", help="Spawned task id (e.g. task-1)")
+    p_task_done.add_argument(
+        "--force", action="store_true",
+        help="Skip claim check (user-initiated cleanup)",
+    )
+    p_task_done.add_argument(
+        "--token", default="",
+        help="Worker claim token if invoked by a phase-runner",
+    )
+    p_task_done.add_argument(
+        "--commit", action="append", default=[], dest="commits",
     )
 
     p_block = sub.add_parser(
         "block", help="Worker reports a blocker + releases claim",
     )
     add_common(p_block)
+    p_block.add_argument("--token", required=True, help="Worker claim token")
     p_block.add_argument("--phase", required=True)
     p_block.add_argument("--question", required=True)
     p_block.add_argument(
@@ -95,6 +119,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    try:
+        st.validate_slug(args.plan, kind="plan slug")
+    except st.InvalidSlug as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     cfg = load_project_config(args.project)
     state_path = cfg.state_path(args.plan)
 
@@ -106,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         "spawn": cmd_spawn,
         "complete": cmd_complete,
         "block": cmd_block,
+        "task-done": cmd_task_done,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -183,6 +213,23 @@ def cmd_answer(args, cfg: ProjectConfig, state_path: Path) -> int:
 
 def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
+        try:
+            st.assert_claim_match(data, args.token, args.phase)
+        except st.ClaimMismatch as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 4
+        cap = data["config"].get("max_spawns_per_phase", st.DEFAULT_MAX_SPAWNS_PER_PHASE)
+        existing = sum(
+            1 for t in data["spawned_tasks"]
+            if t.get("spawned_by_phase") == args.phase
+        )
+        if existing >= cap:
+            print(
+                f"error: phase {args.phase} already spawned {existing} task(s); "
+                f"cap is {cap}",
+                file=sys.stderr,
+            )
+            return 5
         task_id = f"task-{len(data['spawned_tasks']) + 1}"
         data["spawned_tasks"].append({
             "id": task_id,
@@ -202,31 +249,84 @@ def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
     return 0
 
 
-def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
+def cmd_task_done(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
-        claim = data.get("current_claim")
-        if claim is None or claim.get("phase_id") != args.phase:
-            print(
-                f"warning: completing phase {args.phase} but "
-                f"current claim is {claim}",
-                file=sys.stderr,
-            )
+        match = next(
+            (t for t in data["spawned_tasks"] if t["id"] == args.task_id),
+            None,
+        )
+        if match is None:
+            print(f"error: no task {args.task_id!r}", file=sys.stderr)
+            return 6
+        if match["status"] == "done":
+            print(f"task {args.task_id} already done")
+            return 0
+        if not args.force:
+            if not args.token:
+                print(
+                    "error: --token required (or pass --force for manual cleanup)",
+                    file=sys.stderr,
+                )
+                return 4
+            try:
+                st.assert_claim_match(data, args.token, match["spawned_by_phase"])
+            except st.ClaimMismatch as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 4
+        match["status"] = "done"
+        match["completed_at"] = st.utcnow()
+        st.append_event(
+            data, st.EVENT_TASK_COMPLETED,
+            task=args.task_id, commits=list(args.commits),
+            forced=bool(args.force),
+        )
+    print(f"task {args.task_id} done")
+    return 0
+
+
+def _verify_commit_shas(project_root: Path, shas: list[str]) -> str | None:
+    """Run `git cat-file -e <sha>` for each. Returns error message on first miss."""
+    for sha in shas:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "cat-file", "-e", sha],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            return f"unknown commit SHA {sha!r} in {project_root}"
+    return None
+
+
+def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
+    if args.commits:
+        if err := _verify_commit_shas(cfg.project_root, args.commits):
+            print(f"error: {err}", file=sys.stderr)
+            return 3
+    with st.mutate(state_path) as data:
+        try:
+            st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
+        except st.ClaimMismatch as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 4
         st.append_event(
             data, st.EVENT_PHASE_COMPLETED,
             phase=args.phase, commits=list(args.commits),
         )
-        st.release_claim(data, expected_phase=args.phase)
     print(f"Completed phase {args.phase}")
     return 0
 
 
 def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
+        try:
+            st.assert_claim_match(data, args.token, args.phase)
+        except st.ClaimMismatch as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 4
         blocker_id = st.add_blocker(
             data, args.phase, args.question, args.options,
             args.context, args.type,
         )
-        st.release_claim(data, expected_phase=args.phase)
+        st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
     print(f"Blocked {blocker_id} on phase {args.phase}")
     return 0
 

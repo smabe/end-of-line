@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import state as st
+
 _SESSIONS_HEADER_RE = re.compile(
     r"^##\s+Sessions?\s+index\s*$", re.MULTILINE | re.IGNORECASE
 )
@@ -67,6 +69,7 @@ def parse_sessions_index(plan_path: Path) -> list[Phase]:
                 phase_id = basename[len(master_stem) + 1:]
             else:
                 phase_id = basename
+            st.validate_slug(phase_id, kind="phase_id")
             phases.append(Phase(
                 id=phase_id,
                 plan_file=plan_file,

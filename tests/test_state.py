@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -103,6 +104,46 @@ class TestBlockers(TempStateMixin, unittest.TestCase):
         st.answer_blocker(data, bid, "X")
         with self.assertRaises(KeyError):
             st.answer_blocker(data, bid, "Y")
+
+
+class TestLockfileSymlink(TempStateMixin, unittest.TestCase):
+    def test_refuses_symlink_lockfile(self) -> None:
+        victim = self.tmp / "victim.txt"
+        victim.write_text("don't truncate me")
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
+        os.symlink(victim, lock_path)
+        with self.assertRaises(OSError):
+            with st.locked(self.state_path):
+                pass
+        self.assertEqual(victim.read_text(), "don't truncate me")
+
+    def test_lockfile_created_with_600_mode(self) -> None:
+        with st.locked(self.state_path):
+            pass
+        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
+        mode = lock_path.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+
+class TestSchemaVersion(TempStateMixin, unittest.TestCase):
+    def test_load_rejects_future_version(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text('{"schema_version": 999, "events": []}')
+        with self.assertRaises(st.SchemaVersionMismatch):
+            st.load(self.state_path)
+
+    def test_load_rejects_missing_version(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text('{"events": []}')
+        with self.assertRaises(st.SchemaVersionMismatch):
+            st.load(self.state_path)
+
+    def test_load_accepts_current_version(self) -> None:
+        with st.mutate(self.state_path) if False else st.locked(self.state_path):
+            st.save_atomic(self.state_path, st.empty_state("foo", "plans"))
+        loaded = st.load(self.state_path)
+        self.assertEqual(loaded["plan_slug"], "foo")
 
 
 class TestEvents(unittest.TestCase):
