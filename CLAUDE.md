@@ -1,0 +1,103 @@
+# end-of-line / clu
+
+Personal plan orchestrator for the `/plan` skill. Cron-driven supervisor, file-state, cold-context phase workers. Tron-themed (binary is `clu`; the program IS End of Line).
+
+## Stack
+- Python 3.11+ (uses `fromisoformat` Z-suffix support, `IntEnum`, dataclasses with `kw_only`)
+- Zero runtime deps — stdlib only
+- `unittest` for tests (NOT pytest)
+- Installed via `pip install -e .` → `clu` on PATH
+
+## Run + test
+```bash
+python3 -m unittest discover -s tests       # full suite (~1s, 48 tests)
+python3 -m end_of_line.cli --help           # CLI
+```
+
+## Read these before changing anything
+- `brainstorm/clu-master.md` — load-bearing. Synthesizes 4 expert reviews into the critical-fix list. **Day 1 shipped (security + correctness); Day 2 is the UX surface.**
+- `docs/contract.md` — state schema + worker contract + cron snippet
+- `brainstorm/clu-{dist-sys,red-team,notifications,end-user}.md` — the four full reviews if you need to re-justify a decision
+
+## Architecture in one screen
+- **Supervisor** (`supervisor.py`): one-tick decision logic. 8-priority chain. No long-running process — cron fires `clu tick` every 5 min.
+- **State** (`state.py`): atomic JSON file under `<project>/plans/.orchestrator/<slug>.state.json`. Mutations via `with st.mutate(path) as data:` (locks + load + save_atomic). Event log is append-only.
+- **Dispatch** (`dispatch.py`): fire-and-forget shell Popen with fast-fail (`proc.wait(timeout=0.5)`). Worker stderr → per-token log under `.orchestrator/logs/`. PID stamped on the live claim.
+- **CLI** (`cli.py`): `init / tick / status / answer / spawn / complete / block / task-done`. Worker-side commands (`complete / block / spawn / task-done`) require `--token` matching the live claim — this is load-bearing for security.
+- **Plan parser** (`plan_parser.py`): reads master plan's `## Sessions index` table.
+- **Config** (`config.py`): `.orchestrator.json` per project.
+
+## Conventions (mandatory)
+
+### TDD for any logic change
+Write failing tests first. AAA pattern. Factory helpers (see `tests/test_worker_callbacks.py` for the `setUp` template — git init + claim_phase).
+
+### `/simplify` after non-trivial work
+Hook the simplify skill before committing anything bigger than a typo. The Day-1 simplify pass collapsed 9 error sites into `_die()` + `ExitCode` and cut test runtime in half. Pays its own rent.
+
+### `/commit` style
+Structured message:
+```
+Title under 70 chars
+
+Why
+<1-3 sentences on motivation, not changelog>
+
+What's new
+- <user-visible behavior>
+
+Under the hood
+- <implementation notes>
+
+Tests
+<count / what's covered>
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+
+### Exit codes
+Use `ExitCode` IntEnum, never bare ints:
+```python
+return _die(ExitCode.CLAIM_MISMATCH, str(exc))
+```
+
+### Worker callback contract (load-bearing)
+Every worker-side CLI command (`complete`, `block`, `spawn`, `task-done`) requires `--token` matching the live claim. Don't add a worker command that skips this — it breaks the whole security model. See `state.assert_claim_match` and `state.release_claim`.
+
+### Slugs
+`args.plan` and any parsed `phase_id` MUST go through `st.validate_slug()` before they touch a filesystem path. Regex: `^[a-z0-9][a-z0-9_-]{0,63}$`. Don't add a code path that bypasses.
+
+### Event types are constants
+Never write raw event-type strings. Use `state.EVENT_*`. A typo silently breaks `completed_phase_ids()` projection.
+
+## What NOT to do
+- No SwiftUI / iOS code — this repo is pure Python. No `/review` needed (that's HealthData's mandatory SwiftUI gate, doesn't apply here).
+- Don't `git add -A` — stage explicit paths.
+- Don't introduce third-party deps without a real justification. Stdlib has everything we need.
+- Don't break the "one tick = one action" contract in `supervisor.tick`. If a tick needs to do two things, that's two ticks.
+
+## Status (as of 2026-05-11)
+
+**Day 1 shipped** (commits `1f2da6c` → `fad80e9`):
+- Token validation + SHA quality gate on all worker callbacks
+- Path-traversal guards, lockfile O_NOFOLLOW, schema-version check
+- Spawned-task completion path + per-phase spawn cap (default 10)
+- Dispatch fast-fail with per-token logs + pid stamping
+- ExitCode enum + `_die` helper
+
+**Day 2 ahead** (see `brainstorm/clu-master.md` for ranked list):
+1. Worker heartbeat → `stalled` status (end-user Cliff 1)
+2. iMessage adapter — outbound osascript + LaunchAgent polling `chat.db` for inbound replies (Cliff 2)
+3. `clu` no-args fleet view (Cliff 3)
+4. Quiet hours 22:00–08:00 + SLA-pauses-during-quiet
+5. Victory ping on `plan_completed`
+6. `clu retry` / `clu pause` / `clu resume`
+7. Halt-reason as first-class field in `clu status`
+
+**Locked config decisions** (from the brainstorm — don't re-litigate):
+- Notifications: iMessage to **self-chat** handle, NO Pushover (user picked iMessage-only)
+- Quiet hours: 22:00–08:00 local
+- Worker sandbox: document-only for v0.1; user is responsible for what the worker LLM does
+
+## Sister project
+- `/Users/smabe/projects/HealthData` — the iOS app this orchestrator was built to drive. Run `clu init --project ~/projects/HealthData --plan watch-start-workout` once cron is wired (watch-start-workout has 3 phases per `## Sessions index`).
