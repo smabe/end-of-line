@@ -54,6 +54,7 @@ class TickResult:
 ACTION_NOTIFY_KIND: dict[Action, str] = {
     "stalled": notify.KIND_STALLED,
     "plan_done": notify.KIND_COMPLETED,
+    "halt": notify.KIND_HALTED,
 }
 
 
@@ -158,13 +159,21 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 continue
             prior_attempts = st.attempts_for_phase(data, phase.id)
             if prior_attempts >= max_attempts:
-                if data["status"] != st.STATUS_HALTED:
-                    data["status"] = st.STATUS_HALTED
-                    st.append_event(
-                        data, st.EVENT_PHASE_MAX_ATTEMPTS,
-                        phase=phase.id, attempts=prior_attempts,
-                    )
-                return TickResult("halt", f"phase={phase.id} attempts={prior_attempts}")
+                # Only reachable from STATUS_RUNNING — the TERMINAL_STATUSES
+                # short-circuit above sends every subsequent halt tick to
+                # "idle", so notify fires exactly once per transition.
+                data["status"] = st.STATUS_HALTED
+                st.append_event(
+                    data, st.EVENT_PHASE_MAX_ATTEMPTS,
+                    phase=phase.id, attempts=prior_attempts,
+                )
+                return TickResult(
+                    "halt",
+                    f"phase={phase.id} attempts={prior_attempts}",
+                    notify_body=notify.render_halted(
+                        data["plan_slug"], phase.id, prior_attempts,
+                    ),
+                )
             token = st.claim_phase(data, phase.id, ttl)
             return TickResult(
                 "dispatch",

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 KIND_BLOCKER = "blocker"
 KIND_STALLED = "stalled"
 KIND_COMPLETED = "completed"
+KIND_HALTED = "halted"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset()
 
@@ -130,3 +131,10 @@ def render_stalled(plan_slug: str, phase: str, age_seconds: float) -> str:
 
 def render_completed(plan_slug: str, commit_count: int) -> str:
     return f"✅ {plan_slug} done — {commit_count} commit(s)."
+
+
+def render_halted(plan_slug: str, phase: str, attempts: int) -> str:
+    return (
+        f"🛑 {plan_slug}/{phase} halted — {attempts} attempts. "
+        f"`clu retry --plan {plan_slug}` to resume."
+    )

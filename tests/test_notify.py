@@ -222,6 +222,23 @@ class NotifyIntegrationTestCase(unittest.TestCase):
         self.assertIn("test-plan", body)
         self.assertIn("1 commit", body)
 
+    def test_cmd_tick_sends_halt_notification(self) -> None:
+        with st.mutate(self.state_path) as data:
+            data["config"]["max_attempts_per_phase"] = 2
+            st.append_event(data, "phase_started", phase="a", claimed_by="x")
+            st.append_event(data, "lease_expired", phase="a")
+            st.append_event(data, "phase_started", phase="a", claimed_by="y")
+            st.append_event(data, "lease_expired", phase="a")
+        rc = main([
+            "tick", "--project", str(self.project), "--plan", "test-plan",
+        ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.sent), 1)
+        _, body = self.sent[0]
+        self.assertIn("test-plan", body)
+        self.assertIn("a", body)
+        self.assertIn("halted", body.lower())
+
 
 class StalledNotifyTestCase(unittest.TestCase):
     """Supervisor populates notify_kind/body for stalled detections."""

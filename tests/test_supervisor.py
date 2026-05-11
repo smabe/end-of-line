@@ -161,8 +161,7 @@ class SupervisorTestCase(unittest.TestCase):
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "escalate")
 
-    def test_max_attempts_halts_plan(self) -> None:
-        # Simulate two prior failed attempts via phase_started events
+    def _seed_max_attempts(self) -> None:
         with st.locked(self.state_path):
             data = st.load(self.state_path)
             data["config"]["max_attempts_per_phase"] = 2
@@ -171,9 +170,30 @@ class SupervisorTestCase(unittest.TestCase):
             st.append_event(data, "phase_started", phase="a", claimed_by="y")
             st.append_event(data, "lease_expired", phase="a")
             st.save_atomic(self.state_path, data)
+
+    def test_max_attempts_halts_plan(self) -> None:
+        self._seed_max_attempts()
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "halt")
         self.assertEqual(self._read()["status"], "halted")
+
+    def test_halt_first_time_sets_notify_body(self) -> None:
+        self._seed_max_attempts()
+        result = tick(self.state_path, self.cfg)
+        self.assertIsNotNone(result.notify_body)
+        self.assertIn("a", result.notify_body)  # phase id appears
+        self.assertIn("2", result.notify_body)  # attempt count appears
+
+    def test_halt_does_not_renotify_on_subsequent_ticks(self) -> None:
+        self._seed_max_attempts()
+        first = tick(self.state_path, self.cfg)
+        self.assertIsNotNone(first.notify_body)
+        second = tick(self.state_path, self.cfg)
+        # Status is now HALTED → TERMINAL_STATUSES short-circuit means the
+        # second tick goes "idle" rather than reaching the halt branch
+        # again. That's what protects the user from a 5-min ping loop.
+        self.assertEqual(second.action, "idle")
+        self.assertIsNone(second.notify_body)
 
 
 if __name__ == "__main__":
