@@ -333,16 +333,29 @@ If the state file shows a live claim whose worker is definitely dead
 lease hasn't expired yet:
 
 ```bash
-clu pause --project P --plan S --reason "manual release"
-# Edit plans/.orchestrator/<slug>.state.json: clear current_claim,
-# append a synthetic phase_released event with type=lease_expired.
+clu release-claim --project P --plan S [--reason "worker OOM"]
+```
+
+This nulls `current_claim` and appends a `claim_force_released` event
+so the audit log distinguishes operator recovery from automatic lease
+expiry. The plan's status is unchanged — `release-claim` is a recovery
+action, not a state transition.
+
+The default refuses to release a fresh-heartbeat claim on a running
+plan (the heuristic for a live worker). Pause first, or override with
+`--force`:
+
+```bash
+clu pause --project P --plan S --reason "investigating stuck worker"
+clu release-claim --project P --plan S
 clu resume --project P --plan S
 ```
 
-This is the last resort and skips the normal lock discipline — only
-when the lease can't be allowed to count down naturally. Most of the
-time, just wait: a stale lease releases on the next tick after expiry,
-and the phase's attempts counter ticks up exactly once.
+Most of the time, you don't need this — a stale lease releases on the
+next tick after expiry, and the phase's attempts counter ticks up
+exactly once. Reach for `release-claim` when 30 minutes is too long to
+wait or when the worker's exit pattern wouldn't naturally release
+(e.g., a Popen orphan whose lease is still in the future).
 
 ## Day-to-day commands
 
@@ -354,6 +367,7 @@ and the phase's attempts counter ticks up exactly once.
 | `clu pause --project P --plan S [--reason ...]` | Stop dispatching new phases |
 | `clu resume --project P --plan S` | Un-pause |
 | `clu retry --project P --plan S [--phase X]` | Clear max-attempts on a halted phase |
+| `clu release-claim --project P --plan S [--force] [--reason ...]` | Clear a stuck `current_claim` after a dead worker |
 | `clu unregister --project P --plan S` | Drop a plan from the host registry (state file untouched) |
 | `clu answer --project P --plan S <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |
 

@@ -138,6 +138,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Phase to clear attempts on. Defaults to the most-recent halt.",
     )
 
+    p_release_claim = sub.add_parser(
+        "release-claim",
+        help="Clear a stuck current_claim (operator escape hatch). Refuses "
+             "to clear a fresh-heartbeat claim on a running plan unless "
+             "`--force` is passed; use `clu pause` first or `--force` "
+             "explicitly. Emits EVENT_CLAIM_FORCE_RELEASED so the audit log "
+             "distinguishes operator recovery from automatic lease expiry.",
+    )
+    add_common(p_release_claim)
+    p_release_claim.add_argument(
+        "--force", action="store_true", default=False,
+        help="Override the live-worker safety check (running + fresh heartbeat).",
+    )
+    p_release_claim.add_argument(
+        "--reason", default="",
+        help="Optional explanation, recorded in the audit event.",
+    )
+
     p_answer = sub.add_parser("answer", help="Answer a pending blocker")
     add_common(p_answer)
     p_answer.add_argument("blocker_id")
@@ -259,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         "pause": cmd_pause,
         "resume": cmd_resume,
         "retry": cmd_retry,
+        "release-claim": cmd_release_claim,
         "prior-blocker": cmd_prior_blocker,
         "logs": cmd_logs,
     }
@@ -538,6 +557,37 @@ def cmd_retry(args, cfg: ProjectConfig, state_path: Path) -> int:
         data["status"] = st.STATUS_RUNNING
         st.append_event(data, st.EVENT_RETRY_REQUESTED, phase=phase)
     print(f"Retrying {args.plan}/{phase}.")
+    return ExitCode.OK
+
+
+def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
+    with st.mutate(state_path) as data:
+        claim = data.get("current_claim")
+        if claim is None:
+            print(f"no claim to release on {args.plan}", file=sys.stderr)
+            return ExitCode.OK
+        threshold = data["config"].get(
+            "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
+        )
+        running = data["status"] == st.STATUS_RUNNING
+        fresh = not st.is_claim_stalled(claim, threshold)
+        if running and fresh and not args.force:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"plan is running with a fresh-heartbeat claim on phase "
+                f"{claim['phase_id']!r} — `clu pause` first or pass `--force`",
+            )
+        phase = claim["phase_id"]
+        token = claim.get("claimed_by")
+        fields = {
+            "phase": phase, "token": token, "forced": bool(args.force),
+            "released_by_operator": True,
+        }
+        if args.reason:
+            fields["reason"] = args.reason
+        st.release_claim(data)
+        st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
+    print(f"Released claim on {args.plan}/{phase}.")
     return ExitCode.OK
 
 
