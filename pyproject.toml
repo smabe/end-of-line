@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "end-of-line"
+version = "0.1.0"
+description = "Plan orchestrator for /plan-skill multi-phase work. Cron-driven, file-state, cold-context workers."
+requires-python = ">=3.11"
+authors = [{ name = "Abe Awadallah" }]
+dependencies = []
+
+[project.scripts]
+clu = "end_of_line.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["end_of_line*"]

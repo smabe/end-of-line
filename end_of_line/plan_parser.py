@@ -1,0 +1,81 @@
+"""Parse the /plan skill's master-plan markdown.
+
+Contract: a multi-session plan has a `## Sessions index` table whose rows
+declare each phase. We extract phase id + plan file + scope + effort. For
+single-phase plans (no Sessions index), return [] — the caller decides
+whether to synthesize one phase from the master itself.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+_SESSIONS_HEADER_RE = re.compile(
+    r"^##\s+Sessions?\s+index\s*$", re.MULTILINE | re.IGNORECASE
+)
+_SEPARATOR_RE = re.compile(r"^\|[\s\-:|]+\|\s*$")
+
+
+@dataclass
+class Phase:
+    id: str
+    plan_file: str
+    scope: str
+    effort: str
+
+
+def parse_sessions_index(plan_path: Path) -> list[Phase]:
+    text = plan_path.read_text()
+    match = _SESSIONS_HEADER_RE.search(text)
+    if not match:
+        return []
+
+    master_stem = plan_path.stem
+    lines = text[match.end():].splitlines()
+    phases: list[Phase] = []
+    in_table = False
+    seen_separator = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not in_table:
+            if stripped.startswith("##"):
+                break
+            if stripped.startswith("|"):
+                in_table = True
+            else:
+                continue
+        if in_table:
+            if not stripped:
+                break
+            if stripped.startswith("##"):
+                break
+            if _SEPARATOR_RE.match(stripped):
+                seen_separator = True
+                continue
+            if not seen_separator:
+                continue
+            cells = _split_row(stripped)
+            if len(cells) < 4:
+                continue
+            plan_file = cells[1].strip().strip("`")
+            scope = cells[2].strip()
+            effort = cells[3].strip()
+            basename = Path(plan_file).stem
+            if basename.startswith(master_stem + "-"):
+                phase_id = basename[len(master_stem) + 1:]
+            else:
+                phase_id = basename
+            phases.append(Phase(
+                id=phase_id,
+                plan_file=plan_file,
+                scope=scope,
+                effort=effort,
+            ))
+    return phases
+
+
+def _split_row(row: str) -> list[str]:
+    inner = row.strip().strip("|")
+    return [c.strip() for c in inner.split("|")]
