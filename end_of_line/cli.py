@@ -26,7 +26,7 @@ import sys
 from enum import IntEnum
 from pathlib import Path
 
-from . import notify, registry, state as st
+from . import fleet, notify, registry, state as st
 from .config import ProjectConfig, load_project_config
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
@@ -66,7 +66,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="clu", description="End of Line — plan orchestrator (clu CLI)"
     )
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    # required=False so bare `clu` falls through to the fleet view — the
+    # daily-driver entry point. `clu list` keeps the dumb name+root listing
+    # for scripting that needs no projection.
+    sub = parser.add_subparsers(dest="cmd", required=False)
 
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument(
@@ -175,8 +178,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-    # `list` is host-scoped — it has no --project / --plan and shouldn't
-    # trigger ProjectConfig load (which requires a project root).
+    # Host-scoped commands skip the per-plan ProjectConfig load (which
+    # requires --project). Bare `clu` is the fleet view; `clu list` is the
+    # name-only listing kept for scripting.
+    if args.cmd is None:
+        return cmd_fleet(args)
     if args.cmd == "list":
         return cmd_list(args)
 
@@ -242,6 +248,11 @@ def cmd_list(args) -> int:
     return 0
 
 
+def cmd_fleet(args) -> int:
+    print(fleet.render(registry.entries()), end="")
+    return 0
+
+
 def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
     result = tick(state_path, cfg)
     print(result)
@@ -278,7 +289,7 @@ def cmd_status(args, cfg: ProjectConfig, state_path: Path) -> int:
     if completed := sorted(st.completed_phase_ids(data)):
         print(f"Done:    {', '.join(completed)}")
 
-    open_blockers = [b for b in data["blockers"] if b["answer"] is None]
+    open_blockers = st.open_blockers(data)
     if open_blockers:
         print(f"\nOpen blockers ({len(open_blockers)}):")
         for b in open_blockers:

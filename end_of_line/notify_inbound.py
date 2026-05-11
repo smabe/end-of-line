@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from . import registry, state as st
-from .config import load_project_config
 
 DEFAULT_CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 DEFAULT_SEEN_PATH = Path.home() / ".clu" / "seen_msg_rowid"
@@ -58,26 +57,16 @@ def open_blockers_for_host(
     """
     out: list[OpenBlocker] = []
     for row in entries:
-        project_root = Path(row.project_root)
-        try:
-            cfg = load_project_config(project_root)
-            state_path = cfg.state_path(row.plan_slug)
-        except (OSError, st.InvalidSlug, ValueError):
+        data = registry.load_entry_state(row)
+        if data is None:
             continue
-        if not state_path.exists():
-            continue
-        try:
-            data = st.load(state_path)
-        except (OSError, ValueError, st.SchemaVersionMismatch):
-            continue
-        for b in data.get("blockers", []):
-            if b.get("answer") is None:
-                out.append(OpenBlocker(
-                    project_root=project_root,
-                    plan_slug=row.plan_slug,
-                    blocker_id=b["id"],
-                ))
-                break
+        open_qs = st.open_blockers(data)
+        if open_qs:
+            out.append(OpenBlocker(
+                project_root=Path(row.project_root),
+                plan_slug=row.plan_slug,
+                blocker_id=open_qs[0]["id"],
+            ))
     return out
 
 

@@ -62,6 +62,9 @@ STATUS_DONE = "done"
 TERMINAL_STATUSES = frozenset(
     {STATUS_PAUSED, STATUS_HALTED, STATUS_HALTED_REPLAN, STATUS_DONE}
 )
+# Display-only labels — fleet view derives these instead of storing them.
+STATUS_STALLED = "stalled"
+STATUS_MISSING = "missing"
 
 # Event types — string-typo'ing one of these silently breaks projection,
 # so always reference the constant.
@@ -382,11 +385,18 @@ def completed_phase_ids(data: dict) -> set[str]:
     }
 
 
+def open_blockers(data: dict) -> list[dict]:
+    """All blockers with `answer is None`, in order.
+
+    Hot path: fleet view (count), `clu status` (display), inbound poller
+    (route by plan). Centralized so the unanswered-predicate can't drift
+    between `b["answer"] is None` and `b.get("answer") is None`.
+    """
+    return [b for b in data.get("blockers", []) if b.get("answer") is None]
+
+
 def phase_has_open_blocker(data: dict, phase_id: str) -> bool:
-    return any(
-        b["phase_id"] == phase_id and b["answer"] is None
-        for b in data["blockers"]
-    )
+    return any(b["phase_id"] == phase_id for b in open_blockers(data))
 
 
 def attempts_for_phase(data: dict, phase_id: str) -> int:

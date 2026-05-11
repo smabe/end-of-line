@@ -81,6 +81,28 @@ def register(project_root: Path, plan_slug: str, *, path: Path | None = None) ->
     return True
 
 
+def load_entry_state(entry: PlanEntry) -> dict | None:
+    """Project (registry entry → loaded state.json) or None on any failure.
+
+    Tolerant by design: a stale registry entry — missing project dir,
+    deleted state file, schema drift — must not take callers that walk
+    every plan (fleet view, inbound poller) down. Returns None on every
+    recoverable failure mode; never raises.
+    """
+    from .config import load_project_config  # local import to avoid cycle
+    try:
+        cfg = load_project_config(Path(entry.project_root))
+        state_path = cfg.state_path(entry.plan_slug)
+    except (OSError, st.InvalidSlug, ValueError):
+        return None
+    if not state_path.exists():
+        return None
+    try:
+        return st.load(state_path)
+    except (OSError, ValueError, st.SchemaVersionMismatch):
+        return None
+
+
 def unregister(project_root: Path, plan_slug: str, *, path: Path | None = None) -> bool:
     project_root = project_root.resolve()
     target = path or registry_path()
