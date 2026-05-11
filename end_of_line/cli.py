@@ -24,6 +24,7 @@ import functools
 import json
 import subprocess
 import sys
+import time
 from enum import IntEnum
 from pathlib import Path
 
@@ -190,6 +191,16 @@ def main(argv: list[str] | None = None) -> int:
     p_heartbeat.add_argument("--token", required=True, help="Worker claim token")
     p_heartbeat.add_argument("--phase", required=True)
 
+    p_logs = sub.add_parser(
+        "logs",
+        help="Tail the active worker's log (or newest log in the dir if idle)",
+    )
+    add_common(p_logs)
+    p_logs.add_argument(
+        "-f", "--follow", action="store_true",
+        help="Stream new lines as they're appended (like `tail -f`)",
+    )
+
     p_prior_blocker = sub.add_parser(
         "prior-blocker",
         help="Print the answer for the phase's most recent answered blocker (exit 0); "
@@ -249,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume": cmd_resume,
         "retry": cmd_retry,
         "prior-blocker": cmd_prior_blocker,
+        "logs": cmd_logs,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -348,6 +360,59 @@ def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:
             f"no answered blocker for phase {args.phase!r}",
         )
     print(answered[-1]["answer"])
+    return ExitCode.OK
+
+
+def _resolve_log_path(state_path: Path, cfg: ProjectConfig) -> Path | None:
+    """Active claim's log_path wins; otherwise newest file in the logs dir."""
+    if state_path.exists():
+        claim = st.load(state_path).get("current_claim") or {}
+        if log_path := claim.get("log_path"):
+            return Path(log_path)
+    log_dir = state_path.parent / "logs"
+    if not log_dir.exists():
+        return None
+    candidates = [p for p in log_dir.iterdir() if p.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _follow_log(
+    log_path: Path, *, stop_after_seconds: float | None = None,
+    poll_interval: float = 0.25,
+) -> int:
+    """Stream a log file in tail-f fashion. Rotation/truncation mid-follow is
+    not handled — punted to a follow-up. `stop_after_seconds` exists so tests
+    can exercise the loop without a subprocess timeout."""
+    deadline = (
+        time.monotonic() + stop_after_seconds
+        if stop_after_seconds is not None else None
+    )
+    with open(log_path) as fh:
+        sys.stdout.write(fh.read())
+        sys.stdout.flush()
+        while True:
+            chunk = fh.read()
+            if chunk:
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+                continue
+            if deadline is not None and time.monotonic() >= deadline:
+                return ExitCode.OK
+            try:
+                time.sleep(poll_interval)
+            except KeyboardInterrupt:
+                return ExitCode.OK
+
+
+def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:
+    log_path = _resolve_log_path(state_path, cfg)
+    if log_path is None or not log_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no logs found for plan {args.plan!r}")
+    if args.follow:
+        return _follow_log(log_path)
+    sys.stdout.write(log_path.read_text())
     return ExitCode.OK
 
 
