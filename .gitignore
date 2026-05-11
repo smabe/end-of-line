@@ -8,3 +8,8 @@ dist/
 .pytest_cache/
 .coverage
 .DS_Store
+
+# clu runtime state — per-project state files, logs, and local config.
+# Use examples/HealthData.orchestrator.json as the template.
+.orchestrator.json
+**/.orchestrator/
