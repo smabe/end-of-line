@@ -70,6 +70,9 @@ Every worker-side CLI command (`complete`, `block`, `spawn`, `task-done`, `heart
 ### Event types are constants
 Never write raw event-type strings. Use `state.EVENT_*`. A typo silently breaks `completed_phase_ids()` projection.
 
+### Test isolation for the host registry
+Any test that calls `main(["init", ...])` (or otherwise touches `registry.register`) MUST call `tests.isolate_registry(self, tmp_path)` in `setUp`. Without it, tests pollute the user's real `~/.config/clu/registry.json`. The helper points `XDG_CONFIG_HOME` at a per-test tmp dir and auto-restores via `addCleanup`. See `tests/__init__.py`.
+
 ## What NOT to do
 - No SwiftUI / iOS code — this repo is pure Python. No `/review` needed (that's HealthData's mandatory SwiftUI gate, doesn't apply here).
 - Don't `git add -A` — stage explicit paths.
@@ -85,16 +88,19 @@ Never write raw event-type strings. Use `state.EVENT_*`. A typo silently breaks 
 - Dispatch fast-fail with per-token logs + pid stamping
 - ExitCode enum + `_die` helper
 
-**Day 2 in progress:**
-- 2.1 (shipped `ef01756`): Worker heartbeat → `stalled` status (Cliff 1)
-- 2.2 (shipped this commit): iMessage outbound via osascript + quiet hours 22-08 default. Wired to blocker/stalled/plan_completed events.
+**Day 2 in progress** (89 tests, all green, ~1s suite):
+- 2.1 (shipped `ef01756`): Worker heartbeat → `stalled` status (Cliff 1).
+- 2.2 (shipped `738fcb8`): iMessage outbound via osascript + quiet hours 22-08 default. Wired to blocker/stalled/plan_completed events.
+- 2.3 (shipped `95f9f7c`): Host-level registry at `~/.config/clu/registry.json`; `clu init` auto-registers; `clu register/unregister/list` commands; notifications now slug-prefixed (`❓ <plan>/q-1`) for multi-plan disambiguation.
 
-**Day 2 ahead** (see `brainstorm/clu-master.md` for ranked list):
-1. iMessage inbound LaunchAgent — poll `~/Library/Messages/chat.db` and exec `clu answer` on numeric replies (Cliff 2 reply loop)
-2. `clu` no-args fleet view (Cliff 3)
-3. SLA-pauses-during-quiet (escalations should also respect quiet hours)
-4. `clu retry` / `clu pause` / `clu resume`
-5. Halt-reason as first-class field in `clu status`
+**Pick up here:** iMessage inbound LaunchAgent. Registry now exists so multi-plan routing is tractable. Sketch from `brainstorm/clu-notifications.md`: poll `~/Library/Messages/chat.db` for new rows where `is_from_me=0`, regex-match `^\s*(<plan-slug>\s+)?[0-9]\s*$`, look up the latest open blocker for that plan (or any if bare number + only one plan has an open blocker), exec `clu answer`. New file: `end_of_line/notify_inbound.py`. New file: `examples/clu.inbound.plist` (LaunchAgent template). Tests: poll/match/dispatch/seen-rowid persistence in `~/.clu/seen_msg_rowid`.
+
+**Day 2 backlog after that:**
+1. `clu` no-args fleet view (Cliff 3 — also uses the registry)
+2. SLA-pauses-during-quiet (stale-blocker escalations should respect quiet hours)
+3. `clu retry` / `clu pause` / `clu resume`
+4. Halt-reason as first-class field in `clu status`
+5. Halt notification (user explicitly de-selected this from Day 2.2 — re-confirm before adding)
 
 **Locked config decisions** (from the brainstorm — don't re-litigate):
 - Notifications: iMessage to **self-chat** handle, NO Pushover (user picked iMessage-only)

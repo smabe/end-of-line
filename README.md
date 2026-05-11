@@ -52,7 +52,7 @@ In your project repo, drop a `.orchestrator.json`:
 Then:
 
 ```bash
-# Initialize state for a plan
+# Initialize state for a plan (auto-registers in ~/.config/clu/registry.json)
 clu init --project /path/to/project --plan my-plan
 
 # Run the cron loop manually
@@ -60,6 +60,12 @@ clu tick --project /path/to/project --plan my-plan --dispatch
 
 # Inspect state
 clu status --project /path/to/project --plan my-plan
+
+# List every plan registered on this host
+clu list
+
+# Remove a plan from the host registry
+clu unregister --project /path/to/project --plan my-plan
 ```
 
 Add cron:
@@ -73,14 +79,17 @@ Add cron:
 A phase worker is a fresh Claude session (or any process) that:
 
 1. Reads its phase plan file from `<project>/<plan_dir>/<phase_plan_file>.md`
-2. Runs `/plan` (Mode 2 / resume) or equivalent
-3. On success, calls:  
-   `clu complete --project P --plan S --phase X --commit <sha> [--commit <sha>...]`
+2. Runs `/plan` (Mode 2 / resume) or equivalent.  
+   Every ~2 min while running: `clu heartbeat --project P --plan S --phase X --token <token>` so the supervisor doesn't mark the phase stalled.
+3. On success:  
+   `clu complete --project P --plan S --phase X --token <token> --commit <sha> [--commit <sha>...]`
 4. On a /simplify finding it can't fix this phase:  
-   `clu spawn --project P --plan S --source simplify --phase X --title "…"`
+   `clu spawn --project P --plan S --phase X --token <token> --source simplify --title "…"`
 5. On blocked ambiguity:  
-   `clu block --project P --plan S --phase X --question "…" --option A --option B --context "…"`
+   `clu block --project P --plan S --phase X --token <token> --question "…" --option A --option B --context "…"`
 6. On unrecoverable failure: just exit — lease expires, supervisor retries.
+
+All worker-side commands require `--token` matching the live claim (see `docs/contract.md`).
 
 ## Commands
 

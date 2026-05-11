@@ -6,6 +6,10 @@
 
 Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 
+## Host-level registry
+
+`$XDG_CONFIG_HOME/clu/registry.json` (default `~/.config/clu/registry.json`) indexes every `(project_root, plan_slug)` pair clu knows about on this host. `clu init` auto-registers; `clu register / unregister / list` manage entries explicitly. Multi-plan features (inbound reply routing, fleet view) walk the registry to find state files. Reads + writes go through `state.locked` + `state.save_atomic`.
+
 ## State schema (v1)
 
 ```jsonc
