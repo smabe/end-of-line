@@ -2,6 +2,7 @@
 
 Subcommands (orchestrator-side):
   tick      — one supervisor tick (cron target)
+  tick-all  — tick every registered plan once (cron target for the host)
   status    — show current state
   init      — bootstrap state.json for a plan
 
@@ -101,6 +102,13 @@ def main(argv: list[str] | None = None) -> int:
     add_common(p_unregister)
 
     sub.add_parser("list", help="List all registered plans on this host")
+
+    sub.add_parser(
+        "tick-all",
+        help="Tick every registered plan once (cron entry point). Per-plan "
+             "errors are logged to stderr; the loop continues so one bad "
+             "plan doesn't poison the cadence.",
+    )
 
     p_status = sub.add_parser("status", help="Show current state")
     add_common(p_status)
@@ -215,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_fleet(args)
     if args.cmd == "list":
         return cmd_list(args)
+    if args.cmd == "tick-all":
+        return cmd_tick_all(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -296,6 +306,28 @@ def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
     if result.notify_body and (kind := ACTION_NOTIFY_KIND.get(result.action)):
         notify.notify(cfg.notify, kind, result.notify_body)
     return 0
+
+
+def cmd_tick_all(args) -> int:
+    from .dispatch import dispatch_for_tick
+    for row in registry.entries():
+        try:
+            cfg = load_project_config(Path(row.project_root))
+            state_path = cfg.state_path(row.plan_slug)
+            result = tick(state_path, cfg)
+            print(f"tick {row.plan_slug} @ {row.project_root}: {result}")
+            if result.action == "dispatch":
+                dispatch_for_tick(result, cfg, row.plan_slug, state_path)
+            if result.notify_body and (kind := ACTION_NOTIFY_KIND.get(result.action)):
+                notify.notify(cfg.notify, kind, result.notify_body)
+        except Exception as exc:
+            # Per-plan exceptions must not abort the loop — a single broken
+            # plan can't be allowed to poison the 5-minute cron cadence.
+            print(
+                f"tick-all: {row.plan_slug} @ {row.project_root}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+    return ExitCode.OK
 
 
 def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:

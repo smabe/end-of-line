@@ -482,9 +482,14 @@ through this.
   `state.ClaimMismatch` and returns `ExitCode.CLAIM_MISMATCH`. Every
   worker-side command wears this so forged tokens get a uniform exit.
 - `main(argv)` — argparse + dispatch table.
-- Operator-side commands: `cmd_init`, `cmd_tick`, `cmd_status`,
-  `cmd_register`, `cmd_unregister`, `cmd_list`, `cmd_fleet`,
-  `cmd_pause`, `cmd_resume`, `cmd_retry`, `cmd_answer`.
+- Operator-side commands: `cmd_init`, `cmd_tick`, `cmd_tick_all`,
+  `cmd_status`, `cmd_register`, `cmd_unregister`, `cmd_list`,
+  `cmd_fleet`, `cmd_pause`, `cmd_resume`, `cmd_retry`, `cmd_answer`.
+- `cmd_tick_all` is the host-scoped cron entry point: walks
+  `registry.entries()` and runs the per-plan tick + dispatch + notify
+  dance for each. Per-plan exceptions are caught and logged to stderr
+  so one broken plan can't poison the cadence. Replaces the old
+  `examples/clu-tick-all.sh` parser of `clu list` output.
 - Worker-side commands: `cmd_complete`, `cmd_block`, `cmd_spawn`,
   `cmd_heartbeat`, `cmd_task_done`. All require `--token` matching the
   live claim, all wear `@_translate_claim_mismatch`.

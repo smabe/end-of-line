@@ -4,18 +4,22 @@
 
   Install:
     1. Copy to ~/Library/LaunchAgents/com.clu.tick.plist
-    2. Edit ProgramArguments to point at the path of your tick-all.sh
-       (the absolute path of examples/clu-tick-all.sh in your clone).
-       LaunchAgents do NOT inherit $PATH, so use absolute paths.
+    2. Verify the ProgramArguments path matches `which clu` in your shell
+       (pipx installs to ~/.local/bin/clu by default). LaunchAgents do
+       NOT inherit $PATH, so the absolute path is required.
     3. launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
     4. Tail /tmp/clu-tick.{out,err} to watch each 5-minute tick.
 
-  StartInterval=300 fires the script every 5 minutes. The script itself
-  iterates over `clu list` and ticks each registered plan once. Plans
+  StartInterval=300 fires `clu tick-all` every 5 minutes. The subcommand
+  iterates the host registry and ticks each registered plan once. Plans
   with no pending work return [idle]; plans with a phase ready spawn a
   worker via the configured dispatch.command. Costs roughly: one claude
   --print session per active plan per 5 minutes, capped at the budget in
   .orchestrator.json.
+
+  Pre-Day-3.5 installs used examples/clu-tick-all.sh as ProgramArguments.
+  That path now exec's `clu tick-all` as a back-compat shim; re-bootstrap
+  with this template to drop the shell hop.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -25,7 +29,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/smabe/projects/end-of-line/examples/clu-tick-all.sh</string>
+        <string>/Users/smabe/.local/bin/clu</string>
+        <string>tick-all</string>
     </array>
 
     <key>StartInterval</key>
