@@ -24,15 +24,125 @@ import functools
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from enum import IntEnum
 from pathlib import Path
 
-from . import dispatch, fleet, notify, queue, registry, state as st
+from . import dispatch, fleet, monitor, notify, queue, registry, state as st
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .supervisor import ACTION_NOTIFY_KIND, tick
+
+
+_MONITOR_TIP = (
+    "\n  Tip: run /clu-monitor for background notifications on "
+    "halts and blockers.\n"
+)
+
+
+def _maybe_print_monitor_tip() -> None:
+    """Print the /clu-monitor tip if monitoring isn't scheduled and stdout
+    is a TTY. Silent otherwise — worker subprocesses pipe stdout to a log
+    file, so this naturally suppresses there."""
+    if not sys.stdout.isatty():
+        return
+    if monitor.is_scheduled():
+        return
+    print(_MONITOR_TIP, end="")
+
+
+_CLU_SECTION_RE = re.compile(r"^##\s+clu\s*$", re.IGNORECASE | re.MULTILINE)
+
+_CLU_SECTION_TEMPLATE = """
+
+## clu
+
+This project uses clu for autonomous plan execution.
+
+- `clu queue add <slug>` to enqueue a plan; cron dispatches on each tick.
+- `clu queue list` for pending; `clu list` for fleet status.
+- Run `/clu-monitor` once per machine for background notifications on
+  halts and blockers (status: `~/.config/clu/monitor.json`).
+- The `/plan` and `/brainstorm` skills (bundled via `clu install-skill`)
+  are the canonical authoring + pre-planning entry points.
+"""
+
+
+def _decline_marker_path(cfg: ProjectConfig) -> Path:
+    return cfg.project_root / cfg.plan_dir / ".orchestrator" / ".no-claude-md"
+
+
+def _claude_md_has_clu_section(claude_md: Path) -> bool:
+    try:
+        text = claude_md.read_text()
+    except OSError:
+        return False
+    return bool(_CLU_SECTION_RE.search(text))
+
+
+def _write_decline_marker(cfg: ProjectConfig) -> None:
+    marker = _decline_marker_path(cfg)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch(exist_ok=True)
+
+
+def _append_clu_section(claude_md: Path) -> None:
+    with claude_md.open("a") as f:
+        f.write(_CLU_SECTION_TEMPLATE)
+    print(f"Added clu section to {claude_md}")
+
+
+def _maybe_handle_claude_md_injection(
+    cfg: ProjectConfig, args: argparse.Namespace,
+) -> None:
+    """CLAUDE.md `## clu` injection flow.
+
+    Flag overrides win over the interactive flow. The decline marker
+    persists per-project so a re-run of `clu init` doesn't re-prompt
+    after the operator already said no.
+    """
+    claude_md = cfg.project_root / "CLAUDE.md"
+
+    if getattr(args, "inject_claude_md", False):
+        if not claude_md.exists() or _claude_md_has_clu_section(claude_md):
+            return
+        _append_clu_section(claude_md)
+        return
+
+    if getattr(args, "no_claude_md", False):
+        _write_decline_marker(cfg)
+        return
+
+    # Interactive flow: stdin must be a TTY (we need to read input), the
+    # file must exist (don't auto-create), no existing section, no prior
+    # decline. Failing any precondition is silent — this is a polite
+    # suggestion, not a workflow gate.
+    if not sys.stdin.isatty():
+        return
+    if not claude_md.exists():
+        return
+    if _claude_md_has_clu_section(claude_md):
+        return
+    if _decline_marker_path(cfg).exists():
+        return
+
+    print(
+        "\nThis project doesn't have a clu section in CLAUDE.md yet. "
+        "Adding one helps future Claude sessions orient on clu's "
+        "workflow. May I append a short section? [y/N]: ",
+        end="",
+    )
+    response = input().strip().lower()
+    if response in {"y", "yes"}:
+        _append_clu_section(claude_md)
+    else:
+        _write_decline_marker(cfg)
+        print(
+            "Skipped. Run `clu init --inject-claude-md` later if you "
+            "change your mind.",
+        )
 
 
 class ExitCode(IntEnum):
@@ -101,6 +211,20 @@ def main(argv: list[str] | None = None) -> int:
 
     p_init = sub.add_parser("init", help="Bootstrap orchestrator state for a plan")
     add_common(p_init)
+    # CLAUDE.md injection flags — init-only (not in add_common, which is
+    # shared with register/unregister). Mutually exclusive: either force-on
+    # or force-off; neither → interactive prompt under TTY.
+    _claude_md_group = p_init.add_mutually_exclusive_group()
+    _claude_md_group.add_argument(
+        "--inject-claude-md", action="store_true",
+        help="Force-append a clu section to project CLAUDE.md (no prompt). "
+             "Idempotent if section already exists.",
+    )
+    _claude_md_group.add_argument(
+        "--no-claude-md", action="store_true",
+        help="Skip the CLAUDE.md prompt and write a decline marker so "
+             "future inits don't re-ask.",
+    )
 
     p_register = sub.add_parser(
         "register",
@@ -438,6 +562,8 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     # without a separate setup step.
     registry.register(cfg.project_root, args.plan)
     print(f"Initialized {state_path}")
+    _maybe_handle_claude_md_injection(cfg, args)
+    _maybe_print_monitor_tip()
     return 0
 
 
@@ -891,6 +1017,7 @@ def cmd_queue_add(args) -> int:
         print(f"queued at position {pos}")
     if len(slugs) > 1:
         print(f"queued {len(slugs)} plans")
+    _maybe_print_monitor_tip()
     return ExitCode.OK
 
 
