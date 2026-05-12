@@ -176,7 +176,10 @@ The bundled skill also encodes **9 universal quality mandates** — TDD before l
 | `clu retry [--phase X]` | Clear max-attempts on a halted phase and resume |
 | `clu release-claim [--force] [--reason ...]` | Escape hatch when a worker dies holding the lease |
 | `clu task-done <task_id>` | Mark a spawned follow-up done |
-| `clu install-skill [--force] [--dry-run] [--only <name>]` | (Re-)install the bundled skills (`/clu-phase` + `/plan` + `/brainstorm`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it) |
+| `clu install-skill [--force] [--dry-run] [--only <name>]` | (Re-)install the bundled skills (`/clu-phase` + `/plan` + `/brainstorm` + `/clu-monitor`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it) |
+| `clu install-hook` / `clu uninstall-hook` | Register or remove the `UserPromptSubmit` hook in `~/.claude/settings.json` that surfaces clu's inbox events into the active Claude session. `/clu-monitor` is the user-facing wrapper |
+| `clu doctor --project P` | Smoke-test what a worker subprocess sees (PATH + resolved binary locations). No state writes |
+| `clu unregister --all-archived [--dry-run]` | Batch-prune registry entries whose master plan file no longer exists. `--dry-run` previews without mutating |
 
 ## State schema
 
@@ -199,7 +202,8 @@ Sketch — see `docs/contract.md` for the full schema:
 
 ```
 end_of_line/          # the package (cli, supervisor, state, notify, dispatch, …)
-end_of_line/skills/   # bundled skills (/clu-phase worker, /plan authorship, /brainstorm pre-planning) installed via `clu install-skill`
+end_of_line/skills/   # bundled skills (/clu-phase worker, /plan authorship, /brainstorm pre-planning, /clu-monitor in-session signaling) installed via `clu install-skill`
+end_of_line/hooks/    # bundled UserPromptSubmit hook script that surfaces inbox events into Claude's context
 tests/                # unittest suite
 plans/                # active plan files (dogfooded — this repo uses clu on itself)
 docs/                 # architecture, reference, operations, conventions, contract

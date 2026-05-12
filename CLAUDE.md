@@ -108,15 +108,45 @@ notification kinds added in the same chain (phase 2: `fa82771`):
 the tick's primary action via `TickResult.side_notifies`. Marker schema
 bumped v1 → v2 (`is_scheduled` treats v1 as "needs reinstall"). Tests
 406 → 461. Closes [#20](https://github.com/smabe/end-of-line/issues/20).
+Follow-up `3e31551` drops the TTY refusal that blocked the
+`/clu-monitor` → Bash → `clu install-hook` path (closes
+[#21](https://github.com/smabe/end-of-line/issues/21)).
 
-**Day-6 candidates** — none chosen, talk to the operator:
+**queue-ux-hardening** — `clu queue add a b c` is now atomic
+(closes [#18](https://github.com/smabe/end-of-line/issues/18),
+`5c510a6`): single `queue.mutate` window, all-or-nothing batch
+validation, slice insertion for `--front`. `clu queue list` gains an
+`In flight: <slug> (dispatched HH:MM:SS UTC, lease until ...)` footer
+when a registered plan has an active claim (reuses the existing
+`reg_states` projection — no second registry walk). Tests 359 → 373.
 
-- **Replan path.** `STATUS_HALTED_REPLAN` exists in the enum but
-  nothing sets it. Worker callback or operator command? Underspecified.
+**green-batch** — four backlog issues drained autonomously through the
+queue (2026-05-12). `dispatch-path-tilde` expands `~` per-segment in
+`dispatch.path` at config load (#15, `b31eb69`). `install-skill-list`
+adds `clu install-skill --list` to enumerate bundled skills (#13,
+`46230e0`). `unregister-archived` adds `clu unregister --all-archived
+[--dry-run]` to batch-prune ghost registry entries (#12, `6db6740`).
+`clu-doctor` adds `clu doctor --project P` to smoke-test the worker
+subprocess environment (PATH + binary resolution), extracting
+`dispatch.build_worker_env` as the single source of truth (#14,
+`72c4bad`). Tests 337 → 359.
+
+**Open candidates** — pick from the backlog or propose new work:
+
+- **#4: Replan worker callback** — `STATUS_HALTED_REPLAN` exists in
+  the enum but nothing sets it. Worker callback or operator command?
+  Underspecified, needs design discussion.
+- **#10: Programmatic enforcement of mandate #9** — `clu verify` +
+  refuse-on-stale-stamp. Spec locked. Trigger to revisit: ≥2 worker
+  summaries observed lying about test results.
+- **#11: Pluggable notification backends** — Slack + stdout for
+  non-Mac operators. Trigger to revisit: a real non-Mac operator
+  trying clu.
+- **#17: v2 worker-callback queue enqueue** — `clu queue add --token
+  T` from inside a phase. Trigger to revisit: 30 days of v1 use +
+  ≥3 real-chain requests.
 - **Multi-plan inbound routing.** Day 2.4 deferred last-pinged routing
-  for ambiguous bare-digit replies.
-- **`clu logs <plan>`.** Tail `.orchestrator/logs/<token>` without
-  knowing the token.
+  for ambiguous bare-digit replies. Not yet filed as an issue.
 
 ## Locked config decisions
 

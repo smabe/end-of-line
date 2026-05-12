@@ -35,6 +35,61 @@ crashes immediately, the supervisor logs `dispatch_failed` and releases
 the claim on the next tick. If the worker hangs, the 30-minute lease
 expires and the next tick frees the claim.
 
+## In-session signaling (inbox + UserPromptSubmit hook)
+
+Beyond iMessage to the operator, clu has a second notification channel
+aimed at active Claude Code sessions: a per-event JSON inbox at
+`~/.config/clu/inbox/` surfaced via a UserPromptSubmit hook
+(`end_of_line/hooks/clu_inbox_surface.py`). The hook is installed
+through `clu install-hook` (or the `/clu-monitor` skill, which is its
+user-facing wrapper); a marker at `~/.config/clu/monitor.json` records
+the install for idempotency.
+
+When the supervisor fires an operator-relevant event, `notify.notify`
+performs two writes:
+
+1. **iMessage** (loud, immediate) — gated by `notify.quiet_hours` so
+   the operator isn't woken at 03:00 by a halt that can wait.
+2. **Inbox** (quiet, persistent) — `inbox.write_event` drops a JSON
+   file tagged with `project_root`. Quiet hours do NOT apply here:
+   the inbox is read by *the next Claude turn*, not by the operator.
+
+On the next user message in Claude Code, the UserPromptSubmit hook
+reads the inbox, filters to events whose `project_root` matches the
+session's CWD (via `git rev-parse --show-toplevel` or `os.getcwd()`),
+emits a `hookSpecificOutput.additionalContext` payload (≤10K chars,
+20 most recent events plus a footer line for older overflow), and
+moves each surfaced event into `inbox/processed/`. Mark-and-sweep
+dedup: Claude sees every event exactly once.
+
+This pattern is what makes "queue plans, walk away" work end-to-end:
+the operator gets the iMessage on their phone, walks back to a Claude
+session (the same one or a fresh `/clear`), types literally anything,
+and Claude already knows what halted, completed, or got stuck. No
+manual context summary.
+
+The supervisor extends `TickResult` with `side_notifies: list[(kind,
+body)]` so a single tick can emit multiple parallel notifications
+*alongside* whatever first-match action the priority chain selected
+(not instead of it). Two rules currently use this slot:
+
+- **Stuck-blocker re-ping.** Any blocker with `consumed: false` AND
+  `(now - created_at) > 30min` AND no re-ping within the last 30min
+  fires `KIND_STUCK_BLOCKER` (iMessage + inbox) and stamps
+  `last_repinged_at` on the blocker. Repeats every 30min until the
+  blocker is consumed. The original blocker iMessage from clu is
+  fire-and-forget; this rule covers the case where the operator
+  missed it and nothing escalated.
+- **Stalled-claim transition.** A `current_claim` whose `lease_expires`
+  has passed while plan status is still `RUNNING` fires
+  `KIND_STALLED_CLAIM` once and stamps `stalled_notified: true` on
+  the claim. The lease-release rule in the priority chain (rule #1)
+  still fires next tick to actually drop the claim — this rule is
+  just the operator-visible early warning.
+
+Both side rules respect `notify.quiet_hours` for iMessage (these are
+escalations, not emergencies) but write to the inbox unconditionally.
+
 ## One tick = one action
 
 `supervisor.tick` walks an eight-priority chain. First match wins; the
