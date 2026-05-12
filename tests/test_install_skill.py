@@ -22,6 +22,7 @@ from unittest import mock
 from end_of_line.cli import (
     _CLU_NOTE_END,
     _CLU_NOTE_START,
+    BUNDLED_SKILLS,
     ExitCode,
     main,
 )
@@ -310,6 +311,34 @@ class ClaudeMdNoteTests(InstallSkillTestBase):
             rc, _, _ = self._run()
         self.assertEqual(rc, int(ExitCode.OK))
         self.assertFalse(self.claude_md.exists())
+
+
+class ListFlagTests(InstallSkillTestBase):
+    """`--list` enumerates bundled skills and their install targets without
+    touching the filesystem. Closes #13."""
+
+    def test_list_prints_bundled_skills_with_target_paths(self):
+        rc, out, _ = self._run("--list")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertIn("Bundled skills", out)
+        for name in BUNDLED_SKILLS:
+            target = self.home / ".claude" / "skills" / name / "SKILL.md"
+            # Each name must appear on the same line as its target path.
+            lines = [ln for ln in out.splitlines() if name in ln]
+            self.assertTrue(
+                any(str(target) in ln for ln in lines),
+                f"expected `{name}` and `{target}` on the same line; got:\n{out}",
+            )
+        # No filesystem writes.
+        self.assertFalse((self.home / ".claude" / "skills").exists())
+
+    def test_list_short_circuits_other_flags(self):
+        # --list with --force is a no-op listing — must not crash, must not
+        # write, must not consult --force / --only / --dry-run.
+        rc, out, _ = self._run("--list", "--force", "--dry-run")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertIn("Bundled skills", out)
+        self.assertFalse((self.home / ".claude" / "skills").exists())
 
 
 class DryRunTests(InstallSkillTestBase):

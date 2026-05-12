@@ -129,6 +129,11 @@ def main(argv: list[str] | None = None) -> int:
                     "Default installs all three; pass --only <name> to install one.",
     )
     p_install_skill.add_argument(
+        "--list", action="store_true", default=False,
+        help="List bundled skills and their install targets, then exit. "
+             "No writes; other flags are ignored.",
+    )
+    p_install_skill.add_argument(
         "--force", action="store_true", default=False,
         help="Overwrite an existing target, even a regular file the operator "
              "wrote. Symlinks are overwritten without --force.",
@@ -565,6 +570,17 @@ def _inject_claude_md_note(claude_md: Path) -> None:
 
 def cmd_install_skill(args) -> int:
     from importlib.resources import files
+
+    if args.list:
+        targets = [
+            (name, Path.home() / ".claude" / "skills" / name / "SKILL.md")
+            for name in BUNDLED_SKILLS
+        ]
+        width = max(len(name) for name, _ in targets)
+        print("Bundled skills available via clu install-skill:")
+        for name, target in targets:
+            print(f"  {name.ljust(width)}  {target}")
+        return ExitCode.OK
 
     if args.only is not None and args.only not in BUNDLED_SKILLS:
         return _die(
