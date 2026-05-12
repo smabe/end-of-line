@@ -103,7 +103,9 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Honor the project's CLAUDE.md.** It's the project-specific layer of these mandates: naming conventions, exit-code patterns, event constants, files to avoid. Read it before your first commit on a project, and re-read when you're unsure.
 
-- **The completion summary is load-bearing.** When you call `clu complete`, your final message to the operator is the only signal they have about what shipped. Mention what actually committed (SHA), what tests pass (count + delta), and anything you tried that didn't work and the operator should know about (e.g. "couldn't run `gh issue close` because the binary wasn't on PATH; operator should close manually"). Silence on a failure mode reads as "everything went fine," which is worse than admitting a small thing didn't.
+- **Re-run verification right before complete.** The project's primary check — test suite, build, lint, whichever is authoritative — must pass at the moment you exit, not just at some point earlier in the phase. Run it from a fresh process before calling `clu complete` so you're verifying the post-edit state, not stale memory of an earlier run. Record the exact result (test count + delta, lint clean, build green) and put it in the completion summary. A wrong "tests passed" claim is the single fastest way to lose operator trust; a worker that consistently re-verifies and reports honestly is the foundation everything else builds on.
+
+- **The completion summary is load-bearing.** When you call `clu complete`, your final message to the operator is the only signal they have about what shipped. Mention what actually committed (SHA), the verification result from the mandate above (count + delta), and anything you tried that didn't work and the operator should know about (e.g. "couldn't run `gh issue close` because the binary wasn't on PATH; operator should close manually"). Silence on a failure mode reads as "everything went fine," which is worse than admitting a small thing didn't.
 
 ## Common pitfalls
 
