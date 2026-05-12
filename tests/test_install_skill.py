@@ -1,10 +1,10 @@
 """Tests for `clu install-skill` — copies bundled skills into
 ~/.claude/skills/<name>/SKILL.md.
 
-clu ships three skills: `clu-phase` (worker contract), `plan` (authorship),
-and `brainstorm` (parallel-persona pre-planning). Default installs all three.
-`--only <name>` installs one. `--force` overrides the no-clobber-non-symlink
-safety.
+clu ships four skills: `clu-phase` (worker contract), `plan` (authorship),
+`brainstorm` (parallel-persona pre-planning), and `clu-monitor` (background
+notification scheduling). Default installs all four. `--only <name>` installs
+one. `--force` overrides the no-clobber-non-symlink safety.
 
 HOME is redirected per-test so we never write to the real ~/.claude.
 """
@@ -41,6 +41,9 @@ class InstallSkillTestBase(unittest.TestCase):
         self.brainstorm_target = (
             self.home / ".claude" / "skills" / "brainstorm" / "SKILL.md"
         )
+        self.monitor_target = (
+            self.home / ".claude" / "skills" / "clu-monitor" / "SKILL.md"
+        )
         self.bundled_bytes = (
             files("end_of_line").joinpath("skills/clu-phase/SKILL.md").read_bytes()
         )
@@ -49,6 +52,9 @@ class InstallSkillTestBase(unittest.TestCase):
         )
         self.bundled_brainstorm_bytes = (
             files("end_of_line").joinpath("skills/brainstorm/SKILL.md").read_bytes()
+        )
+        self.bundled_monitor_bytes = (
+            files("end_of_line").joinpath("skills/clu-monitor/SKILL.md").read_bytes()
         )
 
     def _run(self, *argv: str) -> tuple[int, str, str]:
@@ -59,30 +65,37 @@ class InstallSkillTestBase(unittest.TestCase):
 
 
 class FreshInstallTests(InstallSkillTestBase):
-    def test_default_installs_all_three_skills(self):
+    def test_default_installs_all_four_skills(self):
         rc, out, _ = self._run()
         self.assertEqual(rc, int(ExitCode.OK))
         self.assertTrue(self.target.exists())
         self.assertTrue(self.plan_target.exists())
         self.assertTrue(self.brainstorm_target.exists())
+        self.assertTrue(self.monitor_target.exists())
         self.assertEqual(self.target.read_bytes(), self.bundled_bytes)
         self.assertEqual(self.plan_target.read_bytes(), self.bundled_plan_bytes)
         self.assertEqual(
             self.brainstorm_target.read_bytes(), self.bundled_brainstorm_bytes,
         )
+        self.assertEqual(
+            self.monitor_target.read_bytes(), self.bundled_monitor_bytes,
+        )
         self.assertIn(str(self.target), out)
         self.assertIn(str(self.plan_target), out)
         self.assertIn(str(self.brainstorm_target), out)
+        self.assertIn(str(self.monitor_target), out)
 
     def test_creates_parent_dirs(self):
         self.assertFalse(self.target.parent.exists())
         self.assertFalse(self.plan_target.parent.exists())
         self.assertFalse(self.brainstorm_target.parent.exists())
+        self.assertFalse(self.monitor_target.parent.exists())
         rc, _, _ = self._run()
         self.assertEqual(rc, int(ExitCode.OK))
         self.assertTrue(self.target.exists())
         self.assertTrue(self.plan_target.exists())
         self.assertTrue(self.brainstorm_target.exists())
+        self.assertTrue(self.monitor_target.exists())
 
 
 class OnlyFlagTests(InstallSkillTestBase):
@@ -92,6 +105,7 @@ class OnlyFlagTests(InstallSkillTestBase):
         self.assertTrue(self.target.exists())
         self.assertFalse(self.plan_target.exists())
         self.assertFalse(self.brainstorm_target.exists())
+        self.assertFalse(self.monitor_target.exists())
         self.assertIn(str(self.target), out)
 
     def test_only_plan(self):
@@ -100,6 +114,7 @@ class OnlyFlagTests(InstallSkillTestBase):
         self.assertFalse(self.target.exists())
         self.assertTrue(self.plan_target.exists())
         self.assertFalse(self.brainstorm_target.exists())
+        self.assertFalse(self.monitor_target.exists())
         self.assertIn(str(self.plan_target), out)
 
     def test_only_brainstorm(self):
@@ -108,10 +123,23 @@ class OnlyFlagTests(InstallSkillTestBase):
         self.assertFalse(self.target.exists())
         self.assertFalse(self.plan_target.exists())
         self.assertTrue(self.brainstorm_target.exists())
+        self.assertFalse(self.monitor_target.exists())
         self.assertEqual(
             self.brainstorm_target.read_bytes(), self.bundled_brainstorm_bytes,
         )
         self.assertIn(str(self.brainstorm_target), out)
+
+    def test_only_clu_monitor(self):
+        rc, out, _ = self._run("--only", "clu-monitor")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.plan_target.exists())
+        self.assertFalse(self.brainstorm_target.exists())
+        self.assertTrue(self.monitor_target.exists())
+        self.assertEqual(
+            self.monitor_target.read_bytes(), self.bundled_monitor_bytes,
+        )
+        self.assertIn(str(self.monitor_target), out)
 
     def test_only_unknown_name_exits_clean(self):
         rc, _, err = self._run("--only", "banana")
@@ -119,10 +147,12 @@ class OnlyFlagTests(InstallSkillTestBase):
         self.assertFalse(self.target.exists())
         self.assertFalse(self.plan_target.exists())
         self.assertFalse(self.brainstorm_target.exists())
+        self.assertFalse(self.monitor_target.exists())
         # Message must list the valid names so the operator can self-correct.
         self.assertIn("clu-phase", err)
         self.assertIn("plan", err)
         self.assertIn("brainstorm", err)
+        self.assertIn("clu-monitor", err)
         self.assertIn("banana", err)
 
 
@@ -144,15 +174,16 @@ class ExistingTargetTests(InstallSkillTestBase):
         self.assertEqual(self.target.read_bytes(), self.bundled_bytes)
 
     def test_refusal_is_atomic_other_skills_not_installed(self):
-        # clu-phase target is a regular file → refuse. plan + brainstorm
-        # targets are fresh → would install, but abort-all means they MUST
-        # NOT install.
+        # clu-phase target is a regular file → refuse. Other targets are
+        # fresh → would install, but abort-all means they MUST NOT install.
         self.assertFalse(self.plan_target.exists())
         self.assertFalse(self.brainstorm_target.exists())
+        self.assertFalse(self.monitor_target.exists())
         rc, _, _ = self._run()
         self.assertEqual(rc, int(ExitCode.STATUS_TRANSITION))
         self.assertFalse(self.plan_target.exists())
         self.assertFalse(self.brainstorm_target.exists())
+        self.assertFalse(self.monitor_target.exists())
 
 
 class SymlinkTargetTests(InstallSkillTestBase):
@@ -348,9 +379,11 @@ class DryRunTests(InstallSkillTestBase):
         self.assertFalse(self.target.exists())
         self.assertFalse(self.plan_target.exists())
         self.assertFalse(self.brainstorm_target.exists())
+        self.assertFalse(self.monitor_target.exists())
         self.assertIn(str(self.target), out)
         self.assertIn(str(self.plan_target), out)
         self.assertIn(str(self.brainstorm_target), out)
+        self.assertIn(str(self.monitor_target), out)
         self.assertIn("would", out.lower())
 
     def test_dry_run_force_describes_overwrite(self):
