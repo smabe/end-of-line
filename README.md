@@ -31,11 +31,31 @@ clu install-skill          # copies the /clu-phase worker skill into ~/.claude/s
 
 On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path that works without `--break-system-packages`.
 
-`clu install-skill` writes the bundled worker skill to `~/.claude/skills/clu-phase/SKILL.md`, which Claude Code reads to drive each phase. Pass `--force` to overwrite an existing file or symlink, `--dry-run` to preview.
+`clu install-skill` writes two bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
 
 For the inbound iMessage poller, grant Full Disk Access to the pipx venv python (System Settings → Privacy & Security → Full Disk Access → add `~/.local/pipx/venvs/end-of-line/bin/python3`). Without it, the poller can't open `chat.db`.
 
 (Optional) Install the LaunchAgents from `examples/` for cron-driven dispatch — see `docs/operations.md`.
+
+## Working with clu
+
+`clu install-skill` ships two skills:
+
+- **`/clu-phase`** — the worker skill clu's dispatch invokes for each phase. Required for clu to function; you don't run it directly. The dispatch command in `.orchestrator.json` (see [Configure a project](#configure-a-project)) launches Claude with this skill so each phase honors the worker callback contract.
+- **`/plan`** — authorship skill for writing plans clu can orchestrate. Drops a file at `plans/<slug>.md` in your project with a `## Sessions index` table — that table is what clu's parser reads to know which phases to dispatch.
+
+**Recommended companion: `/grill-me`** by Matt Pocock ([source](https://github.com/mattpocock/skills)) — interviews you relentlessly about a plan or design until shared understanding is reached. Pairs well with `/plan` when you're about to hand a non-trivial plan to clu; running `/grill-me` first surfaces underspecified branches before they become mid-phase blockers. Installed separately; clu does not bundle it.
+
+### Minimum plan shape clu can orchestrate
+
+If you skip the bundled `/plan` and hand-roll a plan, clu's parser needs the master file (`plans/<slug>.md`) to contain a `## Sessions index` table:
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| phase-a | `<slug>-phase-a.md` | one-line scope | time est |
+| phase-b | `<slug>-phase-b.md` | one-line scope | time est |
+
+Each row points to a sub-plan file in the same `plans/` directory. The bundled `/plan` produces this shape by default.
 
 ## Configure a project
 
@@ -116,7 +136,7 @@ Every worker callback validates `--token` against the live claim — `clu` rejec
 
 If a worker calls `clu block`, clu releases the claim and sends an iMessage. When you reply, the inbound poller routes the answer back, the supervisor consumes it on the next tick, and re-dispatches the phase — the resume-aware worker reads the answered blocker from state and continues with your choice.
 
-The bundled skill also encodes **9 universal quality mandates** — TDD before logic changes, structured commit messages, `command -v` fallbacks for external tools, re-running the project's primary check from a fresh process before `clu complete`, and so on. See `end_of_line/skill/SKILL.md` for the full list. Each mandate earned its slot by capturing a witnessed failure mode from real worker sessions, not hypothetical good advice. Project-specific rules (test framework, naming conventions, files to avoid) layer on top via your project's `CLAUDE.md`.
+The bundled skill also encodes **9 universal quality mandates** — TDD before logic changes, structured commit messages, `command -v` fallbacks for external tools, re-running the project's primary check from a fresh process before `clu complete`, and so on. See `end_of_line/skills/clu-phase/SKILL.md` for the full list. Each mandate earned its slot by capturing a witnessed failure mode from real worker sessions, not hypothetical good advice. Project-specific rules (test framework, naming conventions, files to avoid) layer on top via your project's `CLAUDE.md`.
 
 ## Operator commands
 
@@ -159,7 +179,7 @@ Sketch — see `docs/contract.md` for the full schema:
 
 ```
 end_of_line/          # the package (cli, supervisor, state, notify, dispatch, …)
-end_of_line/skill/    # the bundled /clu-phase worker skill, installed via `clu install-skill`
+end_of_line/skills/   # bundled skills (/clu-phase worker, /plan authorship) installed via `clu install-skill`
 tests/                # unittest suite
 plans/                # active plan files (dogfooded — this repo uses clu on itself)
 docs/                 # architecture, reference, operations, conventions, contract

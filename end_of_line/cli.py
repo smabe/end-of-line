@@ -109,6 +109,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Copy bundled skills (/clu-phase worker + /plan authorship) "
              "into ~/.claude/skills/<name>/SKILL.md so Claude Code can find "
              "them. Default installs both; use --only to install one.",
+        description="Copy bundled skills into ~/.claude/skills/<name>/SKILL.md "
+                    "so Claude Code can find them. Two skills ship: /clu-phase "
+                    "(the worker clu's dispatch invokes — required for clu to "
+                    "function) and /plan (authorship skill for writing plans "
+                    "in the shape clu's parser expects). Default installs "
+                    "both; pass --only <name> to install one.",
     )
     p_install_skill.add_argument(
         "--force", action="store_true", default=False,
