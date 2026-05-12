@@ -375,6 +375,99 @@ handle** (your own number or Apple ID email). clu sends from your Mac to
 yourself; you answer from your phone. Without an active iMessage
 conversation to that handle, `osascript` will fail silently.
 
+## Background monitoring
+
+The clu LaunchAgent ticks every minute and dispatches workers, but
+between those ticks no AI sits in the loop watching for halts. If a
+plan halts at 02:15, the existing iMessage flow fires — but if a
+worker is stuck on a blocker for hours because the operator missed the
+iMessage, nothing escalates.
+
+`/clu-monitor` (bundled as of 2026-05-12) closes that gap by scheduling
+a Claude Code routine via `/schedule`. The routine runs `clu list` and
+`clu queue list` every 15 minutes (default cadence:
+`*/15 8-21 * * *`, respecting the same quiet-hours convention) and
+iMessages the operator if:
+
+- Any plan has status `HALTED` or `HALTED_REPLAN`
+- Any plan has an open blocker un-consumed for more than 30 minutes
+- Any plan has a stalled claim (lease expired with status `RUNNING`)
+
+Otherwise the routine stays silent. No "all clear" pings.
+
+### Setup
+
+```bash
+$ clu install-skill   # one-time, installs /clu-phase /plan /brainstorm /clu-monitor
+$ # then, in a Claude Code session:
+$ /clu-monitor
+Background monitoring scheduled.
+Status file: ~/.config/clu/monitor.json
+```
+
+The marker file at `~/.config/clu/monitor.json` records the
+`schedule_id` so re-running `/clu-monitor` is idempotent.
+
+### Status, pause, reset
+
+```bash
+$ cat ~/.config/clu/monitor.json
+{
+  "schema_version": 1,
+  "scheduled_at": "2026-05-12T19:00:00Z",
+  "schedule_id": "sch-...",
+  "cadence": "*/15 8-21 * * *"
+}
+
+# To pause without removing the schedule:
+$ /schedule pause sch-...
+
+# To remove entirely (and free Claude Code to schedule a new one later):
+$ /schedule delete sch-...
+$ rm ~/.config/clu/monitor.json
+```
+
+### CLI tips
+
+`clu init` and `clu queue add` both print a one-line tip recommending
+`/clu-monitor` when the marker file is absent. The tip is suppressed
+when:
+
+- Monitoring is already scheduled (marker file present), OR
+- Output is not a TTY (workers running clu commands in dispatch
+  subprocesses see no tip — keeps log files clean)
+
+### Project CLAUDE.md integration
+
+On the first `clu init` in a project, clu offers to append a `## clu`
+section to the project's `CLAUDE.md` (if one exists). The section
+helps future Claude Code sessions orient on the project's clu workflow
+— relevant across `/clear` boundaries where in-session context is
+gone.
+
+The prompt fires once per project. Decline once, and a marker at
+`<plan_dir>/.orchestrator/.no-claude-md` suppresses future prompts.
+Flag overrides:
+
+- `clu init --inject-claude-md ...` — force inject, no prompt.
+- `clu init --no-claude-md ...` — write the decline marker, no prompt.
+
+The injected section is appended verbatim (never overwrites existing
+content) and matches:
+
+```markdown
+## clu
+
+This project uses clu for autonomous plan execution.
+
+- `clu queue add <slug>` to enqueue a plan; cron dispatches on each tick.
+- `clu queue list` for pending; `clu list` for fleet status.
+- Run `/clu-monitor` once per machine for background notifications on
+  halts and blockers (status: `~/.config/clu/monitor.json`).
+- The `/plan` and `/brainstorm` skills (bundled via `clu install-skill`)
+  are the canonical authoring + pre-planning entry points.
+```
+
 ## Troubleshooting
 
 ### Inbound poller crash-loops

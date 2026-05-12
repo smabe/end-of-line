@@ -161,6 +161,29 @@ The hard rules clu enforces (in `queue.validate_repair`):
 
 A validator-rejected repair surfaces `would drop slugs: [...]` or `history entries removed: [...]` in the `KIND_QUEUE_REPAIR_FAILED` body.
 
+## Background-monitoring marker
+
+`$XDG_CONFIG_HOME/clu/monitor.json` (default `~/.config/clu/monitor.json`). Account-wide, not per-project — one `/clu-monitor` routine watches every plan on the host. Absent file = monitoring not set up; `clu init` and `clu queue add` emit a one-line tip recommending `/clu-monitor` when this file is absent and stdout is a TTY.
+
+```jsonc
+{
+  "schema_version": 1,
+  "scheduled_at": "2026-05-12T19:00:00Z",
+  "schedule_id": "sch-...",
+  "cadence": "*/15 8-21 * * *"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `scheduled_at` | ISO UTC timestamp of marker creation |
+| `schedule_id` | The `/schedule` routine id for management via `/schedule pause / delete` |
+| `cadence` | The cron expression passed to `/schedule create` |
+
+Idempotency: `/clu-monitor` checks for this file before invoking `/schedule create`. A successful create writes the marker; a failed create leaves it absent so the next attempt retries cleanly. To reset (e.g. after manually deleting the schedule), delete this file and re-run `/clu-monitor`.
+
+Helpers in `end_of_line/monitor.py`: `marker_path`, `is_scheduled`, `load_marker`, `record_scheduled`, `clear_marker`. Reads/writes go through `state.locked_json` so the marker shares the lock + atomic-write primitive with state.json, registry.json, and queue.json.
+
 ## Notification kinds
 
 The outbound iMessage adapter (`notify.py`) classifies every send by kind. Quiet hours (default 22:00–08:00 local) gate every kind not in `notify.QUIET_HOURS_BYPASS_KINDS`.

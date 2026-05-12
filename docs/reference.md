@@ -527,6 +527,53 @@ makes "trust the prompt" optional.
 - `dispatch.dispatch_repair_worker` for the spawn side.
 - `cli.cmd_queue_*` for the operator surface.
 
+### `monitor.py`
+
+Background-monitoring marker file (account-wide, not per-project). The
+`/clu-monitor` skill writes this after `/schedule` confirms a routine
+was created; clu CLI commands read it to suppress monitoring tips when
+the routine is already in place. Tolerant by design — missing file,
+corrupt JSON, and schema mismatch all surface as `None` / `False`.
+
+**Key types and functions**
+
+- `SCHEMA_VERSION` — independent from `state.SCHEMA_VERSION`; passed to
+  `state.load` via `expected_version`.
+- `marker_path()` → `Path` — XDG-respecting location
+  (`$XDG_CONFIG_HOME/clu/monitor.json` or `~/.config/clu/monitor.json`).
+- `load_marker(path=None)` → `dict | None` — marker contents, `None`
+  on any failure mode (missing, corrupt JSON, schema version mismatch).
+- `is_scheduled(path=None)` → `bool` — `True` iff `load_marker` returns
+  a dict. The single predicate every CLI suppression branch keys off.
+- `record_scheduled(schedule_id, cadence, *, path=None)` — atomic write
+  via `state.locked_json`. Overwrites a stale schema-mismatched marker
+  rather than refusing — the marker is advisory, no information loss.
+- `clear_marker(path=None)` — idempotent delete; no error on absent
+  file.
+
+**Invariants and gotchas**
+
+- The marker is advisory, not load-bearing. A drifted marker (e.g.
+  schedule deleted out-of-band) makes `/clu-monitor` skip retrying;
+  operator resets manually with `rm ~/.config/clu/monitor.json`. v1
+  trusts the marker — coupling clu to `/schedule`'s introspection
+  would be premature.
+- `record_scheduled` follows the "write after side effect" ordering:
+  `/clu-monitor` calls `/schedule create` first and only writes the
+  marker on success. A failed create leaves the marker absent so the
+  next attempt retries cleanly.
+- The path resolution mirrors `registry.registry_path()` — same XDG
+  rules, same parent directory (`$XDG_CONFIG_HOME/clu/`).
+
+**See also**
+
+- `operations.md` § "Background monitoring" for the user-facing setup
+  + reset workflow.
+- `contract.md` § "Background-monitoring marker" for the JSON shape.
+- `cli._maybe_print_monitor_tip` for the suppression consumer.
+- `end_of_line/skills/clu-monitor/SKILL.md` for the skill that writes
+  the marker after `/schedule` confirms a routine.
+
 ### `fleet.py`
 
 Pure projection: take every registry entry, project into a one-line

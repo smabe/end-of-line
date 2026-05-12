@@ -88,6 +88,14 @@ re-litigate without reading [`docs/contract.md`](docs/contract.md) §
 "Queue schema" + [`docs/architecture.md`](docs/architecture.md) §
 "Queue advancement" + "Auto-repair worker" first.
 
+**clu-monitor** — `/clu-monitor` ships as a bundled skill (#19);
+operator runs it once per machine to schedule background notifications
+on halts, stuck blockers, and stalled claims. CLI tips in `clu init` /
+`clu queue add` and the optional project CLAUDE.md injection prompt
+make Claude propose it proactively in new sessions. Marker at
+`~/.config/clu/monitor.json`; helpers in `end_of_line/monitor.py`. See
+[`docs/operations.md`](docs/operations.md) § "Background monitoring".
+
 **Day-6 candidates** — none chosen, talk to the operator:
 
 - **Replan path.** `STATUS_HALTED_REPLAN` exists in the enum but
