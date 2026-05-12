@@ -104,6 +104,20 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("list", help="List all registered plans on this host")
 
+    p_install_skill = sub.add_parser(
+        "install-skill",
+        help="Copy the bundled /clu-phase worker skill into "
+             "~/.claude/skills/clu-phase/SKILL.md so Claude Code can find it.",
+    )
+    p_install_skill.add_argument(
+        "--force", action="store_true", default=False,
+        help="Overwrite an existing target (including a symlink).",
+    )
+    p_install_skill.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Print the planned action without writing.",
+    )
+
     sub.add_parser(
         "tick-all",
         help="Tick every registered plan once (cron entry point). Per-plan "
@@ -254,6 +268,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list(args)
     if args.cmd == "tick-all":
         return cmd_tick_all(args)
+    if args.cmd == "install-skill":
+        return cmd_install_skill(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -326,6 +342,37 @@ def cmd_list(args) -> int:
 def cmd_fleet(args) -> int:
     print(fleet.render(registry.entries()), end="")
     return 0
+
+
+def cmd_install_skill(args) -> int:
+    from importlib.resources import files
+
+    bundled = files("end_of_line").joinpath("skill/SKILL.md")
+    target = Path.home() / ".claude" / "skills" / "clu-phase" / "SKILL.md"
+    # `is_symlink` first — `exists()` follows symlinks, so a broken symlink
+    # would otherwise look like a clean target.
+    is_symlink = target.is_symlink()
+    exists = is_symlink or target.exists()
+
+    if exists and not args.force:
+        what = "symlink" if is_symlink else "file"
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"target {what} already exists at {target} — pass --force to overwrite",
+        )
+
+    if args.dry_run:
+        verb = "Would overwrite" if exists else "Would write"
+        print(f"{verb} {target} from bundled {bundled}")
+        return ExitCode.OK
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if is_symlink:
+        # Unlink the symlink itself; do NOT touch its destination.
+        target.unlink()
+    target.write_bytes(bundled.read_bytes())
+    print(f"Installed worker skill to {target}")
+    return ExitCode.OK
 
 
 def _tick_one_plan(

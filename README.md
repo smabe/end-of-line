@@ -26,11 +26,16 @@ v0.1, working. 151 tests pass (`python3 -m unittest discover -s tests`). Stdlib-
 git clone https://github.com/smabe/end-of-line.git
 cd end-of-line
 pipx install -e .          # puts `clu` on $PATH via its own venv
+clu install-skill          # copies the /clu-phase worker skill into ~/.claude/skills/
 ```
 
 On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path that works without `--break-system-packages`.
 
+`clu install-skill` writes the bundled worker skill to `~/.claude/skills/clu-phase/SKILL.md`, which Claude Code reads to drive each phase. Pass `--force` to overwrite an existing file or symlink, `--dry-run` to preview.
+
 For the inbound iMessage poller, grant Full Disk Access to the pipx venv python (System Settings → Privacy & Security → Full Disk Access → add `~/.local/pipx/venvs/end-of-line/bin/python3`). Without it, the poller can't open `chat.db`.
+
+(Optional) Install the LaunchAgents from `examples/` for cron-driven dispatch — see `docs/operations.md`.
 
 ## Configure a project
 
@@ -54,7 +59,7 @@ Drop a `.orchestrator.json` at your project root (it's gitignored by example sin
 - `notify.imessage.to` should be your iMessage self-chat handle (your own number or Apple ID email) — clu DMs you when a worker opens a blocker, when a phase stalls, when the plan halts, or when it completes.
 - `quiet_hours` is `[start, end]` in local wall-clock time; wraps overnight. Halt notifications bypass it (see `notify.QUIET_HOURS_BYPASS_KINDS`).
 
-The dispatch command above launches Claude with the `/clu-phase` skill. Copy `examples/clu-phase-skill.md` to `~/.claude/skills/clu-phase/SKILL.md` so it's discoverable, or write your own equivalent — anything that honors the worker callback contract (always call `clu complete` or `clu block` before exiting) will work.
+The dispatch command above launches Claude with the `/clu-phase` skill. Run `clu install-skill` to drop it into `~/.claude/skills/clu-phase/SKILL.md`, or write your own equivalent — anything that honors the worker callback contract (always call `clu complete` or `clu block` before exiting) will work.
 
 ## Bootstrap a plan
 

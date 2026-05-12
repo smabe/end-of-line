@@ -16,3 +16,6 @@ clu = "end_of_line.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["end_of_line*"]
+
+[tool.setuptools.package-data]
+end_of_line = ["skill/SKILL.md"]
