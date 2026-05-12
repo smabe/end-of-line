@@ -170,6 +170,21 @@ def main(argv: list[str] | None = None) -> int:
         "--project", type=Path, default=None,
         help="Project root (defaults to CWD).",
     )
+    p_queue_list = queue_subs.add_parser(
+        "list", help="Show the pending queue and any recent failures.",
+    )
+    p_queue_list.add_argument(
+        "--project", type=Path, default=None,
+        help="Project root (defaults to CWD).",
+    )
+    p_queue_remove = queue_subs.add_parser(
+        "remove", help="Drop a pending slug (moves it to history).",
+    )
+    p_queue_remove.add_argument("slug")
+    p_queue_remove.add_argument(
+        "--project", type=Path, default=None,
+        help="Project root (defaults to CWD).",
+    )
 
     sub.add_parser(
         "tick-all",
@@ -517,10 +532,19 @@ def cmd_install_skill(args) -> int:
 
 
 def cmd_queue(args) -> int:
+    # Bare `clu queue` defaults to `list` — mirrors bare `clu` → fleet view.
+    # Argparse routes a missing subcommand through here with queue_cmd=None.
+    if args.queue_cmd is None or args.queue_cmd == "list":
+        return cmd_queue_list(args)
     if args.queue_cmd == "add":
         return cmd_queue_add(args)
-    print("usage: clu queue add <slug> [--front] [--project PATH]", file=sys.stderr)
-    return _die(ExitCode.GENERIC, "missing queue subcommand")
+    if args.queue_cmd == "remove":
+        return cmd_queue_remove(args)
+    print(
+        "usage: clu queue {add|list|remove} [--project PATH]",
+        file=sys.stderr,
+    )
+    return _die(ExitCode.GENERIC, f"unknown queue subcommand {args.queue_cmd!r}")
 
 
 def cmd_queue_add(args) -> int:
@@ -567,6 +591,148 @@ def cmd_queue_add(args) -> int:
             position = len(data["queue"])
 
     print(f"queued at position {position}")
+    return ExitCode.OK
+
+
+_FREEZE_STATUSES = frozenset({
+    st.STATUS_HALTED, st.STATUS_HALTED_REPLAN, st.STATUS_PAUSED,
+})
+
+
+def _project_state_status(state: dict) -> str:
+    """Project a loaded state.json into the one-word STATUS column label."""
+    claim = state.get("current_claim")
+    threshold = state.get("config", {}).get(
+        "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
+    )
+    if claim and st.is_claim_stalled(claim, threshold):
+        return st.STATUS_STALLED
+    return state["status"]
+
+
+def _queue_row(
+    slug: str, cfg: ProjectConfig, reg_states: dict,
+    *, is_head: bool, head_frozen: bool,
+) -> tuple[str, str]:
+    """Compute (STATUS, NOTE) for one pending queue entry.
+
+    NOTE precedence: head-freeze marker beats everything (it's the most
+    actionable signal). Otherwise: missing plan file > path hint for an
+    unregistered slug > empty (the row's already speaking through STATUS).
+    """
+    plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
+    state = reg_states.get(slug)
+    status = _project_state_status(state) if state else "queued"
+
+    if is_head and head_frozen:
+        note = "chain frozen at head"
+    elif not plan_file.exists():
+        note = "plan file missing"
+    elif state is None:
+        note = str(plan_file.relative_to(cfg.project_root))
+    else:
+        note = ""
+    return status, note
+
+
+def _format_table(headers: list[str], rows: list[tuple[str, ...]]) -> str:
+    """Two-space-separated columns, ljust-padded. Matches fleet.render."""
+    widths = [
+        max(len(headers[i]), max((len(r[i]) for r in rows), default=0))
+        for i in range(len(headers))
+    ]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    lines = [fmt.format(*headers).rstrip()]
+    for row in rows:
+        lines.append(fmt.format(*row).rstrip())
+    return "\n".join(lines)
+
+
+def _format_age_iso(ts_iso: str | None) -> str:
+    """ISO timestamp → fleet.humanize_age string. Unknown / unparseable → '?'."""
+    if not ts_iso:
+        return "?"
+    try:
+        dt = st.parse_iso(ts_iso)
+    except (TypeError, ValueError):
+        return "?"
+    seconds = (st._now_utc() - dt).total_seconds()
+    return fleet.humanize_age(seconds)
+
+
+def cmd_queue_list(args) -> int:
+    project = getattr(args, "project", None) or Path.cwd()
+    cfg = load_project_config(Path(project))
+    queue_path = cfg.queue_path()
+
+    if not queue_path.exists():
+        print("(queue is empty)")
+        return ExitCode.OK
+
+    data = queue.load(queue_path)
+    pending = data["queue"]
+    history = data["history"]
+
+    if not pending:
+        print("(queue is empty)")
+    else:
+        reg_states = {
+            e.plan_slug: registry.load_entry_state(e)
+            for e in registry.entries()
+            if Path(e.project_root).resolve() == cfg.project_root.resolve()
+        }
+        head_state = reg_states.get(pending[0]["slug"])
+        head_frozen = bool(
+            head_state and head_state.get("status") in _FREEZE_STATUSES
+        )
+        rows = [
+            (str(i), entry["slug"], *_queue_row(
+                entry["slug"], cfg, reg_states,
+                is_head=(i == 1), head_frozen=head_frozen,
+            ))
+            for i, entry in enumerate(pending, start=1)
+        ]
+        print(_format_table(["POS", "SLUG", "STATUS", "NOTE"], rows))
+
+    if history:
+        print()
+        print("Recent failures:")
+        # Cap at 10 — operator wants the most recent context, not the full log.
+        for entry in history[-10:]:
+            age = _format_age_iso(entry.get("ended_at"))
+            outcome = entry.get("outcome", "?")
+            print(f"  {entry['slug']}  {outcome}  ({age} ago)")
+    return ExitCode.OK
+
+
+def cmd_queue_remove(args) -> int:
+    slug = args.slug
+    try:
+        st.validate_slug(slug, kind="plan slug")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    project = getattr(args, "project", None) or Path.cwd()
+    cfg = load_project_config(Path(project))
+    queue_path = cfg.queue_path()
+
+    if not queue_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"{slug!r} is not in the queue")
+
+    with queue.mutate(queue_path) as data:
+        positions = [
+            i for i, e in enumerate(data["queue"]) if e["slug"] == slug
+        ]
+        if not positions:
+            return _die(ExitCode.UNKNOWN_TASK, f"{slug!r} is not in the queue")
+        entry = data["queue"].pop(positions[0])
+        data["history"].append({
+            **entry,
+            "ended_at": st.utcnow(),
+            "outcome": "removed",
+        })
+
+    print(f"removed {slug} from queue")
     return ExitCode.OK
 
 
