@@ -208,7 +208,9 @@ itself — `dispatch_for_tick` does that after the lock is released.
 - `tick(state_path, config)` — entry point. Walks the eight-priority
   chain (see `architecture.md`) and returns a `TickResult`.
 - `TickResult` — dataclass with `action`, `detail`, `phase_id`, `token`,
-  and `notify_body` (rendered iMessage for actions that should ping).
+  `notify_body` (rendered iMessage for actions that should ping), and
+  `side_notifies: list[tuple[kind, body]]` (gap-fill emissions that
+  ride alongside the primary action — see `_emit_*` helpers below).
 - `Action` — typed union of `dispatch`, `idle`, `lease_expired`,
   `escalate`, `blocker_resumed`, `halt`, `plan_done`, `error`,
   `stalled`.
@@ -218,6 +220,16 @@ itself — `dispatch_for_tick` does that after the lock is released.
 - `_detect_stalled(data)` — emits `phase_stalled` once when a claim
   goes past the heartbeat threshold; stamps `stalled_notified=True` on
   the claim so subsequent ticks fall through.
+- `_emit_stuck_blocker_repings(data, config, side_notifies)` — re-pings
+  any open blocker un-consumed for ≥30 min (and again every 30 min
+  thereafter via `last_repinged_at`). Mutates `data` + appends to
+  `side_notifies` + writes an inbox event. Runs before the main chain
+  so it fires regardless of the tick's primary action.
+- `_emit_stalled_claim_notify(data, config, side_notifies)` — one-shot
+  signal on the lease-expiry transition while plan status is
+  `RUNNING`. Stamps `stalled_notified=True` on the (about-to-be-
+  released) claim. Sits ahead of `release_if_expired` so the
+  notification fires before the claim is cleared.
 - `_local_now()` — indirection so tests can pin wall-clock time for
   quiet-hours assertions.
 
@@ -307,13 +319,18 @@ Renderers produce the strings; `notify()` decides whether to send.
 
 - `KIND_BLOCKER`, `KIND_STALLED`, `KIND_COMPLETED`, `KIND_HALTED`,
   `KIND_QUEUE_SKIPPED`, `KIND_QUEUE_REPAIRED`, `KIND_QUEUE_REPAIR_FAILED`,
-  `KIND_QUEUE_CORRUPT` — the notification kinds. See `contract.md` §
-  "Notification kinds" for the trigger + quiet-hours matrix.
+  `KIND_QUEUE_CORRUPT`, `KIND_STUCK_BLOCKER`, `KIND_STALLED_CLAIM` —
+  the notification kinds. See `contract.md` § "Notification kinds" for
+  the trigger + quiet-hours matrix. The last two are the "gap-fill"
+  kinds added with the inbox in #20.
 - `QUIET_HOURS_BYPASS_KINDS` — frozenset of kinds that ignore quiet
   hours. Currently `{KIND_HALTED, KIND_QUEUE_REPAIR_FAILED,
   KIND_QUEUE_CORRUPT}` — the unrecoverable-without-operator set.
-- `notify(spec, kind, body, *, now=None, sender=None)` — gate + send.
-  Returns `True` if sent. `sender` is injectable for tests.
+- `notify(spec, kind, body, *, now=None, sender=None, plan_slug=None, project_root=None, inbox_writer=None)` —
+  gate + send + optionally drop an inbox event. Returns `True` if the
+  iMessage was sent (the inbox write happens independently of the
+  quiet-hours gate, and only when `plan_slug` + `project_root` are
+  both supplied). `sender` and `inbox_writer` are injectable for tests.
 - `in_quiet_window(spec, now)` — public quiet-hours predicate, used by
   the supervisor's SLA-deferral branch as well as `notify()` itself.
 - `is_quiet_hours(now, start, end)` — wrap-aware time-window check;
@@ -328,7 +345,9 @@ Renderers produce the strings; `notify()` decides whether to send.
   `render_queue_corrupt(diagnosis, backup_path)`,
   `render_queue_repaired(slug_count, backup_path)`,
   `render_queue_repair_failed(reason, backup_path)`,
-  `render_systemic_failure(plan_slug, phase, signature)` —
+  `render_systemic_failure(plan_slug, phase, signature)`,
+  `render_stuck_blocker(plan_slug, blocker_id, phase, question, options, age_min)`,
+  `render_stalled_claim(plan_slug, phase, age_min)` —
   kind-specific bodies.
 
 **Invariants and gotchas**
@@ -530,38 +549,43 @@ makes "trust the prompt" optional.
 ### `monitor.py`
 
 Background-monitoring marker file (account-wide, not per-project). The
-`/clu-monitor` skill writes this after `/schedule` confirms a routine
-was created; clu CLI commands read it to suppress monitoring tips when
-the routine is already in place. Tolerant by design — missing file,
-corrupt JSON, and schema mismatch all surface as `None` / `False`.
+`clu install-hook` CLI writes this after registering the
+`UserPromptSubmit` hook in `~/.claude/settings.json`; clu CLI commands
+read it to suppress monitoring tips when the hook is already in place.
+Tolerant by design — missing file, corrupt JSON, schema mismatch, and
+legacy v1 markers all surface as `None` / `False` so the install
+workflow re-runs cleanly.
 
 **Key types and functions**
 
-- `SCHEMA_VERSION` — independent from `state.SCHEMA_VERSION`; passed to
-  `state.load` via `expected_version`.
+- `SCHEMA_VERSION = 2` — bumped from v1 (the broken `/schedule`-based
+  install) when `clu install-hook` shipped. v1 markers are treated as
+  "needs reinstall" rather than migrated in place.
 - `marker_path()` → `Path` — XDG-respecting location
   (`$XDG_CONFIG_HOME/clu/monitor.json` or `~/.config/clu/monitor.json`).
 - `load_marker(path=None)` → `dict | None` — marker contents, `None`
-  on any failure mode (missing, corrupt JSON, schema version mismatch).
+  on any failure mode (missing, corrupt JSON, schema version mismatch,
+  v1 legacy marker).
 - `is_scheduled(path=None)` → `bool` — `True` iff `load_marker` returns
   a dict. The single predicate every CLI suppression branch keys off.
-- `record_scheduled(schedule_id, cadence, *, path=None)` — atomic write
-  via `state.locked_json`. Overwrites a stale schema-mismatched marker
-  rather than refusing — the marker is advisory, no information loss.
+- `record_hook_installed(hook_path, settings_json_path, *, path=None)` —
+  atomic v2 marker write via `state.locked_json`. Overwrites stale v1
+  markers in place.
 - `clear_marker(path=None)` — idempotent delete; no error on absent
-  file.
+  file. Invoked by `clu uninstall-hook` after `settings.json` is
+  pruned.
 
 **Invariants and gotchas**
 
 - The marker is advisory, not load-bearing. A drifted marker (e.g.
-  schedule deleted out-of-band) makes `/clu-monitor` skip retrying;
-  operator resets manually with `rm ~/.config/clu/monitor.json`. v1
-  trusts the marker — coupling clu to `/schedule`'s introspection
-  would be premature.
-- `record_scheduled` follows the "write after side effect" ordering:
-  `/clu-monitor` calls `/schedule create` first and only writes the
-  marker on success. A failed create leaves the marker absent so the
-  next attempt retries cleanly.
+  operator hand-edited `settings.json` to remove the hook) makes the
+  CLI suppress the install tip wrongly until `clu uninstall-hook` is
+  run. v2 trusts the marker — coupling clu to `settings.json`
+  introspection on every CLI invocation would be wasted I/O.
+- `record_hook_installed` follows the "write after side effect"
+  ordering: `clu install-hook` updates `settings.json` first and only
+  writes the marker on success. A failed install leaves the marker
+  absent so the next attempt retries cleanly.
 - The path resolution mirrors `registry.registry_path()` — same XDG
   rules, same parent directory (`$XDG_CONFIG_HOME/clu/`).
 
@@ -569,10 +593,70 @@ corrupt JSON, and schema mismatch all surface as `None` / `False`.
 
 - `operations.md` § "Background monitoring" for the user-facing setup
   + reset workflow.
-- `contract.md` § "Background-monitoring marker" for the JSON shape.
-- `cli._maybe_print_monitor_tip` for the suppression consumer.
-- `end_of_line/skills/clu-monitor/SKILL.md` for the skill that writes
-  the marker after `/schedule` confirms a routine.
+- `contract.md` § "Background-monitoring marker" for the v2 JSON shape
+  and the v1 → v2 migration story.
+- `cli.cmd_install_hook` / `cli.cmd_uninstall_hook` for the install
+  workflow that writes/clears this marker.
+- `end_of_line/skills/clu-monitor/SKILL.md` for the skill that shells
+  out to `clu install-hook` on the operator's behalf.
+
+### `inbox.py`
+
+Per-event JSON inbox surfaced to active Claude Code sessions via the
+`UserPromptSubmit` hook. One file per event under `~/.config/clu/inbox/`,
+mark-and-sweep dedup into a `processed/` subdir.
+
+**Key types and functions**
+
+- `SCHEMA_VERSION = 1` — embedded in every event payload; the hook
+  ignores events with a higher version it doesn't understand.
+- `inbox_root()` → `Path` — XDG-respecting
+  (`$XDG_CONFIG_HOME/clu/inbox/` or `~/.config/clu/inbox/`).
+- `write_event(*, type, plan_slug, project_root, summary, details=None, inbox=None)` → `str` —
+  atomic `tmp + rename` write of one event JSON; returns the event id
+  (`evt-<8hex>`). `project_root` is resolved to an absolute path so the
+  hook's `git rev-parse --show-toplevel` filter compares apples to
+  apples.
+- `read_unprocessed(inbox=None)` → `list[dict]` — every payload in
+  `inbox/` (NOT `inbox/processed/`), sorted by filename (== arrival
+  order thanks to the `time.time_ns()` suffix). Corrupt files are
+  silently skipped.
+- `mark_processed(event_id, inbox=None)` → `None` — scans for the file
+  whose payload has `id == event_id` and moves it into `processed/`.
+  Idempotent: missing inbox, empty inbox, and unknown id all return
+  silently — never propagate cleanup failures into the hook.
+- `list_for_project(project_root, inbox=None)` → `list[dict]` —
+  `read_unprocessed` filtered to events whose `project_root` resolves
+  to the given path. The hook calls this once per Claude turn.
+
+**Invariants and gotchas**
+
+- Filename format `<safe_ts>-<time_ns>-<type>-<short>.json` makes
+  lexical order == arrival order. The `time_ns()` suffix is the
+  monotonicity guarantee (the second-resolution `timestamp` field ties
+  under tight-loop writes); the 8-char short id is the cross-process
+  collision tiebreaker.
+- No flock on writes — each event is its own file, atomic via
+  `tmp + rename`. Concurrent writers race on filenames, but the
+  ns-suffix + random-short combo is collision-free in practice.
+- `mark_processed` reads every event in the directory looking for a
+  matching id. This is O(N) but N caps low — the surfacer processes
+  events serially, and the hook is bounded to 20 events per turn.
+- Inbox writes are unconditional w.r.t. quiet hours. `notify.notify()`
+  gates the iMessage but always calls `write_event` when `plan_slug` +
+  `project_root` are in scope. The asymmetry is deliberate: the inbox
+  is for the next Claude turn, not for waking the operator.
+
+**See also**
+
+- `contract.md` § "Inbox event files" for the JSON payload shape and
+  filename convention.
+- `end_of_line/hooks/clu_inbox_surface.py` — the canonical consumer;
+  reads stdin, calls `list_for_project`, emits
+  `hookSpecificOutput.additionalContext`, calls `mark_processed` per
+  surfaced event.
+- `notify.notify()` for the integration point that writes inbox events
+  alongside iMessage sends.
 
 ### `fleet.py`
 

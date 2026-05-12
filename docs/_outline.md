@@ -43,6 +43,8 @@ In load order from `cli.py`:
 | `registry.py` | 117 | Host-level index at `~/.config/clu/registry.json`; `register / unregister / list / load_entry_state`. |
 | `queue.py` | 196 | Per-project plan queue (`<plan_dir>/.orchestrator/queue.json`); load/save/mutate via `state.locked_json`; bytes-mode regex slug extraction + `validate_repair` for the auto-repair safety boundary. |
 | `monitor.py` | 72 | Account-wide background-monitoring marker at `$XDG_CONFIG_HOME/clu/monitor.json`; tolerant load/save/clear primitives used by the `/clu-monitor` skill and the CLI tip-suppression branch. |
+| `inbox.py` | 138 | Per-event JSON inbox at `$XDG_CONFIG_HOME/clu/inbox/`; `write_event / read_unprocessed / mark_processed / list_for_project` — mark-and-sweep dedup, surfaced into Claude Code via the `UserPromptSubmit` hook. |
+| `hooks/clu_inbox_surface.py` | 121 | `UserPromptSubmit` hook script: reads stdin, filters inbox to current project (`git rev-parse --show-toplevel` / `os.getcwd()`), emits `hookSpecificOutput.additionalContext` capped at 20 events / 9500 chars, marks events processed. Crash-safe (logs to `~/.config/clu/inbox_hook.log` and exits 0). |
 | `fleet.py` | 103 | Pure projection of every registered plan into one-line `PlanSummary` for bare `clu`. |
 | `cli.py` | 536 | argparse dispatch + `ExitCode` IntEnum + `_die` helper + `@_translate_claim_mismatch` decorator + every operator/worker subcommand. |
 

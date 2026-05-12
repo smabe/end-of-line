@@ -13,9 +13,9 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 
 ## Status
 
-v0.1, working. 237 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
+v0.1, working. 461 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
 
-Recent ships, all driven by clu on itself: configurable worker PATH ([`dispatch.path`](#configure-a-project), closes [#9](https://github.com/smabe/end-of-line/issues/9)), self-contained skill bundling (`clu install-skill` ships `/clu-phase` + `/plan` + `/brainstorm` with a `--only` flag), a cleaner manual tick (`clu tick` dispatches by default; `--dry-tick` is the opt-out for state-mutation-only debug ticks), and a Day-4 sweep that closed 6 backlog issues across 4 self-dispatched bundle plans.
+Recent ships, all driven by clu on itself: in-session signaling via a `UserPromptSubmit` hook + per-event JSON inbox ([`/clu-monitor`](#working-with-clu), closes [#20](https://github.com/smabe/end-of-line/issues/20) — replaces the broken `/schedule` mechanism from #19), configurable worker PATH ([`dispatch.path`](#configure-a-project), closes [#9](https://github.com/smabe/end-of-line/issues/9)), self-contained skill bundling (`clu install-skill` ships `/clu-phase` + `/plan` + `/brainstorm` + `/clu-monitor` with a `--only` flag), and a Day-4 sweep that closed 6 backlog issues across 4 self-dispatched bundle plans.
 
 ## How it works
 
@@ -39,7 +39,7 @@ On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path tha
 
 `clu install-skill` writes four bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
 
-After installing the skills, run `/clu-monitor` once in Claude Code to schedule background notifications on halts and blockers. Idempotent — re-running prints the current schedule status. State file: `~/.config/clu/monitor.json`.
+After installing the skills, run `/clu-monitor` once in Claude Code to install a `UserPromptSubmit` hook that surfaces clu's events into Claude's context on your next message — type "ok" after walking back and Claude already knows what halted, completed, or stuck. Idempotent — re-running prints the current install status. State file: `~/.config/clu/monitor.json`.
 
 For the inbound iMessage poller, grant Full Disk Access to the pipx venv python (System Settings → Privacy & Security → Full Disk Access → add `~/.local/pipx/venvs/end-of-line/bin/python3`). Without it, the poller can't open `chat.db`.
 
@@ -52,7 +52,7 @@ For the inbound iMessage poller, grant Full Disk Access to the pipx venv python 
 - **`/clu-phase`** — the worker skill clu's dispatch invokes for each phase. Required for clu to function; you don't run it directly. The dispatch command in `.orchestrator.json` (see [Configure a project](#configure-a-project)) launches Claude with this skill so each phase honors the worker callback contract.
 - **`/plan`** — authorship skill for writing plans clu can orchestrate. Drops a file at `plans/<slug>.md` in your project with a `## Sessions index` table — that table is what clu's parser reads to know which phases to dispatch.
 - **`/brainstorm`** — parallel-persona pre-planning. Launches 3-6 agents (UX, engineer, QA, …) in parallel to analyze a feature from different angles, then consolidates their outputs into a master plan. Useful before `/plan` when the problem space is fuzzy and you'd rather explore than guess.
-- **`/clu-monitor`** — one-shot setup skill that schedules a Claude Code routine via `/schedule` to ping the operator on iMessage when any plan halts, stalls, or sits on an unanswered blocker. Run once per machine; idempotent via the marker at `~/.config/clu/monitor.json`.
+- **`/clu-monitor`** — one-shot setup skill that registers a `UserPromptSubmit` hook in `~/.claude/settings.json`. The hook surfaces clu's events (halts, blockers, plan completions, queue lifecycle, stuck-blocker re-pings, stalled claims) into Claude's context on every user message, so walking back to a session always has Claude already aware of what happened. Run once per machine; idempotent via the marker at `~/.config/clu/monitor.json`.
 
 ### Recommended workflow
 

@@ -96,6 +96,19 @@ make Claude propose it proactively in new sessions. Marker at
 `~/.config/clu/monitor.json`; helpers in `end_of_line/monitor.py`. See
 [`docs/operations.md`](docs/operations.md) § "Background monitoring".
 
+**clu-inbox** — `/clu-monitor` now installs a `UserPromptSubmit` hook
+(phase 1: `c7aded3`) that surfaces clu events into the active Claude
+Code session on every user message, replacing the broken `/schedule`
+mechanism from #19. Inbox at `~/.config/clu/inbox/`, mark-and-sweep
+dedup into `processed/`; helpers in `end_of_line/inbox.py` and the hook
+script at `end_of_line/hooks/clu_inbox_surface.py`. Two new
+notification kinds added in the same chain (phase 2: `fa82771`):
+`stuck_blocker` (30 min re-ping until consumed) and `stalled_claim`
+(one-shot on lease expiry while status RUNNING) — both emit alongside
+the tick's primary action via `TickResult.side_notifies`. Marker schema
+bumped v1 → v2 (`is_scheduled` treats v1 as "needs reinstall"). Tests
+406 → 461. Closes [#20](https://github.com/smabe/end-of-line/issues/20).
+
 **Day-6 candidates** — none chosen, talk to the operator:
 
 - **Replan path.** `STATUS_HALTED_REPLAN` exists in the enum but

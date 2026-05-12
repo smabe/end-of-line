@@ -355,6 +355,8 @@ Outbound — fired during supervisor ticks via `osascript`. Kinds:
 | `queue_repaired` | Auto-repair fixed a corrupt `queue.json` | Gated |
 | `queue_repair_failed` | Auto-repair failed validation — file reverted from backup | **Bypasses quiet hours** |
 | `queue_corrupt` | `queue.json` corrupt and auto-repair disabled OR throttle exhausted | **Bypasses quiet hours** |
+| `stuck_blocker` | Open blocker un-consumed for >30 min; re-pings every 30 min | Gated (inbox always writes) |
+| `stalled_claim` | Live claim's lease expired with plan status still `running`; one-shot per claim | Gated (inbox always writes) |
 
 Quiet hours default to `["22:00", "08:00"]` local time and wrap
 overnight. Configure per project under `notify.quiet_hours` in
@@ -377,73 +379,140 @@ conversation to that handle, `osascript` will fail silently.
 
 ## Background monitoring
 
-The clu LaunchAgent ticks every minute and dispatches workers, but
-between those ticks no AI sits in the loop watching for halts. If a
-plan halts at 02:15, the existing iMessage flow fires — but if a
-worker is stuck on a blocker for hours because the operator missed the
-iMessage, nothing escalates.
+clu sends iMessages on halts, blockers, plan completions, and queue
+events when `notify.imessage_to` is configured. That covers the
+"operator on their phone, away from the keyboard" case.
 
-`/clu-monitor` (bundled as of 2026-05-12) closes that gap by scheduling
-a Claude Code routine via `/schedule`. The routine runs `clu list` and
-`clu queue list` every 15 minutes (default cadence:
-`*/15 8-21 * * *`, respecting the same quiet-hours convention) and
-iMessages the operator if:
+The remaining gap is in-session signaling: when you walk back to an
+active Claude Code session AFTER clu has changed state, Claude has no
+idea what happened unless you summarize for it. **The `/clu-monitor`
+skill closes that gap** by installing a `UserPromptSubmit` hook that
+surfaces clu's events into Claude's context automatically on your next
+message.
 
-- Any plan has status `HALTED` or `HALTED_REPLAN`
-- Any plan has an open blocker un-consumed for more than 30 minutes
-- Any plan has a stalled claim (lease expired with status `RUNNING`)
+### How it works
 
-Otherwise the routine stays silent. No "all clear" pings.
+1. clu writes each notification event as a JSON file to
+   `~/.config/clu/inbox/` alongside sending the iMessage. Inbox writes
+   are unconditional — quiet hours don't gate them (Claude needs the
+   context even when you're asleep).
+2. The bundled `end_of_line/hooks/clu_inbox_surface.py` hook script
+   reads that directory on every user message in Claude Code.
+3. Events tagged with the current `project_root` (derived from
+   `git rev-parse --show-toplevel`, falling back to `os.getcwd()`) get
+   surfaced as a system reminder in the same turn as your message,
+   capped at 20 events / 9500 chars.
+4. Surfaced events are moved to `~/.config/clu/inbox/processed/` so
+   you never see the same event twice.
+
+Walk back to Claude after a notification, type literally anything
+("ok", "next", "/post-ship"), and Claude reacts with full context.
 
 ### Setup
 
 ```bash
-$ clu install-skill   # one-time, installs /clu-phase /plan /brainstorm /clu-monitor
-$ # then, in a Claude Code session:
+$ clu install-skill --force      # one-time; installs /clu-phase + /plan
+                                 # + /brainstorm + /clu-monitor
+$ # then, in a Claude Code session opened in any project:
 $ /clu-monitor
-Background monitoring scheduled.
-Status file: ~/.config/clu/monitor.json
+Installed UserPromptSubmit hook → /Users/you/.../end_of_line/hooks/clu_inbox_surface.py
+Settings updated: /Users/you/.claude/settings.json
 ```
 
-The marker file at `~/.config/clu/monitor.json` records the
-`schedule_id` so re-running `/clu-monitor` is idempotent.
+Account-wide, not per-project — one hook covers every clu-managed plan
+on the host. The marker at `~/.config/clu/monitor.json` (v2) records
+the install so re-running `/clu-monitor` is idempotent.
 
-### Status, pause, reset
+Under the hood, `/clu-monitor` shells out to `clu install-hook`. You
+can run that directly from a TTY if you want to skip the skill (the
+CLI refuses non-TTY contexts to prevent worker subprocesses from
+silently modifying the user's settings.json).
+
+### Status, reset, uninstall
 
 ```bash
+# Check installed
 $ cat ~/.config/clu/monitor.json
 {
-  "schema_version": 1,
-  "scheduled_at": "2026-05-12T19:00:00Z",
-  "schedule_id": "sch-...",
-  "cadence": "*/15 8-21 * * *"
+  "schema_version": 2,
+  "hook_installed_at": "2026-05-12T19:00:00Z",
+  "hook_path": "/Users/.../end_of_line/hooks/clu_inbox_surface.py",
+  "settings_json_path": "/Users/you/.claude/settings.json"
 }
 
-# To pause without removing the schedule:
-$ /schedule pause sch-...
+# Inspect pending events (debug)
+$ ls ~/.config/clu/inbox/
 
-# To remove entirely (and free Claude Code to schedule a new one later):
-$ /schedule delete sch-...
-$ rm ~/.config/clu/monitor.json
+# Full uninstall
+$ clu uninstall-hook            # removes hook entry from settings.json
+$ rm ~/.config/clu/monitor.json # forget the install
+$ rm -rf ~/.config/clu/inbox    # discard pending events (optional)
 ```
+
+### What gets surfaced
+
+Every event clu sends an iMessage for, plus two escalation kinds
+shipped with the inbox in #20:
+
+- `halted` — plan transitioned to HALTED or HALTED_REPLAN
+- `blocked` — worker called `clu block` (first ping)
+- `plan_completed` — plan finished cleanly
+- `queue_*` — queue lifecycle (skipped, corrupt, repaired, repair_failed)
+- `stuck_blocker` — blocker open >30min and not consumed; re-pings every 30min
+- `stalled_claim` — claim's lease expired with plan status still RUNNING
+
+iMessages and inbox writes are independent: quiet hours
+(`notify.quiet_hours` in `.orchestrator.json`) suppress iMessages but
+NOT inbox writes.
+
+### Migration from pre-#20 install
+
+If `~/.config/clu/monitor.json` exists with `schema_version: 1` (the
+broken `/schedule`-based install from #19), `is_scheduled()` now
+returns False so the CLI tip fires and `/clu-monitor` re-runs cleanly
+— the v1 marker is overwritten in place with v2 on the next install.
+No data migrated; the v1 `schedule_id` was never used by anything
+beyond the routine creation. If you previously scheduled a routine
+manually, delete it via `/schedule delete <id>` first.
+
+### Smoke test (run once after install)
+
+After `clu install-skill --force` and `/clu-monitor`, verify the chain
+works end-to-end:
+
+```bash
+# 1. Drop a one-off event into the inbox.
+$ python3 -c "from end_of_line import inbox; inbox.write_event(
+    type='smoke', plan_slug='smoke-test', project_root='$(pwd)',
+    summary='smoke test event', details={'test': True})"
+
+# 2. Open Claude Code in this directory, type anything (e.g. 'hi').
+# 3. Claude should respond aware of the smoke-test event.
+# 4. Verify the event moved:
+$ ls ~/.config/clu/inbox/processed/    # smoke event should be here
+```
+
+If Claude didn't see the event, check:
+
+- `cat ~/.claude/settings.json | jq '.hooks.UserPromptSubmit'` — entry
+  present with absolute path to `clu_inbox_surface.py`?
+- `cat ~/.config/clu/inbox_hook.log` — the hook logs exceptions here
+  before exiting 0; a non-empty log usually points at the cause.
 
 ### CLI tips
 
-`clu init` and `clu queue add` both print a one-line tip recommending
-`/clu-monitor` when the marker file is absent. The tip is suppressed
-when:
+`clu init` and `clu queue add` print a one-line tip recommending
+`/clu-monitor` when the marker is absent. The tip is suppressed when:
 
-- Monitoring is already scheduled (marker file present), OR
-- Output is not a TTY (workers running clu commands in dispatch
-  subprocesses see no tip — keeps log files clean)
+- Monitoring is already installed (v2 marker present), OR
+- Output is not a TTY (workers see no tip — keeps log files clean)
 
 ### Project CLAUDE.md integration
 
 On the first `clu init` in a project, clu offers to append a `## clu`
-section to the project's `CLAUDE.md` (if one exists). The section
-helps future Claude Code sessions orient on the project's clu workflow
-— relevant across `/clear` boundaries where in-session context is
-gone.
+section to the project's `CLAUDE.md` (mechanism shipped in #19,
+unchanged in #20). The section helps future Claude Code sessions orient
+on the project's clu workflow across `/clear` boundaries.
 
 The prompt fires once per project. Decline once, and a marker at
 `<plan_dir>/.orchestrator/.no-claude-md` suppresses future prompts.
