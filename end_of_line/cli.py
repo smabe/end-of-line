@@ -193,9 +193,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     queue_subs = p_queue.add_subparsers(dest="queue_cmd")
     p_queue_add = queue_subs.add_parser(
-        "add", help="Append a plan slug to the queue (--front to insert at head).",
+        "add",
+        help="Append one or more plan slugs to the queue "
+             "(--front to insert at head).",
     )
-    p_queue_add.add_argument("slug")
+    p_queue_add.add_argument("slugs", nargs="+", help="One or more plan slugs")
     p_queue_add.add_argument(
         "--front", action="store_true",
         help="Insert at head instead of tail.",
@@ -809,11 +811,24 @@ def cmd_queue(args) -> int:
 
 
 def cmd_queue_add(args) -> int:
-    slug = args.slug
-    try:
-        st.validate_slug(slug, kind="plan slug")
-    except st.InvalidSlug as exc:
-        return _die(ExitCode.INVALID_SLUG, str(exc))
+    slugs = list(args.slugs)
+
+    # Slug regex first — cheapest validation, do it for all.
+    for slug in slugs:
+        try:
+            st.validate_slug(slug, kind="plan slug")
+        except st.InvalidSlug as exc:
+            return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    # Within-batch duplicates — reject before touching disk.
+    seen: set[str] = set()
+    for slug in slugs:
+        if slug in seen:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"duplicate slug {slug!r} in batch",
+            )
+        seen.add(slug)
 
     project = args.project if args.project is not None else Path.cwd()
     cfg = load_project_config(project)
@@ -826,9 +841,11 @@ def cmd_queue_add(args) -> int:
             f"run `clu init --project {cfg.project_root} --plan <slug>` first",
         )
 
-    plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
-    if not plan_file.exists():
-        return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
+    # Plan-file existence — all must exist before any mutation.
+    for slug in slugs:
+        plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
+        if not plan_file.exists():
+            return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
 
     queue_path = cfg.queue_path()
     if queue_path.exists():
@@ -837,28 +854,43 @@ def cmd_queue_add(args) -> int:
         except _QUEUE_LOAD_ERRORS as exc:
             return _refuse_on_corrupt_queue(queue_path, exc)
 
+    # Single mutation window — atomic from cron's POV. Early-return on a
+    # pre-existing duplicate is safe: data is untouched, so locked_json's
+    # post-yield save_atomic just rewrites the same bytes.
+    positions: list[int] = []
     with queue.mutate(queue_path) as data:
-        for idx, entry in enumerate(data["queue"]):
-            if entry["slug"] == slug:
+        existing_by_slug = {
+            entry["slug"]: i + 1 for i, entry in enumerate(data["queue"])
+        }
+        for slug in slugs:
+            if slug in existing_by_slug:
                 return _die(
                     ExitCode.STATUS_TRANSITION,
-                    f"{slug!r} already queued at position {idx + 1}; "
+                    f"{slug!r} already queued at position "
+                    f"{existing_by_slug[slug]}; "
                     f"`clu queue remove {slug}` first to re-order",
                 )
-        entry = {
-            "slug": slug,
-            "added_at": st.utcnow(),
-            "added_by": "operator",
-            "position_at_add": "front" if args.front else "tail",
-        }
+        entries = [
+            {
+                "slug": slug,
+                "added_at": st.utcnow(),
+                "added_by": "operator",
+                "position_at_add": "front" if args.front else "tail",
+            }
+            for slug in slugs
+        ]
         if args.front:
-            data["queue"].insert(0, entry)
-            position = 1
+            data["queue"][0:0] = entries
+            positions = list(range(1, len(entries) + 1))
         else:
-            data["queue"].append(entry)
-            position = len(data["queue"])
+            start = len(data["queue"]) + 1
+            data["queue"].extend(entries)
+            positions = list(range(start, start + len(entries)))
 
-    print(f"queued at position {position}")
+    for pos in positions:
+        print(f"queued at position {pos}")
+    if len(slugs) > 1:
+        print(f"queued {len(slugs)} plans")
     return ExitCode.OK
 
 
@@ -928,30 +960,44 @@ def _format_age_iso(ts_iso: str | None) -> str:
     return fleet.humanize_age(seconds)
 
 
+def _format_iso_clock(ts_iso: str | None) -> str:
+    """ISO timestamp → 'HH:MM:SS UTC'. Unknown / unparseable → '?'."""
+    if not ts_iso:
+        return "?"
+    try:
+        dt = st.parse_iso(ts_iso)
+    except (TypeError, ValueError):
+        return "?"
+    return dt.strftime("%H:%M:%S UTC")
+
+
 def cmd_queue_list(args) -> int:
     project = getattr(args, "project", None) or Path.cwd()
     cfg = load_project_config(Path(project))
     queue_path = cfg.queue_path()
 
     if not queue_path.exists():
-        print("(queue is empty)")
-        return ExitCode.OK
+        pending: list[dict] = []
+        history: list[dict] = []
+    else:
+        try:
+            data = queue.load(queue_path)
+        except _QUEUE_LOAD_ERRORS as exc:
+            return _refuse_on_corrupt_queue(queue_path, exc)
+        pending = data["queue"]
+        history = data["history"]
 
-    try:
-        data = queue.load(queue_path)
-    except _QUEUE_LOAD_ERRORS as exc:
-        return _refuse_on_corrupt_queue(queue_path, exc)
-    pending = data["queue"]
-    history = data["history"]
+    # Always build reg_states — empty-pending + in-flight is a real case
+    # (the only queued plan was just popped, dispatch in flight).
+    reg_states = {
+        e.plan_slug: registry.load_entry_state(e)
+        for e in registry.entries()
+        if Path(e.project_root).resolve() == cfg.project_root.resolve()
+    }
 
     if not pending:
         print("(queue is empty)")
     else:
-        reg_states = {
-            e.plan_slug: registry.load_entry_state(e)
-            for e in registry.entries()
-            if Path(e.project_root).resolve() == cfg.project_root.resolve()
-        }
         head_state = reg_states.get(pending[0]["slug"])
         head_frozen = bool(
             head_state and head_state.get("status") in _FREEZE_STATUSES
@@ -973,6 +1019,31 @@ def cmd_queue_list(args) -> int:
             age = _format_age_iso(entry.get("ended_at"))
             outcome = entry.get("outcome", "?")
             print(f"  {entry['slug']}  {outcome}  ({age} ago)")
+
+    pending_slugs = {e["slug"] for e in pending}
+    in_flight = []
+    for slug, state in reg_states.items():
+        if not state:
+            continue
+        claim = state.get("current_claim")
+        if not claim:
+            continue
+        if slug in pending_slugs:
+            # Defensive dedup: a claimed slug shouldn't also be pending,
+            # but if it is, the table row already speaks for it.
+            continue
+        in_flight.append((slug, claim))
+    in_flight.sort(key=lambda sc: sc[1].get("started_at", ""))
+
+    if in_flight:
+        print()
+        for slug, claim in in_flight:
+            started = _format_iso_clock(claim.get("started_at"))
+            lease = _format_iso_clock(claim.get("lease_expires"))
+            print(
+                f"In flight: {slug} (dispatched {started}, "
+                f"lease until {lease})"
+            )
     return ExitCode.OK
 
 

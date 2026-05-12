@@ -231,6 +231,98 @@ class QueueListTestCase(unittest.TestCase):
         # List must NOT create the queue file as a side effect.
         self.assertFalse(self.queue_path.exists())
 
+    # --- in-flight footer ---
+
+    def _claim_plan(
+        self,
+        slug: str,
+        *,
+        started_at: str = "2026-05-12T10:00:00Z",
+        lease_expires: str = "2026-05-12T10:30:00Z",
+        last_heartbeat_at: str | None = None,
+    ) -> None:
+        """Register `slug` and write a state.json with an active claim."""
+        _write_plan(self.project, slug)
+        main(["init", "--project", str(self.project), "--plan", slug])
+        cfg = ProjectConfig(project_root=self.project)
+        with st.mutate(cfg.state_path(slug)) as data:
+            data["current_claim"] = {
+                "phase_id": "x",
+                "claimed_by": f"session-{slug}-00000000",
+                "lease_expires": lease_expires,
+                "started_at": started_at,
+                "last_heartbeat_at": last_heartbeat_at or started_at,
+                "attempts": 1,
+            }
+
+    def test_list_in_flight_footer_when_plan_dispatched(self) -> None:
+        # Plan was popped from queue and is now in flight (pending is empty).
+        self._claim_plan("foo")
+        rc, out = self._run(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("(queue is empty)", out)
+        self.assertIn("In flight: foo", out)
+        self.assertIn("dispatched 10:00:00 UTC", out)
+        self.assertIn("lease until 10:30:00 UTC", out)
+
+    def test_list_in_flight_footer_with_pending(self) -> None:
+        self._claim_plan("foo")
+        _write_plan(self.project, "bar")
+        _add(self.project, "bar")
+        rc, out = self._run(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("bar", out)
+        self.assertIn("In flight: foo", out)
+
+    def test_list_no_in_flight_footer_when_empty(self) -> None:
+        _bootstrap(self.project)
+        _write_plan(self.project, "bar")
+        _add(self.project, "bar")
+        rc, out = self._run(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertNotIn("In flight:", out)
+
+    def test_list_in_flight_sorts_by_started_at(self) -> None:
+        # Two in-flight plans — sort by started_at ascending.
+        self._claim_plan(
+            "later",
+            started_at="2026-05-12T11:00:00Z",
+            lease_expires="2026-05-12T11:30:00Z",
+        )
+        self._claim_plan(
+            "earlier",
+            started_at="2026-05-12T09:00:00Z",
+            lease_expires="2026-05-12T09:30:00Z",
+        )
+        rc, out = self._run(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.OK)
+        i_earlier = out.find("In flight: earlier")
+        i_later = out.find("In flight: later")
+        self.assertGreater(i_earlier, -1)
+        self.assertGreater(i_later, -1)
+        self.assertLess(i_earlier, i_later)
+
+    def test_list_in_flight_includes_stalled(self) -> None:
+        # Past-lease claim — still surface in the footer.
+        self._claim_plan(
+            "foo",
+            started_at="2026-05-11T10:00:00Z",
+            lease_expires="2026-05-11T10:30:00Z",
+            last_heartbeat_at="2026-05-11T10:00:00Z",
+        )
+        rc, out = self._run(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("In flight: foo", out)
+
+    def test_list_in_flight_omits_slug_also_in_pending(self) -> None:
+        # Defensive: if the same slug appears in pending AND has a claim,
+        # don't double-report it in the footer.
+        self._claim_plan("foo")
+        _add(self.project, "foo")
+        rc, out = self._run(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertNotIn("In flight: foo", out)
+
 
 if __name__ == "__main__":
     unittest.main()

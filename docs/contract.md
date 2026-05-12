@@ -123,7 +123,7 @@ Field semantics:
   - `removed` — operator ran `clu queue remove <slug>`.
   - `abandoned` — supervisor popped a head whose plan file was missing; written under the queue lock alongside a `KIND_QUEUE_SKIPPED` ping.
   - `absorbed` — supervisor popped a head whose state.json already existed in a non-freeze status (`done`/`running`); the queue entry is retired without re-`init`-ing.
-- A successful normal pop produces no history entry — the popped slug becomes the active plan instead.
+- A successful normal pop produces no history entry — the popped slug becomes the active plan instead. `queue.history` records only failures (`removed | absorbed | abandoned`); successful pops live only in the popped plan's state.json. The `clu queue list` in-flight footer derives from the registry, not `queue.history`.
 - Reads/writes go through `queue.mutate` (which uses `state.locked_json`); the same lock+atomic-write primitive that protects state.json.
 
 Two sibling files share the queue's directory:

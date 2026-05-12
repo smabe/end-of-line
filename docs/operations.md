@@ -221,10 +221,37 @@ queue per project (not per plan).
 ```bash
 clu queue add my-next-plan          # append at tail
 clu queue add fix-bug-7 --front     # insert at head
+clu queue add a b c                 # multi-arg: all-or-nothing batch
 clu queue                           # bare → list (default subcommand)
 clu queue list                      # same
 clu queue remove old-plan           # drop a pending slug (→ history)
 ```
+
+`clu queue add` accepts one or more slugs. Multi-arg adds are atomic from
+cron's POV — clu validates every slug (regex, within-batch dupes,
+plan-file existence, pre-existing pending duplicates) before mutating;
+any failure rejects the whole batch with the queue unchanged. Output
+prints one `queued at position N` line per slug in argument order,
+followed by `queued <N> plans` when N > 1. `--front` with multi-arg
+inserts in argument order at the head (`a b c --front` →
+`[a, b, c, ...existing]`, NOT reversed).
+
+`clu queue list` shows pending entries as a table; when any plan
+registered to this project has an active claim (i.e. was popped and is
+currently running or stalled), a one-line footer surfaces it after the
+table:
+
+```
+$ clu queue list
+POS  SLUG  STATUS  NOTE
+1    bar   queued  plans/bar.md
+
+In flight: foo (dispatched 14:32:05 UTC, lease until 15:02:05 UTC)
+```
+
+Sorted by `started_at` ascending if multiple. Omitted cleanly when no
+in-flight plans. The footer is independent of `queue.history` (which
+records only failures — see `docs/contract.md`).
 
 The supervisor's post-loop step in `clu tick-all` walks every distinct
 project_root and pops at most one entry per tick into a fresh `clu
@@ -563,7 +590,7 @@ wait or when the worker's exit pattern wouldn't naturally release
 | `clu release-claim --project P --plan S [--force] [--reason ...]` | Clear a stuck `current_claim` after a dead worker |
 | `clu unregister --project P --plan S` | Drop a plan from the host registry (state file untouched) |
 | `clu unregister --all-archived [--dry-run]` | Prune every registry entry whose master plan file no longer exists. Use after archiving plans (e.g. `post-ship`). `--dry-run` previews. |
-| `clu queue add <slug> [--front] [--project P]` | Append (or `--front` prepend) a plan slug to the project's queue |
+| `clu queue add <slug>... [--front] [--project P]` | Append (or `--front` prepend) one or more plan slugs to the project's queue. Multi-arg is atomic — any validation failure rejects the whole batch |
 | `clu queue list [--project P]` (or bare `clu queue`) | Show pending queue + recent failures |
 | `clu queue remove <slug> [--project P]` | Drop a pending slug (moves it to history) |
 | `clu answer --project P --plan S <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |
