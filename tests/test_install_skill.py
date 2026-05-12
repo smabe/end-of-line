@@ -27,7 +27,7 @@ class InstallSkillTestBase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.target = self.home / ".claude" / "skills" / "clu-phase" / "SKILL.md"
         self.bundled_bytes = (
-            files("end_of_line").joinpath("skill/SKILL.md").read_bytes()
+            files("end_of_line").joinpath("skills/clu-phase/SKILL.md").read_bytes()
         )
 
     def _run(self, *argv: str) -> tuple[int, str, str]:

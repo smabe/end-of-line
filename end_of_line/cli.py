@@ -347,7 +347,7 @@ def cmd_fleet(args) -> int:
 def cmd_install_skill(args) -> int:
     from importlib.resources import files
 
-    bundled = files("end_of_line").joinpath("skill/SKILL.md")
+    bundled = files("end_of_line").joinpath("skills/clu-phase/SKILL.md")
     target = Path.home() / ".claude" / "skills" / "clu-phase" / "SKILL.md"
     # `is_symlink` first — `exists()` follows symlinks, so a broken symlink
     # would otherwise look like a clean target.
