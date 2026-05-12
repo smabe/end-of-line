@@ -311,6 +311,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the CLAUDE.md note prompt (non-interactive runs).",
     )
 
+    sub.add_parser(
+        "install-hook",
+        help="Register the clu UserPromptSubmit hook in "
+             "~/.claude/settings.json so Claude Code sessions see "
+             "unprocessed inbox events at the start of every turn. "
+             "Idempotent; preserves the operator's other hooks and "
+             "their nested/flat array style.",
+    )
+    sub.add_parser(
+        "uninstall-hook",
+        help="Remove the clu UserPromptSubmit hook from "
+             "~/.claude/settings.json (leaving the operator's other "
+             "hooks intact) and clear the monitor marker.",
+    )
+
     p_queue = sub.add_parser(
         "queue",
         help="Manage the project's plan queue (operator-only in v1).",
@@ -513,6 +528,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_tick_all(args)
     if args.cmd == "install-skill":
         return cmd_install_skill(args)
+    if args.cmd == "install-hook":
+        return cmd_install_hook(args)
+    if args.cmd == "uninstall-hook":
+        return cmd_uninstall_hook(args)
     if args.cmd == "queue":
         return cmd_queue(args)
     # `unregister` needs to handle --all-archived (no single project/plan)
@@ -874,6 +893,168 @@ def cmd_install_skill(args) -> int:
         except ValueError as exc:
             return _die(ExitCode.GENERIC, str(exc))
         print(f"Updated {claude_md} with autonomous-loop-pacing section")
+    return ExitCode.OK
+
+
+def _hook_settings_path() -> Path:
+    return Path.home() / ".claude" / "settings.json"
+
+
+def _resolve_hook_script_path() -> str:
+    """Absolute on-disk path to the bundled UserPromptSubmit hook script.
+
+    Resolved at install time and baked into `settings.json` so the hook
+    keeps working even if `sys.executable` / the cwd change between
+    install and trigger. `importlib.resources.files(...)` returns a
+    Traversable; on a real install it's a concrete `Path`.
+    """
+    from importlib.resources import files
+    return str(files("end_of_line").joinpath("hooks/clu_inbox_surface.py"))
+
+
+def _hook_command(hook_path: str) -> str:
+    """Shell command Claude Code runs each UserPromptSubmit.
+
+    Use `sys.executable -u` so the python the operator's clu was
+    installed under is the same python that imports `end_of_line`.
+    `-u` keeps stdout unbuffered — Claude reads our JSON synchronously.
+    """
+    return f"{sys.executable} -u {hook_path}"
+
+
+def _entry_command(entry: dict) -> str | None:
+    """Pull the `command` string from a settings.json hook entry.
+
+    Both shapes are valid:
+      flat:   {"type": "command", "command": "..."}
+      nested: {"matcher"?: ..., "hooks": [{"type": "command", "command": "..."}]}
+    """
+    if "command" in entry:
+        return entry.get("command")
+    inner = entry.get("hooks")
+    if isinstance(inner, list) and inner:
+        first = inner[0]
+        if isinstance(first, dict):
+            return first.get("command")
+    return None
+
+
+def _entry_mentions_hook_path(entry: dict, hook_path: str) -> bool:
+    cmd = _entry_command(entry) or ""
+    return hook_path in cmd
+
+
+def _detect_nested_style(hooks: dict) -> bool:
+    """True if any existing hook entry uses the nested-array shape.
+
+    The operator's machine may carry a SessionStart entry in nested
+    shape (the style the Claude Code docs lead with). Preserve it on
+    fresh installs so settings.json reads as if the operator wrote
+    every entry by hand. With no entries to learn from, default to the
+    nested shape — it's the richer form and accepts a `timeout` field.
+    """
+    for event_entries in hooks.values():
+        if not isinstance(event_entries, list):
+            continue
+        for entry in event_entries:
+            if isinstance(entry, dict) and "hooks" in entry:
+                return True
+            if isinstance(entry, dict) and "command" in entry:
+                return False
+    return True
+
+
+def _build_hook_entry(command: str, *, nested: bool) -> dict:
+    if nested:
+        return {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
+    return {"type": "command", "command": command}
+
+
+def cmd_install_hook(args) -> int:
+    """Register the clu inbox surface hook in `~/.claude/settings.json`.
+
+    Adds (or refreshes) a single UserPromptSubmit entry pointing at the
+    bundled hook script. Idempotent on absolute hook_path. Refuses if
+    stdout isn't a TTY (workers shouldn't be installing user-level
+    hooks) and refuses on malformed settings.json (don't try to
+    repair). Writes the marker on success.
+    """
+    if not sys.stdout.isatty():
+        return _die(
+            ExitCode.GENERIC,
+            "install-hook requires an interactive shell (refusing in "
+            "non-TTY context — workers should not install user-level hooks)",
+        )
+
+    hook_path = _resolve_hook_script_path()
+    command = _hook_command(hook_path)
+    settings_path = _hook_settings_path()
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if settings_path.exists():
+        try:
+            data = json.loads(settings_path.read_text())
+        except json.JSONDecodeError as exc:
+            return _die(
+                ExitCode.GENERIC,
+                f"settings.json malformed ({exc}); refusing to edit "
+                f"{settings_path}. Fix the JSON manually and re-run.",
+            )
+    else:
+        data = {}
+
+    hooks = data.setdefault("hooks", {})
+    ups = hooks.setdefault("UserPromptSubmit", [])
+    nested = _detect_nested_style(hooks)
+
+    already = any(_entry_mentions_hook_path(e, hook_path) for e in ups)
+    if not already:
+        ups.append(_build_hook_entry(command, nested=nested))
+        tmp = settings_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, settings_path)
+        print(f"Installed UserPromptSubmit hook → {hook_path}")
+    else:
+        print(f"Hook already installed at {hook_path}")
+    print(f"Settings: {settings_path}")
+
+    monitor.record_hook_installed(hook_path, str(settings_path))
+    return ExitCode.OK
+
+
+def cmd_uninstall_hook(args) -> int:
+    """Remove the clu hook entry, leaving the operator's other hooks alone.
+
+    Matches by absolute hook_path so unrelated UserPromptSubmit entries
+    (the operator's own work) survive. Clears the marker on success.
+    Idempotent — running on a host without the hook installed is OK.
+    """
+    settings_path = _hook_settings_path()
+    if not settings_path.exists():
+        monitor.clear_marker()
+        return ExitCode.OK
+    try:
+        data = json.loads(settings_path.read_text())
+    except json.JSONDecodeError:
+        return _die(
+            ExitCode.GENERIC,
+            f"settings.json malformed; refusing to edit {settings_path}.",
+        )
+
+    hook_path = _resolve_hook_script_path()
+    ups = data.get("hooks", {}).get("UserPromptSubmit", [])
+    filtered = [
+        e for e in ups if not _entry_mentions_hook_path(e, hook_path)
+    ]
+    if len(filtered) == len(ups):
+        print("clu inbox hook not present in settings.json")
+    else:
+        data.setdefault("hooks", {})["UserPromptSubmit"] = filtered
+        tmp = settings_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, settings_path)
+        print(f"Uninstalled UserPromptSubmit hook ({hook_path})")
+    monitor.clear_marker()
     return ExitCode.OK
 
 

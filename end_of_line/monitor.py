@@ -1,15 +1,24 @@
 """Background-monitoring marker file.
 
-A successful `/clu-monitor` invocation writes a marker at
+A successful `clu install-hook` writes a marker at
 `$XDG_CONFIG_HOME/clu/monitor.json` (default `~/.config/clu/monitor.json`)
 so subsequent invocations are idempotent and clu CLI hints can suppress
-themselves when monitoring is already scheduled. Account-wide, not
-per-project — one /schedule routine watches every plan on the host.
+themselves when monitoring is already wired up. Account-wide, not
+per-project — one hook watches every plan on the host.
 
-Tolerant by design: missing file, corrupt JSON, and schema mismatch
-all surface as `None` / `False` so callers can branch on a single
-"do we need to schedule?" predicate. The pattern mirrors
-`registry.load_entry_state` — the marker is advisory, never load-bearing.
+Schema v2 (current): {schema_version: 2, hook_installed_at, hook_path,
+settings_json_path}. Written by `clu install-hook` / `cmd_install_hook`.
+
+Schema v1 (legacy `/schedule` install — the broken pre-#20 mechanism):
+{schema_version: 1, schedule_id, cadence, scheduled_at}. v1 markers are
+treated as "needs reinstall" by `is_scheduled` and `load_marker` — both
+return None/False so the CLI hint fires and `/clu-monitor` re-runs the
+install cleanly.
+
+Tolerant by design: missing file, corrupt JSON, schema mismatch, and v1
+markers all surface as `None` / `False` so callers can branch on a
+single "do we need to install?" predicate. The marker is advisory,
+never load-bearing.
 """
 from __future__ import annotations
 
@@ -18,7 +27,7 @@ from pathlib import Path
 
 from . import state as st
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def marker_path() -> Path:
@@ -32,7 +41,11 @@ def _empty() -> dict:
 
 
 def load_marker(path: Path | None = None) -> dict | None:
-    """Return the marker dict, or None on any failure mode."""
+    """Return the marker dict on a current-schema match; None otherwise.
+
+    A v1 marker (legacy `/schedule` install) returns None so callers
+    treat the host as un-monitored and re-run the hook install.
+    """
     path = path or marker_path()
     if not path.exists():
         return None
@@ -46,21 +59,26 @@ def is_scheduled(path: Path | None = None) -> bool:
     return load_marker(path) is not None
 
 
-def record_scheduled(
-    schedule_id: str, cadence: str, *, path: Path | None = None,
+def record_hook_installed(
+    hook_path: str, settings_json_path: str, *, path: Path | None = None,
 ) -> None:
+    """Stamp the v2 marker. Atomically overwrites any prior v1 marker.
+
+    `path` parameter is for tests; production uses the default
+    XDG-derived `marker_path()`.
+    """
     path = path or marker_path()
-    # Overwrite-on-mismatch: if a stale marker has a different schema_version,
-    # locked_json would refuse to load it. Drop it so re-recording works after
-    # a clu upgrade — the marker is advisory, no information loss.
+    # Overwrite-on-mismatch: a stale v1 marker (or any schema mismatch)
+    # would make locked_json's load refuse. Drop it so the v2 write
+    # succeeds atomically. The marker carries no data we'd lose.
     if path.exists() and load_marker(path) is None:
         path.unlink()
     with st.locked_json(
         path, expected_version=SCHEMA_VERSION, empty=_empty,
     ) as data:
-        data["scheduled_at"] = st.utcnow()
-        data["schedule_id"] = schedule_id
-        data["cadence"] = cadence
+        data["hook_installed_at"] = st.utcnow()
+        data["hook_path"] = hook_path
+        data["settings_json_path"] = settings_json_path
 
 
 def clear_marker(path: Path | None = None) -> None:

@@ -97,7 +97,9 @@ class InitTipTestCase(_BaseHintsCase):
         self.assertIn("background notifications", out)
 
     def test_init_suppresses_tip_when_marker_present(self) -> None:
-        monitor.record_scheduled("sched-123", "*/15 8-21 * * *")
+        monitor.record_hook_installed(
+            "/abs/hook.py", "/home/x/.claude/settings.json",
+        )
         rc, out = self._init()
         self.assertEqual(rc, 0)
         self.assertNotIn("/clu-monitor", out)
@@ -130,7 +132,9 @@ class QueueAddTipTestCase(_BaseHintsCase):
         self.assertIn("/clu-monitor", out)
 
     def test_queue_add_suppresses_tip_when_marker_present(self) -> None:
-        monitor.record_scheduled("sched-xyz", "*/15 8-21 * * *")
+        monitor.record_hook_installed(
+            "/abs/hook.py", "/home/x/.claude/settings.json",
+        )
         rc, out = self._queue_add("a")
         self.assertEqual(rc, ExitCode.OK)
         self.assertNotIn("/clu-monitor", out)

@@ -1,14 +1,19 @@
-"""Tests for the `/clu-monitor` marker primitive.
+"""Tests for the marker primitive (v2 — written by `clu install-hook`).
 
 Marker file lives at `$XDG_CONFIG_HOME/clu/monitor.json` (default
-`~/.config/clu/monitor.json`) and signals that background notification
-monitoring is already scheduled. Account-wide, not per-project; mirrors
-the `registry.registry_path()` XDG resolution pattern.
+`~/.config/clu/monitor.json`) and signals that the UserPromptSubmit
+hook for surfacing clu inbox events is installed. Account-wide, not
+per-project; mirrors the `registry.registry_path()` XDG resolution
+pattern.
+
+v1 markers (legacy `/schedule` install) are covered separately by
+`test_monitor_migration.py` — they read as "not scheduled" so the CLI
+hint fires and reinstall runs cleanly.
 
 Tolerance contract: load_marker / is_scheduled treat "missing", "corrupt
-JSON", and "schema mismatch" the same way — no exception, returns
-None/False — so callers can branch on a single "do we need to schedule?"
-predicate without exception handling.
+JSON", "schema mismatch", and v1 markers the same way — no exception,
+returns None/False — so callers can branch on a single "do we need to
+install?" predicate without exception handling.
 """
 from __future__ import annotations
 
@@ -49,12 +54,17 @@ class MarkerLifecycleTests(unittest.TestCase):
         isolate_monitor_marker(self, self.tmp)
         self.path = monitor.marker_path()
 
+    def _record(self) -> None:
+        monitor.record_hook_installed(
+            "/abs/hook.py", "/home/x/.claude/settings.json",
+        )
+
     def test_is_scheduled_returns_false_when_absent(self) -> None:
         self.assertFalse(self.path.exists())
         self.assertFalse(monitor.is_scheduled())
 
     def test_is_scheduled_returns_true_when_present(self) -> None:
-        monitor.record_scheduled("sch-123", "*/15 * * * *")
+        self._record()
         self.assertTrue(monitor.is_scheduled())
 
     def test_is_scheduled_returns_false_when_corrupt(self) -> None:
@@ -66,29 +76,29 @@ class MarkerLifecycleTests(unittest.TestCase):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps({
             "schema_version": 999,
-            "scheduled_at": "2026-05-12T00:00:00Z",
-            "schedule_id": "sch-x",
-            "cadence": "*/15 * * * *",
+            "hook_installed_at": "2026-05-12T00:00:00Z",
+            "hook_path": "/x",
+            "settings_json_path": "/y",
         }))
         self.assertFalse(monitor.is_scheduled())
 
-    def test_record_scheduled_writes_marker(self) -> None:
-        monitor.record_scheduled("sch-abc", "*/15 8-21 * * *")
+    def test_record_hook_installed_writes_marker(self) -> None:
+        monitor.record_hook_installed("/abs/hook.py", "/home/x/settings.json")
         data = json.loads(self.path.read_text())
         self.assertEqual(data["schema_version"], monitor.SCHEMA_VERSION)
-        self.assertEqual(data["schedule_id"], "sch-abc")
-        self.assertEqual(data["cadence"], "*/15 8-21 * * *")
-        self.assertTrue(data["scheduled_at"].endswith("Z"))
+        self.assertEqual(data["hook_path"], "/abs/hook.py")
+        self.assertEqual(data["settings_json_path"], "/home/x/settings.json")
+        self.assertTrue(data["hook_installed_at"].endswith("Z"))
 
-    def test_record_scheduled_overwrites_existing(self) -> None:
-        monitor.record_scheduled("sch-old", "*/30 * * * *")
-        monitor.record_scheduled("sch-new", "*/15 * * * *")
+    def test_record_hook_installed_overwrites_existing(self) -> None:
+        monitor.record_hook_installed("/old/hook.py", "/old/settings.json")
+        monitor.record_hook_installed("/new/hook.py", "/new/settings.json")
         data = json.loads(self.path.read_text())
-        self.assertEqual(data["schedule_id"], "sch-new")
-        self.assertEqual(data["cadence"], "*/15 * * * *")
+        self.assertEqual(data["hook_path"], "/new/hook.py")
+        self.assertEqual(data["settings_json_path"], "/new/settings.json")
 
     def test_clear_marker_removes_file(self) -> None:
-        monitor.record_scheduled("sch-abc", "*/15 * * * *")
+        self._record()
         self.assertTrue(self.path.exists())
         monitor.clear_marker()
         self.assertFalse(self.path.exists())
@@ -99,10 +109,10 @@ class MarkerLifecycleTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
     def test_load_marker_returns_dict_when_present(self) -> None:
-        monitor.record_scheduled("sch-abc", "*/15 * * * *")
+        monitor.record_hook_installed("/abs/hook.py", "/home/x/settings.json")
         loaded = monitor.load_marker()
         self.assertIsNotNone(loaded)
-        self.assertEqual(loaded["schedule_id"], "sch-abc")
+        self.assertEqual(loaded["hook_path"], "/abs/hook.py")
 
     def test_load_marker_returns_none_when_absent(self) -> None:
         self.assertIsNone(monitor.load_marker())
