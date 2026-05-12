@@ -16,7 +16,7 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 # Fragment (no anchors) so other modules can compose it into larger patterns
 # without redefining the character class — drift here is a security invariant
@@ -147,16 +147,39 @@ def locked(state_path: Path) -> Iterator[None]:
 
 
 @contextmanager
+def locked_json(
+    path: Path,
+    *,
+    expected_version: int,
+    empty: Callable[[], dict] | None = None,
+) -> Iterator[dict]:
+    """Generic lock + load + yield-for-mutation + atomic write.
+
+    Shared primitive for every clu JSON file (state, registry, queue). The
+    `empty` factory makes the missing-file branch a caller choice: state
+    files always pre-exist (claim path → save_atomic happens first), so
+    state.mutate passes None and lets load() raise FileNotFoundError;
+    registry and queue tolerate missing-on-first-write and pass a real
+    factory.
+    """
+    with locked(path):
+        if not path.exists() and empty is not None:
+            data = empty()
+        else:
+            data = load(path, expected_version=expected_version)
+        yield data
+        save_atomic(path, data)
+
+
+@contextmanager
 def mutate(state_path: Path) -> Iterator[dict]:
     """Take the lock, load, yield data for mutation, write atomically on exit.
 
     Use this for every read-modify-write. Plain `locked()` is for the rare
     case where multiple files need to be coordinated under one lock.
     """
-    with locked(state_path):
-        data = load(state_path)
+    with locked_json(state_path, expected_version=SCHEMA_VERSION) as data:
         yield data
-        save_atomic(state_path, data)
 
 
 def load(state_path: Path, *, expected_version: int = SCHEMA_VERSION) -> dict:

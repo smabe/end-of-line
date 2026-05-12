@@ -146,6 +146,53 @@ class TestSchemaVersion(TempStateMixin, unittest.TestCase):
         self.assertEqual(loaded["plan_slug"], "foo")
 
 
+class TestLockedJson(TempStateMixin, unittest.TestCase):
+    """The generic lock+load+yield+save primitive (factored out of state.mutate
+    and registry._mutate). state.mutate and registry._mutate are both thin
+    wrappers around it now."""
+
+    def test_works_with_custom_empty_factory(self) -> None:
+        path = self.tmp / "custom.json"
+        empty = lambda: {"schema_version": 1, "payload": "fresh"}
+        with st.locked_json(path, expected_version=1, empty=empty) as data:
+            self.assertEqual(data["payload"], "fresh")
+            data["payload"] = "modified"
+        reloaded = json.loads(path.read_text())
+        self.assertEqual(reloaded["payload"], "modified")
+
+    def test_raises_schema_mismatch(self) -> None:
+        path = self.tmp / "wrong.json"
+        path.write_text('{"schema_version": 7, "payload": "x"}')
+        with self.assertRaises(st.SchemaVersionMismatch):
+            with st.locked_json(
+                path, expected_version=1, empty=lambda: {"schema_version": 1},
+            ):
+                pass
+
+    def test_missing_file_without_empty_factory_raises(self) -> None:
+        # Preserves state.mutate's pre-extraction behavior: callers that
+        # don't pass an empty factory want FileNotFoundError on missing.
+        path = self.tmp / "missing.json"
+        with self.assertRaises(FileNotFoundError):
+            with st.locked_json(path, expected_version=1):
+                pass
+
+    def test_atomic_rename_leaves_no_tmp_on_success(self) -> None:
+        path = self.tmp / "atomic.json"
+        empty = lambda: {"schema_version": 1, "rows": []}
+        with st.locked_json(path, expected_version=1, empty=empty) as data:
+            data["rows"].append("x")
+        leftover = list(path.parent.glob("atomic.json.*.tmp"))
+        self.assertEqual(leftover, [])
+
+    def test_creates_parent_dir(self) -> None:
+        path = self.tmp / "nested" / "deep" / "file.json"
+        empty = lambda: {"schema_version": 1}
+        with st.locked_json(path, expected_version=1, empty=empty):
+            pass
+        self.assertTrue(path.exists())
+
+
 class TestEvents(unittest.TestCase):
     def test_append_event(self) -> None:
         data = st.empty_state("foo", "plans")

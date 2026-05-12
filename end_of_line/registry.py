@@ -11,12 +11,9 @@ per-plan state files.
 """
 from __future__ import annotations
 
-import json
 import os
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterator
 
 from . import state as st
 
@@ -46,15 +43,11 @@ def _load(path: Path) -> dict:
     return st.load(path, expected_version=SCHEMA_VERSION)
 
 
-@contextmanager
-def _mutate(path: Path) -> Iterator[dict]:
-    """lock + load + yield-for-mutation + atomic write. Mirrors state.mutate
-    but tolerates a missing file (first-register creates it)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with st.locked(path):
-        data = _load(path)
-        yield data
-        st.save_atomic(path, data)
+def _mutate(path: Path):
+    """lock + load + yield-for-mutation + atomic write. Tolerates a missing
+    file (first-register creates it) via the shared `state.locked_json`
+    primitive."""
+    return st.locked_json(path, expected_version=SCHEMA_VERSION, empty=_empty)
 
 
 def entries(path: Path | None = None) -> list[PlanEntry]:

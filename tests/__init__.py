@@ -19,3 +19,14 @@ def isolate_registry(testcase: unittest.TestCase, tmp_path: Path) -> None:
     )
     patcher.start()
     testcase.addCleanup(patcher.stop)
+
+
+def isolate_queue(testcase: unittest.TestCase, tmp_path: Path) -> None:
+    """Isolate registry + queue file paths for a queue test.
+
+    queue.json lives under each project's `.orchestrator/` — so per-test
+    isolation falls out naturally as long as the project root is itself
+    tmp-scoped. The only shared sink that needs patching is the host
+    registry, since `clu queue add`'s bootstrap check reads it.
+    """
+    isolate_registry(testcase, tmp_path)

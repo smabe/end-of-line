@@ -32,6 +32,11 @@ class ProjectConfig:
     dispatch: DispatchSpec = field(default_factory=DispatchSpec)
     notify: NotifySpec = field(default_factory=NotifySpec)
 
+    def queue_path(self) -> Path:
+        """Per-project queue file. Lives in the same `.orchestrator/` dir as
+        state files. No slug → no path-traversal validation needed."""
+        return self.project_root / self.plan_dir / ORCHESTRATOR_DIR / "queue.json"
+
     def state_path(self, plan_slug: str) -> Path:
         path = self.project_root / self.plan_dir / ORCHESTRATOR_DIR / f"{plan_slug}.state.json"
         # Defense in depth — even after slug validation, refuse paths that
