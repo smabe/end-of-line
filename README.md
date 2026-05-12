@@ -11,7 +11,7 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 
 v0.1, working. 233 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
 
-Recent ships, all driven by clu on itself: configurable worker PATH ([`dispatch.path`](#configure-a-project), closes [#9](https://github.com/smabe/end-of-line/issues/9)), self-contained skill bundling (`clu install-skill` now ships `/clu-phase` + `/plan` with a `--only` flag), and a Day-4 sweep that closed 6 backlog issues across 4 self-dispatched bundle plans.
+Recent ships, all driven by clu on itself: configurable worker PATH ([`dispatch.path`](#configure-a-project), closes [#9](https://github.com/smabe/end-of-line/issues/9)), self-contained skill bundling (`clu install-skill` now ships `/clu-phase` + `/plan` + `/brainstorm` with a `--only` flag), and a Day-4 sweep that closed 6 backlog issues across 4 self-dispatched bundle plans.
 
 ## How it works
 
@@ -28,12 +28,12 @@ Recent ships, all driven by clu on itself: configurable worker PATH ([`dispatch.
 git clone https://github.com/smabe/end-of-line.git
 cd end-of-line
 pipx install -e .          # puts `clu` on $PATH via its own venv
-clu install-skill          # copies the /clu-phase worker skill into ~/.claude/skills/
+clu install-skill          # copies the bundled skills (/clu-phase + /plan + /brainstorm) into ~/.claude/skills/
 ```
 
 On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path that works without `--break-system-packages`.
 
-`clu install-skill` writes two bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
+`clu install-skill` writes three bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
 
 For the inbound iMessage poller, grant Full Disk Access to the pipx venv python (System Settings → Privacy & Security → Full Disk Access → add `~/.local/pipx/venvs/end-of-line/bin/python3`). Without it, the poller can't open `chat.db`.
 
@@ -41,12 +41,22 @@ For the inbound iMessage poller, grant Full Disk Access to the pipx venv python 
 
 ## Working with clu
 
-`clu install-skill` ships two skills:
+`clu install-skill` ships three skills:
 
 - **`/clu-phase`** — the worker skill clu's dispatch invokes for each phase. Required for clu to function; you don't run it directly. The dispatch command in `.orchestrator.json` (see [Configure a project](#configure-a-project)) launches Claude with this skill so each phase honors the worker callback contract.
 - **`/plan`** — authorship skill for writing plans clu can orchestrate. Drops a file at `plans/<slug>.md` in your project with a `## Sessions index` table — that table is what clu's parser reads to know which phases to dispatch.
+- **`/brainstorm`** — parallel-persona pre-planning. Launches 3-6 agents (UX, engineer, QA, …) in parallel to analyze a feature from different angles, then consolidates their outputs into a master plan. Useful before `/plan` when the problem space is fuzzy and you'd rather explore than guess.
 
-**Recommended companion: `/grill-me`** by Matt Pocock ([source](https://github.com/mattpocock/skills)) — interviews you relentlessly about a plan or design until shared understanding is reached. Pairs well with `/plan` when you're about to hand a non-trivial plan to clu; running `/grill-me` first surfaces underspecified branches before they become mid-phase blockers. Installed separately; clu does not bundle it.
+### Recommended workflow
+
+For non-trivial work, the combo is **brainstorm → grill-me → plan → clu**:
+
+1. **`/brainstorm`** — parallel personas explore the design space and consolidate into a master plan.
+2. **`/grill-me`** by Matt Pocock ([source](https://github.com/mattpocock/skills), installed separately) — interviews you relentlessly until each decision branch is resolved.
+3. **`/plan`** — commit the agreed approach to `plans/<slug>.md` with the `## Sessions index` table clu's parser expects.
+4. **`clu init`** — hand it to clu, which dispatches each phase as a cold-context worker subprocess.
+
+Each skill is independent — use one, all four, or none. The combo just makes ambitious work less likely to drift mid-flight. `/grill-me` is the only piece clu doesn't bundle; install it yourself when you want it.
 
 ### Minimum plan shape clu can orchestrate
 
@@ -159,7 +169,7 @@ The bundled skill also encodes **9 universal quality mandates** — TDD before l
 | `clu retry [--phase X]` | Clear max-attempts on a halted phase and resume |
 | `clu release-claim [--force] [--reason ...]` | Escape hatch when a worker dies holding the lease |
 | `clu task-done <task_id>` | Mark a spawned follow-up done |
-| `clu install-skill [--force] [--dry-run] [--only <name>]` | (Re-)install the bundled skills (`/clu-phase` + `/plan`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it) |
+| `clu install-skill [--force] [--dry-run] [--only <name>]` | (Re-)install the bundled skills (`/clu-phase` + `/plan` + `/brainstorm`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it) |
 
 ## State schema
 
@@ -182,7 +192,7 @@ Sketch — see `docs/contract.md` for the full schema:
 
 ```
 end_of_line/          # the package (cli, supervisor, state, notify, dispatch, …)
-end_of_line/skills/   # bundled skills (/clu-phase worker, /plan authorship) installed via `clu install-skill`
+end_of_line/skills/   # bundled skills (/clu-phase worker, /plan authorship, /brainstorm pre-planning) installed via `clu install-skill`
 tests/                # unittest suite
 plans/                # active plan files (dogfooded — this repo uses clu on itself)
 docs/                 # architecture, reference, operations, conventions, contract
