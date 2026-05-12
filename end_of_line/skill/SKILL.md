@@ -93,7 +93,7 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Review after non-trivial diffs.** If the diff spans more than one file or ~30 lines, run the project's review pass (`/simplify`, a project-local equivalent, or a deliberate self-review). Look specifically for rule-of-three extraction opportunities, dead code, and copy-paste from sibling phases.
 
-- **Structured commit messages.** Title (one line) / Why (motivation) / What's new (the surface) / Under the hood (the non-obvious choices) / Tests (count + what's covered) / `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer. Commit messages outlast the code — treat them as primary documentation.
+- **Structured commit messages.** Title (one line) / Why (motivation) / What's new (the surface) / Under the hood (the non-obvious choices) / Tests (count + what's covered) / `Co-Authored-By:` trailer naming the model you're running (e.g. `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`). Commit messages outlast the code — treat them as primary documentation.
 
 - **Stage explicit paths.** `git add <path1> <path2> ...`, never `git add -A` or `git add .`. Explicit staging forces you to think about what you're including; the blanket forms are how secrets and stray artifacts leak in.
 
