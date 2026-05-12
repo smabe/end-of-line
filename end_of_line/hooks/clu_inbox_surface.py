@@ -19,7 +19,11 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-from .. import inbox
+# Absolute import (not `from .. import`) so the script works when launched
+# directly via `python /path/to/clu_inbox_surface.py` — Claude Code's
+# UserPromptSubmit hook invokes it that way, with no package context. The
+# pipx venv that installed end_of_line guarantees the absolute import resolves.
+from end_of_line import inbox
 
 MAX_EVENTS = 20
 # Buffer under the documented 10K additionalContext cap; leaves room for

@@ -137,6 +137,10 @@ class StalledSupervisorTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
+        # Redirect XDG_CONFIG_HOME so the supervisor's inbox.write_event
+        # calls (stalled-claim emissions) land in the tmp dir, not the
+        # operator's real ~/.config/clu/inbox/.
+        isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         self.cfg = ProjectConfig(
