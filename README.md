@@ -9,7 +9,9 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 
 ## Status
 
-v0.1, working. 221 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
+v0.1, working. 233 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
+
+Recent ships, all driven by clu on itself: configurable worker PATH ([`dispatch.path`](#configure-a-project), closes [#9](https://github.com/smabe/end-of-line/issues/9)), self-contained skill bundling (`clu install-skill` now ships `/clu-phase` + `/plan` with a `--only` flag), and a Day-4 sweep that closed 6 backlog issues across 4 self-dispatched bundle plans.
 
 ## How it works
 
@@ -76,6 +78,7 @@ Drop a `.orchestrator.json` at your project root (it's gitignored by example sin
 ```
 
 - `dispatch.command` gets `{plan_slug}`, `{phase_id}`, `{token}`, `{state_file}`, `{project}` substituted (all shlex-quoted) before launching.
+- `dispatch.path` (optional) — colon-separated PATH passed to the worker subprocess as `env={**os.environ, "PATH": ...}`. Set this when workers need to resolve tools like `gh` or `pipx` from `~/.local/bin` or `/opt/homebrew/bin` that the LaunchAgent's default PATH doesn't include. Use absolute paths only. Empty/unset = inherit the parent env. Example: `"/opt/homebrew/bin:/usr/local/bin:/Users/me/.local/bin:/usr/bin:/bin"`.
 - `notify.imessage.to` should be your iMessage self-chat handle (your own number or Apple ID email) — clu DMs you when a worker opens a blocker, when a phase stalls, when the plan halts, or when it completes.
 - `quiet_hours` is `[start, end]` in local wall-clock time; wraps overnight. Halt notifications bypass it (see `notify.QUIET_HOURS_BYPASS_KINDS`).
 
@@ -156,7 +159,7 @@ The bundled skill also encodes **9 universal quality mandates** — TDD before l
 | `clu retry [--phase X]` | Clear max-attempts on a halted phase and resume |
 | `clu release-claim [--force] [--reason ...]` | Escape hatch when a worker dies holding the lease |
 | `clu task-done <task_id>` | Mark a spawned follow-up done |
-| `clu install-skill [--force] [--dry-run]` | (Re-)install the bundled `/clu-phase` worker skill |
+| `clu install-skill [--force] [--dry-run] [--only <name>]` | (Re-)install the bundled skills (`/clu-phase` + `/plan`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it) |
 
 ## State schema
 
