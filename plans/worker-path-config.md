@@ -1,49 +1,84 @@
-# Worker subprocess PATH config (issue #9)
+# worker-path-config — fix issue #9 (worker subprocess PATH)
+
+Make worker subprocesses see a deterministic PATH so they can resolve
+`gh`, `pipx`, and other user-installed tools across phases. Phase 1
+(config field) shipped in commit `2f9316b`; this master file now
+indexes the two remaining phases.
 
 ## Goal
-Add optional `dispatch.path` config field so operators can configure a deterministic PATH for worker subprocesses, fixing the class of bug where workers can't resolve `gh` / `pipx` / other user-installed tools because LaunchAgent context inherits a sparse PATH.
+Add optional `dispatch.path` field, thread it through
+`subprocess.Popen(env=...)` at dispatch time, and document the
+troubleshooting path so operators can self-serve when a worker
+reports `<tool>: command not found`.
 
-## Diagnosis
-- **Hypothesis:** Worker subprocesses currently inherit whatever PATH `claude --print` exposes from a LaunchAgent context, which doesn't include `/opt/homebrew/bin` or `~/.local/bin` deterministically. Setting `env={**os.environ, "PATH": cfg.dispatch.path}` on `subprocess.Popen` at `end_of_line/dispatch.py:108` will let operators pin a PATH that includes those locations once, and worker tool resolution will become deterministic across phases.
-- **Falsifiable test:** Add a unit test that spawns a no-op shell command via the dispatch pathway with `DispatchSpec(path="/usr/bin:/bin")` and asserts the spawned subprocess sees `PATH=/usr/bin:/bin` (capture the env via a sentinel command like `printenv PATH > $log`). If `env=` is not threaded through, the test sees the parent's full PATH and fails.
-- **Test result:** TBD — this is phase 1's first commit (test must fail before the dispatch.py edit, then pass after).
+## Locked design decisions (do NOT re-litigate)
 
-## Non-goals
-- Not adding a `worker.path` field — it's `dispatch.path` to match the existing `dispatch.command` naming. The issue body used `worker.path` loosely.
-- Not changing `dispatch.kind` semantics or adding new kinds.
-- Not implementing systemic-failure pattern matching for `command not found` (issue #7's territory; defense in depth).
-- Not auto-detecting a sane default PATH on macOS — operator opts in by setting the field. Empty string / unset = current behavior (inherit parent env).
-- Not updating the `/clu-phase` skill in abe-skills (cross-repo; park as follow-up).
-- Not migrating existing `.orchestrator.json` files — additive, optional field.
+- **Field name is `dispatch.path`**, not `worker.path`. Mirrors the
+  existing `dispatch.command` shape. The issue body used the wrong
+  name loosely.
+- **Empty string means "inherit parent env"** (current behavior). The
+  worker subprocess only gets a custom env when `cfg.dispatch.path`
+  is non-empty.
+- **Custom env MUST merge with `os.environ`**, not replace it. Passing
+  `env={"PATH": ...}` alone strips `HOME`/`USER`/etc and breaks the
+  worker's `claude --print` invocation. Use
+  `env = {**os.environ, "PATH": cfg.dispatch.path}`.
+- **No tilde expansion, no auto-detection.** Operator sets absolute
+  paths. Documented as a constraint.
+- **`/clu-phase` skill update is OUT OF SCOPE** for this plan. That
+  skill lives in `~/projects/abe-skills` (cross-repo) and was
+  decoupled in Day 4. Park as a follow-up.
 
-## Files to touch
-- `end_of_line/config.py` — add `path: str = ""` to `DispatchSpec`; parse `disp.get("path", "")` in `load_project_config`.
-- `end_of_line/dispatch.py` — when `cfg.dispatch.path` is non-empty, build `env = {**os.environ, "PATH": cfg.dispatch.path}` and pass `env=env` to `subprocess.Popen` at line 108. Otherwise omit `env=` (inherit, current behavior).
-- `tests/test_dispatch.py` — add tests: (a) no path set → no env override; (b) path set → spawned subprocess sees that PATH; (c) malformed path (e.g. empty string) → treated as unset.
-- `tests/test_config.py` — NEW. Round-trip `load_project_config` with `dispatch.path` present, absent, and as wrong type. (This file doesn't exist yet — first config-loader coverage.)
-- `docs/operations.md` — troubleshooting block: "worker says `<tool>: command not found`" → set `dispatch.path` in `.orchestrator.json`; example value with `/opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin`.
-- `docs/contract.md` — add `dispatch.path` to the config-schema section if it documents `dispatch.command` (verify before editing).
+## Status of phase 1 (already shipped)
 
-## Failure modes to anticipate
-- **Test pollutes real registry.** Any test that calls `main(["init", ...])` needs `tests.isolate_registry(self, tmp_path)` per CLAUDE.md. Phase 1's config-loader tests instantiate `ProjectConfig` directly so should be fine, but the dispatch test currently uses real-ish fixtures — check `test_dispatch.py:setUp`.
-- **`subprocess.Popen(env=)` semantics gotcha.** Passing `env={"PATH": ...}` ALONE strips every other env var, including `HOME`, `USER`, `SHELL` — the worker's `claude --print` invocation needs at least `HOME`. Must merge with `os.environ`, not replace it.
-- **Shell builtin vs binary lookup.** When `shell=True` and the shell is `sh`, PATH is consulted on `exec` of the command, not on shell startup. Empty PATH segments (`::`) and leading `:` are legal but mean "current dir" — undesired. Document that `dispatch.path` is passed as-is; operator owns the value.
-- **Tilde expansion.** `~/.local/bin` won't expand inside subprocess env. Either document "use absolute paths" or call `os.path.expanduser` on each segment. Default to "absolute paths only, documented" — adding expansion is a separable convenience.
-- **Tests run from a context where `os.environ["PATH"]` matters.** A test that asserts the spawned subprocess sees `PATH=X` must not be confused by what the *test harness's* PATH is. Use `env=`-aware sentinel (e.g. `sh -c 'echo $PATH > /tmp/...'`) and read the file.
-- **`shell=True` and quoting.** The current command template uses `shlex.quote` for substitution — confirm that passing `env=` doesn't change shell selection (it uses `/bin/sh` by default on POSIX, which is fine).
-- **Empty string handling.** `cfg.dispatch.path = ""` should NOT cause `env={"PATH": ""}` — that breaks worker. Treat empty as "not set."
+`DispatchSpec.path: str = ""` exists. `load_project_config` parses it.
+Round-trip coverage in `tests/test_config.py`. Commit `2f9316b`. Both
+sub-phases below can rely on `cfg.dispatch.path` being a `str` (never
+`None`, never missing).
 
-## Done criteria
-- New `dispatch.path` field on `DispatchSpec`, parsed by `load_project_config`, with round-trip test.
-- `dispatch.py` passes `env={**os.environ, "PATH": cfg.dispatch.path}` to `Popen` iff the field is non-empty; otherwise current behavior unchanged.
-- Falsifiable test from Diagnosis is committed and green.
-- Full `python3 -m unittest discover -s tests` suite passes (currently 221 tests; expect ~225 after this work).
-- `docs/operations.md` has the troubleshooting line + an example `dispatch.path` value.
-- `docs/contract.md` lists `dispatch.path` alongside `dispatch.command` if the config schema is documented there.
-- Issue #9 closed via commit trailer (`Fixes #9`).
-- Commit format follows project convention: Title / Why / What's new / Under the hood / Tests / Co-Authored-By trailer.
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| env | `worker-path-config-env.md` | `dispatch.py` threads `env=` to `subprocess.Popen` when `dispatch.path` is set; spawn-test asserts the worker sees the configured PATH (the Diagnosis falsifiable test). | 45m |
+| docs | `worker-path-config-docs.md` | Troubleshooting line in `docs/operations.md`; schema entry in `docs/contract.md`; commit closes #9. | 30m |
+
+## Failure modes the worker should know about
+
+- **`subprocess.Popen(env=)` strips parent env unless merged.** See
+  locked decision above.
+- **Empty string handling.** `cfg.dispatch.path == ""` means "don't
+  override env"; do NOT pass `env={"PATH": ""}` to Popen — that gives
+  the worker an unusable PATH.
+- **Test sentinel must be `env=`-aware.** A test that asserts the
+  spawned subprocess sees a specific PATH must capture it from the
+  subprocess (e.g. `sh -c 'echo $PATH > <file>'`), not from the test
+  harness's own environment.
+- **`tests.isolate_registry(self, tmp_path)` in `setUp`** for any test
+  that hits `registry.register` (per CLAUDE.md).
+- **`shell=True` + `env=` interaction.** The current dispatch already
+  uses `shell=True`; passing `env=` is orthogonal — the shell uses
+  whatever `PATH` it finds in its env to resolve commands.
+
+## Done criteria (for the whole plan)
+
+- `dispatch.path` is read by `dispatch.py` and threaded through
+  `subprocess.Popen(env=)` when non-empty.
+- Diagnosis falsifiable test is committed and green (assertion: when
+  `DispatchSpec(path="/usr/bin:/bin")` drives a spawn, the spawned
+  subprocess's `$PATH` is exactly that string).
+- Full `python3 -m unittest discover -s tests` suite passes.
+- `docs/operations.md` documents the troubleshooting line + an example
+  `dispatch.path` value.
+- `docs/contract.md` lists `dispatch.path` alongside `dispatch.command`
+  in the config-schema reference.
+- Issue #9 closed via commit trailer (`Fixes #9`) on the docs commit.
 
 ## Parking lot
-- Update `/clu-phase` skill in `~/projects/abe-skills/skills/clu-phase/SKILL.md` line ~100 to mention `dispatch.path` as the operator-side fix when workers can't resolve a tool. Cross-repo, separate commit.
-- Auto-expand `~` in `dispatch.path` segments (convenience, not correctness).
-- Smoke-test snippet operators can run to enumerate the worker subprocess PATH (issue #9 mentions this; could be a `clu doctor`-style subcommand later).
+- Update `/clu-phase` skill at `~/projects/abe-skills/skills/clu-phase/SKILL.md`
+  line ~100 to mention `dispatch.path` as the operator-side fix when
+  workers can't resolve a tool. Cross-repo, separate commit.
+- Auto-expand `~` in `dispatch.path` segments (convenience, not
+  correctness).
+- `clu doctor`-style smoke-test subcommand to enumerate the worker
+  subprocess PATH (issue #9 suggested this).
