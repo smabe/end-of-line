@@ -28,7 +28,7 @@ import time
 from enum import IntEnum
 from pathlib import Path
 
-from . import fleet, notify, registry, state as st
+from . import fleet, notify, queue, registry, state as st
 from .config import ProjectConfig, load_project_config
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
@@ -151,6 +151,24 @@ def main(argv: list[str] | None = None) -> int:
         "--no-claude-md-note", dest="no_claude_md_note",
         action="store_true", default=False,
         help="Skip the CLAUDE.md note prompt (non-interactive runs).",
+    )
+
+    p_queue = sub.add_parser(
+        "queue",
+        help="Manage the project's plan queue (operator-only in v1).",
+    )
+    queue_subs = p_queue.add_subparsers(dest="queue_cmd")
+    p_queue_add = queue_subs.add_parser(
+        "add", help="Append a plan slug to the queue (--front to insert at head).",
+    )
+    p_queue_add.add_argument("slug")
+    p_queue_add.add_argument(
+        "--front", action="store_true",
+        help="Insert at head instead of tail.",
+    )
+    p_queue_add.add_argument(
+        "--project", type=Path, default=None,
+        help="Project root (defaults to CWD).",
     )
 
     sub.add_parser(
@@ -305,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_tick_all(args)
     if args.cmd == "install-skill":
         return cmd_install_skill(args)
+    if args.cmd == "queue":
+        return cmd_queue(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -493,6 +513,60 @@ def cmd_install_skill(args) -> int:
         except ValueError as exc:
             return _die(ExitCode.GENERIC, str(exc))
         print(f"Updated {claude_md} with autonomous-loop-pacing section")
+    return ExitCode.OK
+
+
+def cmd_queue(args) -> int:
+    if args.queue_cmd == "add":
+        return cmd_queue_add(args)
+    print("usage: clu queue add <slug> [--front] [--project PATH]", file=sys.stderr)
+    return _die(ExitCode.GENERIC, "missing queue subcommand")
+
+
+def cmd_queue_add(args) -> int:
+    slug = args.slug
+    try:
+        st.validate_slug(slug, kind="plan slug")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    project = args.project if args.project is not None else Path.cwd()
+    cfg = load_project_config(project)
+
+    registered_roots = {Path(e.project_root).resolve() for e in registry.entries()}
+    if cfg.project_root not in registered_roots:
+        return _die(
+            ExitCode.GENERIC,
+            f"project {cfg.project_root} has no registered plans; "
+            f"run `clu init --project {cfg.project_root} --plan <slug>` first",
+        )
+
+    plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
+    if not plan_file.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
+
+    with queue.mutate(cfg.queue_path()) as data:
+        for idx, entry in enumerate(data["queue"]):
+            if entry["slug"] == slug:
+                return _die(
+                    ExitCode.STATUS_TRANSITION,
+                    f"{slug!r} already queued at position {idx + 1}; "
+                    f"`clu queue remove {slug}` first to re-order",
+                )
+        entry = {
+            "slug": slug,
+            "added_at": st.utcnow(),
+            "added_by": "operator",
+            "position_at_add": "front" if args.front else "tail",
+        }
+        if args.front:
+            data["queue"].insert(0, entry)
+            position = 1
+        else:
+            data["queue"].append(entry)
+            position = len(data["queue"])
+
+    print(f"queued at position {position}")
     return ExitCode.OK
 
 
