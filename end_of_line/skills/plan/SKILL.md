@@ -15,7 +15,7 @@ user_invocable: true
 
 ## Plan Workflow
 
-This skill enforces the "plan before code" discipline defined in the user's `feedback_plan_discipline.md` memory. Read that memory for the why and the template format — it is the single source of truth.
+This skill enforces a "plan before code" discipline: for any non-trivial multi-file change, write a one-screen plan to `plans/<slug>.md` and get user agreement before coding. The template and rules below are the authoritative source — this file is self-contained on purpose so the bundled clu install works without depending on any external memory file. Why this discipline exists: without an explicit plan, work drifts ("while I'm here" fixes turn a 2-file change into a 7-file commit); the plan file is the anti-drift contract. Trivial changes (typo fixes, single-file tweaks, obvious bug fixes that commit in under 5 minutes) skip the plan flow.
 
 The skill has three modes, auto-detected from context:
 
@@ -146,7 +146,7 @@ The skill has three modes, auto-detected from context:
 
 ## Plan Template
 
-Use this exact structure — the "working agreement" memory references these section headers. Don't rename them.
+Use this exact structure. The Scope Check and Phase Completion Cycle below refer to these section headers by name — don't rename them.
 
 ```markdown
 # <feature name>
@@ -240,7 +240,7 @@ If none of the stop conditions apply, the next phase starts automatically.
 
 - **Never write code before the plan is approved.** Not even "just to set up scaffolding." The plan is the scaffolding.
 - **One active plan per conversation.** If the user wants to work on two things, they get two plans, and we tackle them sequentially.
-- **The template is the source of truth** — don't add or remove sections without updating the `feedback_plan_discipline.md` memory to match.
+- **The template is the source of truth** — don't add or remove sections in the Plan Template above without also updating the Scope Check and Phase Completion Cycle rules, since they reference the section names.
 - **Be ruthless about non-goals.** If you're unsure whether to list something as a non-goal, list it. Easier to remove than to add mid-work.
 - **Archive, don't delete.** Shipped plans move to `plans/shipped/` — they're a record of what got done, not garbage to collect.
 - **New file mirrors existing file? Refactor first by default.** When the plan adds a new file the description says "mirrors" / "like" / "similar to" / "same family as" an existing one — OR a sibling file with the same suffix already exists in the target directory — the reuse-specialist agent is mandatory and its Phase-0-refactor recommendation is presumed correct unless the user explicitly overrides. The refactor becomes phase 0 of the plan; the new feature is phase 1+. Copy-and-defer requires an explicit user decision in the second-approval step, recorded in the Parking lot in writing — not a passive default that quietly leaves duplication for `/simplify` to surface after the duplicate ships.
