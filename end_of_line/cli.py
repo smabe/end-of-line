@@ -106,16 +106,24 @@ def main(argv: list[str] | None = None) -> int:
 
     p_install_skill = sub.add_parser(
         "install-skill",
-        help="Copy the bundled /clu-phase worker skill into "
-             "~/.claude/skills/clu-phase/SKILL.md so Claude Code can find it.",
+        help="Copy bundled skills (/clu-phase worker + /plan authorship) "
+             "into ~/.claude/skills/<name>/SKILL.md so Claude Code can find "
+             "them. Default installs both; use --only to install one.",
     )
     p_install_skill.add_argument(
         "--force", action="store_true", default=False,
-        help="Overwrite an existing target (including a symlink).",
+        help="Overwrite an existing target, even a regular file the operator "
+             "wrote. Symlinks are overwritten without --force.",
     )
     p_install_skill.add_argument(
         "--dry-run", action="store_true", default=False,
         help="Print the planned action without writing.",
+    )
+    # Runtime-validate `--only` rather than `choices=` so the failure path
+    # exits via _die (ExitCode), not argparse's SystemExit(2).
+    p_install_skill.add_argument(
+        "--only", default=None,
+        help="Install only the named skill (default: install all bundled).",
     )
 
     sub.add_parser(
@@ -344,36 +352,55 @@ def cmd_fleet(args) -> int:
     return 0
 
 
+BUNDLED_SKILLS = ("clu-phase", "plan")
+
+
 def cmd_install_skill(args) -> int:
     from importlib.resources import files
 
-    bundled = files("end_of_line").joinpath("skills/clu-phase/SKILL.md")
-    target = Path.home() / ".claude" / "skills" / "clu-phase" / "SKILL.md"
-    # `is_symlink` first — `exists()` follows symlinks, so a broken symlink
-    # would otherwise look like a clean target.
-    is_symlink = target.is_symlink()
-    exists = is_symlink or target.exists()
-
-    if exists and not args.force:
-        what = "symlink" if is_symlink else "file"
+    if args.only is not None and args.only not in BUNDLED_SKILLS:
         return _die(
-            ExitCode.STATUS_TRANSITION,
-            f"target {what} already exists at {target} — pass --force to overwrite",
+            ExitCode.GENERIC,
+            f"unknown skill {args.only!r}; valid: {', '.join(BUNDLED_SKILLS)}",
         )
 
+    skills_to_install = (args.only,) if args.only else BUNDLED_SKILLS
+
+    # Pre-flight: every target is checked before any write. A non-symlink
+    # collision aborts the whole run so install-skill is atomic — the
+    # operator never sees a half-installed state.
+    plans = []
+    for name in skills_to_install:
+        bundled = files("end_of_line").joinpath(f"skills/{name}/SKILL.md")
+        target = Path.home() / ".claude" / "skills" / name / "SKILL.md"
+        # `is_symlink` first — `exists()` follows symlinks, so a broken
+        # symlink would otherwise look like a clean target.
+        is_symlink = target.is_symlink()
+        exists = is_symlink or target.exists()
+        if exists and not is_symlink and not args.force:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"refusing to overwrite {target} (regular file, not a "
+                f"symlink clu owns). Pass --force to overwrite, or "
+                f"--only <other> to skip {name}. No skills were installed.",
+            )
+        plans.append((name, bundled, target, exists))
+
     if args.dry_run:
-        verb = "Would overwrite" if exists else "Would write"
-        print(f"{verb} {target} from bundled {bundled}")
+        for name, bundled, target, exists in plans:
+            verb = "Would overwrite" if exists else "Would write"
+            print(f"{verb} {target} from bundled {bundled}")
         return ExitCode.OK
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if exists:
-        # Always unlink before writing — handles symlinks (don't follow
-        # to destination), hardlinks (don't modify the shared inode),
-        # and regular files (replace cleanly with a fresh inode).
-        target.unlink()
-    target.write_bytes(bundled.read_bytes())
-    print(f"Installed worker skill to {target}")
+    for name, bundled, target, exists in plans:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if exists:
+            # Unlink before writing — handles symlinks (don't follow to
+            # destination), hardlinks (don't modify the shared inode), and
+            # regular files (replace cleanly with a fresh inode).
+            target.unlink()
+        target.write_bytes(bundled.read_bytes())
+        print(f"Installed {name} skill to {target}")
     return ExitCode.OK
 
 
