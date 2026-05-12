@@ -416,8 +416,8 @@ behavior).
 
 Constraints:
 
-- Absolute paths only. No tilde expansion — write
-  `/Users/<you>/.local/bin`, not `~/.local/bin`.
+- Tilde (`~`) is expanded per segment at config load, so
+  `~/.local/bin:/usr/bin` works fine.
 - The fix is per-plan. Each `.orchestrator.json` that needs a custom
   PATH sets its own; there's no host-level default.
 

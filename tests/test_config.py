@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -42,6 +43,30 @@ class LoadProjectConfigTests(unittest.TestCase):
         self._write({"dispatch": {"path": ""}})
         cfg = load_project_config(self.root)
         self.assertEqual(cfg.dispatch.path, "")
+
+    def test_dispatch_path_expands_tilde(self) -> None:
+        self._write({"dispatch": {"path": "~/.local/bin:/usr/bin"}})
+        cfg = load_project_config(self.root)
+        expanded = os.path.expanduser("~/.local/bin")
+        self.assertEqual(cfg.dispatch.path, f"{expanded}:/usr/bin")
+
+    def test_dispatch_path_absolute_unchanged(self) -> None:
+        self._write({"dispatch": {"path": "/foo:/bar"}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.dispatch.path, "/foo:/bar")
+
+    def test_dispatch_path_empty_stays_empty(self) -> None:
+        self._write({"dispatch": {"path": ""}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.dispatch.path, "")
+        self.assertFalse(cfg.dispatch.path)
+
+    def test_dispatch_path_mixed_segments(self) -> None:
+        self._write({"dispatch": {"path": "~/foo:/bar:~/baz"}})
+        cfg = load_project_config(self.root)
+        first = os.path.expanduser("~/foo")
+        third = os.path.expanduser("~/baz")
+        self.assertEqual(cfg.dispatch.path, f"{first}:/bar:{third}")
 
     def test_dispatch_command_and_path_together(self) -> None:
         self._write({

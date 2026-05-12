@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,13 +66,18 @@ def load_project_config(project_root: Path) -> ProjectConfig:
     disp = raw.get("dispatch", {})
     notify_raw = raw.get("notify", {})
     quiet = notify_raw.get("quiet_hours")
+    raw_path = disp.get("path", "") or ""
+    if raw_path:
+        raw_path = ":".join(
+            os.path.expanduser(seg) for seg in raw_path.split(":")
+        )
     return ProjectConfig(
         project_root=project_root,
         plan_dir=raw.get("plan_dir", "plans"),
         dispatch=DispatchSpec(
             kind=disp.get("kind", "shell"),
             command=disp.get("command", ""),
-            path=disp.get("path", "") or "",
+            path=raw_path,
             repair_command=disp.get("repair_command") or None,
         ),
         notify=NotifySpec(

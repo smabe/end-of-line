@@ -92,7 +92,7 @@ Drop a `.orchestrator.json` at your project root (it's gitignored by example sin
 ```
 
 - `dispatch.command` gets `{plan_slug}`, `{phase_id}`, `{token}`, `{state_file}`, `{project}` substituted (all shlex-quoted) before launching.
-- `dispatch.path` (optional) — colon-separated PATH passed to the worker subprocess as `env={**os.environ, "PATH": ...}`. Set this when workers need to resolve tools like `gh` or `pipx` from `~/.local/bin` or `/opt/homebrew/bin` that the LaunchAgent's default PATH doesn't include. Use absolute paths only. Empty/unset = inherit the parent env. Example: `"/opt/homebrew/bin:/usr/local/bin:/Users/me/.local/bin:/usr/bin:/bin"`.
+- `dispatch.path` (optional) — colon-separated PATH passed to the worker subprocess as `env={**os.environ, "PATH": ...}`. Set this when workers need to resolve tools like `gh` or `pipx` from `~/.local/bin` or `/opt/homebrew/bin` that the LaunchAgent's default PATH doesn't include. `~` is expanded per segment at load time, so `~/.local/bin` works. Empty/unset = inherit the parent env. Example: `"/opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin"`.
 - `notify.imessage.to` should be your iMessage self-chat handle (your own number or Apple ID email) — clu DMs you when a worker opens a blocker, when a phase stalls, when the plan halts, or when it completes.
 - `quiet_hours` is `[start, end]` in local wall-clock time; wraps overnight. Halt notifications bypass it (see `notify.QUIET_HOURS_BYPASS_KINDS`).
 
