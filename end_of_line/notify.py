@@ -23,6 +23,9 @@ KIND_BLOCKER = "blocker"
 KIND_STALLED = "stalled"
 KIND_COMPLETED = "completed"
 KIND_HALTED = "halted"
+# Queue-pop skipped a head (plan file missing). Defers during quiet hours
+# — the operator finds out next loud window, no 3am ping.
+KIND_QUEUE_SKIPPED = "queue_skipped"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({KIND_HALTED})
 
@@ -138,6 +141,10 @@ def render_halted(plan_slug: str, phase: str, attempts: int) -> str:
         f"🛑 {plan_slug}/{phase} halted — {attempts} attempts. "
         f"`clu retry --plan {plan_slug}` to resume."
     )
+
+
+def render_queue_skipped(slug: str, reason: str) -> str:
+    return f"⏭️  queue skipped {slug} — {reason}."
 
 
 def render_systemic_failure(plan_slug: str, phase: str, signature: str) -> str:

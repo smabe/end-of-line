@@ -761,7 +761,8 @@ def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
 
 
 def cmd_tick_all(args) -> int:
-    for row in registry.entries():
+    entries = registry.entries()
+    for row in entries:
         try:
             cfg = load_project_config(Path(row.project_root))
             state_path = cfg.state_path(row.plan_slug)
@@ -774,7 +775,140 @@ def cmd_tick_all(args) -> int:
                 f"tick-all: {row.plan_slug} @ {row.project_root}: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
+
+    # Post-loop: per-project queue advancement. One pop per project per
+    # tick, guarded by a busy gate (any active claim in that project).
+    # Re-read registry.entries() — claim state mutated above is what the
+    # busy gate needs to see.
+    seen: dict[Path, None] = {}
+    for row in registry.entries():
+        try:
+            seen.setdefault(Path(row.project_root).resolve(), None)
+        except OSError:
+            continue
+    for project_root in seen:
+        try:
+            _advance_queue_for_project(project_root)
+        except Exception as exc:
+            print(
+                f"tick-all queue @ {project_root}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
     return ExitCode.OK
+
+
+def _advance_queue_for_project(project_root: Path) -> None:
+    """One queue-pop step for a single project. No-op when nothing to do.
+
+    Branches (first match wins):
+      - busy gate: any plan in project has current_claim → return
+      - queue empty / missing → return
+      - head registered with HALTED/HALTED_REPLAN/PAUSED → freeze (no pop)
+      - head registered with DONE/RUNNING → absorb (pop to history, no dispatch)
+      - head's plan file missing → abandon + KIND_QUEUE_SKIPPED ping
+      - normal pop: state-create → registry.register → queue.pop, all under
+        the queue lock; dispatch outside the locks via `_tick_one_plan`.
+    """
+    cfg = load_project_config(project_root)
+    queue_path = cfg.queue_path()
+    if not queue_path.exists():
+        return
+
+    # Busy gate (per-project): any live claim freezes the whole project.
+    for entry in registry.entries():
+        if Path(entry.project_root).resolve() != project_root:
+            continue
+        state = registry.load_entry_state(entry)
+        if state and state.get("current_claim"):
+            return
+
+    queue_data = queue.load(queue_path)
+    if not queue_data["queue"]:
+        return
+
+    head = queue_data["queue"][0]
+    slug = head["slug"]
+    try:
+        st.validate_slug(slug, kind="plan slug")
+    except st.InvalidSlug as exc:
+        print(
+            f"queue head has invalid slug @ {project_root}: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    state_path = cfg.state_path(slug)
+    existing_status: str | None = None
+    if state_path.exists():
+        try:
+            existing_status = st.load(state_path).get("status")
+        except (OSError, ValueError, st.SchemaVersionMismatch):
+            existing_status = None
+
+    project_slugs = {
+        e.plan_slug for e in registry.entries()
+        if Path(e.project_root).resolve() == project_root
+    }
+    registered = slug in project_slugs
+
+    # Freeze + absorb both require the slug to already be in the registry —
+    # a state.json that exists but isn't registered is a crashed-mid-pop,
+    # handled by the normal-pop path (idempotent state-create + register).
+    if registered and existing_status in _FREEZE_STATUSES:
+        return
+
+    if registered and existing_status in {st.STATUS_DONE, st.STATUS_RUNNING}:
+        with queue.mutate(queue_path) as data:
+            if not data["queue"] or data["queue"][0]["slug"] != slug:
+                return
+            entry = data["queue"].pop(0)
+            data["history"].append({
+                **entry,
+                "ended_at": st.utcnow(),
+                "outcome": "absorbed",
+            })
+        return
+
+    plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
+    if not plan_file.exists():
+        with queue.mutate(queue_path) as data:
+            if not data["queue"] or data["queue"][0]["slug"] != slug:
+                return
+            entry = data["queue"].pop(0)
+            data["history"].append({
+                **entry,
+                "ended_at": st.utcnow(),
+                "outcome": "abandoned",
+            })
+        notify.notify(
+            cfg.notify, notify.KIND_QUEUE_SKIPPED,
+            notify.render_queue_skipped(slug, reason="plan file missing"),
+        )
+        return
+
+    # Normal pop sequence: state.create → registry.register → queue.pop,
+    # all under the queue lock so a crashed run can be replayed without
+    # losing the head. Dispatch fires outside the locks (matches the
+    # cmd_init pattern).
+    with queue.mutate(queue_path) as data:
+        if not data["queue"] or data["queue"][0]["slug"] != slug:
+            return
+        with st.locked(state_path):
+            if not state_path.exists():
+                fresh = st.empty_state(slug, cfg.plan_dir)
+                st.append_event(
+                    fresh, st.EVENT_QUEUE_POPPED,
+                    slug=slug,
+                    added_at=head.get("added_at"),
+                    added_by=head.get("added_by", "operator"),
+                    position=1,
+                )
+                st.save_atomic(state_path, fresh)
+        registry.register(cfg.project_root, slug)
+        data["queue"].pop(0)
+
+    result = _tick_one_plan(slug, cfg, state_path, dispatch=True)
+    print(f"tick (queue-pop) {slug} @ {cfg.project_root}: {result}")
 
 
 def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:

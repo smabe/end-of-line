@@ -86,6 +86,11 @@ EVENT_PHASE_STALLED = "phase_stalled"
 EVENT_PAUSED = "paused"
 EVENT_RESUMED = "resumed"
 EVENT_RETRY_REQUESTED = "retry_requested"
+# Provenance event written as the FIRST event of a state.json created by
+# the supervisor's per-project queue advancement step. Fields: slug,
+# added_at, added_by, position. Worker dispatched after this event lands
+# sees it in its initial state read.
+EVENT_QUEUE_POPPED = "queue_popped"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
