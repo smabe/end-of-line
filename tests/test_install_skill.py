@@ -19,7 +19,12 @@ from importlib.resources import files
 from pathlib import Path
 from unittest import mock
 
-from end_of_line.cli import ExitCode, main
+from end_of_line.cli import (
+    _CLU_NOTE_END,
+    _CLU_NOTE_START,
+    ExitCode,
+    main,
+)
 
 
 class InstallSkillTestBase(unittest.TestCase):
@@ -199,6 +204,112 @@ class HardlinkTargetTests(InstallSkillTestBase):
         self.assertNotEqual(
             self.target.stat().st_ino, self.linked.stat().st_ino,
         )
+
+
+class ClaudeMdNoteTests(InstallSkillTestBase):
+    """`--add-claude-md-note` / `--no-claude-md-note` flow.
+
+    Issue #16 — install-skill optionally writes an autonomous-loop-pacing
+    section into ~/.claude/CLAUDE.md, fenced by clu-managed markers so the
+    write is idempotent.
+    """
+
+    NOTE_START = _CLU_NOTE_START
+    NOTE_END = _CLU_NOTE_END
+
+    @property
+    def claude_md(self) -> Path:
+        return self.home / ".claude" / "CLAUDE.md"
+
+    def test_no_flag_no_tty_skips_silently(self):
+        # No interactive TTY, no flag → CLAUDE.md must not be created.
+        with mock.patch("sys.stdin.isatty", return_value=False):
+            rc, _, _ = self._run()
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertFalse(self.claude_md.exists())
+
+    def test_no_claude_md_note_flag_skips_silently(self):
+        rc, out, _ = self._run("--no-claude-md-note")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertFalse(self.claude_md.exists())
+        # No mention of CLAUDE.md in stdout (skills installed, nothing more).
+        self.assertNotIn("CLAUDE.md", out)
+
+    def test_add_claude_md_note_creates_fresh_file(self):
+        self.assertFalse(self.claude_md.exists())
+        rc, out, _ = self._run("--add-claude-md-note")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertTrue(self.claude_md.exists())
+        body = self.claude_md.read_text()
+        self.assertIn(self.NOTE_START, body)
+        self.assertIn(self.NOTE_END, body)
+        self.assertIn("ScheduleWakeup", body)
+        self.assertIn(str(self.claude_md), out)
+
+    def test_add_claude_md_note_appends_to_existing(self):
+        self.claude_md.parent.mkdir(parents=True, exist_ok=True)
+        prior = "# My personal CLAUDE.md\n\nSome existing prose.\n"
+        self.claude_md.write_text(prior)
+        rc, _, _ = self._run("--add-claude-md-note")
+        self.assertEqual(rc, int(ExitCode.OK))
+        body = self.claude_md.read_text()
+        # Prior content is preserved verbatim.
+        self.assertIn(prior, body)
+        # Section is appended after.
+        self.assertTrue(body.endswith(self.NOTE_END + "\n"))
+
+    def test_add_claude_md_note_idempotent_replaces_between_markers(self):
+        self.claude_md.parent.mkdir(parents=True, exist_ok=True)
+        prior = (
+            "# Personal CLAUDE.md\n\n"
+            f"{self.NOTE_START}\n"
+            "stale outdated content\n"
+            f"{self.NOTE_END}\n\n"
+            "## More stuff after\n"
+        )
+        self.claude_md.write_text(prior)
+        rc, _, _ = self._run("--add-claude-md-note")
+        self.assertEqual(rc, int(ExitCode.OK))
+        body = self.claude_md.read_text()
+        # Stale content gone, fresh content present.
+        self.assertNotIn("stale outdated content", body)
+        self.assertIn("ScheduleWakeup", body)
+        # Markers still present and exactly once each.
+        self.assertEqual(body.count(self.NOTE_START), 1)
+        self.assertEqual(body.count(self.NOTE_END), 1)
+        # Pre + post content preserved.
+        self.assertIn("# Personal CLAUDE.md", body)
+        self.assertIn("## More stuff after", body)
+
+    def test_partial_markers_fail_loud(self):
+        # Start marker without end (or vice versa) is malformed state — bail
+        # rather than guess where to insert.
+        self.claude_md.parent.mkdir(parents=True, exist_ok=True)
+        self.claude_md.write_text(
+            f"# Personal\n\n{self.NOTE_START}\nno end marker here\n"
+        )
+        rc, _, err = self._run("--add-claude-md-note")
+        self.assertNotEqual(rc, int(ExitCode.OK))
+        self.assertIn("malformed", err.lower())
+
+    def test_flags_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            self._run("--add-claude-md-note", "--no-claude-md-note")
+
+    def test_interactive_accept(self):
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+             mock.patch("builtins.input", return_value="y"):
+            rc, _, _ = self._run()
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertTrue(self.claude_md.exists())
+        self.assertIn(self.NOTE_START, self.claude_md.read_text())
+
+    def test_interactive_decline(self):
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+             mock.patch("builtins.input", return_value=""):
+            rc, _, _ = self._run()
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertFalse(self.claude_md.exists())
 
 
 class DryRunTests(InstallSkillTestBase):

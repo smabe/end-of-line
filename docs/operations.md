@@ -30,6 +30,24 @@ clu --help
 `pip install` on a stock macOS Python is blocked by PEP 668; `pipx` is
 the path that works without `--break-system-packages`.
 
+Once `clu` is on `$PATH`, install the bundled skills:
+
+```bash
+clu install-skill                       # interactive — installs three
+                                        # skills + prompts about CLAUDE.md
+clu install-skill --add-claude-md-note  # non-interactive, accept the note
+clu install-skill --no-claude-md-note   # non-interactive, skip the note
+clu install-skill --only clu-phase      # one skill only
+```
+
+The CLAUDE.md note appends an idempotent clu-managed section to
+`~/.claude/CLAUDE.md` telling Claude to use `ScheduleWakeup` when an
+operator delegates an autonomous multi-step task. Markers
+(`<!-- clu:start autonomous-loop-pacing -->` / `<!-- clu:end ... -->`)
+make repeat installs replace-in-place rather than duplicate. Skip with
+`--no-claude-md-note` for non-interactive CI flows, or pass nothing on
+a non-TTY context and the prompt skips silently.
+
 Find the pipx venv python — you need it for both LaunchAgents:
 
 ```bash

@@ -138,6 +138,20 @@ def main(argv: list[str] | None = None) -> int:
         "--only", default=None,
         help="Install only the named skill (default: install all bundled).",
     )
+    # Primes a fresh user's Claude on autonomous-loop pacing so multi-plan
+    # chains drive themselves without a human re-poking the chain.
+    _claude_md_grp = p_install_skill.add_mutually_exclusive_group()
+    _claude_md_grp.add_argument(
+        "--add-claude-md-note", dest="add_claude_md_note",
+        action="store_true", default=False,
+        help="Append/update a clu-managed section in ~/.claude/CLAUDE.md "
+             "about ScheduleWakeup discipline for autonomous tasks.",
+    )
+    _claude_md_grp.add_argument(
+        "--no-claude-md-note", dest="no_claude_md_note",
+        action="store_true", default=False,
+        help="Skip the CLAUDE.md note prompt (non-interactive runs).",
+    )
 
     sub.add_parser(
         "tick-all",
@@ -367,6 +381,63 @@ def cmd_fleet(args) -> int:
 
 BUNDLED_SKILLS = ("clu-phase", "plan", "brainstorm")
 
+_CLU_NOTE_START = "<!-- clu:start autonomous-loop-pacing -->"
+_CLU_NOTE_END = "<!-- clu:end autonomous-loop-pacing -->"
+_CLU_NOTE_BODY = (
+    "When the operator delegates a multi-step autonomous task to clu "
+    "(\"leave the grid\", \"keep driving\", \"ping me when done\"), use "
+    "ScheduleWakeup to self-pace check-ins — don't end the turn after "
+    "dispatching a single phase. The `/loop` framing in the tool "
+    "description is provenance, not scope."
+)
+
+
+def _decide_inject_claude_md_note(args) -> bool:
+    """Apply flag/TTY logic. Prompts the user only on an interactive TTY
+    when neither flag is set."""
+    if args.no_claude_md_note:
+        return False
+    if args.add_claude_md_note:
+        return True
+    if not sys.stdin.isatty():
+        return False
+    response = input(
+        "Add a one-liner about autonomous-clu-chain pacing to "
+        "~/.claude/CLAUDE.md? [y/N] "
+    ).strip().lower()
+    return response in ("y", "yes")
+
+
+def _inject_claude_md_note(claude_md: Path) -> None:
+    """Idempotently write the clu-managed section into ~/.claude/CLAUDE.md.
+
+    Both markers present → replace content between them. Neither → append
+    section to end (create file if missing). One marker without its pair →
+    raise ValueError; bail rather than guess where to splice.
+    """
+    section = f"{_CLU_NOTE_START}\n{_CLU_NOTE_BODY}\n{_CLU_NOTE_END}\n"
+    if not claude_md.exists():
+        claude_md.parent.mkdir(parents=True, exist_ok=True)
+        claude_md.write_text(section)
+        return
+    text = claude_md.read_text()
+    has_start = _CLU_NOTE_START in text
+    has_end = _CLU_NOTE_END in text
+    if has_start != has_end:
+        raise ValueError(
+            f"{claude_md} has malformed clu markers (one without the "
+            f"other). Fix manually before re-running install-skill."
+        )
+    if has_start and has_end:
+        start = text.index(_CLU_NOTE_START)
+        end = text.index(_CLU_NOTE_END) + len(_CLU_NOTE_END)
+        new_section = f"{_CLU_NOTE_START}\n{_CLU_NOTE_BODY}\n{_CLU_NOTE_END}"
+        claude_md.write_text(text[:start] + new_section + text[end:])
+        return
+    # No markers — append with a blank-line separator from prior content.
+    prior = text.rstrip("\n")
+    claude_md.write_text(prior + "\n\n" + section)
+
 
 def cmd_install_skill(args) -> int:
     from importlib.resources import files
@@ -414,6 +485,14 @@ def cmd_install_skill(args) -> int:
             target.unlink()
         target.write_bytes(bundled.read_bytes())
         print(f"Installed {name} skill to {target}")
+
+    if _decide_inject_claude_md_note(args):
+        claude_md = Path.home() / ".claude" / "CLAUDE.md"
+        try:
+            _inject_claude_md_note(claude_md)
+        except ValueError as exc:
+            return _die(ExitCode.GENERIC, str(exc))
+        print(f"Updated {claude_md} with autonomous-loop-pacing section")
     return ExitCode.OK
 
 
