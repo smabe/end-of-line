@@ -77,6 +77,18 @@ _AUTH_FAILURE_RE = re.compile(
 _MISSING_BINARY_RE = re.compile(r"command not found", re.IGNORECASE)
 
 
+def build_worker_env(cfg: ProjectConfig) -> dict[str, str] | None:
+    """Return the env dict to pass to subprocess.Popen, or None to inherit.
+
+    Merges (not replaces) os.environ when an override is configured — a bare
+    {"PATH": ...} would strip HOME/USER and break `claude --print` in the
+    worker (the #9 regression). Empty path == no override == inherit.
+    """
+    if cfg.dispatch.path:
+        return {**os.environ, "PATH": cfg.dispatch.path}
+    return None
+
+
 def _match_systemic_signature(log_path: Path, *, rc: int) -> str | None:
     """Return the matching signature name, or None.
 
@@ -139,10 +151,8 @@ def dispatch_for_tick(
         cwd=str(cfg.project_root),
         start_new_session=True,
     )
-    # Merge (not replace) so HOME/USER/etc survive — a bare {"PATH": ...}
-    # would strip them and break `claude --print` in the worker.
-    if cfg.dispatch.path:
-        popen_kwargs["env"] = {**os.environ, "PATH": cfg.dispatch.path}
+    if (worker_env := build_worker_env(cfg)) is not None:
+        popen_kwargs["env"] = worker_env
 
     with open(log_path, "ab") as log_fh:
         proc = subprocess.Popen(
@@ -223,8 +233,8 @@ def dispatch_repair_worker(
         cwd=str(cfg.project_root),
         start_new_session=True,
     )
-    if cfg.dispatch.path:
-        popen_kwargs["env"] = {**os.environ, "PATH": cfg.dispatch.path}
+    if (worker_env := build_worker_env(cfg)) is not None:
+        popen_kwargs["env"] = worker_env
 
     with open(log_path, "ab") as log_fh:
         proc = subprocess.Popen(

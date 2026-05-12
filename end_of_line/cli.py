@@ -23,14 +23,15 @@ import argparse
 import functools
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
 from enum import IntEnum
 from pathlib import Path
 
-from . import fleet, notify, queue, registry, state as st
-from .config import ProjectConfig, load_project_config
+from . import dispatch, fleet, notify, queue, registry, state as st
+from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
 
@@ -219,6 +220,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Project root (defaults to CWD).",
     )
 
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Show what PATH and binary resolutions a worker subprocess "
+             "would see (read-only; doesn't touch plan state).",
+        description="Build the same env dict `dispatch_for_tick` would pass "
+                    "to subprocess.Popen, then run a one-shot `sh -c` probe "
+                    "to print PATH and resolve gh/pipx/clu. Closes #14: "
+                    "operators can now see what their LaunchAgent worker "
+                    "actually inherits instead of guessing dispatch.path.",
+    )
+    p_doctor.add_argument(
+        "--project", type=Path, required=True,
+        help="Project root (contains .orchestrator.json)",
+    )
+
     sub.add_parser(
         "tick-all",
         help="Tick every registered plan once (cron entry point). Per-plan "
@@ -377,6 +393,8 @@ def main(argv: list[str] | None = None) -> int:
     # alongside the per-plan path; the dispatcher branches inside.
     if args.cmd == "unregister":
         return cmd_unregister(args)
+    if args.cmd == "doctor":
+        return cmd_doctor(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -728,6 +746,49 @@ def cmd_install_skill(args) -> int:
         except ValueError as exc:
             return _die(ExitCode.GENERIC, str(exc))
         print(f"Updated {claude_md} with autonomous-loop-pacing section")
+    return ExitCode.OK
+
+
+_DOCTOR_PROBE_SCRIPT = (
+    'echo "PATH=$PATH"; '
+    'for b in gh pipx clu; do '
+    'printf "%s = " "$b"; '
+    'command -v "$b" || echo "NOT FOUND: $b"; '
+    'done'
+)
+
+
+def cmd_doctor(args) -> int:
+    """Smoke-test the worker subprocess env: print PATH + resolved binaries.
+
+    Read-only: no state.json read or write, no registry mutation. Reuses
+    `dispatch.build_worker_env` so what the operator sees here is byte-for-
+    byte what a real worker would inherit. Refuses on a project without an
+    `.orchestrator.json` — without one there's no override config to report,
+    and the operator is asking about a project that isn't initialized.
+    """
+    cfg_path = args.project / CONFIG_FILENAME
+    if not cfg_path.exists():
+        return _die(
+            ExitCode.UNKNOWN_TASK,
+            f"no {CONFIG_FILENAME} at {cfg_path} — "
+            f"run `clu init --project {args.project} --plan <slug>` first",
+        )
+    cfg = load_project_config(args.project)
+    env = dispatch.build_worker_env(cfg)
+    source = "dispatch.path" if env is not None else "inherited"
+    probe_env = env if env is not None else dict(os.environ)
+    # Hardcode /bin/sh so an empty-ish dispatch.path can't make this probe
+    # itself fail to spawn — matches how `shell=True` in dispatch_for_tick
+    # resolves the shell independently of the env we pass.
+    result = subprocess.run(
+        ["/bin/sh", "-c", _DOCTOR_PROBE_SCRIPT],
+        env=probe_env, capture_output=True, text=True,
+    )
+    print("Worker subprocess will see:")
+    for line in result.stdout.splitlines():
+        print(f"  {line}")
+    print(f"  (source: {source})")
     return ExitCode.OK
 
 
