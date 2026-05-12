@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/clu-perfect-system.gif" alt="CLU: 'I created the perfect system.'" width="448">
+</p>
+
 # End of Line
 
 > "End of line."
@@ -9,9 +13,9 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 
 ## Status
 
-v0.1, working. 233 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
+v0.1, working. 237 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
 
-Recent ships, all driven by clu on itself: configurable worker PATH ([`dispatch.path`](#configure-a-project), closes [#9](https://github.com/smabe/end-of-line/issues/9)), self-contained skill bundling (`clu install-skill` now ships `/clu-phase` + `/plan` + `/brainstorm` with a `--only` flag), and a Day-4 sweep that closed 6 backlog issues across 4 self-dispatched bundle plans.
+Recent ships, all driven by clu on itself: configurable worker PATH ([`dispatch.path`](#configure-a-project), closes [#9](https://github.com/smabe/end-of-line/issues/9)), self-contained skill bundling (`clu install-skill` ships `/clu-phase` + `/plan` + `/brainstorm` with a `--only` flag), a cleaner manual tick (`clu tick` dispatches by default; `--dry-tick` is the opt-out for state-mutation-only debug ticks), and a Day-4 sweep that closed 6 backlog issues across 4 self-dispatched bundle plans.
 
 ## How it works
 
