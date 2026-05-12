@@ -260,6 +260,42 @@ Check, in order:
    stream — `clu status` shows it and `cat state.json | jq .events[-5:]`
    has the stderr capture.
 
+### Worker log shows `<tool>: command not found`
+
+Symptom: per-worker log at
+`<project>/plans/.orchestrator/logs/<phase>.<token>.log` contains a line
+like `gh: command not found`, `pipx: command not found`, or any
+user-installed tool reported missing. Typical victims are anything
+under `~/.local/bin` (pipx shims) or Homebrew on Apple Silicon
+(`/opt/homebrew/bin`).
+
+Cause: the worker subprocess inherits a sparse PATH from the
+LaunchAgent that dispatched it — `claude --print` doesn't get the
+operator's interactive shell PATH.
+
+Fix: set `dispatch.path` in `.orchestrator.json` to an absolute,
+colon-separated PATH covering every tool the worker needs:
+
+```json
+"dispatch": {
+  "command": "...",
+  "path": "/opt/homebrew/bin:/usr/local/bin:/Users/<you>/.local/bin:/usr/bin:/bin"
+}
+```
+
+When `path` is non-empty, clu passes `env={**os.environ, "PATH": ...}`
+to the worker's `subprocess.Popen` — your absolute PATH overrides the
+inherited one, and the rest of the env (`HOME`, `USER`, etc.) is left
+intact. Empty or absent = inherit the parent env (the historical
+behavior).
+
+Constraints:
+
+- Absolute paths only. No tilde expansion — write
+  `/Users/<you>/.local/bin`, not `~/.local/bin`.
+- The fix is per-plan. Each `.orchestrator.json` that needs a custom
+  PATH sets its own; there's no host-level default.
+
 ### iMessage notifications not arriving
 
 1. Open `Messages.app`. Confirm it's signed in and you can iMessage
@@ -314,7 +350,7 @@ gate so a 3am rate-limit doesn't sit silent until morning.
 
 | Signature | Trigger | Operator action |
 |---|---|---|
-| `missing_binary` | rc == 127 AND log contains `command not found` | Fix `$PATH` for the dispatch context (LaunchAgent uses a stub PATH — hard-code `/opt/homebrew/bin` or absolute paths). Then `clu resume --plan S`. |
+| `missing_binary` | rc == 127 AND log contains `command not found` | Set `dispatch.path` in `.orchestrator.json` to an absolute, colon-separated PATH (see "Worker log shows `<tool>: command not found`" above). Then `clu resume --plan S`. |
 | `rate_limit` | log contains `rate limit` or `RateLimitError` (case-insensitive) | Wait for the window to refresh, or roll the key. Then `clu resume --plan S`. |
 | `auth_failure` | log contains `401 Unauthorized`, `AuthenticationError`, or `invalid api key` | Fix the credential (re-export `ANTHROPIC_API_KEY` in the LaunchAgent plist, or refresh whatever auth backs the worker). Then `clu resume --plan S`. |
 
