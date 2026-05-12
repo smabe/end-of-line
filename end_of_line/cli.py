@@ -367,8 +367,10 @@ def cmd_install_skill(args) -> int:
         return ExitCode.OK
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    if is_symlink:
-        # Unlink the symlink itself; do NOT touch its destination.
+    if exists:
+        # Always unlink before writing — handles symlinks (don't follow
+        # to destination), hardlinks (don't modify the shared inode),
+        # and regular files (replace cleanly with a fresh inode).
         target.unlink()
     target.write_bytes(bundled.read_bytes())
     print(f"Installed worker skill to {target}")

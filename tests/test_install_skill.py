@@ -96,6 +96,34 @@ class SymlinkTargetTests(InstallSkillTestBase):
         self.assertEqual(self.linked.read_bytes(), b"upstream skill body\n")
 
 
+class HardlinkTargetTests(InstallSkillTestBase):
+    """Some operators ingest skills via hardlinks (e.g. `cp -al`) rather
+    than symlinks. The naive "open target for write" path would modify the
+    shared inode, hitting the upstream copy. Force-install must break the
+    hardlink instead.
+    """
+    def setUp(self) -> None:
+        super().setUp()
+        self.target.parent.mkdir(parents=True)
+        self.linked = self.home / "abe-skills" / "clu-phase" / "SKILL.md"
+        self.linked.parent.mkdir(parents=True)
+        self.linked.write_bytes(b"upstream skill body\n")
+        os.link(self.linked, self.target)
+
+    def test_force_breaks_hardlink_upstream_untouched(self):
+        rc, _, _ = self._run("--force")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertEqual(self.target.read_bytes(), self.bundled_bytes)
+        # The upstream hardlink's content must NOT be modified by the
+        # install. With the old "overwrite-in-place" behavior, this
+        # assertion failed silently — the install hit the shared inode.
+        self.assertEqual(self.linked.read_bytes(), b"upstream skill body\n")
+        # And the two paths must no longer share an inode.
+        self.assertNotEqual(
+            self.target.stat().st_ino, self.linked.stat().st_ino,
+        )
+
+
 class DryRunTests(InstallSkillTestBase):
     def test_dry_run_fresh_makes_no_changes(self):
         rc, out, _ = self._run("--dry-run")
