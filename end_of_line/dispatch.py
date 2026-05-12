@@ -9,6 +9,7 @@ waiting 30 minutes for the lease to expire silently.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -104,14 +105,22 @@ def dispatch_for_tick(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{result.phase_id}.{result.token}.log"
 
+    popen_kwargs: dict = dict(
+        shell=True,
+        cwd=str(cfg.project_root),
+        start_new_session=True,
+    )
+    # Merge (not replace) so HOME/USER/etc survive — a bare {"PATH": ...}
+    # would strip them and break `claude --print` in the worker.
+    if cfg.dispatch.path:
+        popen_kwargs["env"] = {**os.environ, "PATH": cfg.dispatch.path}
+
     with open(log_path, "ab") as log_fh:
         proc = subprocess.Popen(
             cmd,
-            shell=True,
-            cwd=str(cfg.project_root),
             stdout=log_fh,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **popen_kwargs,
         )
 
     try:
