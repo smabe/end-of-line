@@ -15,6 +15,7 @@ ORCHESTRATOR_DIR = ".orchestrator"
 class DispatchSpec:
     kind: str = "shell"
     command: str = ""
+    path: str = ""
 
 
 @dataclass
@@ -60,6 +61,7 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         dispatch=DispatchSpec(
             kind=disp.get("kind", "shell"),
             command=disp.get("command", ""),
+            path=disp.get("path", "") or "",
         ),
         notify=NotifySpec(
             imessage_to=(notify_raw.get("imessage") or {}).get("to"),
