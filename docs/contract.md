@@ -143,7 +143,7 @@ A worker is a fresh process that runs ONE phase. It must:
 
 ```cron
 # Every 5 min, advance any in-progress plans
-*/5 * * * * /usr/local/bin/clu tick --project /Users/me/projects/HealthData --plan watch-start-workout --dispatch >> /tmp/clu-watch.log 2>&1
+*/5 * * * * /usr/local/bin/clu tick --project /Users/me/projects/HealthData --plan watch-start-workout >> /tmp/clu-watch.log 2>&1
 ```
 
 ## What End of Line is NOT

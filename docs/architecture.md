@@ -15,7 +15,7 @@ is replaceable and stateless between invocations.
 
 Four pieces, three of them processes:
 
-- **Supervisor.** `clu tick --dispatch`, fired by `launchd` on a 5-min
+- **Supervisor.** `clu tick`, fired by `launchd` on a 5-min
   cadence. ~50 ms of Python. Reads the state file under a `flock`,
   picks the highest-priority action, writes one event, optionally spawns
   a worker, exits. Burns zero LLM tokens.
@@ -106,7 +106,7 @@ Step by step:
    The state file is created at
    `~/projects/foo/plans/.orchestrator/my-feature.state.json`, and the
    host registry at `~/.config/clu/registry.json` learns about it.
-2. Cron fires `clu tick --dispatch`. The supervisor finds phase
+2. Cron fires `clu tick`. The supervisor finds phase
    `design` pending, claims it (writing `phase_started` with a fresh
    token), and returns to `cmd_tick`.
 3. `cmd_tick` exits the state lock, then calls

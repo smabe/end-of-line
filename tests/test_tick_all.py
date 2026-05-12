@@ -1,9 +1,9 @@
 """Tests for `clu tick-all` — registry-walking cron entry point.
 
 Replaces the old `examples/clu-tick-all.sh` parser. The shell version
-piped `clu list` through awk and fired one `clu tick --dispatch` per
-plan; tick-all does the same in Python so per-plan exceptions can be
-caught + logged without aborting the loop.
+piped `clu list` through awk and fired one `clu tick` per plan;
+tick-all does the same in Python so per-plan exceptions can be caught
++ logged without aborting the loop.
 """
 from __future__ import annotations
 

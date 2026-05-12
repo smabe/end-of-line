@@ -147,7 +147,8 @@ class LifecycleTestCase(unittest.TestCase):
         self._halt_plan_on_phase_a()
         main(self._argv("retry"))
         # Next tick should now re-claim phase 'a' instead of halting.
-        rc = main(self._argv("tick"))
+        # --dry-tick keeps it state-mutation-only so no real worker spawns.
+        rc = main(self._argv("tick", "--dry-tick"))
         self.assertEqual(rc, 0)
         claim = self._read()["current_claim"]
         self.assertIsNotNone(claim)

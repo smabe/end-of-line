@@ -81,11 +81,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.add_argument("--plan", required=True, help="Plan slug")
 
-    p_tick = sub.add_parser("tick", help="Run one supervisor tick")
+    p_tick = sub.add_parser(
+        "tick",
+        help="Run one supervisor tick (dispatches worker by default; "
+             "use --dry-tick for state mutation only).",
+    )
     add_common(p_tick)
     p_tick.add_argument(
-        "--dispatch", action="store_true",
-        help="Actually spawn worker via configured dispatch.command",
+        "--dry-tick", action="store_true",
+        help="Skip worker spawn (state mutation only — debug use). "
+             "Default is to dispatch.",
     )
 
     p_init = sub.add_parser("init", help="Bootstrap orchestrator state for a plan")
@@ -431,7 +436,7 @@ def _tick_one_plan(
 
 
 def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
-    result = _tick_one_plan(args.plan, cfg, state_path, dispatch=args.dispatch)
+    result = _tick_one_plan(args.plan, cfg, state_path, dispatch=not args.dry_tick)
     print(result)
     return 0
 

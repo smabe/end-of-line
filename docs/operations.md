@@ -116,9 +116,10 @@ launchctl list | grep com.clu.tick
 tail -f /tmp/clu-tick.out                      # one block per 5-min tick
 ```
 
-The tick driver calls `clu list`, then `clu tick --project P --plan S
---dispatch` for each registered plan. One worker per active plan per
-tick, capped by `--max-budget-usd` in your dispatch command.
+The tick driver calls `clu list`, then `clu tick --project P --plan S`
+for each registered plan. One worker per active plan per tick, capped
+by `--max-budget-usd` in your dispatch command. Pass `--dry-tick` to
+mutate state without spawning a worker — debug only.
 
 ### Log locations
 
@@ -168,7 +169,7 @@ A clean end-to-end against a real project.
    manually:
 
    ```bash
-   clu tick --project ~/projects/demo --plan demo-feature --dispatch
+   clu tick --project ~/projects/demo --plan demo-feature
    ```
 
    The supervisor claims the first phase, writes `phase_started`, and

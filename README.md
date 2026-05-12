@@ -161,7 +161,7 @@ The bundled skill also encodes **9 universal quality mandates** — TDD before l
 | `clu register` / `clu unregister` | Manual registry edits |
 | `clu status` | Pretty-print one plan's current state, with a `Reason:` line for paused/halted plans |
 | `clu logs [--follow]` | Tail the active worker's log (falls back to the newest log if idle) |
-| `clu tick --dispatch` | One supervisor decision step on one plan; spawn a worker if a phase is ready |
+| `clu tick` | One supervisor decision step on one plan; spawns a worker if a phase is ready. `--dry-tick` skips spawn (debug only) |
 | `clu tick-all` | Tick every registered plan once (host-scoped; what cron runs) |
 | `clu answer <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |
 | `clu pause [--reason ...]` | Halt dispatching new phases |

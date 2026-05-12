@@ -146,7 +146,7 @@ def _cli_dispatch(target: OpenBlocker, answer: str) -> None:
 
 
 def _spawn_tick(project_root: Path, plan_slug: str) -> None:
-    """Fire-and-forget `clu tick --dispatch` for the plan whose blocker was just
+    """Fire-and-forget `clu tick` for the plan whose blocker was just
     answered, so the next phase dispatches immediately instead of waiting for
     the next cron firing. Mirrors `dispatch.py`'s Popen pattern."""
     subprocess.Popen(
@@ -154,7 +154,6 @@ def _spawn_tick(project_root: Path, plan_slug: str) -> None:
             sys.executable, "-m", "end_of_line.cli", "tick",
             "--project", str(project_root),
             "--plan", plan_slug,
-            "--dispatch",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
