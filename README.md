@@ -9,7 +9,7 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 
 ## Status
 
-v0.1, working. 151 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — Linux would need different notification + inbound channels.
+v0.1, working. 221 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
 
 ## How it works
 
@@ -46,7 +46,7 @@ Drop a `.orchestrator.json` at your project root (it's gitignored by example sin
   "plan_dir": "plans",
   "dispatch": {
     "kind": "shell",
-    "command": "claude --print --permission-mode bypassPermissions --max-budget-usd 1.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'"
+    "command": "claude --print --permission-mode bypassPermissions --max-budget-usd 3.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'"
   },
   "notify": {
     "imessage": {"to": "you@example.com"},
@@ -93,9 +93,9 @@ cp examples/clu.inbound.plist ~/Library/LaunchAgents/com.clu.inbound.plist
 # Edit ProgramArguments[0] to point at your pipx venv python
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.inbound.plist
 
-# Tick driver — fires every 5 min, advances every registered plan
+# Tick driver — fires every 60s, advances every registered plan via `clu tick-all`
 cp examples/clu.tick.plist ~/Library/LaunchAgents/com.clu.tick.plist
-# Edit ProgramArguments[0] to point at your clone's examples/clu-tick-all.sh
+# Verify ProgramArguments[0] matches `which clu` in your shell (default: ~/.local/bin/clu)
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
 ```
 
@@ -116,6 +116,8 @@ Every worker callback validates `--token` against the live claim — `clu` rejec
 
 If a worker calls `clu block`, clu releases the claim and sends an iMessage. When you reply, the inbound poller routes the answer back, the supervisor consumes it on the next tick, and re-dispatches the phase — the resume-aware worker reads the answered blocker from state and continues with your choice.
 
+The bundled skill also encodes **9 universal quality mandates** — TDD before logic changes, structured commit messages, `command -v` fallbacks for external tools, re-running the project's primary check from a fresh process before `clu complete`, and so on. See `end_of_line/skill/SKILL.md` for the full list. Each mandate earned its slot by capturing a witnessed failure mode from real worker sessions, not hypothetical good advice. Project-specific rules (test framework, naming conventions, files to avoid) layer on top via your project's `CLAUDE.md`.
+
 ## Operator commands
 
 | Command | Purpose |
@@ -125,12 +127,16 @@ If a worker calls `clu block`, clu releases the claim and sends an iMessage. Whe
 | `clu list` | List plans on this host (name + project path) |
 | `clu register` / `clu unregister` | Manual registry edits |
 | `clu status` | Pretty-print one plan's current state, with a `Reason:` line for paused/halted plans |
-| `clu tick --dispatch` | One supervisor decision step; spawn a worker if a phase is ready |
+| `clu logs [--follow]` | Tail the active worker's log (falls back to the newest log if idle) |
+| `clu tick --dispatch` | One supervisor decision step on one plan; spawn a worker if a phase is ready |
+| `clu tick-all` | Tick every registered plan once (host-scoped; what cron runs) |
 | `clu answer <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |
 | `clu pause [--reason ...]` | Halt dispatching new phases |
 | `clu resume` | Un-pause |
 | `clu retry [--phase X]` | Clear max-attempts on a halted phase and resume |
+| `clu release-claim [--force] [--reason ...]` | Escape hatch when a worker dies holding the lease |
 | `clu task-done <task_id>` | Mark a spawned follow-up done |
+| `clu install-skill [--force] [--dry-run]` | (Re-)install the bundled `/clu-phase` worker skill |
 
 ## State schema
 
@@ -153,12 +159,12 @@ Sketch — see `docs/contract.md` for the full schema:
 
 ```
 end_of_line/          # the package (cli, supervisor, state, notify, dispatch, …)
+end_of_line/skill/    # the bundled /clu-phase worker skill, installed via `clu install-skill`
 tests/                # unittest suite
-plans/                # the project's own plans (dogfooded — this repo uses clu on itself)
-examples/             # .orchestrator.json template, LaunchAgent plists, clu-phase skill,
-                      # clu-tick-all.sh, fake-worker.sh for smoke testing
-docs/contract.md      # state schema + worker callback contract
-brainstorm/           # design docs that informed Day 1 / Day 2 / Day 3
+plans/                # active plan files (dogfooded — this repo uses clu on itself)
+docs/                 # architecture, reference, operations, conventions, contract
+docs/history/         # archived plans + pre-Day-1 brainstorms — receipts that the system shipped real features
+examples/             # .orchestrator.json template, LaunchAgent plists, fake-worker.sh for smoke testing
 ```
 
 ## Naming
