@@ -85,6 +85,26 @@ If you see an answered blocker, that means: you asked a question previously, the
 
 7. **Call the callback and exit.** Output of the callback is logged. Exit code 0 from the callback means clu accepted it.
 
+## Quality mandates
+
+These mandates apply on every project that uses clu. The project's CLAUDE.md adds project-specific rules on top (naming, exit-code patterns, event constants, files to avoid); read it before your first commit.
+
+- **TDD when modifying logic.** Failing test first, then the minimal implementation that turns it green. Skip TDD only for pure refactor, config, docs, or content edits. The project's CLAUDE.md names the test framework.
+
+- **Review after non-trivial diffs.** If the diff spans more than one file or ~30 lines, run the project's review pass (`/simplify`, a project-local equivalent, or a deliberate self-review). Look specifically for rule-of-three extraction opportunities, dead code, and copy-paste from sibling phases.
+
+- **Structured commit messages.** Title (one line) / Why (motivation) / What's new (the surface) / Under the hood (the non-obvious choices) / Tests (count + what's covered) / `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer. Commit messages outlast the code — treat them as primary documentation.
+
+- **Stage explicit paths.** `git add <path1> <path2> ...`, never `git add -A` or `git add .`. Explicit staging forces you to think about what you're including; the blanket forms are how secrets and stray artifacts leak in.
+
+- **External tools need absolute paths or `command -v` fallbacks.** Worker subprocess PATH is not the operator's shell PATH — LaunchAgent and headless `claude --print` contexts inherit a minimal environment. Before shelling out to `gh`, `pipx`, `pip`, or any user-installed tool, resolve the absolute path or use `command -v <tool>` with a known fallback.
+
+- **Read existing helpers before inventing new ones.** Grep first. If you'd write a function whose 80%-overlap twin already exists, use the existing one — project-level rule-of-three may already have extracted what you need.
+
+- **Honor the project's CLAUDE.md.** It's the project-specific layer of these mandates: naming conventions, exit-code patterns, event constants, files to avoid. Read it before your first commit on a project, and re-read when you're unsure.
+
+- **The completion summary is load-bearing.** When you call `clu complete`, your final message to the operator is the only signal they have about what shipped. Mention what actually committed (SHA), what tests pass (count + delta), and anything you tried that didn't work and the operator should know about (e.g. "couldn't run `gh issue close` because the binary wasn't on PATH; operator should close manually"). Silence on a failure mode reads as "everything went fine," which is worse than admitting a small thing didn't.
+
 ## Common pitfalls
 
 - **Passing the wrong token**: tokens are validated against the live claim. If you pass anything other than the `$TOKEN` arg, `clu` rejects with `CLAIM_MISMATCH` (exit 4) and your phase is stuck. Always use `--token "$TOKEN"`.
