@@ -26,8 +26,15 @@ KIND_HALTED = "halted"
 # Queue-pop skipped a head (plan file missing). Defers during quiet hours
 # — the operator finds out next loud window, no 3am ping.
 KIND_QUEUE_SKIPPED = "queue_skipped"
+KIND_QUEUE_REPAIRED = "queue_repaired"
+KIND_QUEUE_REPAIR_FAILED = "queue_repair_failed"
+KIND_QUEUE_CORRUPT = "queue_corrupt"
 
-QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({KIND_HALTED})
+QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
+    KIND_HALTED,
+    KIND_QUEUE_REPAIR_FAILED,
+    KIND_QUEUE_CORRUPT,
+})
 
 # osascript-friendly AppleScript: argv carries the handle + body so we
 # don't have to escape user-controlled text into the script source.
@@ -145,6 +152,19 @@ def render_halted(plan_slug: str, phase: str, attempts: int) -> str:
 
 def render_queue_skipped(slug: str, reason: str) -> str:
     return f"⏭️  queue skipped {slug} — {reason}."
+
+
+def render_queue_corrupt(diagnosis: str, backup_path) -> str:
+    return f"💀 queue corrupt: {diagnosis}. backup at {backup_path}."
+
+
+def render_queue_repaired(slug_count: int, backup_path) -> str:
+    entries = "entry" if slug_count == 1 else "entries"
+    return f"🔧 queue repaired — {slug_count} {entries} preserved. backup at {backup_path}."
+
+
+def render_queue_repair_failed(reason: str, backup_path) -> str:
+    return f"💥 queue repair failed: {reason}. reverted from backup at {backup_path}."
 
 
 def render_systemic_failure(plan_slug: str, phase: str, signature: str) -> str:

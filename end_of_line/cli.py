@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import json
 import subprocess
 import sys
@@ -42,6 +43,10 @@ class ExitCode(IntEnum):
     SPAWN_CAP = 5
     UNKNOWN_TASK = 6
     STATUS_TRANSITION = 7
+    # Repair worker's intent: "I won't touch this — would lose data."
+    # clu's validation rejects the result anyway regardless of rc, so
+    # this code is purely a legibility win when reading worker logs.
+    REPAIR_DECLINED = 9
 
 
 def _die(rc: ExitCode | int, msg: str) -> int:
@@ -822,7 +827,11 @@ def _advance_queue_for_project(project_root: Path) -> None:
         if state and state.get("current_claim"):
             return
 
-    queue_data = queue.load(queue_path)
+    try:
+        queue_data = queue.load(queue_path)
+    except (json.JSONDecodeError, st.SchemaVersionMismatch, KeyError, OSError) as exc:
+        _handle_corrupt_queue(cfg, exc, queue_path)
+        return
     if not queue_data["queue"]:
         return
 
@@ -909,6 +918,109 @@ def _advance_queue_for_project(project_root: Path) -> None:
 
     result = _tick_one_plan(slug, cfg, state_path, dispatch=True)
     print(f"tick (queue-pop) {slug} @ {cfg.project_root}: {result}")
+
+
+_REPAIR_MAX_ATTEMPTS = 3
+
+
+def _handle_corrupt_queue(
+    cfg: ProjectConfig, exc: Exception, queue_path: Path,
+) -> None:
+    """Backup-first auto-repair pipeline for an unparseable queue.json.
+
+    Steps (any failure short-circuits to a notification + early return):
+      1. Backup the current bytes to a `corrupt-<utc>` sibling. Always.
+      2. Check the per-diagnosis-hash throttle. ≥ 3 attempts → notify only.
+      3. `repair_command` unset → notify only, increment throttle.
+      4. Spawn the repair worker synchronously, then run
+         `queue.validate_repair` against the worker's output.
+      5. Validation failed → revert bytes from backup, REPAIR_FAILED.
+      6. Validation passed → REPAIRED, reset throttle.
+    """
+    from . import dispatch  # local: dispatch imports supervisor too.
+
+    diagnosis = f"{type(exc).__name__}: {exc}"
+    diagnosis_hash = hashlib.sha256(diagnosis.encode()).hexdigest()[:8]
+    throttle_path = queue_path.with_name(queue_path.name + ".repair-attempts")
+
+    try:
+        original_bytes = queue_path.read_bytes()
+    except OSError as read_exc:
+        print(
+            f"corrupt queue: cannot read {queue_path}: {read_exc}",
+            file=sys.stderr,
+        )
+        return
+    backup_path = queue_path.with_name(
+        f"{queue_path.name}.corrupt-{st.utcnow_compact()}"
+    )
+    try:
+        backup_path.write_bytes(original_bytes)
+    except OSError as write_exc:
+        print(
+            f"corrupt queue: cannot write backup {backup_path}: {write_exc}",
+            file=sys.stderr,
+        )
+        return
+
+    attempts = queue.read_throttle(throttle_path, diagnosis_hash)
+    if attempts >= _REPAIR_MAX_ATTEMPTS:
+        notify.notify(
+            cfg.notify, notify.KIND_QUEUE_CORRUPT,
+            notify.render_queue_corrupt(diagnosis, backup_path)
+            + f" (auto-repair gave up after {_REPAIR_MAX_ATTEMPTS} attempts)",
+        )
+        return
+
+    if not cfg.dispatch.repair_command:
+        notify.notify(
+            cfg.notify, notify.KIND_QUEUE_CORRUPT,
+            notify.render_queue_corrupt(diagnosis, backup_path),
+        )
+        queue.increment_throttle(throttle_path, diagnosis_hash)
+        return
+
+    log_path = (
+        queue_path.parent / "logs"
+        / f"repair-queue-{st.utcnow_compact()}.log"
+    )
+
+    try:
+        dispatch.dispatch_repair_worker(
+            cfg, queue_path, backup_path, diagnosis, log_path,
+        )
+    except (OSError, ValueError) as spawn_exc:
+        notify.notify(
+            cfg.notify, notify.KIND_QUEUE_REPAIR_FAILED,
+            notify.render_queue_repair_failed(
+                f"dispatch failed: {spawn_exc}", backup_path,
+            ),
+        )
+        queue.increment_throttle(throttle_path, diagnosis_hash)
+        return
+
+    result = queue.validate_repair(original_bytes, queue_path)
+    if not result.ok:
+        try:
+            queue_path.write_bytes(original_bytes)
+        except OSError as revert_exc:
+            print(
+                f"corrupt queue: revert failed for {queue_path}: {revert_exc}",
+                file=sys.stderr,
+            )
+        notify.notify(
+            cfg.notify, notify.KIND_QUEUE_REPAIR_FAILED,
+            notify.render_queue_repair_failed(result.reason or "unknown", backup_path),
+        )
+        queue.increment_throttle(throttle_path, diagnosis_hash)
+        return
+
+    repaired = queue.load(queue_path)
+    notify.notify(
+        cfg.notify, notify.KIND_QUEUE_REPAIRED,
+        notify.render_queue_repaired(len(repaired["queue"]), backup_path),
+    )
+    queue.reset_throttle(throttle_path)
 
 
 def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:

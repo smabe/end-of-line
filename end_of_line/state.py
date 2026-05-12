@@ -105,6 +105,14 @@ def utcnow() -> str:
     return _now_utc().strftime(_ISO_FMT)
 
 
+def utcnow_compact() -> str:
+    """Filename-safe UTC timestamp (`20260512T143415Z`).
+
+    Used in backup / log paths where `:` would be illegal on some filesystems.
+    """
+    return _now_utc().strftime("%Y%m%dT%H%M%SZ")
+
+
 def parse_iso(ts: str) -> _dt.datetime:
     # Python 3.11+ fromisoformat handles trailing 'Z' natively.
     return _dt.datetime.fromisoformat(ts)

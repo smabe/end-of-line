@@ -27,6 +27,35 @@ from .supervisor import TickResult
 # the lease.
 _FAST_FAIL_WAIT_SEC = 0.5
 
+# Synchronous: the cron tick blocks waiting on the repair worker, so a
+# hung worker can't stall the queue indefinitely. 60s is plenty for a
+# small JSON repair; if the cron cadence is faster than this, the next
+# tick will still wait for the lock the previous one is holding.
+DEFAULT_REPAIR_TIMEOUT_SEC = 60
+
+# Sentinel rc returned by dispatch_repair_worker when the worker hung
+# past the timeout and was killed. Distinct from any rc the worker
+# itself could plausibly emit.
+REPAIR_RC_TIMEOUT = -1
+
+# Suggested schema_json bundle to pass into the repair worker prompt.
+# Stays here (not config) because it has to track queue.SCHEMA_VERSION.
+_REPAIR_SCHEMA_HINT = json.dumps({
+    "schema_version": 1,
+    "queue": [{
+        "slug": "<plan-slug>",
+        "added_at": "<iso8601-utc>",
+        "added_by": "operator",
+        "position_at_add": "tail|front",
+    }],
+    "history": [{
+        "slug": "<plan-slug>",
+        "added_at": "<iso8601-utc>",
+        "ended_at": "<iso8601-utc>",
+        "outcome": "abandoned|removed|absorbed",
+    }],
+})
+
 # Exceptions that are recoverable in dispatch fallback paths.
 _DISPATCH_FALLBACK_ERRORS = (OSError, json.JSONDecodeError, st.SchemaVersionMismatch)
 
@@ -156,6 +185,61 @@ def dispatch_for_tick(
         file=sys.stderr,
     )
     return True
+
+
+def dispatch_repair_worker(
+    cfg: ProjectConfig,
+    corrupt_path: Path,
+    backup_path: Path,
+    diagnosis: str,
+    log_path: Path,
+    *,
+    timeout_sec: float = DEFAULT_REPAIR_TIMEOUT_SEC,
+) -> int:
+    """Spawn the configured repair_command and wait synchronously for it.
+
+    Returns the worker's rc, or `REPAIR_RC_TIMEOUT` if we had to kill it.
+    Caller is responsible for running `queue.validate_repair` against
+    the corrupt_path bytes regardless of rc — a worker that ignores its
+    prompt and writes garbage is what the validation exists to catch.
+
+    Stays separate from `dispatch_for_tick` because the contracts differ:
+    repair is synchronous + worker-style logs but no claim/token to stamp.
+    """
+    cmd_tmpl = cfg.dispatch.repair_command or ""
+    if not cmd_tmpl:
+        raise ValueError("dispatch_repair_worker called without repair_command")
+    cmd = cmd_tmpl.format(
+        corrupt_path=shlex.quote(str(corrupt_path)),
+        backup_path=shlex.quote(str(backup_path)),
+        diagnosis=shlex.quote(diagnosis),
+        schema_json=shlex.quote(_REPAIR_SCHEMA_HINT),
+        log_path=shlex.quote(str(log_path)),
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    popen_kwargs: dict = dict(
+        shell=True,
+        cwd=str(cfg.project_root),
+        start_new_session=True,
+    )
+    if cfg.dispatch.path:
+        popen_kwargs["env"] = {**os.environ, "PATH": cfg.dispatch.path}
+
+    with open(log_path, "ab") as log_fh:
+        proc = subprocess.Popen(
+            cmd, stdout=log_fh, stderr=subprocess.STDOUT, **popen_kwargs,
+        )
+
+    try:
+        return proc.wait(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return REPAIR_RC_TIMEOUT
 
 
 def _pause_for_systemic_failure(

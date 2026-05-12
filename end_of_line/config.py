@@ -16,6 +16,11 @@ class DispatchSpec:
     kind: str = "shell"
     command: str = ""
     path: str = ""
+    # Optional. When set, a corrupt queue.json triggers a synchronous
+    # repair worker via this template (substitutes {corrupt_path},
+    # {backup_path}, {diagnosis}, {schema_json}, {log_path}). Unset →
+    # auto-repair disabled; clu falls back to a plain corrupt notification.
+    repair_command: str | None = None
 
 
 @dataclass
@@ -67,6 +72,7 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             kind=disp.get("kind", "shell"),
             command=disp.get("command", ""),
             path=disp.get("path", "") or "",
+            repair_command=disp.get("repair_command") or None,
         ),
         notify=NotifySpec(
             imessage_to=(notify_raw.get("imessage") or {}).get("to"),
