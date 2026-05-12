@@ -188,6 +188,41 @@ class QueueListTestCase(unittest.TestCase):
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("(queue is empty)", out)
 
+    def test_list_refuses_on_corrupt_queue(self) -> None:
+        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
+        self.queue_path.write_text("{not valid json")
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.GENERIC)
+        diagnosis = err.getvalue()
+        self.assertIn("queue.json corrupt", diagnosis)
+        self.assertIn(str(self.queue_path), diagnosis)
+        self.assertIn("Open Claude in this project to repair", diagnosis)
+
+    def test_list_diagnosis_mentions_backup_paths(self) -> None:
+        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
+        self.queue_path.write_text("garbage")
+        backup = self.queue_path.with_name(self.queue_path.name + ".corrupt-20260101T000000Z")
+        backup.write_text("{}")
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn(backup.name, err.getvalue())
+
+    def test_list_diagnosis_when_no_backup_present(self) -> None:
+        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
+        self.queue_path.write_text("garbage")
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main(["queue", "list", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn("No backup files found", err.getvalue())
+
     def test_list_handles_missing_queue_file(self) -> None:
         self.assertFalse(self.queue_path.exists())
         rc, out = self._run(["queue", "list", "--project", str(self.project)])

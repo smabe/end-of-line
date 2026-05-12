@@ -85,6 +85,20 @@ class QueueRemoveTestCase(unittest.TestCase):
         self.assertEqual([e["slug"] for e in data["queue"]], ["foo"])
         self.assertEqual(data["history"], [])
 
+    def test_remove_refuses_on_corrupt_queue(self) -> None:
+        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
+        self.queue_path.write_text("{not valid json")
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main(["queue", "remove", "foo", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn("queue.json corrupt", err.getvalue())
+        self.assertIn("Open Claude in this project to repair", err.getvalue())
+        # The corrupt file is NOT modified by the refusal path.
+        self.assertEqual(self.queue_path.read_text(), "{not valid json")
+
     def test_remove_does_not_touch_running_slug(self) -> None:
         # foo is registered (treated as currently running) but never enqueued.
         _bootstrap(self.project, slug="foo")

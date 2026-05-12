@@ -415,8 +415,92 @@ def cmd_list(args) -> int:
 
 
 def cmd_fleet(args) -> int:
-    print(fleet.render(registry.entries()), end="")
+    entries = registry.entries()
+    print(fleet.render(entries), end="")
+    footer = _queue_footer(entries)
+    if footer:
+        print(footer)
     return 0
+
+
+_QUEUE_LOAD_ERRORS = (
+    json.JSONDecodeError, st.SchemaVersionMismatch, KeyError, OSError,
+)
+
+
+def _queue_footer(entries) -> str | None:
+    """One-line summary of pending queue work across all distinct projects.
+
+    Iterates distinct project_roots (registry.entries() may yield multiple
+    rows per project), loads each queue.json best-effort, and renders a
+    single line. Returns None when no project has pending work and no queue
+    is unreadable — keeps the fleet view quiet in the steady state.
+    """
+    counts: list[tuple[Path, int]] = []
+    unreadable: list[Path] = []
+    seen: set[Path] = set()
+    for entry in entries:
+        try:
+            root = Path(entry.project_root).resolve()
+        except OSError:
+            continue
+        if root in seen:
+            continue
+        seen.add(root)
+        try:
+            cfg = load_project_config(root)
+        except (OSError, ValueError):
+            continue
+        qp = cfg.queue_path()
+        if not qp.exists():
+            continue
+        try:
+            data = queue.load(qp)
+        except _QUEUE_LOAD_ERRORS:
+            unreadable.append(root)
+            continue
+        if data.get("queue"):
+            counts.append((root, len(data["queue"])))
+
+    if not counts and not unreadable:
+        return None
+
+    parts: list[str] = []
+    if len(counts) == 1:
+        root, n = counts[0]
+        parts.append(f"queue: {n} pending in {root} — see `clu queue list`")
+    elif counts:
+        total = sum(n for _, n in counts)
+        parts.append(
+            f"queue: {total} pending across {len(counts)} projects "
+            "— see `clu queue list --project <P>`"
+        )
+    if unreadable:
+        suffix = "s" if len(unreadable) > 1 else ""
+        parts.append(f"{len(unreadable)} queue file{suffix} unreadable")
+    return "(" + "; ".join(parts) + ")"
+
+
+def _refuse_on_corrupt_queue(queue_path: Path, exc: Exception) -> int:
+    """Operator-at-keyboard refusal path. Surfaces backup paths and a
+    paste-into-Claude instruction; the auto-repair pipeline only runs
+    from cmd_tick_all (phase `repair`), never from the CLI."""
+    backups = sorted(
+        queue_path.parent.glob(f"{queue_path.name}.corrupt-*"), reverse=True,
+    )
+    lines = [
+        f"queue.json corrupt at {queue_path}:",
+        f"  {type(exc).__name__}: {exc}",
+    ]
+    if backups:
+        head = f"Backup at {backups[0]}"
+        if len(backups) > 1:
+            head += f" (and {len(backups) - 1} older)"
+        lines.append(head + ".")
+    else:
+        lines.append("No backup files found.")
+    lines.append("Open Claude in this project to repair.")
+    return _die(ExitCode.GENERIC, "\n".join(lines))
 
 
 BUNDLED_SKILLS = ("clu-phase", "plan", "brainstorm")
@@ -574,7 +658,14 @@ def cmd_queue_add(args) -> int:
     if not plan_file.exists():
         return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
 
-    with queue.mutate(cfg.queue_path()) as data:
+    queue_path = cfg.queue_path()
+    if queue_path.exists():
+        try:
+            queue.load(queue_path)
+        except _QUEUE_LOAD_ERRORS as exc:
+            return _refuse_on_corrupt_queue(queue_path, exc)
+
+    with queue.mutate(queue_path) as data:
         for idx, entry in enumerate(data["queue"]):
             if entry["slug"] == slug:
                 return _die(
@@ -674,7 +765,10 @@ def cmd_queue_list(args) -> int:
         print("(queue is empty)")
         return ExitCode.OK
 
-    data = queue.load(queue_path)
+    try:
+        data = queue.load(queue_path)
+    except _QUEUE_LOAD_ERRORS as exc:
+        return _refuse_on_corrupt_queue(queue_path, exc)
     pending = data["queue"]
     history = data["history"]
 
@@ -723,6 +817,11 @@ def cmd_queue_remove(args) -> int:
 
     if not queue_path.exists():
         return _die(ExitCode.UNKNOWN_TASK, f"{slug!r} is not in the queue")
+
+    try:
+        queue.load(queue_path)
+    except _QUEUE_LOAD_ERRORS as exc:
+        return _refuse_on_corrupt_queue(queue_path, exc)
 
     with queue.mutate(queue_path) as data:
         positions = [
@@ -829,7 +928,7 @@ def _advance_queue_for_project(project_root: Path) -> None:
 
     try:
         queue_data = queue.load(queue_path)
-    except (json.JSONDecodeError, st.SchemaVersionMismatch, KeyError, OSError) as exc:
+    except _QUEUE_LOAD_ERRORS as exc:
         _handle_corrupt_queue(cfg, exc, queue_path)
         return
     if not queue_data["queue"]:

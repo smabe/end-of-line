@@ -155,6 +155,22 @@ class QueueAddTestCase(unittest.TestCase):
         entry = queue.load(self.queue_path)["queue"][0]
         self.assertEqual(entry["position_at_add"], "front")
 
+    def test_add_refuses_on_corrupt_queue(self) -> None:
+        _bootstrap(self.project)
+        _write_plan(self.project, "foo")
+        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
+        self.queue_path.write_text("{not valid json")
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main(["queue", "add", "foo", "--project", str(self.project)])
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn("queue.json corrupt", err.getvalue())
+        self.assertIn("Open Claude in this project to repair", err.getvalue())
+        # File is NOT touched by the refusal path.
+        self.assertEqual(self.queue_path.read_text(), "{not valid json")
+
     def test_add_uses_resolved_path_for_bootstrap(self) -> None:
         # Symlinked project root: `clu queue add` should accept the symlink as
         # --project and still find the registry row written under the real
