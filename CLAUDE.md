@@ -7,32 +7,16 @@ of Line). Public pitch and install live in [`README.md`](README.md);
 this file is the project-private brief for agents starting a fresh
 session.
 
-## Mandate: verify cross-system contracts before scoping
+## Mandate references
 
-Before writing a plan that touches an external system — Claude Code
-skills / hooks / slash commands / MCP, Anthropic SDK features, OS-level
-facilities (LaunchAgent, launchctl, AppleScript, Full Disk Access),
-or third-party APIs — verify the integration's actual semantics with
-the relevant guide agent **before** writing the plan file:
-
-- Claude Code skills / hooks / MCP / settings → `claude-code-guide` agent
-- Anthropic SDK features (caching, batch, models, tool use) → `claude-api` skill
-- iOS / Foundation Models → `apple-foundation-models` skill
-
-One query, ~30 seconds, bounded cost. The cost of skipping is unbounded.
-
-**Real example (2026-05-12, #19 → #20):** scoped `/clu-monitor` to call
-`/schedule`. Workers shipped a 3-phase plan in 20 minutes. Smoke test
-revealed `/schedule` creates *remote* agents in Anthropic's cloud — they
-can't run `clu`, can't read local state, can't send iMessage. The whole
-monitor was a dispatch into the void. Fix required a second 3-phase
-plan (`clu-inbox`). Net cost: ~6h of worker time on the wrong code.
-
-Applies whether or not you formally invoke `/plan` (which has a step
-7.5 research pass that would catch this). If you bypass `/plan` and
-write plan markdown directly via the Write tool, **you still owe the
-verification step** — the discipline lives in the convention, not the
-skill harness.
+The cross-system verification + operator-approval checkpoint mandates
+that govern scoping and novel artifacts live in user-level CLAUDE.md
+(`~/.claude/CLAUDE.md` ↔ `~/projects/abe-skills/CLAUDE.md`) so they
+apply across all projects. clu's #19 (`/clu-monitor` calling
+`/schedule` without verifying it's a remote-only mechanism) was the
+canonical failure that motivated them — ~6h of worker time on a
+broken design, fixed by the `clu-inbox` rebuild in #20. Receipts in
+`docs/history/plans/clu-monitor/` and `docs/history/plans/clu-inbox/`.
 
 ## Stack + run/test
 
