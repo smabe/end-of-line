@@ -1,10 +1,11 @@
 # end-of-line / clu
 
 Personal plan orchestrator for the `/plan` skill. Cron-driven supervisor,
-file state, cold-context phase workers. Tron-themed (binary is `clu`;
-the program IS End of Line). Public pitch and install live in
-[`README.md`](README.md); this file is the project-private brief for
-agents starting a fresh session.
+file state, cold-context phase workers, per-project plan queue for
+inter-plan chaining. Tron-themed (binary is `clu`; the program IS End
+of Line). Public pitch and install live in [`README.md`](README.md);
+this file is the project-private brief for agents starting a fresh
+session.
 
 ## Stack + run/test
 
@@ -61,23 +62,33 @@ For the *why* behind each, see
 | [`docs/_outline.md`](docs/_outline.md) | Structural contract for the docs library |
 | [`docs/history/`](docs/history/) | Frozen pre-Day-1 brainstorms |
 
-## Status (as of 2026-05-11)
+## Status (as of 2026-05-12)
 
-Shipped through Day 3.4: security + correctness (Day 1), UX surface +
-notifications + halt (Day 2), real worker dispatch end to end and the
-docs library (Day 3). Recent orientation:
+Shipped through Day 5 + the `clu-queue` plan: security + correctness
+(Day 1), UX surface + notifications + halt (Day 2), real worker
+dispatch + docs library (Day 3), backlog drain + self-contained worker
+PATH (Day 4), tick-default-dispatch + bundled skills (Day 5), and now
+per-project plan queue with auto-repair (`clu-queue`,
+[`plans/clu-queue.md`](plans/clu-queue.md) — canonical execution
+history). Eight phases shipped: primitive, add, list, pop, repair,
+footer, docs, smoke.
 
-```
-e226bd0 Day 3.4 phase 5: docs/conventions.md
-756e1d5 Day 3.4 phase 4: docs/operations.md
-a8d0311 Day 3.4 phase 3: docs/reference.md
-1daef22 Day 3.4 phase 2: docs/architecture.md
-5987bdc Day 3.4 phase 1: docs/_outline.md (audit)
-```
+What the queue adds operator-side: `clu queue add/list/remove` (bare
+`clu queue` → list), a per-project queue file at
+`<plan_dir>/.orchestrator/queue.json`, the supervisor's post-loop
+queue-advancement step in `cmd_tick_all` (per-project, at-most-one pop
+per tick, head-only freeze on HALTED/PAUSED), and an opt-in auto-repair
+worker dispatched from a `dispatch.repair_command` template — with
+`queue.validate_repair` as the slug-preservation safety boundary, not
+the worker's prompt.
 
-**Pick up here.** Day 3.4 phase 6 (this commit) closes out the docs
-plan. Day-4 candidates, none chosen — talk to the operator before
-starting:
+v2 (worker-callback enqueue from inside a phase) is deferred to GitHub
+issue [#17](https://github.com/smabe/end-of-line/issues/17). Don't
+re-litigate without reading [`docs/contract.md`](docs/contract.md) §
+"Queue schema" + [`docs/architecture.md`](docs/architecture.md) §
+"Queue advancement" + "Auto-repair worker" first.
+
+**Day-6 candidates** — none chosen, talk to the operator:
 
 - **Replan path.** `STATUS_HALTED_REPLAN` exists in the enum but
   nothing sets it. Worker callback or operator command? Underspecified.
@@ -85,9 +96,6 @@ starting:
   for ambiguous bare-digit replies.
 - **`clu logs <plan>`.** Tail `.orchestrator/logs/<token>` without
   knowing the token.
-- **Wire to a real plan.** `clu init --project ~/projects/HealthData
-  --plan watch-start-workout` — the integration test the brainstorm
-  called for.
 
 ## Locked config decisions
 

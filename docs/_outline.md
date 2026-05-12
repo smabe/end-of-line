@@ -41,6 +41,7 @@ In load order from `cli.py`:
 | `notify.py` | 140 | Outbound iMessage via `osascript`; render functions per notification kind; quiet-hours gate (`_in_quiet_window`, `QUIET_HOURS_BYPASS_KINDS`). |
 | `notify_inbound.py` | 190 | Long-lived poller over `~/Library/Messages/chat.db`; reply grammar `^\s*(<slug>\s+)?[0-9]\s*$`; routes to `clu answer`; seen-rowid checkpoint. |
 | `registry.py` | 117 | Host-level index at `~/.config/clu/registry.json`; `register / unregister / list / load_entry_state`. |
+| `queue.py` | 196 | Per-project plan queue (`<plan_dir>/.orchestrator/queue.json`); load/save/mutate via `state.locked_json`; bytes-mode regex slug extraction + `validate_repair` for the auto-repair safety boundary. |
 | `fleet.py` | 103 | Pure projection of every registered plan into one-line `PlanSummary` for bare `clu`. |
 | `cli.py` | 536 | argparse dispatch + `ExitCode` IntEnum + `_die` helper + `@_translate_claim_mismatch` decorator + every operator/worker subcommand. |
 

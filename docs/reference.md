@@ -48,9 +48,14 @@ the file.
   defaults baked in.
 - `locked(state_path)` — `flock` context manager with `O_NOFOLLOW`
   on the sibling lockfile.
-- `mutate(state_path)` — lock + load + yield + atomic-write. The default
-  read-modify-write helper; only drop to `locked()` when coordinating
-  multiple files.
+- `locked_json(path, *, expected_version, empty=None)` — generic
+  lock + load + yield-for-mutation + atomic-write. The shared primitive
+  every clu JSON file (state, registry, queue) is built on. Pass `empty`
+  to tolerate a missing-on-first-write file; state.json passes `None` so
+  load() raises `FileNotFoundError` as documented.
+- `mutate(state_path)` — lock + load + yield + atomic-write. Thin wrapper
+  over `locked_json` for state files. The default read-modify-write
+  helper; only drop to `locked()` when coordinating multiple files.
 - `load(state_path, *, expected_version)` — JSON read + schema check.
   Reused by `registry.py` with its own version.
 - `save_atomic(state_path, data)` — tmp + fsync + rename. Caller must
@@ -127,9 +132,17 @@ resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
   `notify`.
 - `ProjectConfig.state_path(plan_slug)` — returns the canonical state
   path; raises `InvalidSlug` if resolution escapes the orchestrator dir.
+- `ProjectConfig.queue_path()` — `<project>/<plan_dir>/.orchestrator/
+  queue.json`. No slug involved → no path-traversal validation. One
+  queue file per project.
 - `DispatchSpec` — `kind` (only `"shell"` in v0.1) + `command` template
-  string. Substitutions: `{plan_slug}`, `{phase_id}`, `{token}`,
-  `{project}`, `{state_file}`.
+  string + optional `path` (absolute PATH for worker subprocess) +
+  optional `repair_command` template. Worker `command` substitutions:
+  `{plan_slug}`, `{phase_id}`, `{token}`, `{project}`, `{state_file}`.
+  Repair `repair_command` substitutions: `{corrupt_path}`,
+  `{backup_path}`, `{diagnosis}`, `{schema_json}`, `{log_path}`. Unset
+  `repair_command` disables queue auto-repair (clu still backs up and
+  notifies via `KIND_QUEUE_CORRUPT`).
 - `NotifySpec` — `imessage_to` (handle) + `quiet_hours` (tuple of
   `"HH:MM"` strings).
 - `load_project_config(project_root)` — parses
@@ -240,8 +253,20 @@ on the live claim (healthy) or releases the claim with a
 **Key types and functions**
 
 - `dispatch_for_tick(result, cfg, plan_slug, state_file)` — the only
-  public entry point. Returns `True` on spawn, `False` on no-op or
-  fast-fail.
+  public entry point for phase dispatch. Returns `True` on spawn,
+  `False` on no-op or fast-fail.
+- `dispatch_repair_worker(cfg, corrupt_path, backup_path, diagnosis,
+  log_path, *, timeout_sec=60)` — synchronous repair-worker spawn for a
+  corrupt `queue.json`. Renders `cfg.dispatch.repair_command`, waits for
+  the worker to exit (or kills it on timeout, returning
+  `REPAIR_RC_TIMEOUT = -1`), and returns the rc. Caller MUST follow up
+  with `queue.validate_repair` regardless of rc — the rc is advisory.
+  Stays separate from `dispatch_for_tick` because the contracts differ:
+  there's no claim or token, the wait is synchronous (the cron tick
+  blocks), and the logs go to `repair-queue-<UTCstamp>.log` instead of
+  the per-token path.
+- `DEFAULT_REPAIR_TIMEOUT_SEC` (60s), `REPAIR_RC_TIMEOUT` (-1) —
+  sentinel for the timeout-killed path.
 - `_FAST_FAIL_WAIT_SEC` (0.5s) — how long `proc.wait()` polls before
   declaring the worker healthy. Exits sooner if the worker crashed.
 - `_release_with_failure(state_file, result, *, reason)` — clears the
@@ -280,10 +305,13 @@ Renderers produce the strings; `notify()` decides whether to send.
 
 **Key types and functions**
 
-- `KIND_BLOCKER`, `KIND_STALLED`, `KIND_COMPLETED`, `KIND_HALTED` — the
-  notification kinds.
+- `KIND_BLOCKER`, `KIND_STALLED`, `KIND_COMPLETED`, `KIND_HALTED`,
+  `KIND_QUEUE_SKIPPED`, `KIND_QUEUE_REPAIRED`, `KIND_QUEUE_REPAIR_FAILED`,
+  `KIND_QUEUE_CORRUPT` — the notification kinds. See `contract.md` §
+  "Notification kinds" for the trigger + quiet-hours matrix.
 - `QUIET_HOURS_BYPASS_KINDS` — frozenset of kinds that ignore quiet
-  hours. Currently `{KIND_HALTED}`.
+  hours. Currently `{KIND_HALTED, KIND_QUEUE_REPAIR_FAILED,
+  KIND_QUEUE_CORRUPT}` — the unrecoverable-without-operator set.
 - `notify(spec, kind, body, *, now=None, sender=None)` — gate + send.
   Returns `True` if sent. `sender` is injectable for tests.
 - `in_quiet_window(spec, now)` — public quiet-hours predicate, used by
@@ -295,7 +323,13 @@ Renderers produce the strings; `notify()` decides whether to send.
   the user-facing prompt that includes the reply grammar hint.
 - `render_stalled(plan_slug, phase, age_seconds)`,
   `render_completed(plan_slug, commit_count)`,
-  `render_halted(plan_slug, phase, attempts)` — kind-specific bodies.
+  `render_halted(plan_slug, phase, attempts)`,
+  `render_queue_skipped(slug, reason)`,
+  `render_queue_corrupt(diagnosis, backup_path)`,
+  `render_queue_repaired(slug_count, backup_path)`,
+  `render_queue_repair_failed(reason, backup_path)`,
+  `render_systemic_failure(plan_slug, phase, signature)` —
+  kind-specific bodies.
 
 **Invariants and gotchas**
 
@@ -425,6 +459,74 @@ Stored at `$XDG_CONFIG_HOME/clu/registry.json` (default
 - `fleet.py` and `notify_inbound.py` are the two consumers.
 - `contract.md` § "Host-level registry" for the JSON shape on disk.
 
+### `queue.py`
+
+Per-project plan queue. Holds the list of plans waiting to be `init`ed
+after the current one finishes. Storage at `<plan_dir>/.orchestrator/
+queue.json`; schema in `contract.md` § "Queue schema". The
+auto-repair safety boundary lives here too — `validate_repair` is what
+makes "trust the prompt" optional.
+
+**Key types and functions**
+
+- `SCHEMA_VERSION` — independent from `state.SCHEMA_VERSION`; passed to
+  `state.load` via `expected_version`.
+- `_empty()` — fresh shape: `{"schema_version": 1, "queue": [],
+  "history": []}`. Private to the module; callers use `mutate`.
+- `load(path)` — `state.load` with the queue's schema version. Raises
+  `FileNotFoundError`, `json.JSONDecodeError`, or
+  `state.SchemaVersionMismatch`. Callers (cli + supervisor) bundle these
+  into `_QUEUE_LOAD_ERRORS` for `try/except`.
+- `save_atomic(path, data)` — thin alias over `state.save_atomic`.
+- `mutate(path)` — lock + load + yield-for-mutation + atomic-write,
+  tolerant of a missing file via `state.locked_json(empty=_empty)`. The
+  read-modify-write helper for every queue write.
+- `best_effort_extract_slugs(data: bytes)` → `set[str]` — regex over raw
+  bytes for every `"slug": "..."` match. Catches catastrophic loss; the
+  worker can't surgically corrupt around it because the slug values
+  usually survive even a truncated JSON.
+- `best_effort_extract_history_slugs(data: bytes)` → `set[str]` — scans
+  the `"history": [ ... ]` block specifically, with a small
+  bracket-counter that respects escaped strings. Pending-only slug set
+  is `best_effort_extract_slugs - best_effort_extract_history_slugs`.
+- `validate_repair(backup_bytes, repaired_path)` → `ValidationResult` —
+  the hard slug-preservation check. Returns
+  `ValidationResult(ok=False, reason=...)` on any rule violation;
+  caller MUST revert from backup when `ok=False`. See `contract.md`
+  § "Auto-repair contract" for the rules.
+- `ValidationResult` — dataclass: `ok: bool`, `reason: str | None`.
+- `read_throttle(throttle_path, diagnosis_hash)` → `int` — current
+  attempt count for `diagnosis_hash`. Returns 0 on any read failure
+  (FileNotFound, corrupt JSON, mismatched hash) — we don't want a
+  "repair-the-throttle" sub-failure.
+- `increment_throttle(throttle_path, diagnosis_hash)` — bump the
+  counter. Writes
+  `{"attempts": N, "last_at": "...", "diagnosis_hash": "..."}`.
+- `reset_throttle(throttle_path)` — unlink the throttle file. Called
+  after a successful repair so the next failure starts fresh.
+
+**Invariants and gotchas**
+
+- The validation step is the safety boundary, NOT the worker's prompt.
+  Even a perfectly-prompted worker can hallucinate; the regex over the
+  backup bytes is what makes "delete slug X to make the file parse"
+  impossible to slip past.
+- `history` is append-only at the semantic level — `validate_repair`
+  enforces it. `cmd_queue_remove` and the supervisor's
+  abandon/absorb branches all append; no code path removes.
+- `read_throttle` resets to 0 on a hash mismatch: a *different*
+  corruption gets its own three attempts. The throttle is per-error-
+  type, not per-file-lifetime.
+- Slug regex (`_SLUG_RE`) is bytes-mode and case-sensitive — it matches
+  exactly what `state.SLUG_PATTERN` accepts via JSON. Don't widen.
+
+**See also**
+
+- `contract.md` § "Queue schema" and "Auto-repair contract" for the
+  on-disk shape and worker/clu responsibility split.
+- `dispatch.dispatch_repair_worker` for the spawn side.
+- `cli.cmd_queue_*` for the operator surface.
+
 ### `fleet.py`
 
 Pure projection: take every registry entry, project into a one-line
@@ -474,8 +576,9 @@ through this.
 **Key types and functions**
 
 - `ExitCode` — IntEnum: `OK`, `GENERIC`, `INVALID_SLUG`, `BAD_SHA`,
-  `CLAIM_MISMATCH`, `SPAWN_CAP`, `UNKNOWN_TASK`, `STATUS_TRANSITION`.
-  Cron and inbound poller key off these codes.
+  `CLAIM_MISMATCH`, `SPAWN_CAP`, `UNKNOWN_TASK`, `STATUS_TRANSITION`,
+  `REPAIR_DECLINED`. Cron and inbound poller key off these codes. See
+  `contract.md` § "Exit codes" for the full table.
 - `_die(rc, msg)` — write `error: <msg>` to stderr, return `int(rc)`.
   Use this from every error path; don't return bare ints.
 - `_translate_claim_mismatch(fn)` — decorator that catches a leaked
@@ -484,12 +587,44 @@ through this.
 - `main(argv)` — argparse + dispatch table.
 - Operator-side commands: `cmd_init`, `cmd_tick`, `cmd_tick_all`,
   `cmd_status`, `cmd_register`, `cmd_unregister`, `cmd_list`,
-  `cmd_fleet`, `cmd_pause`, `cmd_resume`, `cmd_retry`, `cmd_answer`.
+  `cmd_fleet`, `cmd_pause`, `cmd_resume`, `cmd_retry`, `cmd_answer`,
+  `cmd_queue` (+ `cmd_queue_add`, `cmd_queue_list`, `cmd_queue_remove`).
 - `cmd_tick_all` is the host-scoped cron entry point: walks
   `registry.entries()` and runs the per-plan tick + dispatch + notify
-  dance for each. Per-plan exceptions are caught and logged to stderr
-  so one broken plan can't poison the cadence. Replaces the old
-  `examples/clu-tick-all.sh` parser of `clu list` output.
+  dance for each, then makes a second pass over distinct project_roots
+  for queue advancement via `_advance_queue_for_project`. Per-plan
+  exceptions are caught and logged to stderr so one broken plan can't
+  poison the cadence. Replaces the old `examples/clu-tick-all.sh`
+  parser of `clu list` output.
+- `cmd_queue(args)` — dispatch on `args.queue_cmd` to add / list /
+  remove. Bare `clu queue` (`queue_cmd is None`) routes to `cmd_queue_list`,
+  mirroring bare `clu` → `cmd_fleet`.
+- `cmd_queue_add(args)` — append (or `--front` prepend) a plan slug to
+  the project's queue. Refuses with a bootstrap message if the project
+  has no registered plans; refuses if `<plan_dir>/<slug>.md` doesn't
+  exist; refuses with `STATUS_TRANSITION` on duplicate.
+- `cmd_queue_list(args)` — render the pending queue + a `Recent
+  failures:` tail of the last 10 history entries. Uses `registry.entries`
+  + `registry.load_entry_state` to derive a STATUS column per pending
+  entry; the head's status drives a `chain frozen at head` NOTE when the
+  freeze predicate fires.
+- `cmd_queue_remove(args)` — pop the named pending slug + append a
+  `history` entry with outcome `removed`. Returns `UNKNOWN_TASK` if the
+  slug isn't pending.
+- `_advance_queue_for_project(project_root)` — the supervisor-side
+  queue-pop step (see `architecture.md` § "Queue advancement").
+- `_handle_corrupt_queue(cfg, exc, queue_path)` — the auto-repair
+  pipeline (see `architecture.md` § "Auto-repair worker").
+- `_refuse_on_corrupt_queue(queue_path, exc)` — operator-at-keyboard
+  refusal path for `cmd_queue_*`. Surfaces backup paths + a
+  paste-into-Claude diagnosis. The auto-repair pipeline only runs from
+  `cmd_tick_all`, never from the operator CLI.
+- `_queue_footer(entries)` — one-line summary of pending queue work,
+  printed under the fleet table when bare `clu` finds any project with
+  a non-empty queue. `None` when nothing's pending and nothing's
+  unreadable.
+- `_QUEUE_LOAD_ERRORS` — `(JSONDecodeError, SchemaVersionMismatch,
+  KeyError, OSError)` tuple every queue-loader wraps with `try/except`.
 - Worker-side commands: `cmd_complete`, `cmd_block`, `cmd_spawn`,
   `cmd_heartbeat`, `cmd_task_done`. All require `--token` matching the
   live claim, all wear `@_translate_claim_mismatch`.

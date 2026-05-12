@@ -77,6 +77,128 @@ debugging session that asks "why didn't this tick advance?" reduces to
 The dispatch step is the only one that can spawn a worker. The
 supervisor never edits source code, runs tests, or calls Claude itself.
 
+The eight-rule chain above runs **inside one plan's tick**. The
+host-scoped cron entry (`cmd_tick_all`) adds a tenth rule on top, fired
+once per distinct project after every registered plan has ticked: per-
+project queue advancement (see "Queue advancement" below). That step
+operates on `queue.json`, not on any single state.json, so it lives
+outside `supervisor.tick`. The "one tick = one action" invariant still
+holds within each plan; the queue advancement step is at-most-one
+queue-pop per project per cron interval, independent of the eight in-
+tick rules.
+
+## Queue advancement
+
+`cmd_tick_all` walks `registry.entries()` to tick every registered plan,
+then makes a second pass over the distinct project_roots and runs
+`_advance_queue_for_project` on each. This is where inter-plan
+transitions happen — `supervisor.tick` only moves phases within a plan.
+
+```
+                  ┌──────────────────────────────┐
+  cron tick-all ─▶│  for plan in registry:       │
+                  │      tick + dispatch + notify│
+                  └──────────────┬───────────────┘
+                                 │
+                  ┌──────────────▼───────────────┐
+                  │  for project in distinct:    │
+                  │      advance_queue(project)  │  ← at most one pop
+                  └──────────────────────────────┘
+```
+
+For each project, `_advance_queue_for_project` walks a first-match-wins
+branch chain:
+
+1. **Queue empty / missing** → return.
+2. **Per-project busy gate.** Any plan registered under this project has
+   `current_claim != None` → return. Other projects' queues are
+   unaffected; the gate is per-project, not host-wide.
+3. **Head-only freeze.** If the queue head's slug is already registered
+   AND its state's `status` is in `{HALTED, HALTED_REPLAN, PAUSED}` →
+   freeze the chain at that head. No pop. The operator must `clu retry`/
+   `clu resume`/`clu queue remove` to unblock.
+4. **Absorb.** If the head is registered AND status ∈ `{DONE, RUNNING}`,
+   pop without re-`init`-ing — the plan already exists, the queue entry
+   was just bookkeeping. `history` outcome `absorbed`.
+5. **Abandon.** If the head's plan file (`<plan_dir>/<slug>.md`) doesn't
+   exist, pop with `history` outcome `abandoned` and fire
+   `KIND_QUEUE_SKIPPED` (gated by quiet hours — abandonment can wait).
+6. **Normal pop.** Under one queue-lock window:
+   `state.empty_state` → append `EVENT_QUEUE_POPPED` → `state.save_atomic`
+   → `registry.register` → `queue.pop(0)`. Dispatch fires **outside**
+   both locks via `_tick_one_plan`, matching the `cmd_init` order
+   (`cli.py:cmd_init`).
+
+The freeze predicate and the busy gate are independent: busy gate is a
+property of `current_claim` on any plan in the project; freeze is a
+property of the queue head's status. Never short-circuit one through
+the other.
+
+**Crash recovery.** The normal-pop sequence is idempotent. If the process
+dies between `state.save_atomic` and `registry.register`, the next tick
+re-enters: queue head is still present, no current_claim exists, the
+freeze predicate is false (the orphan state's status is `running` but
+the slug isn't yet registered — the "registered AND status" guard
+declines to absorb), and the inner `state.exists()` check skips re-
+creating. `registry.register` is idempotent; `queue.pop` then completes
+the sequence.
+
+**Lock ordering.** When two locks are taken together, the order is
+always `queue → state` (and `registry` reads/writes are queue-lock-
+protected by virtue of happening inside `queue.mutate`'s window). The
+normal-pop branch nests `state.locked(state_path)` *inside*
+`queue.mutate(queue_path)`. Don't invert; the queue is the higher-level
+resource and must be acquired first.
+
+## Auto-repair worker
+
+When the queue advancement step's `queue.load(queue_path)` raises
+(catastrophic JSON or schema corruption), clu can dispatch a headless
+Claude worker to repair the file. The full contract — including the
+hard rules clu enforces post-repair — lives in `contract.md` §
+"Auto-repair contract"; this section describes the runtime topology.
+
+```
+cmd_tick_all (per-project)
+        │
+        │  queue.load fails (JSONDecodeError | SchemaVersionMismatch | OSError)
+        ▼
+_handle_corrupt_queue
+        │
+        │  1. read original bytes
+        │  2. write queue.json.corrupt-<UTCstamp> (backup)
+        │  3. throttle check (≥3 attempts on same diagnosis_hash → notify only)
+        │  4. repair_command unset → KIND_QUEUE_CORRUPT, increment throttle
+        │  5. dispatch_repair_worker (synchronous, 60s timeout)
+        │  6. queue.validate_repair(backup_bytes, queue_path)
+        │
+        ├─ validation fails ─▶ revert from backup → KIND_QUEUE_REPAIR_FAILED
+        └─ validation passes ─▶ KIND_QUEUE_REPAIRED, reset throttle
+```
+
+Three reasons clu's validation is the safety boundary, not the worker's
+prompt:
+
+- The prompt is operator-authored and can be wrong. Validation is in
+  Python, version-controlled, tested.
+- The worker is an LLM. Even with a correct prompt, "clean up" is a
+  plausible failure mode. The regex-based slug extraction over the
+  *backup* bytes is what makes "delete slug X to make the file parse"
+  impossible to get past clu.
+- The throttle (per-diagnosis-hash, capped at 3) keeps a worker that
+  keeps producing the same broken output from looping forever.
+
+`dispatch_repair_worker` is synchronous because the cron tick should not
+move on until the queue is either repaired or definitively-not-repaired
+— otherwise the next tick would race the in-flight repair on the same
+file. Synchronous wait + 60s timeout + post-validation is the simplest
+correct shape.
+
+The `repair_command` template variables (`{corrupt_path}`,
+`{backup_path}`, `{diagnosis}`, `{schema_json}`, `{log_path}`) are
+documented in `operations.md` § "Enabling auto-repair" alongside a
+recommended `claude --print` template.
+
 ## Typical happy path
 
 ```

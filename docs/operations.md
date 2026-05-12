@@ -211,6 +211,108 @@ A clean end-to-end against a real project.
    tick consumes the blocker, the tick after that re-dispatches the
    phase with the answer in state.
 
+## Plan queue
+
+Once a project has at least one registered plan, the operator can queue
+follow-up plans for clu to `init` automatically as the chain drains.
+Storage lives in `<project>/<plan_dir>/.orchestrator/queue.json`; one
+queue per project (not per plan).
+
+```bash
+clu queue add my-next-plan          # append at tail
+clu queue add fix-bug-7 --front     # insert at head
+clu queue                           # bare → list (default subcommand)
+clu queue list                      # same
+clu queue remove old-plan           # drop a pending slug (→ history)
+```
+
+The supervisor's post-loop step in `clu tick-all` walks every distinct
+project_root and pops at most one entry per tick into a fresh `clu
+init`-equivalent. Bare `clu` (the fleet view) prints a one-line footer
+when any project has pending queue work; hidden when every queue is
+empty.
+
+### Bootstrap
+
+`clu queue add` requires the project to be known to the host registry.
+Run `clu init --project P --plan <something>` at least once for the
+project before queuing. Without it, `queue add` refuses:
+
+```
+error: project /Users/.../foo has no registered plans;
+run `clu init --project /Users/.../foo --plan <slug>` first
+```
+
+The bootstrap rule exists so an operator who points `clu queue add` at
+a stray directory can't silently create a queue file in an unintended
+project.
+
+### Multi-host queues
+
+The queue is **per project, per host**. If you run clu against the same
+git-synced project from two Macs, each Mac has its own `.orchestrator/
+queue.json` and its own `repair-attempts` counter. clu does **not**
+attempt any cross-host merge.
+
+**Recommendation: pick one Mac as the cron host and only enqueue from
+that one.** Other Macs can still run `clu status` / `clu queue list`
+read-only against the local copy, but `queue add` and `queue remove`
+should be limited to the cron host to avoid two queues that diverge.
+
+This is a deliberate design choice — the queue file is a small,
+operator-facing list of intentions, not a synced data structure. If the
+cron host's queue is the source of truth, the worst-case multi-machine
+failure mode is "the other Mac's queue is stale," not "two ticks
+dispatched the same plan twice."
+
+### Enabling auto-repair
+
+If `queue.json` ever fails to load (catastrophic JSON / schema
+corruption), clu can dispatch a headless Claude worker to repair it.
+This is opt-in: set `dispatch.repair_command` in `.orchestrator.json`.
+Without it, clu falls back to a halt-bypass `KIND_QUEUE_CORRUPT`
+notification — operator repairs by hand.
+
+Recommended template:
+
+```jsonc
+{
+  "dispatch": {
+    "command": "...",
+    "repair_command": "claude --print 'queue.json at {corrupt_path} is corrupt: {diagnosis}. Backup at {backup_path}. Read both files, diagnose, repair in place using atomic write (tmp + fsync + os.replace). HARD RULES (clu validates and reverts on violation): 1. The queue array MUST contain at least every slug from the original. 2. Do NOT write an empty queue array unless the original was provably empty. 3. The history array is forensic — do not remove entries; you may append. 4. If you cannot repair without violating rules 1-3, exit 9 (REPAIR_DECLINED). Log to {log_path}. Expected schema: {schema_json}.'"
+  }
+}
+```
+
+Template variables: `{corrupt_path}`, `{backup_path}`, `{diagnosis}`,
+`{schema_json}`, `{log_path}` — all shlex-quoted before substitution.
+
+What's worth knowing about the pipeline:
+
+- **clu's validation is the safety boundary, not the prompt.** The
+  prompt is advisory; clu's `queue.validate_repair` re-loads the file,
+  checks every backup slug against the repaired output, and reverts from
+  the backup on any rule violation. A worker that ignores its prompt
+  cannot drop slugs past us.
+- **Backups are kept.** Every corruption produces a
+  `queue.json.corrupt-<UTCstamp>` sibling whether the repair succeeds or
+  not. Diff old vs new after a `KIND_QUEUE_REPAIRED` ping to see what
+  the worker rewrote; the backup is also what clu reverts from on
+  validation failure.
+- **Throttle.** After 3 failed attempts on the same diagnosis-hash, the
+  4th corruption skips dispatch entirely and goes straight to
+  `KIND_QUEUE_CORRUPT`. The counter is per-diagnosis (different
+  corruption errors get their own three attempts) and resets on a
+  successful repair.
+- **Synchronous.** `dispatch_repair_worker` blocks the cron tick for up
+  to 60s. The next tick won't move on the queue until this one decides
+  repaired-or-reverted. If you set a faster cron cadence than 60s, the
+  next tick will wait for the queue lock the previous one holds.
+
+The operator CLI (`clu queue add/list/remove`) does **not** trigger
+auto-repair — it refuses loudly on a corrupt queue and prints a paste-
+into-Claude diagnosis. Auto-repair only runs from `tick-all`.
+
 ## iMessage notification model
 
 Outbound — fired during supervisor ticks via `osascript`. Kinds:
@@ -222,6 +324,10 @@ Outbound — fired during supervisor ticks via `osascript`. Kinds:
 | `stalled` | Live claim with no heartbeat for `stalled_heartbeat_minutes` (default 10m) | Gated |
 | `plan_completed` | All phases done | Gated |
 | `halted` | Plan halted (max attempts, lease expired too many times, etc.) | **Bypasses quiet hours** |
+| `queue_skipped` | Queue head abandoned (plan file missing) | Gated |
+| `queue_repaired` | Auto-repair fixed a corrupt `queue.json` | Gated |
+| `queue_repair_failed` | Auto-repair failed validation — file reverted from backup | **Bypasses quiet hours** |
+| `queue_corrupt` | `queue.json` corrupt and auto-repair disabled OR throttle exhausted | **Bypasses quiet hours** |
 
 Quiet hours default to `["22:00", "08:00"]` local time and wrap
 overnight. Configure per project under `notify.quiet_hours` in
@@ -381,6 +487,38 @@ plan A flags `rate_limit`, plan B's next tick will hit the same
 failure and ping you separately. That's accepted noise — the operator
 sees the same fix-once action either way.
 
+### `queue.json` corrupt
+
+Symptom: `clu queue list` / `clu queue add` / `clu queue remove` exits
+loud with a `queue.json corrupt at ...` message + a paste-into-Claude
+diagnosis. The supervisor sends a `queue_corrupt` or
+`queue_repair_failed` iMessage when it hits the same path in `tick-all`.
+
+The operator has four paths:
+
+1. **Wait for auto-repair.** If `dispatch.repair_command` is set in
+   `.orchestrator.json`, the next `tick-all` will dispatch the repair
+   worker (up to 3 attempts per diagnosis-hash). A `queue_repaired`
+   iMessage means it's back; a `queue_repair_failed` means the worker's
+   output didn't pass clu's slug-preservation rules and the file was
+   reverted from backup — go to path 2 or 3.
+2. **Inspect the backup.** Every corruption produces a
+   `queue.json.corrupt-<UTCstamp>` sibling. Diff it against the current
+   file to see what's missing; hand-edit the live file with the parts
+   you want preserved.
+3. **Start fresh.** `mv queue.json queue.json.bad` — clu treats a
+   missing queue file as empty. Pending entries are lost; history is
+   lost. Use this when the corruption is total and the backups don't
+   help.
+4. **Ask Claude in-project.** Open `claude` interactively in the
+   project root and paste the diagnosis from the CLI's refusal message.
+   The CLI surfaces backup paths in the same output, so Claude can
+   read both files and propose a fix without clu's auto-repair gate.
+
+The throttle file lives next to the queue at
+`queue.json.repair-attempts`. If you want to retry auto-repair after
+hitting the cap, delete it.
+
 ### Stuck claim that won't release
 
 If the state file shows a live claim whose worker is definitely dead
@@ -424,6 +562,9 @@ wait or when the worker's exit pattern wouldn't naturally release
 | `clu retry --project P --plan S [--phase X]` | Clear max-attempts on a halted phase |
 | `clu release-claim --project P --plan S [--force] [--reason ...]` | Clear a stuck `current_claim` after a dead worker |
 | `clu unregister --project P --plan S` | Drop a plan from the host registry (state file untouched) |
+| `clu queue add <slug> [--front] [--project P]` | Append (or `--front` prepend) a plan slug to the project's queue |
+| `clu queue list [--project P]` (or bare `clu queue`) | Show pending queue + recent failures |
+| `clu queue remove <slug> [--project P]` | Drop a pending slug (moves it to history) |
 | `clu answer --project P --plan S <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |
 
 The full CLI surface — including worker-side commands like `complete`,
