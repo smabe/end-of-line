@@ -14,13 +14,18 @@ Action priority (first match wins):
 from __future__ import annotations
 
 import datetime as _dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import notify, state as st
+from . import inbox, notify, state as st
 from .config import ProjectConfig
 from .plan_parser import parse_sessions_index
+
+# Stuck-blocker re-ping cadence. Mirrors the operations.md SLA — first
+# escalation at 30 min, repeated every 30 min until the blocker is
+# answered + consumed.
+_REPING_INTERVAL_MIN = 30
 
 
 def _local_now() -> _dt.datetime:
@@ -43,6 +48,10 @@ class TickResult:
     # user. cmd_tick dispatches AFTER tick() exits the state lock so a hung
     # Messages.app can't hold the lock.
     notify_body: str | None = None
+    # Parallel iMessage emissions for the same tick — gap-fill notifications
+    # (stuck-blocker re-pings, stalled-claim transitions) that fire alongside
+    # the primary action rather than replacing it. Each entry is (kind, body).
+    side_notifies: list[tuple[str, str]] = field(default_factory=list)
 
     def __str__(self) -> str:
         return f"[{self.action}] {self.detail}" if self.detail else f"[{self.action}]"
@@ -89,20 +98,150 @@ def _detect_stalled(data: dict) -> TickResult | None:
     )
 
 
+def _emit_stuck_blocker_repings(
+    data: dict, config: ProjectConfig,
+    side_notifies: list[tuple[str, str]],
+) -> None:
+    """Re-ping any blocker open ≥30min since asked (or last reping)."""
+    now = st._now_utc()
+    project_root = str(config.project_root.resolve())
+    for b in data["blockers"]:
+        if b.get("consumed") or b.get("answer") is not None:
+            continue
+        try:
+            created = st.parse_iso(b["asked_at"])
+        except (KeyError, ValueError):
+            continue
+        last_pinged_dt = None
+        if b.get("last_repinged_at"):
+            try:
+                last_pinged_dt = st.parse_iso(b["last_repinged_at"])
+            except ValueError:
+                last_pinged_dt = None
+        age_seconds = (now - created).total_seconds()
+        if age_seconds < _REPING_INTERVAL_MIN * 60:
+            continue
+        if last_pinged_dt is not None:
+            if (now - last_pinged_dt).total_seconds() < _REPING_INTERVAL_MIN * 60:
+                continue
+        age_min = int(age_seconds // 60)
+        b["last_repinged_at"] = st.utcnow()
+        st.append_event(
+            data, st.EVENT_STUCK_BLOCKER_REPINGED,
+            blocker_id=b["id"], phase=b["phase_id"], age_min=age_min,
+        )
+        side_notifies.append((
+            notify.KIND_STUCK_BLOCKER,
+            notify.render_stuck_blocker(
+                data["plan_slug"], b["id"], b["phase_id"],
+                b["question"], b["options"], age_min,
+            ),
+        ))
+        try:
+            inbox.write_event(
+                type="stuck_blocker",
+                plan_slug=data["plan_slug"],
+                project_root=project_root,
+                summary=(
+                    f"Blocker {b['id']} on phase {b['phase_id']} "
+                    f"open {age_min}min"
+                ),
+                details={
+                    "blocker_id": b["id"],
+                    "phase_id": b["phase_id"],
+                    "question": b["question"],
+                    "options": list(b["options"]),
+                },
+            )
+        except OSError:
+            # Inbox write is best-effort — never let it kill a tick.
+            pass
+
+
+def _emit_stalled_claim_notify(
+    data: dict, config: ProjectConfig,
+    side_notifies: list[tuple[str, str]],
+) -> None:
+    """One-shot signal on lease-expiry transition while plan is RUNNING.
+
+    Sits before the existing ``release_if_expired`` branch so the operator
+    learns about the stalled worker before the claim is auto-cleared. Stamps
+    ``stalled_notified`` on the (about-to-be-released) claim for defense in
+    depth in case the auto-release path ever changes.
+    """
+    claim = data.get("current_claim")
+    if not claim:
+        return
+    if data["status"] != st.STATUS_RUNNING:
+        return
+    if claim.get("stalled_notified"):
+        return
+    try:
+        expires = st.parse_iso(claim["lease_expires"])
+    except (KeyError, ValueError):
+        return
+    now = st._now_utc()
+    if expires >= now:
+        return
+    age_min = int((now - expires).total_seconds() // 60)
+    claim["stalled_notified"] = True
+    st.append_event(
+        data, st.EVENT_STALLED_CLAIM_NOTIFIED,
+        phase=claim["phase_id"], stalled_min=age_min,
+    )
+    side_notifies.append((
+        notify.KIND_STALLED_CLAIM,
+        notify.render_stalled_claim(
+            data["plan_slug"], claim["phase_id"], age_min,
+        ),
+    ))
+    try:
+        inbox.write_event(
+            type="stalled_claim",
+            plan_slug=data["plan_slug"],
+            project_root=str(config.project_root.resolve()),
+            summary=(
+                f"Claim on phase {claim['phase_id']} stalled "
+                f"{age_min}min past lease"
+            ),
+            details={
+                "phase_id": claim["phase_id"],
+                "stalled_min": age_min,
+                "claimed_by": claim.get("claimed_by"),
+            },
+        )
+    except OSError:
+        pass
+
+
 def tick(state_path: Path, config: ProjectConfig) -> TickResult:
     if not state_path.exists():
         return TickResult("idle", f"no state at {state_path}")
 
+    side_notifies: list[tuple[str, str]] = []
+
+    def _attach(result: TickResult) -> TickResult:
+        # Gap-fill emissions piggyback on whichever primary action this tick
+        # produces — they're not their own first-class action.
+        result.side_notifies = side_notifies
+        return result
+
     with st.mutate(state_path) as data:
+        # Pre-detect the gap-fill side effects so they fire even when the
+        # primary action is "idle" or "lease_expired". Both helpers mutate
+        # data + side_notifies in place; neither preempts the chain below.
+        _emit_stalled_claim_notify(data, config, side_notifies)
+        _emit_stuck_blocker_repings(data, config, side_notifies)
+
         if claim := data.get("current_claim"):
             if st.release_if_expired(data):
-                return TickResult("lease_expired", f"phase={claim['phase_id']}")
+                return _attach(TickResult("lease_expired", f"phase={claim['phase_id']}"))
 
         # Surface stalled claims once. Don't release the claim — the lease
         # owns retry; this event is just the signal the notification adapter
         # (Day-2 Cliff 2) hangs off of.
         if stalled := _detect_stalled(data):
-            return stalled
+            return _attach(stalled)
 
         # Defer SLA escalation during quiet hours — an overnight rollover would
         # otherwise ping the user at 3am. The blocker stays aged for the next
@@ -124,9 +263,9 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         data, st.EVENT_BLOCKER_SLA_EXCEEDED,
                         blocker_id=b["id"], age_hours=round(age_hours, 1),
                     )
-                    return TickResult(
+                    return _attach(TickResult(
                         "escalate", f"blocker={b['id']} age_hours={age_hours:.1f}",
-                    )
+                    ))
 
         # Newly-answered blocker → mark consumed (worker sees on next dispatch)
         for b in data["blockers"]:
@@ -135,21 +274,21 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 if data["status"] == st.STATUS_PAUSED:
                     data["status"] = st.STATUS_RUNNING
                 st.append_event(data, st.EVENT_BLOCKER_CONSUMED, blocker_id=b["id"])
-                return TickResult("blocker_resumed", f"blocker={b['id']}")
+                return _attach(TickResult("blocker_resumed", f"blocker={b['id']}"))
 
         if data["status"] in st.TERMINAL_STATUSES:
-            return TickResult("idle", f"plan status={data['status']}")
+            return _attach(TickResult("idle", f"plan status={data['status']}"))
 
         if claim := data.get("current_claim"):
-            return TickResult(
+            return _attach(TickResult(
                 "idle",
                 f"phase={claim['phase_id']} in_flight lease={claim['lease_expires']}",
-            )
+            ))
 
         plan_path = config.project_root / config.plan_dir / f"{data['plan_slug']}.md"
         phases = parse_sessions_index(plan_path)
         if not phases:
-            return TickResult("error", f"no Sessions index in {plan_path}")
+            return _attach(TickResult("error", f"no Sessions index in {plan_path}"))
 
         completed = st.completed_phase_ids(data)
         max_attempts = data["config"].get("max_attempts_per_phase", st.DEFAULT_MAX_ATTEMPTS)
@@ -167,20 +306,20 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                     data, st.EVENT_PHASE_MAX_ATTEMPTS,
                     phase=phase.id, attempts=prior_attempts,
                 )
-                return TickResult(
+                return _attach(TickResult(
                     "halt",
                     f"phase={phase.id} attempts={prior_attempts}",
                     notify_body=notify.render_halted(
                         data["plan_slug"], phase.id, prior_attempts,
                     ),
-                )
+                ))
             token = st.claim_phase(data, phase.id, ttl)
-            return TickResult(
+            return _attach(TickResult(
                 "dispatch",
                 detail=f"phase={phase.id} token={token}",
                 phase_id=phase.id,
                 token=token,
-            )
+            ))
 
         # All phases attempted — but wait for pending spawned tasks.
         if all(p.id in completed for p in phases):
@@ -195,15 +334,15 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                     for evt in data["events"]
                     if evt.get("type") == st.EVENT_PHASE_COMPLETED
                 )
-                return TickResult(
+                return _attach(TickResult(
                     "plan_done",
                     data["plan_slug"],
                     notify_body=notify.render_completed(
                         data["plan_slug"], commit_count,
                     ),
-                )
-            return TickResult(
+                ))
+            return _attach(TickResult(
                 "idle", f"phases done; {len(pending_tasks)} spawned task(s) pending",
-            )
+            ))
 
-        return TickResult("idle", "all phases blocked or none dispatchable")
+        return _attach(TickResult("idle", "all phases blocked or none dispatchable"))

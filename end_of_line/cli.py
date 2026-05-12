@@ -1404,8 +1404,20 @@ def _tick_one_plan(
     if dispatch and result.action == "dispatch":
         from .dispatch import dispatch_for_tick
         dispatch_for_tick(result, cfg, plan_slug, state_path)
+    project_root = str(cfg.project_root.resolve())
     if result.notify_body and (kind := ACTION_NOTIFY_KIND.get(result.action)):
-        notify.notify(cfg.notify, kind, result.notify_body)
+        # plan_slug + project_root piggyback so notify() drops an inbox
+        # event alongside the iMessage — keeps in-session signaling aligned
+        # with the operator's phone.
+        notify.notify(
+            cfg.notify, kind, result.notify_body,
+            plan_slug=plan_slug, project_root=project_root,
+        )
+    # side_notifies (stuck-blocker re-pings, stalled-claim transitions)
+    # already wrote rich-detail inbox events from inside tick(); fire
+    # iMessage only — no plan_slug → no duplicate inbox event.
+    for kind, body in result.side_notifies:
+        notify.notify(cfg.notify, kind, body)
     return result
 
 
@@ -2016,6 +2028,8 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
         notify.render_blocker(
             args.plan, blocker_id, args.phase, args.question, args.options,
         ),
+        plan_slug=args.plan,
+        project_root=str(cfg.project_root.resolve()),
     )
     print(f"Blocked {blocker_id} on phase {args.phase}")
     return ExitCode.OK

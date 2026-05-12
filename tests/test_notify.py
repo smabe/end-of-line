@@ -173,6 +173,47 @@ class NotifyDispatchTestCase(unittest.TestCase):
         self.assertEqual(args[sep_idx + 1], "+15551234567")
         self.assertEqual(args[sep_idx + 2], "hi from clu")
 
+    def test_writes_inbox_event_when_plan_slug_and_project_root_provided(self) -> None:
+        writes: list[dict] = []
+        notify.notify(
+            self._spec(), notify.KIND_BLOCKER, "Pick framework?\n[0] FastAPI",
+            now=_dt.datetime(2026, 5, 11, 12, 0),
+            sender=self._sender,
+            plan_slug="test-plan", project_root="/some/proj",
+            inbox_writer=lambda **kw: writes.append(kw),
+        )
+        self.assertEqual(len(writes), 1)
+        entry = writes[0]
+        self.assertEqual(entry["type"], notify.KIND_BLOCKER)
+        self.assertEqual(entry["plan_slug"], "test-plan")
+        self.assertEqual(entry["project_root"], "/some/proj")
+        self.assertIn("Pick framework?", entry["summary"])
+
+    def test_writes_inbox_event_even_during_quiet_hours(self) -> None:
+        writes: list[dict] = []
+        ok = notify.notify(
+            self._spec(), notify.KIND_BLOCKER, "Pick framework?",
+            now=_dt.datetime(2026, 5, 11, 3, 0),  # quiet
+            sender=self._sender,
+            plan_slug="test-plan", project_root="/x",
+            inbox_writer=lambda **kw: writes.append(kw),
+        )
+        # iMessage suppressed during quiet hours.
+        self.assertFalse(ok)
+        self.assertEqual(self.sent, [])
+        # But inbox event still recorded — Claude needs the signal next turn.
+        self.assertEqual(len(writes), 1)
+
+    def test_skips_inbox_write_when_plan_slug_missing(self) -> None:
+        writes: list[dict] = []
+        notify.notify(
+            self._spec(), notify.KIND_BLOCKER, "hello",
+            now=_dt.datetime(2026, 5, 11, 12, 0),
+            sender=self._sender,
+            inbox_writer=lambda **kw: writes.append(kw),
+        )
+        self.assertEqual(writes, [])
+
 
 class NotifyIntegrationTestCase(unittest.TestCase):
     """CLI wiring — cmd_block and cmd_tick should call notify with the right body."""

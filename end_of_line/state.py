@@ -91,6 +91,11 @@ EVENT_RETRY_REQUESTED = "retry_requested"
 # added_at, added_by, position. Worker dispatched after this event lands
 # sees it in its initial state read.
 EVENT_QUEUE_POPPED = "queue_popped"
+# Gap-fill notifications surfaced both via iMessage (cmd_tick) and inbox
+# (next Claude turn). REPINGED fires every 30 minutes per blocker;
+# CLAIM_NOTIFIED fires once per (claim, transition) pair.
+EVENT_STUCK_BLOCKER_REPINGED = "stuck_blocker_repinged"
+EVENT_STALLED_CLAIM_NOTIFIED = "stalled_claim_notified"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"

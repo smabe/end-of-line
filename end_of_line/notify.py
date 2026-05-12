@@ -29,6 +29,11 @@ KIND_QUEUE_SKIPPED = "queue_skipped"
 KIND_QUEUE_REPAIRED = "queue_repaired"
 KIND_QUEUE_REPAIR_FAILED = "queue_repair_failed"
 KIND_QUEUE_CORRUPT = "queue_corrupt"
+# Gap-fill kinds — escalations, not emergencies, so NOT in
+# QUIET_HOURS_BYPASS_KINDS. The inbox path surfaces them on next Claude
+# turn regardless of quiet hours.
+KIND_STUCK_BLOCKER = "stuck_blocker"
+KIND_STALLED_CLAIM = "stalled_claim"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
     KIND_HALTED,
@@ -91,12 +96,36 @@ def notify(
     *,
     now: _dt.datetime | None = None,
     sender: Sender | None = None,
+    plan_slug: str | None = None,
+    project_root: str | None = None,
+    inbox_writer: Callable[..., str] | None = None,
 ) -> bool:
     """Send an iMessage if quiet hours / config permit. Returns True if sent.
 
     Stays best-effort — on osascript failure we log to stderr and return False
     so a broken Messages.app can't take down the supervisor.
+
+    When `plan_slug` and `project_root` are both provided, also drops an
+    inbox event so the next Claude turn sees the same signal — independent
+    of quiet hours, since the inbox is for in-session pickup, not waking
+    the operator.
     """
+    if plan_slug is not None and project_root is not None:
+        writer = inbox_writer
+        if writer is None:
+            from . import inbox as _inbox
+            writer = _inbox.write_event
+        try:
+            writer(
+                type=kind,
+                plan_slug=plan_slug,
+                project_root=project_root,
+                summary=body.splitlines()[0][:200] if body else kind,
+                details={"full_body": body},
+            )
+        except OSError as exc:
+            # Never let a broken inbox dir block the iMessage path.
+            print(f"notify: inbox write failed ({kind}): {exc}", file=sys.stderr)
     # Quiet hours are user-facing wall-clock semantics — local time is the
     # whole point. Don't switch this to UTC to match state.py.
     now = now or _dt.datetime.now()
@@ -165,6 +194,27 @@ def render_queue_repaired(slug_count: int, backup_path) -> str:
 
 def render_queue_repair_failed(reason: str, backup_path) -> str:
     return f"💥 queue repair failed: {reason}. reverted from backup at {backup_path}."
+
+
+def render_stuck_blocker(
+    plan_slug: str, blocker_id: str, phase: str,
+    question: str, options: list[str], age_min: int,
+) -> str:
+    opts = "\n".join(f"[{i}] {o}" for i, o in enumerate(options))
+    return (
+        f"⏰ {plan_slug}/{blocker_id} still open ({age_min}min) [{phase}]\n"
+        f"{question}\n{opts}\n\n"
+        f"Reply: `{plan_slug} <number>`."
+    )
+
+
+def render_stalled_claim(plan_slug: str, phase: str, age_min: int) -> str:
+    return (
+        f"🐌 {plan_slug}/{phase} claim stalled ({age_min}min past lease).\n"
+        f"Worker is unresponsive. Run `clu release-claim --plan {plan_slug} "
+        f"--phase {phase}` to free it, or `clu retry` if you've fixed the "
+        f"underlying cause."
+    )
 
 
 def render_systemic_failure(plan_slug: str, phase: str, signature: str) -> str:
