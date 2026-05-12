@@ -108,9 +108,32 @@ def main(argv: list[str] | None = None) -> int:
     add_common(p_register)
 
     p_unregister = sub.add_parser(
-        "unregister", help="Remove a (project, plan) pair from the host registry",
+        "unregister",
+        help="Remove plan(s) from the host registry. Per-plan: "
+             "--project P --plan S. Batch: --all-archived prunes every "
+             "registry entry whose master plan file no longer exists.",
     )
-    add_common(p_unregister)
+    # --project / --plan are optional at parse-time so --all-archived can
+    # forbid them; cmd_unregister validates the combination at runtime.
+    p_unregister.add_argument(
+        "--project", type=Path, default=None,
+        help="Project root (required without --all-archived)",
+    )
+    p_unregister.add_argument(
+        "--plan", default=None,
+        help="Plan slug (required without --all-archived; "
+             "mutually exclusive with --all-archived)",
+    )
+    p_unregister.add_argument(
+        "--all-archived", action="store_true",
+        help="Remove every registry entry whose master plan file no "
+             "longer exists (post-archive ghost cleanup).",
+    )
+    p_unregister.add_argument(
+        "--dry-run", action="store_true",
+        help="With --all-archived: print what would be removed without "
+             "mutating the registry.",
+    )
 
     sub.add_parser("list", help="List all registered plans on this host")
 
@@ -350,6 +373,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_install_skill(args)
     if args.cmd == "queue":
         return cmd_queue(args)
+    # `unregister` needs to handle --all-archived (no single project/plan)
+    # alongside the per-plan path; the dispatcher branches inside.
+    if args.cmd == "unregister":
+        return cmd_unregister(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -369,7 +396,6 @@ def main(argv: list[str] | None = None) -> int:
         "task-done": cmd_task_done,
         "heartbeat": cmd_heartbeat,
         "register": cmd_register,
-        "unregister": cmd_unregister,
         "pause": cmd_pause,
         "resume": cmd_resume,
         "retry": cmd_retry,
@@ -402,11 +428,80 @@ def cmd_register(args, cfg: ProjectConfig, state_path: Path) -> int:
     return 0
 
 
-def cmd_unregister(args, cfg: ProjectConfig, state_path: Path) -> int:
+def cmd_unregister(args) -> int:
+    if args.all_archived:
+        return cmd_unregister_all_archived(args)
+    return cmd_unregister_one(args)
+
+
+def cmd_unregister_one(args) -> int:
+    # --project / --plan are parse-time optional so --all-archived can
+    # forbid them; the per-plan path validates them here.
+    if args.project is None or args.plan is None:
+        return _die(
+            ExitCode.GENERIC,
+            "unregister requires --project and --plan "
+            "(or --all-archived for batch ghost cleanup)",
+        )
+    try:
+        st.validate_slug(args.plan, kind="plan slug")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+    cfg = load_project_config(args.project)
     removed = registry.unregister(cfg.project_root, args.plan)
     msg = "Unregistered" if removed else "Not in registry"
     print(f"{msg}: {cfg.project_root}  →  {args.plan}")
-    return 0
+    return ExitCode.OK
+
+
+def cmd_unregister_all_archived(args) -> int:
+    if args.plan is not None:
+        return _die(
+            ExitCode.GENERIC,
+            "--all-archived is mutually exclusive with --plan",
+        )
+
+    to_remove: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str, str]] = []
+    for entry in registry.entries():
+        proj = Path(entry.project_root)
+        try:
+            cfg = load_project_config(proj)
+        except (OSError, ValueError) as exc:
+            # Project dir gone → archived. Dir present but config
+            # unreadable → surface for operator review, don't auto-remove.
+            if not proj.exists():
+                to_remove.append((entry.project_root, entry.plan_slug))
+            else:
+                skipped.append(
+                    (entry.project_root, entry.plan_slug, str(exc))
+                )
+            continue
+        master_path = cfg.project_root / cfg.plan_dir / f"{entry.plan_slug}.md"
+        if not master_path.exists():
+            to_remove.append((entry.project_root, entry.plan_slug))
+
+    if not to_remove:
+        print("(nothing to unregister)")
+    else:
+        if args.dry_run:
+            print("Would unregister:")
+        else:
+            # Atomic batch removal under one _mutate window — operators see
+            # one all-or-nothing transition, not a half-pruned registry.
+            targets = {(p, s) for p, s in to_remove}
+            with registry._mutate(registry.registry_path()) as data:
+                data["plans"] = [
+                    row for row in data["plans"]
+                    if (row["project_root"], row["plan_slug"]) not in targets
+                ]
+            print(f"Unregistered {len(to_remove)} plans:")
+        for proj_root, slug in to_remove:
+            print(f"  {proj_root}  →  {slug}")
+
+    for proj_root, slug, reason in skipped:
+        print(f"  skipped: {proj_root}  →  {slug}  ({reason})")
+    return ExitCode.OK
 
 
 def cmd_list(args) -> int:

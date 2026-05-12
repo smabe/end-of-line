@@ -562,6 +562,7 @@ wait or when the worker's exit pattern wouldn't naturally release
 | `clu retry --project P --plan S [--phase X]` | Clear max-attempts on a halted phase |
 | `clu release-claim --project P --plan S [--force] [--reason ...]` | Clear a stuck `current_claim` after a dead worker |
 | `clu unregister --project P --plan S` | Drop a plan from the host registry (state file untouched) |
+| `clu unregister --all-archived [--dry-run]` | Prune every registry entry whose master plan file no longer exists. Use after archiving plans (e.g. `post-ship`). `--dry-run` previews. |
 | `clu queue add <slug> [--front] [--project P]` | Append (or `--front` prepend) a plan slug to the project's queue |
 | `clu queue list [--project P]` (or bare `clu queue`) | Show pending queue + recent failures |
 | `clu queue remove <slug> [--project P]` | Drop a pending slug (moves it to history) |
