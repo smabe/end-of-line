@@ -37,26 +37,15 @@ class InstallHookTestBase(unittest.TestCase):
         self.patcher_home.start()
         self.addCleanup(self.patcher_home.stop)
         self.settings = self.home / ".claude" / "settings.json"
-        # By default treat install as interactive (TTY) so the no-TTY refusal
-        # path doesn't fire on every test. `redirect_stdout` swaps sys.stdout
-        # to a StringIO whose isatty() is False, so the StringIO instances
-        # used by `_run_install` / `_run_uninstall` need their isatty method
-        # forced on a per-test basis (see _force_tty).
-        self.is_tty = True
-
-    def _force_tty(self, buf: io.StringIO) -> None:
-        buf.isatty = lambda: self.is_tty  # type: ignore[method-assign]
 
     def _run_install(self) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        self._force_tty(out)
         with redirect_stdout(out), redirect_stderr(err):
             rc = main(["install-hook"])
         return rc, out.getvalue(), err.getvalue()
 
     def _run_uninstall(self) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        self._force_tty(out)
         with redirect_stdout(out), redirect_stderr(err):
             rc = main(["uninstall-hook"])
         return rc, out.getvalue(), err.getvalue()
@@ -93,12 +82,16 @@ class FreshInstallTests(InstallHookTestBase):
         entries = self._ups_entries()
         self.assertEqual(len(entries), 1)
 
-    def test_install_refuses_in_non_tty(self) -> None:
-        self.is_tty = False
+    def test_install_proceeds_in_non_tty(self) -> None:
+        # Regression for #21: the previous TTY gate blocked the legitimate
+        # /clu-monitor → Bash → clu install-hook path, since Claude Code's
+        # Bash tool runs subprocesses without a TTY. /clu-monitor is the
+        # only caller of install-hook in practice, so the safety was
+        # speculative. This asserts the install proceeds when stdout
+        # isatty() is False (the default with redirect_stdout(StringIO)).
         rc, _, err = self._run_install()
-        self.assertNotEqual(rc, int(ExitCode.OK))
-        self.assertIn("interactive", err.lower())
-        self.assertFalse(self.settings.exists())
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertTrue(self.settings.exists())
 
 
 class FormatPreservationTests(InstallHookTestBase):

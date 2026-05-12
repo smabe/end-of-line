@@ -974,18 +974,10 @@ def cmd_install_hook(args) -> int:
     """Register the clu inbox surface hook in `~/.claude/settings.json`.
 
     Adds (or refreshes) a single UserPromptSubmit entry pointing at the
-    bundled hook script. Idempotent on absolute hook_path. Refuses if
-    stdout isn't a TTY (workers shouldn't be installing user-level
-    hooks) and refuses on malformed settings.json (don't try to
-    repair). Writes the marker on success.
+    bundled hook script. Idempotent on absolute hook_path. Refuses on
+    malformed settings.json (don't try to repair). Writes the marker
+    on success.
     """
-    if not sys.stdout.isatty():
-        return _die(
-            ExitCode.GENERIC,
-            "install-hook requires an interactive shell (refusing in "
-            "non-TTY context — workers should not install user-level hooks)",
-        )
-
     hook_path = _resolve_hook_script_path()
     command = _hook_command(hook_path)
     settings_path = _hook_settings_path()
