@@ -11,12 +11,6 @@ A cron-driven plan orchestrator. You write a multi-phase plan as markdown; `clu`
 
 The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-of-line/commit/aef2b81) that decided whether halts should bypass quiet hours was shipped by clu — a worker opened the blocker, I answered via iMessage, the worker resumed, edited `notify.py`, wrote tests, and committed.
 
-## Status
-
-v0.1, working. 461 tests pass (`python3 -m unittest discover -s tests`). Stdlib-only Python 3.11+. macOS-targeted today because the iMessage adapter uses `osascript` and the chat.db poller reads Apple's local SQLite — pluggable backends (Slack / stdout / etc.) are tracked in [#11](https://github.com/smabe/end-of-line/issues/11).
-
-Recent ships, all driven by clu on itself: in-session signaling via a `UserPromptSubmit` hook + per-event JSON inbox ([`/clu-monitor`](#working-with-clu), closes [#20](https://github.com/smabe/end-of-line/issues/20) — replaces the broken `/schedule` mechanism from #19), configurable worker PATH ([`dispatch.path`](#configure-a-project), closes [#9](https://github.com/smabe/end-of-line/issues/9)), self-contained skill bundling (`clu install-skill` ships `/clu-phase` + `/plan` + `/brainstorm` + `/clu-monitor` with a `--only` flag), and a Day-4 sweep that closed 6 backlog issues across 4 self-dispatched bundle plans.
-
 ## How it works
 
 - **State lives outside sessions.** Each plan owns `<project>/plans/.orchestrator/<slug>.state.json`. Workers don't carry context; they read state on startup.
