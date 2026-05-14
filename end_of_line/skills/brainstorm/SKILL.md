@@ -34,7 +34,7 @@ Ask the user which personas to include. Default to the 5 most relevant. Don't ex
 
 ### Step 2: Launch Agents
 
-Launch all persona agents **in parallel** using `run_in_background: true`. Each agent:
+Launch all persona agents **in parallel** using `run_in_background: true`. Pass `subagent_type: "general-purpose"` explicitly — personas need full tool access (Read, Grep, WebFetch, WebSearch, Write) and the default shouldn't be assumed stable. Each agent:
 
 1. Receives a thorough brief with full context about the feature and existing codebase patterns
 2. Writes their analysis to `.claude/plans/{feature}-{persona}.md`
@@ -46,6 +46,10 @@ Launch all persona agents **in parallel** using `run_in_background: true`. Each 
 - List 8-12 specific topics to cover
 - Tell them to write to a specific file path
 - Ask for specific recommendations, not vague observations
+- Instruct them: if analysis depends on external API behavior,
+  features from other apps/services, or how existing implementations
+  solve the problem — verify with WebFetch / WebSearch / Read against
+  authoritative sources. Do not rely on training data.
 
 ### Step 3: Consolidate
 
@@ -90,3 +94,6 @@ Summarize the master plan concisely and ask for feedback before implementation.
 - Persona files are working documents — the master plan is the deliverable
 - Flag disagreements between personas as open questions rather than picking a winner
 - The master plan should be concise enough to scan but detailed enough to implement from
+- Personas must not confabulate external behavior (third-party APIs,
+  competitor features, framework semantics). The master plan should
+  distinguish verified claims from assertions based on prior knowledge.
