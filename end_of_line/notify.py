@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as _dt
 import subprocess
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -229,4 +230,14 @@ def render_worktree_missing(plan_slug: str, worktree_path: str) -> str:
         f"🌳 {plan_slug} paused — worktree missing at {worktree_path}. "
         f"Restore the dir (e.g. `git worktree add`) or edit state.worktree, "
         f"then `clu resume --plan {plan_slug}`."
+    )
+
+
+def render_worktree_conflict(
+    project_root: Path, slug_a: str, slug_b: str,
+) -> str:
+    return (
+        f"🌳 {slug_a} ⟷ {slug_b} in {project_root.name} — both active "
+        f"without a worktree. Concurrent edits will collide. Pause one "
+        f"(`clu pause`) or rerun init with `--worktree`."
     )

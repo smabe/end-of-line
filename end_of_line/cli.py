@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from enum import IntEnum
 from pathlib import Path
 
@@ -716,6 +717,83 @@ def _setup_worktree(args, cfg: ProjectConfig) -> dict | int:
     }
 
 
+def _is_plan_active(state: dict) -> bool:
+    """True iff a plan is currently advancing — claim in flight or running.
+
+    Done / halted / paused plans aren't writing, so they don't conflict
+    regardless of worktree status. Inverse of `state.TERMINAL_STATUSES`
+    plus the current-claim short-circuit (a claim on a non-terminal status
+    is the standard advancing case).
+    """
+    if state.get("current_claim"):
+        return True
+    return state.get("status") == st.STATUS_RUNNING
+
+
+def _plans_for_project(
+    project_root: Path, cfg: ProjectConfig,
+) -> Iterator[tuple[str, dict, Path]]:
+    """Yield (slug, state, state_path) for every plan registered in project_root.
+
+    Skips entries whose state file is missing, unreadable, or version-
+    mismatched — same tolerance as the rest of the supervisor loop.
+    Centralized so multiple post-loop helpers (queue advance, worktree
+    conflict scan, init-time sibling check) share the same scan shape.
+    """
+    target = project_root.resolve()
+    for entry in registry.entries():
+        try:
+            if Path(entry.project_root).resolve() != target:
+                continue
+        except OSError:
+            continue
+        state_path = cfg.state_path(entry.plan_slug)
+        if not state_path.exists():
+            continue
+        try:
+            state = st.load(state_path)
+        except (OSError, ValueError, st.SchemaVersionMismatch):
+            continue
+        yield entry.plan_slug, state, state_path
+
+
+def _active_no_worktree_siblings(
+    project_root: Path, exclude_slug: str | None = None,
+) -> list[str]:
+    """Slugs of plans in `project_root` that are active AND lack a worktree."""
+    cfg = load_project_config(project_root)
+    return [
+        slug for slug, state, _ in _plans_for_project(project_root, cfg)
+        if slug != exclude_slug
+        and not st.get_worktree(state)
+        and _is_plan_active(state)
+    ]
+
+
+def _maybe_print_worktree_conflict_hint(
+    project_root: Path, plan_slug: str, has_worktree: bool,
+) -> None:
+    """One-shot init-time stderr hint when sibling active plans lack a worktree.
+
+    Only fires when the new plan ALSO lacks one — operator who explicitly
+    passed `--worktree` already opted into isolation and doesn't need the
+    nudge. Silent when no active siblings exist.
+    """
+    if has_worktree:
+        return
+    siblings = _active_no_worktree_siblings(project_root, exclude_slug=plan_slug)
+    if not siblings:
+        return
+    sibling_str = ", ".join(siblings)
+    print(
+        f"hint: {plan_slug} and active sibling(s) [{sibling_str}] both run "
+        f"against {project_root}. Concurrent ticks may clobber each "
+        f"other's working tree — rerun init with `--worktree` if you want "
+        f"isolation.",
+        file=sys.stderr,
+    )
+
+
 def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     worktree_record: dict | None = None
     if args.worktree is not False:
@@ -748,6 +826,9 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     # without a separate setup step.
     registry.register(cfg.project_root, args.plan)
     print(f"Initialized {state_path}")
+    _maybe_print_worktree_conflict_hint(
+        cfg.project_root, args.plan, worktree_record is not None,
+    )
     _maybe_handle_claude_md_injection(cfg, args)
     _maybe_print_monitor_tip()
     return 0
@@ -1620,7 +1701,65 @@ def cmd_tick_all(args) -> int:
                 f"tick-all queue @ {project_root}: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
+        try:
+            _detect_worktree_conflicts_for_project(project_root)
+        except Exception as exc:
+            print(
+                f"tick-all worktree-conflicts @ {project_root}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
     return ExitCode.OK
+
+
+def _detect_worktree_conflicts_for_project(project_root: Path) -> None:
+    """Emit pair-warnings + maintain `in_conflict_with` for plans in project.
+
+    For each plan in the project: compute the set of OTHER plans that
+    are active + worktree-less + in this project (the "conflicting"
+    set). If it differs from the plan's persisted `in_conflict_with`,
+    update the field and — for each newly-conflicting pair where this
+    plan is the lexicographically-smaller slug — emit
+    `EVENT_WORKTREE_CONFLICT_WARNING` + a KIND_HALTED iMessage. The
+    canonical-pair rule guarantees one warning per (a, b) per onset,
+    not two.
+
+    Pair entries auto-clear when one side stops being active (done,
+    halted, paused, worktree-enabled) — both lists shrink on the next
+    tick that sees the transition.
+    """
+    cfg = load_project_config(project_root)
+    plans = list(_plans_for_project(project_root, cfg))
+
+    conflicting = {
+        slug for slug, state, _ in plans
+        if not st.get_worktree(state) and _is_plan_active(state)
+    }
+
+    new_pairs: list[tuple[str, str]] = []
+    for slug, state, state_path in plans:
+        target_set = (conflicting - {slug}) if slug in conflicting else set()
+        existing = set(state.get("in_conflict_with") or [])
+        if target_set == existing:
+            continue
+        with st.mutate(state_path) as data:
+            # JSON-serialized field; treat as set semantics, store sorted list.
+            data["in_conflict_with"] = sorted(target_set)
+            for other in sorted(target_set - existing):
+                if slug < other:
+                    # Canonical pair member emits the event; the
+                    # other-side plan only updates its `in_conflict_with`.
+                    st.append_event(
+                        data, st.EVENT_WORKTREE_CONFLICT_WARNING,
+                        other_slug=other,
+                    )
+                    new_pairs.append((slug, other))
+
+    for slug_a, slug_b in new_pairs:
+        notify.notify(
+            cfg.notify, notify.KIND_HALTED,
+            notify.render_worktree_conflict(project_root, slug_a, slug_b),
+        )
 
 
 def _advance_queue_for_project(project_root: Path) -> None:
@@ -1641,11 +1780,8 @@ def _advance_queue_for_project(project_root: Path) -> None:
         return
 
     # Busy gate (per-project): any live claim freezes the whole project.
-    for entry in registry.entries():
-        if Path(entry.project_root).resolve() != project_root:
-            continue
-        state = registry.load_entry_state(entry)
-        if state and state.get("current_claim"):
+    for _slug, state, _path in _plans_for_project(project_root, cfg):
+        if state.get("current_claim"):
             return
 
     try:
