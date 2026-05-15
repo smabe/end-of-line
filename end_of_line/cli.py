@@ -230,6 +230,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the CLAUDE.md prompt and write a decline marker so "
              "future inits don't re-ask.",
     )
+    # Worktree flags — opt-in per-plan isolation. `--worktree` alone uses
+    # the default path; with a value, treats it as the path. `--branch` and
+    # `--base-ref` only take effect with `--worktree`.
+    p_init.add_argument(
+        "--worktree", nargs="?", default=False, const=True,
+        metavar="PATH",
+        help="Create a git worktree at PATH (default: "
+             "<project-parent>/<basename>-<slug>) on branch clu/<slug> "
+             "(override with --branch) forked from current HEAD (override "
+             "with --base-ref). Plan dispatch will run with cwd=PATH.",
+    )
+    p_init.add_argument(
+        "--branch", default=None,
+        help="With --worktree: branch name to create (default: clu/<slug>). "
+             "Ignored without --worktree.",
+    )
+    p_init.add_argument(
+        "--base-ref", default=None, dest="base_ref",
+        help="With --worktree: ref to fork the new branch from "
+             "(default: HEAD). Ignored without --worktree.",
+    )
 
     p_register = sub.add_parser(
         "register",
@@ -574,14 +595,155 @@ def main(argv: list[str] | None = None) -> int:
     return dispatchers[args.cmd](args, cfg, state_path)
 
 
+def _resolve_ref(project_root: Path, ref: str) -> str | None:
+    """Resolve `ref` to a commit SHA via `git rev-parse`, or None if unknown.
+
+    `_verify_commit_shas` (used by `cmd_complete`) only handles raw SHAs via
+    `cat-file -e`; symbolic refs like `HEAD` or `main` need rev-parse with
+    the `^{commit}` peel to fail cleanly on tags-without-commits.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(project_root), "rev-parse", "--verify",
+         f"{ref}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _rollback_worktree(project_root: Path, record: dict) -> None:
+    """Tear down a worktree + branch created by `_setup_worktree`.
+
+    Best-effort: swallows git errors so the caller's primary error path
+    (state save failure) surfaces cleanly. Operator can mop up via
+    `clu worktree gc` or `git worktree prune` if a step fails.
+    """
+    subprocess.run(
+        ["git", "-C", str(project_root), "worktree", "remove",
+         "--force", record["path"]],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(project_root), "branch", "-D", record["branch"]],
+        capture_output=True,
+    )
+
+
+def _setup_worktree(args, cfg: ProjectConfig) -> dict | int:
+    """Materialize the worktree + branch and return the record dict.
+
+    Returns an int rc (via `_die`) on any precondition or git failure;
+    callers check `isinstance(result, int)`. On success the worktree is
+    on disk and the caller is responsible for rolling it back if a
+    downstream step (state save) fails.
+
+    The persisted `base_ref` is the resolved commit SHA, not the symbolic
+    ref the operator passed — freezes the fork point unambiguously.
+    """
+    # Project must be a git repo.
+    git_check = subprocess.run(
+        ["git", "-C", str(cfg.project_root), "rev-parse", "--git-dir"],
+        capture_output=True, text=True,
+    )
+    if git_check.returncode != 0:
+        return _die(
+            ExitCode.WORKTREE_SETUP_FAILED,
+            f"--worktree requires a git repository at {cfg.project_root}",
+        )
+
+    if args.worktree is True:
+        worktree_path = (
+            cfg.project_root.parent / f"{cfg.project_root.name}-{args.plan}"
+        )
+    else:
+        worktree_path = Path(args.worktree).expanduser()
+
+    branch = args.branch if args.branch else f"clu/{args.plan}"
+    base_ref_input = args.base_ref if args.base_ref else "HEAD"
+
+    base_sha = _resolve_ref(cfg.project_root, base_ref_input)
+    if base_sha is None:
+        return _die(
+            ExitCode.WORKTREE_SETUP_FAILED,
+            f"base ref {base_ref_input!r} could not be resolved in "
+            f"{cfg.project_root}",
+        )
+
+    branch_check = subprocess.run(
+        ["git", "-C", str(cfg.project_root), "rev-parse", "--verify",
+         f"refs/heads/{branch}"],
+        capture_output=True, text=True,
+    )
+    if branch_check.returncode == 0:
+        return _die(
+            ExitCode.WORKTREE_SETUP_FAILED,
+            f"branch {branch!r} already exists; pass --branch <new> or "
+            f"delete the old branch first",
+        )
+
+    if worktree_path.exists():
+        return _die(
+            ExitCode.WORKTREE_SETUP_FAILED,
+            f"worktree path already exists: {worktree_path}",
+        )
+
+    add_result = subprocess.run(
+        ["git", "-C", str(cfg.project_root), "worktree", "add",
+         "-b", branch, str(worktree_path), base_sha],
+        capture_output=True, text=True,
+    )
+    if add_result.returncode != 0:
+        return _die(
+            ExitCode.WORKTREE_SETUP_FAILED,
+            f"git worktree add failed: {add_result.stderr.strip()}",
+        )
+
+    # Echo provenance to stderr — `--base-ref` errors silently if it
+    # resolves to the wrong commit (e.g. stale local branch), so the
+    # operator sees both the symbolic ref and the SHA they actually got.
+    print(
+        f"Worktree at {worktree_path}\n"
+        f"  Branch: {branch}\n"
+        f"  Base:   {base_ref_input} → {base_sha}",
+        file=sys.stderr,
+    )
+
+    return {
+        "path": str(worktree_path),
+        "branch": branch,
+        "base_ref": base_sha,
+    }
+
+
 def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
+    worktree_record: dict | None = None
+    if args.worktree is not False:
+        result = _setup_worktree(args, cfg)
+        if isinstance(result, int):
+            return result
+        worktree_record = result
+
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    with st.locked(state_path):
-        # Re-check existence INSIDE the lock to defeat concurrent inits.
-        if state_path.exists():
-            print(f"State already exists: {state_path}", file=sys.stderr)
-            return 1
-        st.save_atomic(state_path, st.empty_state(args.plan, cfg.plan_dir))
+    try:
+        with st.locked(state_path):
+            # Re-check existence INSIDE the lock to defeat concurrent inits.
+            if state_path.exists():
+                print(f"State already exists: {state_path}", file=sys.stderr)
+                if worktree_record is not None:
+                    _rollback_worktree(cfg.project_root, worktree_record)
+                return 1
+            data = st.empty_state(args.plan, cfg.plan_dir)
+            if worktree_record is not None:
+                data["worktree"] = worktree_record
+            st.save_atomic(state_path, data)
+    except Exception:
+        # save_atomic / lock failure → tear down the worktree we just made.
+        # WORKTREE_SETUP_FAILED is the operator-facing receipt; the raised
+        # exception's traceback still surfaces for debugging.
+        if worktree_record is not None:
+            _rollback_worktree(cfg.project_root, worktree_record)
+        raise
     # Auto-register so fleet view / inbound routing can find the plan
     # without a separate setup step.
     registry.register(cfg.project_root, args.plan)
