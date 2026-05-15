@@ -52,6 +52,11 @@ class TickResult:
     # (stuck-blocker re-pings, stalled-claim transitions) that fire alongside
     # the primary action rather than replacing it. Each entry is (kind, body).
     side_notifies: list[tuple[str, str]] = field(default_factory=list)
+    # Plan's `state.worktree` record (`{path, branch, base_ref}`) captured
+    # inside the state lock and handed to `dispatch_for_tick` so it can
+    # `Popen(cwd=...)` without a second state load. None when the plan
+    # runs against the main project root.
+    worktree: dict | None = None
 
     def __str__(self) -> str:
         return f"[{self.action}] {self.detail}" if self.detail else f"[{self.action}]"
@@ -219,14 +224,20 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         return TickResult("idle", f"no state at {state_path}")
 
     side_notifies: list[tuple[str, str]] = []
+    worktree: dict | None = None
 
     def _attach(result: TickResult) -> TickResult:
         # Gap-fill emissions piggyback on whichever primary action this tick
         # produces — they're not their own first-class action.
         result.side_notifies = side_notifies
+        result.worktree = worktree
         return result
 
     with st.mutate(state_path) as data:
+        # Snapshot the worktree record while we hold the state lock — dispatch
+        # only ever uses it as a read, so a second `st.load` outside the lock
+        # would be redundant work + a race window.
+        worktree = st.get_worktree(data)
         # Pre-detect the gap-fill side effects so they fire even when the
         # primary action is "idle" or "lease_expired". Both helpers mutate
         # data + side_notifies in place; neither preempts the chain below.

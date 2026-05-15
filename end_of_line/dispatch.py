@@ -146,9 +146,14 @@ def dispatch_for_tick(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{result.phase_id}.{result.token}.log"
 
+    # Worktree-bearing plans run with cwd pointing at the worktree dir;
+    # main-repo plans keep cwd at project_root. The `{project}` template
+    # substitution always resolves to project_root regardless — that's the
+    # callback target, not the working directory.
+    cwd = result.worktree["path"] if result.worktree else str(cfg.project_root)
     popen_kwargs: dict = dict(
         shell=True,
-        cwd=str(cfg.project_root),
+        cwd=cwd,
         start_new_session=True,
     )
     if (worker_env := build_worker_env(cfg)) is not None:

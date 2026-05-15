@@ -49,8 +49,11 @@ class DispatchTestCase(unittest.TestCase):
             dispatch=DispatchSpec(kind="shell", command=cmd, path=path),
         )
 
-    def _result(self) -> TickResult:
-        return TickResult(action="dispatch", detail="", phase_id="a", token=self.token)
+    def _result(self, *, worktree: dict | None = None) -> TickResult:
+        return TickResult(
+            action="dispatch", detail="", phase_id="a",
+            token=self.token, worktree=worktree,
+        )
 
     def test_missing_command_releases_claim(self) -> None:
         cfg = self._cfg("")
@@ -73,24 +76,46 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertIn("rc=", events[0]["reason"])
 
-    def _capture_env_value(self, var: str, path: str = "") -> str:
-        """Run a sentinel worker that writes one env var to a tempfile.
+    def _capture_via_sentinel(
+        self,
+        *,
+        payload: str,
+        sentinel_name: str,
+        worktree: dict | None = None,
+        path: str = "",
+    ) -> str:
+        """Spawn a worker that writes a shell payload's output to a sentinel.
 
-        Returns the captured value (stripped). Uses a polled wait so the test
-        doesn't need to know the dispatch fast-fail timing; the sentinel
-        command finishes fast but `dispatch_for_tick` may treat it as either
-        fast-fail or running depending on scheduling.
+        `payload` is a `sh -c` fragment with `{s}` substituted for the absolute
+        sentinel path; e.g. `'pwd > {s}'` or `'printf "%s" "$PATH" > {s}'`.
+        Polled-wait covers the fast-fail-vs-long-running ambiguity in
+        `dispatch_for_tick`: the sentinel write is the observable, not the
+        worker's exit timing.
         """
-        sentinel = self.project / f"{var}.captured"
-        cfg = self._cfg(f'sh -c \'printf "%s" "${var}" > {sentinel}\'', path=path)
-        dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        sentinel = self.project / sentinel_name
+        cfg = self._cfg(
+            f'sh -c \'{payload.format(s=sentinel)}\'', path=path,
+        )
+        dispatch_for_tick(
+            self._result(worktree=worktree), cfg, "t", self.state_path,
+        )
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if sentinel.exists():
                 break
             time.sleep(0.05)
-        self.assertTrue(sentinel.exists(), f"sentinel for {var} never written")
+        self.assertTrue(
+            sentinel.exists(), f"sentinel {sentinel_name} never written",
+        )
         return sentinel.read_text()
+
+    def _capture_env_value(self, var: str, path: str = "") -> str:
+        # printf "%s" writes no trailing newline → no .strip() needed.
+        return self._capture_via_sentinel(
+            payload=f'printf "%s" "${var}" > {{s}}',
+            sentinel_name=f"{var}.captured",
+            path=path,
+        )
 
     def test_dispatch_no_path_omits_env(self) -> None:
         """Empty dispatch.path => worker inherits parent PATH unchanged."""
@@ -116,6 +141,35 @@ class DispatchTestCase(unittest.TestCase):
         self.assertTrue(expected_home, "test prerequisite: HOME must be set")
         captured = self._capture_env_value("HOME", path="/usr/bin:/bin")
         self.assertEqual(captured, expected_home)
+
+    def _capture_cwd(self, *, worktree: dict | None) -> str:
+        # `pwd` ends in a newline; strip so callers can compare paths directly.
+        return self._capture_via_sentinel(
+            payload="pwd > {s}",
+            sentinel_name="cwd.captured",
+            worktree=worktree,
+        ).strip()
+
+    def test_dispatch_cwd_is_project_root_without_worktree(self) -> None:
+        cwd = self._capture_cwd(worktree=None)
+        self.assertEqual(Path(cwd).resolve(), self.project.resolve())
+
+    def test_dispatch_cwd_is_worktree_path_when_set(self) -> None:
+        # Real directory on disk so the spawned shell can chdir into it.
+        # In production this is a `git worktree`, but `dispatch_for_tick`
+        # only Popens with `cwd=path` — it doesn't validate the .git layout.
+        # mkdtemp (not a fixed name) so parallel runs of this case can't
+        # collide on the sibling dir.
+        wt = Path(tempfile.mkdtemp(prefix="wt-sibling-"))
+        try:
+            cwd = self._capture_cwd(worktree={
+                "path": str(wt),
+                "branch": "clu/t",
+                "base_ref": "0" * 40,
+            })
+            self.assertEqual(Path(cwd).resolve(), wt.resolve())
+        finally:
+            wt.rmdir()
 
     def test_long_running_worker_stamps_pid(self) -> None:
         # Sleep longer than fast-fail window so we treat it as "running"
