@@ -96,6 +96,14 @@ EVENT_QUEUE_POPPED = "queue_popped"
 # CLAIM_NOTIFIED fires once per (claim, transition) pair.
 EVENT_STUCK_BLOCKER_REPINGED = "stuck_blocker_repinged"
 EVENT_STALLED_CLAIM_NOTIFIED = "stalled_claim_notified"
+# Worktree lifecycle. MISSING fires once per dispatch when state.worktree
+# points at a path that's been deleted or detached (operator removed the
+# directory or ran `git worktree prune`); accompanied by a status=PAUSED
+# transition. CONFLICT_WARNING fires once per (project, slug-pair) when
+# tick-all detects two active plans in the same project without isolated
+# worktrees — suppression flag lives on each plan's `in_conflict_with` field.
+EVENT_WORKTREE_MISSING = "worktree_missing"
+EVENT_WORKTREE_CONFLICT_WARNING = "worktree_conflict_warning"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
@@ -429,6 +437,15 @@ def completed_phase_ids(data: dict) -> set[str]:
         for evt in data["events"]
         if evt.get("type") == EVENT_PHASE_COMPLETED and "phase" in evt
     }
+
+
+def get_worktree(data: dict) -> dict | None:
+    """The plan's worktree record, or None when the plan runs in the main repo.
+
+    Field is additive optional — readers must tolerate its absence rather than
+    relying on a schema_version bump. Shape: `{path, branch, base_ref}`.
+    """
+    return data.get("worktree")
 
 
 def open_blockers(data: dict) -> list[dict]:

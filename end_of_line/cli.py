@@ -158,6 +158,11 @@ class ExitCode(IntEnum):
     # clu's validation rejects the result anyway regardless of rc, so
     # this code is purely a legibility win when reading worker logs.
     REPAIR_DECLINED = 9
+    # `clu init --worktree` rolled back: `git worktree add` succeeded but a
+    # downstream step (e.g. state save) failed, and we tore the worktree +
+    # branch back down. Distinct exit so callers can tell setup failure from
+    # an invalid-slug or status-transition refusal.
+    WORKTREE_SETUP_FAILED = 10
 
 
 def _die(rc: ExitCode | int, msg: str) -> int:
