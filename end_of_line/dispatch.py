@@ -150,6 +150,24 @@ def dispatch_for_tick(
     # main-repo plans keep cwd at project_root. The `{project}` template
     # substitution always resolves to project_root regardless — that's the
     # callback target, not the working directory.
+    def _pause_for_missing(verb: str) -> bool:
+        # verb distinguishes the stat-time miss ("missing") from the
+        # Popen-time race ("vanished") in stderr forensics; everything
+        # else funnels through one path so the two cases can't drift.
+        _pause_for_missing_worktree(
+            state_file, result, cfg,
+            plan_slug=plan_slug,
+            worktree_path=result.worktree["path"],
+        )
+        print(
+            f"dispatch: worktree {verb} at {result.worktree['path']}, paused",
+            file=sys.stderr,
+        )
+        return False
+
+    if result.worktree and not _worktree_alive(Path(result.worktree["path"])):
+        return _pause_for_missing("missing")
+
     cwd = result.worktree["path"] if result.worktree else str(cfg.project_root)
     popen_kwargs: dict = dict(
         shell=True,
@@ -159,13 +177,20 @@ def dispatch_for_tick(
     if (worker_env := build_worker_env(cfg)) is not None:
         popen_kwargs["env"] = worker_env
 
-    with open(log_path, "ab") as log_fh:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            **popen_kwargs,
-        )
+    try:
+        with open(log_path, "ab") as log_fh:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                **popen_kwargs,
+            )
+    except FileNotFoundError:
+        # Pre-Popen stat passed but the dir vanished in the gap. Operator
+        # gets one explanation, not two competing failure signals.
+        if result.worktree:
+            return _pause_for_missing("vanished")
+        raise
 
     try:
         rc = proc.wait(timeout=_FAST_FAIL_WAIT_SEC)
@@ -257,29 +282,48 @@ def dispatch_repair_worker(
         return REPAIR_RC_TIMEOUT
 
 
-def _pause_for_systemic_failure(
+def _worktree_alive(path: Path) -> bool:
+    """True iff `path` exists AND `git -C path rev-parse --git-dir` succeeds.
+
+    Catches both the "operator deleted the dir" and "operator ran
+    `git worktree prune`" failure modes. Plain `path.exists()` would miss
+    the prune case — the dir is still there but git won't operate on it.
+    """
+    if not path.exists():
+        return False
+    check = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--git-dir"],
+        capture_output=True, text=True,
+    )
+    return check.returncode == 0
+
+
+def _pause_and_halt(
     state_file: Path,
     result: TickResult,
     cfg: ProjectConfig,
     *,
-    plan_slug: str,
-    signature: str,
-    log_path: Path,
+    event_type: str,
+    event_kwargs: dict,
+    notify_body: str,
+    log_label: str,
 ) -> None:
-    """Flip the plan to paused + emit EVENT_SYSTEMIC_FAILURE + halt-bypass ping.
+    """Shared dispatch-time pause shape: release claim, flip PAUSED, halt-bypass ping.
 
-    Reuses STATUS_PAUSED (no new constant) and KIND_HALTED (no new gate); the
-    only new vocabulary is the event itself. `attempts_for_phase` subtracts
-    the phase_started that this token produced, so the budget isn't burned.
+    Every dispatch-time fatal — systemic failure, missing worktree, future
+    additions — does the same dance: append the failure event, release the
+    just-made claim (so `attempts_for_phase` doesn't burn a budget on a
+    failure that wasn't the worker's fault), set status=PAUSED, then notify
+    via KIND_HALTED so the iMessage bypasses quiet hours. Callers pick the
+    event constant + kwargs and the rendered iMessage body.
     """
     try:
         with st.mutate(state_file) as data:
             st.append_event(
-                data, st.EVENT_SYSTEMIC_FAILURE,
+                data, event_type,
                 phase=result.phase_id,
                 token=result.token,
-                signature=signature,
-                log_path=str(log_path),
+                **event_kwargs,
             )
             try:
                 st.release_claim(
@@ -294,13 +338,47 @@ def _pause_for_systemic_failure(
             data["status"] = st.STATUS_PAUSED
     except _DISPATCH_FALLBACK_ERRORS as exc:
         print(
-            f"dispatch: failed to record systemic_failure: {exc}",
+            f"dispatch: failed to record {log_label}: {exc}",
             file=sys.stderr,
         )
         return
-    notify.notify(
-        cfg.notify, notify.KIND_HALTED,
-        notify.render_systemic_failure(plan_slug, result.phase_id or "", signature),
+    notify.notify(cfg.notify, notify.KIND_HALTED, notify_body)
+
+
+def _pause_for_missing_worktree(
+    state_file: Path,
+    result: TickResult,
+    cfg: ProjectConfig,
+    *,
+    plan_slug: str,
+    worktree_path: str,
+) -> None:
+    _pause_and_halt(
+        state_file, result, cfg,
+        event_type=st.EVENT_WORKTREE_MISSING,
+        event_kwargs={"worktree_path": worktree_path},
+        notify_body=notify.render_worktree_missing(plan_slug, worktree_path),
+        log_label="worktree_missing",
+    )
+
+
+def _pause_for_systemic_failure(
+    state_file: Path,
+    result: TickResult,
+    cfg: ProjectConfig,
+    *,
+    plan_slug: str,
+    signature: str,
+    log_path: Path,
+) -> None:
+    _pause_and_halt(
+        state_file, result, cfg,
+        event_type=st.EVENT_SYSTEMIC_FAILURE,
+        event_kwargs={"signature": signature, "log_path": str(log_path)},
+        notify_body=notify.render_systemic_failure(
+            plan_slug, result.phase_id or "", signature,
+        ),
+        log_label="systemic_failure",
     )
 
 

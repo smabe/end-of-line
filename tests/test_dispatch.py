@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -155,12 +157,14 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(Path(cwd).resolve(), self.project.resolve())
 
     def test_dispatch_cwd_is_worktree_path_when_set(self) -> None:
-        # Real directory on disk so the spawned shell can chdir into it.
-        # In production this is a `git worktree`, but `dispatch_for_tick`
-        # only Popens with `cwd=path` — it doesn't validate the .git layout.
-        # mkdtemp (not a fixed name) so parallel runs of this case can't
-        # collide on the sibling dir.
+        # Phase 4 added an `_worktree_alive` gate (stat + `git rev-parse
+        # --git-dir`), so the test fixture has to be a real git dir.
+        # `git init` is sufficient — rev-parse doesn't care whether it's
+        # a primary repo or a worktree.
         wt = Path(tempfile.mkdtemp(prefix="wt-sibling-"))
+        subprocess.run(
+            ["git", "-C", str(wt), "init", "-q"], check=True,
+        )
         try:
             cwd = self._capture_cwd(worktree={
                 "path": str(wt),
@@ -169,7 +173,67 @@ class DispatchTestCase(unittest.TestCase):
             })
             self.assertEqual(Path(cwd).resolve(), wt.resolve())
         finally:
+            shutil.rmtree(wt)
+
+    def test_worktree_missing_path_pauses_plan(self) -> None:
+        """Worktree dir gone at dispatch → status=PAUSED, event recorded.
+
+        The previous claim is released without burning a phase attempt so
+        `clu resume` after the operator fixes the dir picks up cleanly.
+        """
+        missing = self.project.parent / "this-was-removed"
+        # Intentionally don't mkdir; the path doesn't exist on disk.
+        cfg = self._cfg("echo should-not-spawn")
+        result = self._result(worktree={
+            "path": str(missing),
+            "branch": "clu/t",
+            "base_ref": "0" * 40,
+        })
+        ok = dispatch_for_tick(result, cfg, "t", self.state_path)
+        self.assertFalse(ok)
+        data = json.loads(self.state_path.read_text())
+        self.assertIsNone(data["current_claim"])
+        self.assertEqual(data["status"], "paused")
+        evts = [e for e in data["events"] if e["type"] == "worktree_missing"]
+        self.assertEqual(len(evts), 1)
+        self.assertEqual(evts[0]["worktree_path"], str(missing))
+
+    def test_worktree_exists_but_not_git_pauses_plan(self) -> None:
+        """Path exists but `git -C path rev-parse --git-dir` fails → pause.
+
+        Catches the `git worktree prune` failure mode where the dir
+        remains but git has detached its admin metadata.
+        """
+        wt = Path(tempfile.mkdtemp(prefix="wt-not-git-"))
+        try:
+            cfg = self._cfg("echo should-not-spawn")
+            result = self._result(worktree={
+                "path": str(wt),
+                "branch": "clu/t",
+                "base_ref": "0" * 40,
+            })
+            ok = dispatch_for_tick(result, cfg, "t", self.state_path)
+            self.assertFalse(ok)
+            data = json.loads(self.state_path.read_text())
+            self.assertEqual(data["status"], "paused")
+            self.assertIn(
+                "worktree_missing",
+                {e["type"] for e in data["events"]},
+            )
+        finally:
             wt.rmdir()
+
+    def test_main_repo_dispatch_unaffected_by_worktree_check(self) -> None:
+        """Plans without a worktree never hit the alive-check codepath."""
+        cfg = self._cfg("sleep 3")
+        ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertTrue(ok)
+        data = json.loads(self.state_path.read_text())
+        # No worktree_missing event should appear.
+        self.assertNotIn(
+            "worktree_missing",
+            {e["type"] for e in data["events"]},
+        )
 
     def test_long_running_worker_stamps_pid(self) -> None:
         # Sleep longer than fast-fail window so we treat it as "running"

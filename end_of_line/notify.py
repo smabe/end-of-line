@@ -222,3 +222,11 @@ def render_systemic_failure(plan_slug: str, phase: str, signature: str) -> str:
         f"🚨 {plan_slug}/{phase} paused — systemic failure: {signature}. "
         f"Run `clu resume --plan {plan_slug}` once cleared."
     )
+
+
+def render_worktree_missing(plan_slug: str, worktree_path: str) -> str:
+    return (
+        f"🌳 {plan_slug} paused — worktree missing at {worktree_path}. "
+        f"Restore the dir (e.g. `git worktree add`) or edit state.worktree, "
+        f"then `clu resume --plan {plan_slug}`."
+    )
