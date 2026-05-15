@@ -39,8 +39,16 @@ the file.
 - `STATUS_*`, `TERMINAL_STATUSES`, `STATUS_STALLED`, `STATUS_MISSING` —
   the plan-status enum. `STALLED` and `MISSING` are display-only (fleet
   view derives them).
+- `GC_ELIGIBLE_STATUSES = TERMINAL_STATUSES − {STATUS_PAUSED}` — the
+  status set `clu worktree gc` will act on. Paused plans are excluded
+  because they may still resume and need their worktree intact.
 - `EVENT_*` — every event type as a constant. Never write a raw string;
   a typo silently breaks `completed_phase_ids()` and friends.
+  Worktree-specific events: `EVENT_WORKTREE_MISSING` (dispatch-time,
+  paired with status=PAUSED), `EVENT_WORKTREE_CONFLICT_WARNING`
+  (tick-time, paired with `in_conflict_with` flag).
+- `get_worktree(data)` — reader for the additive-optional `worktree`
+  field. Returns `dict | None`; callers never read the raw key.
 - `BLOCKER_INPUT`, `BLOCKER_REPLAN` — blocker types.
 - `utcnow()`, `parse_iso(ts)` — single timestamp format
   (`%Y-%m-%dT%H:%M:%SZ`). All UTC.
@@ -135,6 +143,10 @@ resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
 - `ProjectConfig.queue_path()` — `<project>/<plan_dir>/.orchestrator/
   queue.json`. No slug involved → no path-traversal validation. One
   queue file per project.
+- `ProjectConfig.master_plan_path(plan_slug)` — `<project>/<plan_dir>/
+  <slug>.md`. Absence is the canonical "archived" signal; used by
+  `cmd_unregister --all-archived` and `clu worktree gc` to widen
+  scope with `--include-archived`.
 - `DispatchSpec` — `kind` (only `"shell"` in v0.1) + `command` template
   string + optional `path` (absolute PATH for worker subprocess) +
   optional `repair_command` template. Worker `command` substitutions:
@@ -708,8 +720,9 @@ through this.
 
 - `ExitCode` — IntEnum: `OK`, `GENERIC`, `INVALID_SLUG`, `BAD_SHA`,
   `CLAIM_MISMATCH`, `SPAWN_CAP`, `UNKNOWN_TASK`, `STATUS_TRANSITION`,
-  `REPAIR_DECLINED`. Cron and inbound poller key off these codes. See
-  `contract.md` § "Exit codes" for the full table.
+  `REPAIR_DECLINED`, `WORKTREE_SETUP_FAILED`. Cron and inbound poller
+  key off these codes. See `contract.md` § "Exit codes" for the full
+  table.
 - `_die(rc, msg)` — write `error: <msg>` to stderr, return `int(rc)`.
   Use this from every error path; don't return bare ints.
 - `_translate_claim_mismatch(fn)` — decorator that catches a leaked
@@ -719,7 +732,8 @@ through this.
 - Operator-side commands: `cmd_init`, `cmd_tick`, `cmd_tick_all`,
   `cmd_status`, `cmd_register`, `cmd_unregister`, `cmd_list`,
   `cmd_fleet`, `cmd_pause`, `cmd_resume`, `cmd_retry`, `cmd_answer`,
-  `cmd_queue` (+ `cmd_queue_add`, `cmd_queue_list`, `cmd_queue_remove`).
+  `cmd_queue` (+ `cmd_queue_add`, `cmd_queue_list`, `cmd_queue_remove`),
+  `cmd_worktree` (+ `cmd_worktree_gc`).
 - `cmd_tick_all` is the host-scoped cron entry point: walks
   `registry.entries()` and runs the per-plan tick + dispatch + notify
   dance for each, then makes a second pass over distinct project_roots
@@ -744,6 +758,34 @@ through this.
   slug isn't pending.
 - `_advance_queue_for_project(project_root)` — the supervisor-side
   queue-pop step (see `architecture.md` § "Queue advancement").
+- `_detect_worktree_conflicts_for_project(project_root)` — the
+  post-loop conflict scan (see `architecture.md` § "Worktree conflict
+  scan"). Emits `EVENT_WORKTREE_CONFLICT_WARNING` + halt-bypass
+  iMessage once per (project, sorted-slug-pair) onset.
+- `_plans_for_project(project_root, cfg)` — generator yielding
+  `(slug, state, state_path)` for every plan registered under the
+  project. Centralizes the registry-walk + state-load pattern used
+  by `_advance_queue_for_project`, `_detect_worktree_conflicts_for_
+  project`, and `_active_no_worktree_siblings`.
+- `_setup_worktree(args, cfg)` / `_rollback_worktree(project_root,
+  record)` — `clu init --worktree` materializes a `git worktree add`
+  on branch `clu/<slug>` forked from `--base-ref` (default HEAD).
+  Returns the persisted `{path, branch, base_ref}` dict or an
+  `ExitCode.WORKTREE_SETUP_FAILED` rc. Rollback on state-save
+  failure tears down both the worktree dir and the branch.
+- `_resolve_ref(project_root, ref)` — `git rev-parse --verify
+  <ref>^{commit}` wrapper, returns the resolved SHA or `None`.
+  Distinct from `_verify_commit_shas` which only handles raw SHAs.
+- `cmd_worktree_gc(args)` — list candidates (status DONE / HALTED /
+  HALTED_REPLAN + has worktree), `--confirm` runs `git worktree
+  remove --force` with a 30s timeout, `--delete-branch` adds `git
+  branch -D`, `--include-archived` widens to plans whose master
+  `<slug>.md` is gone. Action-time re-reads each candidate's status
+  so a `clu retry` mid-gc doesn't lose its worktree.
+- `_resolve_project_arg(args)` — centralizes the four-site
+  `args.project or Path.cwd()` pattern with uniform `.resolve()`.
+  `getattr` tolerates the bare `clu queue` shape where the
+  Namespace has no `--project` attribute.
 - `_handle_corrupt_queue(cfg, exc, queue_path)` — the auto-repair
   pipeline (see `architecture.md` § "Auto-repair worker").
 - `_refuse_on_corrupt_queue(queue_path, exc)` — operator-at-keyboard

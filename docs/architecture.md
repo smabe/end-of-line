@@ -132,15 +132,36 @@ debugging session that asks "why didn't this tick advance?" reduces to
 The dispatch step is the only one that can spawn a worker. The
 supervisor never edits source code, runs tests, or calls Claude itself.
 
+Inside `supervisor.tick`, the same `with st.mutate(state_path) as data:`
+window that owns rule selection also snapshots `state.worktree` onto
+`TickResult.worktree`. That snapshot rides along to
+`dispatch_for_tick` so the dispatch step can `Popen(cwd=worktree.path)`
+without a second state load. When `state.worktree` is absent the field
+is `None` and dispatch keeps `cwd=cfg.project_root` (pre-worktree
+behavior). The `{project}` template substitution in
+`dispatch.command` always resolves to `project_root` regardless of
+worktree — that's the callback target, not the worker's cwd.
+
+Worktree-bearing dispatch adds two pre-Popen guards: `_worktree_alive`
+checks both `Path.exists()` and `git rev-parse --git-dir` (catching
+the `git worktree prune` case where the dir lingers but git has
+detached its admin metadata), and a `FileNotFoundError` fallback
+around `Popen` itself catches the millisecond race where the dir
+vanishes between stat and chdir. Both paths funnel into
+`_pause_for_missing_worktree`, which appends `EVENT_WORKTREE_MISSING`,
+releases the just-made claim without burning a phase attempt, flips
+the plan to `PAUSED`, and fires a halt-bypass iMessage naming the
+missing path.
+
 The eight-rule chain above runs **inside one plan's tick**. The
-host-scoped cron entry (`cmd_tick_all`) adds a tenth rule on top, fired
-once per distinct project after every registered plan has ticked: per-
-project queue advancement (see "Queue advancement" below). That step
-operates on `queue.json`, not on any single state.json, so it lives
-outside `supervisor.tick`. The "one tick = one action" invariant still
-holds within each plan; the queue advancement step is at-most-one
-queue-pop per project per cron interval, independent of the eight in-
-tick rules.
+host-scoped cron entry (`cmd_tick_all`) adds two post-loop passes,
+fired once per distinct project after every registered plan has
+ticked: per-project queue advancement and the worktree conflict scan
+(see "Queue advancement" and "Worktree conflict scan" below). Both
+operate cross-state (queue.json or paired state.jsons), so they live
+outside `supervisor.tick`. The "one tick = one action" invariant
+still holds within each plan; the post-loop passes are each at-most-
+one effect per project per cron interval.
 
 ## Queue advancement
 
@@ -204,6 +225,50 @@ protected by virtue of happening inside `queue.mutate`'s window). The
 normal-pop branch nests `state.locked(state_path)` *inside*
 `queue.mutate(queue_path)`. Don't invert; the queue is the higher-level
 resource and must be acquired first.
+
+## Worktree conflict scan
+
+After queue advancement, `cmd_tick_all` runs
+`_detect_worktree_conflicts_for_project` on each distinct project
+root. This is the only mechanism that emits `EVENT_WORKTREE_CONFLICT_
+WARNING` — `supervisor.tick` itself is single-plan and can't see
+sibling plans.
+
+The scan reuses the `_plans_for_project(project_root, cfg)` helper to
+load every plan's state once, then computes the "conflicting" set:
+plans that are **active** (`current_claim != None` OR `status ==
+RUNNING`) AND have no `worktree` record. For each plan whose target
+peer-set differs from its persisted `in_conflict_with` field, the
+field is rewritten and — for each newly-conflicting pair where this
+plan is the **lexicographically-smaller** slug — `EVENT_WORKTREE_
+CONFLICT_WARNING` is appended and a KIND_HALTED iMessage fires
+naming the pair.
+
+The canonical-pair rule (`slug_a < slug_b` emits, the other side
+only updates its `in_conflict_with`) guarantees exactly one event +
+one iMessage per (project, pair) onset. Pairs auto-clear when one
+side stops being active: the next tick sees the transition, computes
+a smaller target-set, and rewrites `in_conflict_with` accordingly —
+no separate clear path needed.
+
+```
+                  ┌──────────────────────────────┐
+  cron tick-all ─▶│  for plan in registry:       │
+                  │      tick + dispatch + notify│
+                  └──────────────┬───────────────┘
+                                 │
+                  ┌──────────────▼───────────────┐
+                  │  for project in distinct:    │
+                  │      advance_queue(project)  │  ← at most one pop
+                  │      detect_conflicts(project)│ ← at most one emit/pair
+                  └──────────────────────────────┘
+```
+
+`clu init` runs a one-shot version of the same scan at plan-creation
+time (without the event-write side effect) and prints a stderr hint
+when the new plan would land into an existing same-project conflict
+— giving the operator a chance to add `--worktree` before the first
+tick fires the iMessage.
 
 ## Auto-repair worker
 

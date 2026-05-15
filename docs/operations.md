@@ -340,6 +340,100 @@ The operator CLI (`clu queue add/list/remove`) does **not** trigger
 auto-repair — it refuses loudly on a corrupt queue and prints a paste-
 into-Claude diagnosis. Auto-repair only runs from `tick-all`.
 
+## Per-plan worktrees
+
+By default, every plan in a project runs against the project's main
+working tree — concurrent plans edit the same files. Pass `--worktree`
+at init to put a plan in its own git worktree on its own branch, so
+two plans in the same project can advance in parallel without
+stomping each other's diffs.
+
+### Init walkthrough
+
+```bash
+# Default: worktree at <project-parent>/<basename>-<slug>,
+# branch clu/<slug>, forked from HEAD.
+clu init --plan rearchitect-workouts --worktree
+
+# Custom path and branch:
+clu init --plan rearchitect-workouts \
+    --worktree ~/scratch/wo-rearch \
+    --branch abe/wo-rearch \
+    --base-ref feature/wo-base
+```
+
+`clu init` prints the resolved fork SHA + symbolic ref to stderr so
+you can confirm what you got. The persisted `state.worktree.base_ref`
+is the **resolved SHA**, not the symbolic ref — freezes the fork
+point unambiguously.
+
+Refusals exit `WORKTREE_SETUP_FAILED` (rc 10):
+
+- Project isn't a git repo (`--worktree` on a non-git project).
+- Branch `clu/<slug>` (or `--branch`) already exists.
+- Target path already exists.
+- `--base-ref` isn't a resolvable commit.
+- `git worktree add` succeeded but the state save failed — the
+  worktree + branch are torn back down before clu reports failure.
+  No orphan state.
+
+### Conflict warning
+
+Running `clu init --plan b` (no `--worktree`) in a project where
+plan `a` is already active without a worktree prints a stderr hint
+suggesting `--worktree`. Ignoring the hint is supported; clu's
+`tick-all` will then emit `EVENT_WORKTREE_CONFLICT_WARNING` + a halt-
+bypass iMessage naming the pair on the next tick after both plans
+are active. The iMessage fires once per (project, pair) onset and
+auto-clears when one side pauses, halts, finishes, or gets a
+worktree.
+
+### Recovery when the worktree dir is missing
+
+If you `git worktree remove` a worktree (or run `git worktree prune`)
+while the plan is paused or halted, the next dispatch detects the
+missing dir and pauses the plan with `EVENT_WORKTREE_MISSING`. The
+iMessage names the orphan path. Recovery:
+
+```bash
+# Option 1: restore the worktree
+git worktree add /path/from/iMessage clu/<slug>
+clu resume --plan <slug>
+
+# Option 2: drop the worktree association (revert to main-repo runs)
+# Edit state.json directly: remove the "worktree" key.
+clu resume --plan <slug>
+```
+
+There is no `clu worktree reattach` subcommand in v1 — operator
+edits state JSON by hand for rare recovery.
+
+### Cleanup with `clu worktree gc`
+
+```bash
+# Dry-run list of done/halted plans with worktrees:
+clu worktree gc --project /path/to/project
+
+# Actually remove the worktree dirs (keeps the clu/<slug> branches):
+clu worktree gc --project /path/to/project --confirm
+
+# Also drop the clu/<slug> branches:
+clu worktree gc --project /path/to/project --confirm --delete-branch
+
+# Include archived plans (master plan file moved out of plan_dir):
+clu worktree gc --project /path/to/project --include-archived --confirm
+```
+
+Each `git worktree remove --force` and `git branch -D` runs with a
+30-second timeout — a hung git invocation can't block your terminal
+indefinitely. Action-time re-checks each candidate's status, so a
+`clu retry` that landed between the list pass and `--confirm` doesn't
+lose its worktree.
+
+`clu unregister --all-archived` also emits a stderr warning per ghost
+entry whose state file still has a `worktree` record, naming the
+orphan path. Recovery: `clu worktree gc --include-archived --confirm`.
+
 ## iMessage notification model
 
 Outbound — fired during supervisor ticks via `osascript`. Kinds:

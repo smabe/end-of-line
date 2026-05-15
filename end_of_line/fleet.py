@@ -16,6 +16,7 @@ class PlanSummary:
     current_phase: str | None
     open_blocker_count: int
     last_event_age_seconds: float | None
+    has_worktree: bool = False
 
 
 def summarize_plan(entry: registry.PlanEntry) -> PlanSummary | None:
@@ -54,6 +55,7 @@ def summarize_plan(entry: registry.PlanEntry) -> PlanSummary | None:
         current_phase=claim["phase_id"] if claim else None,
         open_blocker_count=open_count,
         last_event_age_seconds=last_age,
+        has_worktree=st.get_worktree(data) is not None,
     )
 
 
@@ -77,11 +79,13 @@ def render(entries: Iterable[registry.PlanEntry]) -> str:
     if not entries:
         return "No plans registered. Run `clu init` or `clu register` to add one.\n"
 
-    rows: list[tuple[str, str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str, str, str]] = []
     for entry in entries:
         summary = summarize_plan(entry)
         if summary is None:
-            rows.append((entry.plan_slug, st.STATUS_MISSING, "-", "-", "-"))
+            rows.append(
+                (entry.plan_slug, st.STATUS_MISSING, "-", "-", "-", "-")
+            )
             continue
         rows.append((
             summary.plan_slug,
@@ -89,9 +93,10 @@ def render(entries: Iterable[registry.PlanEntry]) -> str:
             summary.current_phase or "-",
             str(summary.open_blocker_count),
             humanize_age(summary.last_event_age_seconds),
+            "yes" if summary.has_worktree else "-",
         ))
 
-    header = ("PLAN", "STATUS", "PHASE", "BLOCKERS", "LAST")
+    header = ("PLAN", "STATUS", "PHASE", "BLOCKERS", "LAST", "WT")
     widths = [
         max(len(header[i]), max(len(r[i]) for r in rows))
         for i in range(len(header))

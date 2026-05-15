@@ -117,6 +117,14 @@ clu init --project ~/projects/my-repo --plan my-feature
 clu              # bare command = fleet view across every registered plan
 ```
 
+Concurrent plans in the same project stomp each other's diffs by default. Add `--worktree` at init to isolate a plan in its own `git worktree` on branch `clu/<slug>`:
+
+```bash
+clu init --project ~/projects/my-repo --plan my-feature --worktree
+# After it ships, clean up:
+clu worktree gc --project ~/projects/my-repo --confirm --delete-branch
+```
+
 ## macOS LaunchAgents
 
 Two daemons:
@@ -174,6 +182,7 @@ The bundled skill also encodes **9 universal quality mandates** — TDD before l
 | `clu install-hook` / `clu uninstall-hook` | Register or remove the `UserPromptSubmit` hook in `~/.claude/settings.json` that surfaces clu's inbox events into the active Claude session. `/clu-monitor` is the user-facing wrapper |
 | `clu doctor --project P` | Smoke-test what a worker subprocess sees (PATH + resolved binary locations). No state writes |
 | `clu unregister --all-archived [--dry-run]` | Batch-prune registry entries whose master plan file no longer exists. `--dry-run` previews without mutating |
+| `clu worktree gc [--project P] [--confirm] [--delete-branch] [--include-archived]` | List or remove worktrees of done/halted plans. Default is dry-run; `--confirm` runs `git worktree remove --force` (and `--delete-branch` adds `git branch -D`) |
 
 ## State schema
 

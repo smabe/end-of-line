@@ -907,6 +907,8 @@ def cmd_unregister_all_archived(args) -> int:
 
     to_remove: list[tuple[str, str]] = []
     skipped: list[tuple[str, str, str]] = []
+    # (proj, slug, wt_path, branch) — branch may be custom (`--branch` at init).
+    orphan_worktrees: list[tuple[str, str, str, str]] = []
     for entry in registry.entries():
         proj = Path(entry.project_root)
         try:
@@ -923,6 +925,15 @@ def cmd_unregister_all_archived(args) -> int:
             continue
         if not cfg.master_plan_path(entry.plan_slug).exists():
             to_remove.append((entry.project_root, entry.plan_slug))
+            # Best-effort: if the state file lingered with a worktree
+            # record, surface the path so the operator can `clu worktree
+            # gc` (or `git worktree remove`) before the dir orphans on disk.
+            state = registry.load_entry_state(entry)
+            if state and (wt := st.get_worktree(state)):
+                orphan_worktrees.append(
+                    (entry.project_root, entry.plan_slug,
+                     wt["path"], wt["branch"])
+                )
 
     if not to_remove:
         print("(nothing to unregister)")
@@ -942,6 +953,19 @@ def cmd_unregister_all_archived(args) -> int:
         for proj_root, slug in to_remove:
             print(f"  {proj_root}  →  {slug}")
 
+    for proj_root, slug, wt_path, branch in orphan_worktrees:
+        # After this command's registry mutate, the entry is gone — so
+        # `clu worktree gc` can't see the plan anymore (it walks the
+        # registry). Direct git removal is the only path that works
+        # both for dry-run AND post-unregister.
+        print(
+            f"warning: {proj_root} / {slug} had worktree at {wt_path}. "
+            f"Clean up with `git -C {proj_root} worktree remove --force "
+            f"{wt_path}` (and `git branch -D {branch}` if you also "
+            f"want the branch dropped).",
+            file=sys.stderr,
+        )
+
     for proj_root, slug, reason in skipped:
         print(f"  skipped: {proj_root}  →  {slug}  ({reason})")
     return ExitCode.OK
@@ -953,7 +977,13 @@ def cmd_list(args) -> int:
         print("No plans registered. Run `clu init` or `clu register` to add one.")
         return 0
     for row in rows:
-        print(f"  {row.plan_slug:<30}  {row.project_root}")
+        # Worktree annotation is best-effort — a stale registry entry whose
+        # state can't be loaded falls back to the plain (slug, root) line.
+        state = registry.load_entry_state(row)
+        wt_marker = ""
+        if state is not None and st.get_worktree(state):
+            wt_marker = "  (worktree)"
+        print(f"  {row.plan_slug:<30}  {row.project_root}{wt_marker}")
     return 0
 
 

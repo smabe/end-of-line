@@ -65,6 +65,22 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     "stalled_heartbeat_minutes": 10
   },
 
+  // Optional, additive (no schema_version bump). Present iff the plan was
+  // init'd with `--worktree`. `base_ref` is the resolved commit SHA at
+  // init time, not the symbolic ref the operator passed.
+  "worktree": {
+    "path": "/absolute/path/to/worktree-dir",
+    "branch": "clu/<slug>",
+    "base_ref": "<40-char SHA>"
+  },
+
+  // Optional. Set by the tick-time worktree conflict scan. List with
+  // set semantics, stored sorted. Cleared automatically when the other
+  // plan transitions out of "active" (claim ends or status leaves
+  // RUNNING). Future code MUST NOT `.add()` to it — read into a set,
+  // rewrite the list.
+  "in_conflict_with": ["<other-slug>", "..."],
+
   "events": [
     {"ts": "ISO8601", "type": "phase_started",   "phase": "a-foundation", "claimed_by": "..."},
     {"ts": "ISO8601", "type": "phase_completed", "phase": "a-foundation", "commits": ["abc123"]},
@@ -73,7 +89,9 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     {"ts": "ISO8601", "type": "lease_expired",   "phase": "..."},
     {"ts": "ISO8601", "type": "task_spawned",    "task": "task-1", "source": "simplify"},
     {"ts": "ISO8601", "type": "plan_completed"},
-    {"ts": "ISO8601", "type": "queue_popped",   "slug": "...", "added_at": "...", "added_by": "operator", "position": 1}
+    {"ts": "ISO8601", "type": "queue_popped",   "slug": "...", "added_at": "...", "added_by": "operator", "position": 1},
+    {"ts": "ISO8601", "type": "worktree_missing", "phase": "...", "token": "...", "worktree_path": "..."},
+    {"ts": "ISO8601", "type": "worktree_conflict_warning", "other_slug": "..."}
   ]
 }
 ```
@@ -87,6 +105,12 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 - A phase is "done" iff there is a `phase_completed` event with its `phase` id. Status is derived, not stored.
 - Atomic writes only: tmp + fsync + rename, under a sibling lock file.
 - Schema version mismatch halts the supervisor. No silent migrations.
+- `worktree` and `in_conflict_with` are **additive optional** — readers use `state.get_worktree(data)` and `data.get("in_conflict_with") or []`. No `schema_version` bump on introduction.
+
+### Worktree event semantics
+
+- `worktree_missing` — emitted by `dispatch_for_tick` when `state.worktree` exists but `path` is either gone from disk or no longer a valid git working dir (operator deleted the dir, or ran `git worktree prune`). The plan is paused (status → PAUSED), the just-made claim is released without burning a phase attempt, and a KIND_HALTED iMessage names the path. Recovery: restore the dir or hand-edit `state.worktree`, then `clu resume`.
+- `worktree_conflict_warning` — emitted by `clu tick-all`'s post-loop conflict scan when two active plans in the same project both lack a worktree record. Only the lexicographically-smaller slug in the pair emits the event (`other_slug` names the peer); both plans update their `in_conflict_with` field. Auto-clears when one side transitions out of "active" (claim ends or status leaves RUNNING).
 
 ## Queue schema
 
@@ -254,6 +278,7 @@ Inbox-vs-iMessage asymmetry: every `notify()` call with `plan_slug` + `project_r
 | 6 | `UNKNOWN_TASK` | Named task / blocker / queue entry not found |
 | 7 | `STATUS_TRANSITION` | Refused state change (pause → resume on `done`, etc.) |
 | 9 | `REPAIR_DECLINED` | Repair worker refusing to touch the file (legibility-only — clu still validates) |
+| 10 | `WORKTREE_SETUP_FAILED` | `clu init --worktree` rolled back: git worktree add succeeded but a downstream step (state save) failed, and we tore the worktree + branch back down |
 
 ## Plan markdown contract
 

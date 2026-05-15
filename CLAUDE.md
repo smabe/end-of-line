@@ -73,7 +73,7 @@ For the *why* behind each, see
 | [`docs/_outline.md`](docs/_outline.md) | Structural contract for the docs library |
 | [`docs/history/`](docs/history/) | Frozen pre-Day-1 brainstorms |
 
-## Status (as of 2026-05-12)
+## Status (as of 2026-05-15)
 
 Shipped through Day 5 + the `clu-queue` plan: security + correctness
 (Day 1), UX surface + notifications + halt (Day 2), real worker
@@ -122,6 +122,31 @@ bumped v1 → v2 (`is_scheduled` treats v1 as "needs reinstall"). Tests
 Follow-up `3e31551` drops the TTY refusal that blocked the
 `/clu-monitor` → Bash → `clu install-hook` path (closes
 [#21](https://github.com/smabe/end-of-line/issues/21)).
+
+**clu-worktrees** — opt-in per-plan git worktrees so concurrent plans
+in the same project can advance on isolated branches without stomping
+each other's diffs (closes [#24](https://github.com/smabe/end-of-line/issues/24)).
+Seven phases shipped 2026-05-15:
+1. constants + helper + exit code (`4fcb7b4`),
+2. `clu init --worktree [PATH] [--branch] [--base-ref]` with rollback
+   on save fail (`34dbff4`),
+3. `TickResult.worktree` snapshot + dispatch `cwd` routing (`fd7bae3`),
+4. missing-worktree detection at dispatch → `EVENT_WORKTREE_MISSING`
+   + pause + halt-bypass iMessage; extracted `_pause_and_halt` so
+   systemic-failure + missing-worktree share the pause shape (`27e40e5`),
+5. tick-time conflict scan + init-time hint; suppression via
+   `in_conflict_with` field, canonical-pair rule emits once per
+   (project, pair) onset; extracted `_plans_for_project` helper
+   (`d267c3e`),
+6. `clu worktree gc [--confirm] [--delete-branch]
+   [--include-archived]` with status re-check + 30s git timeouts;
+   `ProjectConfig.master_plan_path` + `_resolve_project_arg`
+   extractions during simplify (`47a15b1`),
+7. fleet `WT` column + `clu list` `(worktree)` annotation +
+   `clu unregister --all-archived` orphan-worktree stderr warning +
+   docs sweep (contract / architecture / operations / reference /
+   README). Tests 461 → 494. Worktree v2 (worker-callback enqueue
+   inside a phase, etc.) deferred — none filed yet.
 
 **queue-ux-hardening** — `clu queue add a b c` is now atomic
 (closes [#18](https://github.com/smabe/end-of-line/issues/18),
