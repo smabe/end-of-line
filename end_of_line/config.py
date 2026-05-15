@@ -43,6 +43,15 @@ class ProjectConfig:
         state files. No slug → no path-traversal validation needed."""
         return self.project_root / self.plan_dir / ORCHESTRATOR_DIR / "queue.json"
 
+    def master_plan_path(self, plan_slug: str) -> Path:
+        """The plan's `<slug>.md` master file under `plan_dir/`.
+
+        Absence is the canonical "archived" signal — `cmd_unregister
+        --all-archived` and `clu worktree gc` both treat a missing
+        master as the plan having been moved out of the active set.
+        """
+        return self.project_root / self.plan_dir / f"{plan_slug}.md"
+
     def state_path(self, plan_slug: str) -> Path:
         path = self.project_root / self.plan_dir / ORCHESTRATOR_DIR / f"{plan_slug}.state.json"
         # Defense in depth — even after slug validation, refuse paths that

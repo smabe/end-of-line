@@ -388,6 +388,35 @@ def main(argv: list[str] | None = None) -> int:
         help="Project root (defaults to CWD).",
     )
 
+    p_worktree = sub.add_parser(
+        "worktree",
+        help="Manage per-plan git worktrees (subcommands: gc).",
+    )
+    worktree_subs = p_worktree.add_subparsers(dest="worktree_cmd")
+    p_worktree_gc = worktree_subs.add_parser(
+        "gc",
+        help="List or remove worktrees of done/halted plans "
+             "(default: dry-run list).",
+    )
+    p_worktree_gc.add_argument(
+        "--project", type=Path, default=None,
+        help="Project root (defaults to CWD).",
+    )
+    p_worktree_gc.add_argument(
+        "--confirm", action="store_true",
+        help="Actually remove (default: dry run).",
+    )
+    p_worktree_gc.add_argument(
+        "--delete-branch", action="store_true", dest="delete_branch",
+        help="Also drop the clu/<slug> branch via `git branch -D`. "
+             "Default keeps the branch so its commits stay reachable.",
+    )
+    p_worktree_gc.add_argument(
+        "--include-archived", action="store_true", dest="include_archived",
+        help="Widen to plans whose master plan file is gone (post-archive). "
+             "Default scope: currently-tracked plans only.",
+    )
+
     p_doctor = sub.add_parser(
         "doctor",
         help="Show what PATH and binary resolutions a worker subprocess "
@@ -561,6 +590,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_uninstall_hook(args)
     if args.cmd == "queue":
         return cmd_queue(args)
+    if args.cmd == "worktree":
+        return cmd_worktree(args)
     # `unregister` needs to handle --all-archived (no single project/plan)
     # alongside the per-plan path; the dispatcher branches inside.
     if args.cmd == "unregister":
@@ -890,8 +921,7 @@ def cmd_unregister_all_archived(args) -> int:
                     (entry.project_root, entry.plan_slug, str(exc))
                 )
             continue
-        master_path = cfg.project_root / cfg.plan_dir / f"{entry.plan_slug}.md"
-        if not master_path.exists():
+        if not cfg.master_plan_path(entry.plan_slug).exists():
             to_remove.append((entry.project_root, entry.plan_slug))
 
     if not to_remove:
@@ -1377,8 +1407,7 @@ def cmd_queue_add(args) -> int:
             )
         seen.add(slug)
 
-    project = args.project if args.project is not None else Path.cwd()
-    cfg = load_project_config(project)
+    cfg = load_project_config(_resolve_project_arg(args))
 
     registered_roots = {Path(e.project_root).resolve() for e in registry.entries()}
     if cfg.project_root not in registered_roots:
@@ -1520,8 +1549,7 @@ def _format_iso_clock(ts_iso: str | None) -> str:
 
 
 def cmd_queue_list(args) -> int:
-    project = getattr(args, "project", None) or Path.cwd()
-    cfg = load_project_config(Path(project))
+    cfg = load_project_config(_resolve_project_arg(args))
     queue_path = cfg.queue_path()
 
     if not queue_path.exists():
@@ -1602,8 +1630,7 @@ def cmd_queue_remove(args) -> int:
     except st.InvalidSlug as exc:
         return _die(ExitCode.INVALID_SLUG, str(exc))
 
-    project = getattr(args, "project", None) or Path.cwd()
-    cfg = load_project_config(Path(project))
+    cfg = load_project_config(_resolve_project_arg(args))
     queue_path = cfg.queue_path()
 
     if not queue_path.exists():
@@ -1628,6 +1655,123 @@ def cmd_queue_remove(args) -> int:
         })
 
     print(f"removed {slug} from queue")
+    return ExitCode.OK
+
+
+def _resolve_project_arg(args) -> Path:
+    """Resolve `args.project` (or CWD fallback) to an absolute symlink-free path.
+
+    Centralizes the four-site `args.project or Path.cwd()` pattern with a
+    uniform `.resolve()` so a symlinked project dir compares equal to its
+    canonical form during registry walks. `getattr` tolerates the bare
+    `clu queue` dispatch shape where the queue parser has no `--project`
+    attribute on the Namespace.
+    """
+    project = getattr(args, "project", None)
+    return (project if project else Path.cwd()).resolve()
+
+
+def cmd_worktree(args) -> int:
+    if args.worktree_cmd == "gc":
+        return cmd_worktree_gc(args)
+    print(
+        "usage: clu worktree gc [--project PATH] [--confirm] "
+        "[--delete-branch] [--include-archived]",
+        file=sys.stderr,
+    )
+    return _die(
+        ExitCode.GENERIC,
+        f"unknown worktree subcommand {args.worktree_cmd!r}",
+    )
+
+
+def cmd_worktree_gc(args) -> int:
+    """List or remove worktrees for done/halted plans.
+
+    Two-pass: scan picks candidates by status-at-list-time, action re-loads
+    each state under `st.load` to verify status hasn't changed (a plan
+    might have been retried in the gap). Stale-list races on the file
+    itself — operator running gc twice in parallel — are accepted in v1.
+    """
+    project_root = _resolve_project_arg(args)
+    try:
+        cfg = load_project_config(project_root)
+    except (OSError, ValueError) as exc:
+        return _die(
+            ExitCode.GENERIC,
+            f"failed to load project at {project_root}: {exc}",
+        )
+
+    candidates: list[tuple[str, dict, bool]] = []  # (slug, worktree, archived)
+    for slug, state, _state_path in _plans_for_project(project_root, cfg):
+        wt = st.get_worktree(state)
+        if not wt:
+            continue
+        if state.get("status") not in st.GC_ELIGIBLE_STATUSES:
+            continue
+        master_present = cfg.master_plan_path(slug).exists()
+        if not master_present and not args.include_archived:
+            continue
+        candidates.append((slug, wt, not master_present))
+
+    if not candidates:
+        print("(no worktree-bearing done/halted plans)")
+        return ExitCode.OK
+
+    print(f"Candidates ({len(candidates)}):")
+    for slug, wt, archived in candidates:
+        tag = " (archived)" if archived else ""
+        print(f"  {slug}{tag}  →  {wt['path']}  [{wt['branch']}]")
+
+    if not args.confirm:
+        print("(dry run — pass --confirm to remove)")
+        return ExitCode.OK
+
+    removed = 0
+    for slug, wt, _archived in candidates:
+        state_path = cfg.state_path(slug)
+        # Re-check status at action time so a `clu retry` that landed
+        # between list and confirm doesn't lose its worktree.
+        if state_path.exists():
+            try:
+                fresh = st.load(state_path)
+            except (OSError, ValueError, st.SchemaVersionMismatch):
+                print(f"  skipped: {slug}: state unreadable")
+                continue
+            if fresh.get("status") not in st.GC_ELIGIBLE_STATUSES:
+                print(f"  skipped: {slug}: status changed since list")
+                continue
+
+        remove_result = subprocess.run(
+            ["git", "-C", str(cfg.project_root), "worktree", "remove",
+             "--force", wt["path"]],
+            capture_output=True, text=True, timeout=30,
+        )
+        if remove_result.returncode != 0:
+            print(
+                f"  failed: {slug}: {remove_result.stderr.strip()}",
+                file=sys.stderr,
+            )
+            continue
+        print(f"  removed: {slug}  →  {wt['path']}")
+        removed += 1
+
+        if args.delete_branch:
+            branch_result = subprocess.run(
+                ["git", "-C", str(cfg.project_root), "branch", "-D",
+                 wt["branch"]],
+                capture_output=True, text=True, timeout=30,
+            )
+            if branch_result.returncode != 0:
+                print(
+                    f"  branch removal failed for {slug}: "
+                    f"{branch_result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  branch dropped: {wt['branch']}")
+
+    print(f"Removed {removed}/{len(candidates)} worktree(s).")
     return ExitCode.OK
 
 

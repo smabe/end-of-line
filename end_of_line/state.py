@@ -62,6 +62,13 @@ STATUS_DONE = "done"
 TERMINAL_STATUSES = frozenset(
     {STATUS_PAUSED, STATUS_HALTED, STATUS_HALTED_REPLAN, STATUS_DONE}
 )
+# `clu worktree gc` eligibility — terminal minus paused. Paused plans may
+# resume and need their worktree intact; done/halted plans won't (operator
+# uses `clu retry` only on halted, which the gc action-time re-check
+# blocks).
+GC_ELIGIBLE_STATUSES = frozenset(
+    {STATUS_DONE, STATUS_HALTED, STATUS_HALTED_REPLAN}
+)
 # Display-only labels — fleet view derives these instead of storing them.
 STATUS_STALLED = "stalled"
 STATUS_MISSING = "missing"
