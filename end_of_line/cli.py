@@ -390,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_worktree = sub.add_parser(
         "worktree",
-        help="Manage per-plan git worktrees (subcommands: gc).",
+        help="Manage per-plan git worktrees (subcommands: gc, reattach).",
     )
     worktree_subs = p_worktree.add_subparsers(dest="worktree_cmd")
     p_worktree_gc = worktree_subs.add_parser(
@@ -417,6 +417,24 @@ def main(argv: list[str] | None = None) -> int:
              "Default scope: currently-tracked plans only.",
     )
 
+    p_worktree_reattach = worktree_subs.add_parser(
+        "reattach",
+        help="Point a plan's state.worktree.path at a new directory "
+             "(after operator moved or rebuilt the worktree).",
+    )
+    p_worktree_reattach.add_argument(
+        "--project", type=Path, required=True,
+        help="Project root.",
+    )
+    p_worktree_reattach.add_argument(
+        "--plan", required=True, help="Plan slug.",
+    )
+    p_worktree_reattach.add_argument(
+        "--path", type=Path, required=True,
+        help="New worktree path. Must already exist and be a valid "
+             "git working directory (this command does NOT create one).",
+    )
+
     p_doctor = sub.add_parser(
         "doctor",
         help="Show what PATH and binary resolutions a worker subprocess "
@@ -430,6 +448,11 @@ def main(argv: list[str] | None = None) -> int:
     p_doctor.add_argument(
         "--project", type=Path, required=True,
         help="Project root (contains .orchestrator.json)",
+    )
+    p_doctor.add_argument(
+        "--worktree", action="store_true",
+        help="Also walk every registered plan in this project and report "
+             "worktree-path liveness (stat + `git rev-parse --git-dir`).",
     )
 
     sub.add_parser(
@@ -1398,7 +1421,36 @@ def cmd_doctor(args) -> int:
     for line in result.stdout.splitlines():
         print(f"  {line}")
     print(f"  (source: {source})")
+
+    if getattr(args, "worktree", False):
+        _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _print_worktree_health(cfg: ProjectConfig) -> None:
+    """Walk every plan in the project, report worktree-path liveness.
+
+    `ok` = stat'd + `git rev-parse --git-dir` succeeded — what the
+    dispatcher's pre-Popen gate checks. `MISSING` covers both
+    deleted-dir and `git worktree prune` cases. Plans without a
+    worktree record print as `(none)`.
+    """
+    project_root = cfg.project_root.resolve()
+    print("\nWorktrees:")
+    rows: list[tuple[str, str, str]] = []
+    for slug, state, _ in _plans_for_project(project_root, cfg):
+        wt = st.get_worktree(state)
+        if wt is None:
+            rows.append((slug, "(none)", "-"))
+            continue
+        ok = dispatch.worktree_alive(Path(wt["path"]))
+        rows.append((slug, wt["path"], "ok" if ok else "MISSING"))
+    if not rows:
+        print("  (no registered plans in this project)")
+        return
+    width = max(len(slug) for slug, _, _ in rows)
+    for slug, path, status in rows:
+        print(f"  {slug:<{width}}  {status:<8}  {path}")
 
 
 def cmd_queue(args) -> int:
@@ -1704,15 +1756,64 @@ def _resolve_project_arg(args) -> Path:
 def cmd_worktree(args) -> int:
     if args.worktree_cmd == "gc":
         return cmd_worktree_gc(args)
+    if args.worktree_cmd == "reattach":
+        return cmd_worktree_reattach(args)
     print(
-        "usage: clu worktree gc [--project PATH] [--confirm] "
-        "[--delete-branch] [--include-archived]",
+        "usage: clu worktree {gc|reattach} [...]",
         file=sys.stderr,
     )
     return _die(
         ExitCode.GENERIC,
         f"unknown worktree subcommand {args.worktree_cmd!r}",
     )
+
+
+def cmd_worktree_reattach(args) -> int:
+    """Rewrite a plan's `state.worktree.path` to point at a new directory.
+
+    Recovery path when the operator has moved or rebuilt the worktree dir
+    by hand (or `git worktree move` made the original path stale). The
+    new path must already exist AND pass the same alive-check the
+    dispatcher uses, so we don't silently re-attach to a non-git dir.
+    Leaves status alone — operator runs `clu resume` separately if the
+    plan was paused by `EVENT_WORKTREE_MISSING`.
+    """
+    try:
+        st.validate_slug(args.plan, kind="plan slug")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+    cfg = load_project_config(args.project.resolve())
+    state_path = cfg.state_path(args.plan)
+    if not state_path.exists():
+        return _die(
+            ExitCode.UNKNOWN_TASK,
+            f"no state at {state_path}",
+        )
+
+    new_path = args.path.expanduser().resolve()
+    if not dispatch.worktree_alive(new_path):
+        return _die(
+            ExitCode.GENERIC,
+            f"{new_path} is not a valid git working directory "
+            f"(refusing to reattach to a non-git path)",
+        )
+
+    with st.mutate(state_path) as data:
+        existing = st.get_worktree(data)
+        if existing is None:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"plan {args.plan!r} has no worktree record — use "
+                f"`clu init --worktree` instead of reattach",
+            )
+        old_path = existing["path"]
+        existing["path"] = str(new_path)
+        data["worktree"] = existing
+    print(
+        f"Reattached {args.plan}: {old_path} → {new_path} "
+        f"(branch: {existing['branch']})",
+    )
+    return ExitCode.OK
 
 
 def cmd_worktree_gc(args) -> int:

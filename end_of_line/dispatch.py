@@ -165,7 +165,7 @@ def dispatch_for_tick(
         )
         return False
 
-    if result.worktree and not _worktree_alive(Path(result.worktree["path"])):
+    if result.worktree and not worktree_alive(Path(result.worktree["path"])):
         return _pause_for_missing("missing")
 
     cwd = result.worktree["path"] if result.worktree else str(cfg.project_root)
@@ -185,12 +185,26 @@ def dispatch_for_tick(
                 stderr=subprocess.STDOUT,
                 **popen_kwargs,
             )
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         # Pre-Popen stat passed but the dir vanished in the gap. Operator
         # gets one explanation, not two competing failure signals.
         if result.worktree:
             return _pause_for_missing("vanished")
-        raise
+        # Non-worktree case: usually the log dir vanished or the shell
+        # binary is missing. Pre-clu-worktrees, the bare `raise` here
+        # propagated up and crashed the whole `cmd_tick_all` loop —
+        # taking out every other plan's tick along with it. Funnel into
+        # the same release-and-record path as a fast-fail rc so one
+        # broken plan can't poison the cadence.
+        _release_with_failure(
+            state_file, result,
+            reason=f"Popen FileNotFoundError: {exc}",
+        )
+        print(
+            f"dispatch: Popen FileNotFoundError: {exc}, log={log_path}",
+            file=sys.stderr,
+        )
+        return False
 
     try:
         rc = proc.wait(timeout=_FAST_FAIL_WAIT_SEC)
@@ -282,7 +296,7 @@ def dispatch_repair_worker(
         return REPAIR_RC_TIMEOUT
 
 
-def _worktree_alive(path: Path) -> bool:
+def worktree_alive(path: Path) -> bool:
     """True iff `path` exists AND `git -C path rev-parse --git-dir` succeeds.
 
     Catches both the "operator deleted the dir" and "operator ran

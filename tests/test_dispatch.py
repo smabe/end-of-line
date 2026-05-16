@@ -66,6 +66,28 @@ class DispatchTestCase(unittest.TestCase):
         types = [e["type"] for e in data["events"]]
         self.assertIn("dispatch_failed", types)
 
+    def test_popen_filenotfounderror_releases_claim_without_raising(self) -> None:
+        """Non-worktree Popen FileNotFoundError → dispatch_failed, not crash.
+
+        Pre-clu-worktrees the bare `raise` here propagated up and crashed
+        the whole `cmd_tick_all` loop. The funnel-through-_release_with_
+        failure path is the same shape as a fast-fail rc!=0.
+        """
+        from unittest import mock
+
+        cfg = self._cfg("true")
+        with mock.patch(
+            "end_of_line.dispatch.subprocess.Popen",
+            side_effect=FileNotFoundError(2, "no such file"),
+        ):
+            ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertFalse(ok)
+        data = json.loads(self.state_path.read_text())
+        self.assertIsNone(data["current_claim"])
+        events = [e for e in data["events"] if e["type"] == "dispatch_failed"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("FileNotFoundError", events[0]["reason"])
+
     def test_fast_fail_releases_claim(self) -> None:
         # Plain non-zero exit that doesn't match a systemic signature
         # (those route through the pause branch — see test_systemic_failure).
@@ -157,7 +179,7 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(Path(cwd).resolve(), self.project.resolve())
 
     def test_dispatch_cwd_is_worktree_path_when_set(self) -> None:
-        # Phase 4 added an `_worktree_alive` gate (stat + `git rev-parse
+        # Phase 4 added a `worktree_alive` gate (stat + `git rev-parse
         # --git-dir`), so the test fixture has to be a real git dir.
         # `git init` is sufficient — rev-parse doesn't care whether it's
         # a primary repo or a worktree.

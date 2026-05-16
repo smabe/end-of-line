@@ -120,6 +120,56 @@ class DoctorCommandTestCase(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn(".orchestrator.json", stderr)
 
+    def test_doctor_worktree_flag_reports_alive_and_missing(self) -> None:
+        """`--worktree` walks plans, reports liveness + missing rows."""
+        # Need a real git repo for `clu init --worktree` to succeed.
+        import subprocess
+        subprocess.run(["git", "-C", str(self.project), "init", "-q"], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.project), "config", "user.email", "t@t"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.project), "config", "user.name", "t"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.project), "commit", "--allow-empty", "-m", "i"],
+            check=True, capture_output=True,
+        )
+        # Plan alpha: with worktree (alive). Plan beta: with worktree
+        # that we delete to simulate operator removal. Plan gamma:
+        # plain init (no worktree → "(none)").
+        for slug in ("alpha", "beta", "gamma"):
+            (self.project / "plans" / f"{slug}.md").write_text(PLAN)
+        self._write_cfg(path=os.environ["PATH"])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            main(["init", "--project", str(self.project),
+                  "--plan", "alpha", "--worktree"])
+            main(["init", "--project", str(self.project),
+                  "--plan", "beta", "--worktree"])
+            main(["init", "--project", str(self.project), "--plan", "gamma"])
+        # Wipe beta's worktree dir to trigger MISSING.
+        beta_wt = self.project.resolve().parent / f"{self.project.name}-beta"
+        import shutil
+        shutil.rmtree(beta_wt)
+
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["doctor", "--project", str(self.project), "--worktree"])
+        stdout = out.getvalue()
+        self.assertEqual(rc, 0)
+        # Each plan should appear with its expected status.
+        self.assertRegex(stdout, r"alpha\s+ok\s+")
+        self.assertRegex(stdout, r"beta\s+MISSING\s+")
+        self.assertRegex(stdout, r"gamma\s+-\s+\(none\)")
+
+    def test_doctor_without_worktree_flag_skips_section(self) -> None:
+        self._write_cfg(path=os.environ["PATH"])
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("Worktrees:", stdout)
+
     def test_doctor_does_not_touch_state(self) -> None:
         # Initialize a plan, snapshot state.json mtime, run doctor, confirm
         # mtime unchanged.  Guarantees the command is pure read.
