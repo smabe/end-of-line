@@ -156,6 +156,7 @@ class ExitCode(IntEnum):
     SPAWN_CAP = 5
     UNKNOWN_TASK = 6
     STATUS_TRANSITION = 7
+    INVALID_VALUE = 8
     # Repair worker's intent: "I won't touch this — would lose data."
     # clu's validation rejects the result anyway regardless of rc, so
     # this code is purely a legibility win when reading worker logs.
@@ -252,6 +253,21 @@ def main(argv: list[str] | None = None) -> int:
         "--base-ref", default=None, dest="base_ref",
         help="With --worktree: ref to fork the new branch from "
              "(default: HEAD). Ignored without --worktree.",
+    )
+    p_init.add_argument(
+        "--lease-ttl-minutes", type=int, default=None,
+        dest="lease_ttl_minutes",
+        help="Override default lease TTL (minutes). Default: 30.",
+    )
+    p_init.add_argument(
+        "--stalled-heartbeat-minutes", type=int, default=None,
+        dest="stalled_heartbeat_minutes",
+        help="Override stall threshold (minutes). Default: 10.",
+    )
+    p_init.add_argument(
+        "--max-attempts-per-phase", type=int, default=None,
+        dest="max_attempts_per_phase",
+        help="Override max phase attempts. Default: 3.",
     )
 
     p_register = sub.add_parser(
@@ -1027,6 +1043,18 @@ def _maybe_print_worktree_conflict_hint(
 
 
 def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
+    for attr, label in [
+        ("lease_ttl_minutes", "--lease-ttl-minutes"),
+        ("stalled_heartbeat_minutes", "--stalled-heartbeat-minutes"),
+        ("max_attempts_per_phase", "--max-attempts-per-phase"),
+    ]:
+        val = getattr(args, attr, None)
+        if val is not None and val <= 0:
+            return _die(
+                ExitCode.INVALID_VALUE,
+                f"{label} must be a positive integer, got {val}",
+            )
+
     worktree_record: dict | None = None
     if args.worktree is not False:
         result = _setup_worktree(args, cfg)
@@ -1044,6 +1072,14 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
                     _rollback_worktree(cfg.project_root, worktree_record)
                 return 1
             data = st.empty_state(args.plan, cfg.plan_dir)
+            for key in (
+                "lease_ttl_minutes",
+                "stalled_heartbeat_minutes",
+                "max_attempts_per_phase",
+            ):
+                val = getattr(args, key, None)
+                if val is not None:
+                    data["config"][key] = val
             if worktree_record is not None:
                 data["worktree"] = worktree_record
             st.save_atomic(state_path, data)
