@@ -1423,7 +1423,7 @@ def _refuse_on_corrupt_queue(queue_path: Path, exc: Exception) -> int:
     return _die(ExitCode.GENERIC, "\n".join(lines))
 
 
-BUNDLED_SKILLS = ("clu-phase", "plan", "brainstorm", "clu-monitor", "clu-plan")
+BUNDLED_SKILLS = ("brainstorm", "clu-monitor", "clu-phase", "clu-plan", "clu-reply", "plan")
 
 _CLU_NOTE_START = "<!-- clu:start autonomous-loop-pacing -->"
 _CLU_NOTE_END = "<!-- clu:end autonomous-loop-pacing -->"
