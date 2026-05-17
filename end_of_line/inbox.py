@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from . import state as st
+from ._xdg_guard import assert_xdg_safe
 
 SCHEMA_VERSION = 1
 
@@ -27,7 +28,9 @@ SCHEMA_VERSION = 1
 def inbox_root() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME")
     root = Path(base) if base else Path.home() / ".config"
-    return root / "clu" / "inbox"
+    path = root / "clu" / "inbox"
+    assert_xdg_safe(path)
+    return path
 
 
 def _processed_root(inbox_dir: Path) -> Path:
