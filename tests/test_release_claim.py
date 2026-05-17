@@ -235,6 +235,56 @@ class ReleaseClaimTestCase(unittest.TestCase):
             ])
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
 
+    # ---- --reset-attempts flag -------------------------------------------------
+
+    def test_release_claim_reset_attempts_emits_event(self) -> None:
+        # --force required to bypass fresh-heartbeat safety check.
+        self._write(lambda d: _stamp_claim(d, phase="A", heartbeat_age_seconds=30))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(self._argv("--force", "--reset-attempts"))
+        self.assertEqual(rc, 0)
+        events = self._read()["events"]
+        reset_evts = [e for e in events if e["type"] == st.EVENT_ATTEMPTS_RESET]
+        self.assertEqual(len(reset_evts), 1)
+        self.assertEqual(reset_evts[0]["phase"], "A")
+        self.assertTrue(reset_evts[0]["operator"])
+        self.assertIn("Attempts reset", buf.getvalue())
+
+    def test_attempts_for_phase_zeros_after_reset_event(self) -> None:
+        # STARTED, STARTED, ATTEMPTS_RESET, STARTED → attempts = 1
+        data = {
+            "events": [
+                {"type": st.EVENT_PHASE_STARTED, "phase": "A", "claimed_by": "s1"},
+                {"type": st.EVENT_PHASE_STARTED, "phase": "A", "claimed_by": "s2"},
+                {"type": st.EVENT_ATTEMPTS_RESET, "phase": "A", "operator": True},
+                {"type": st.EVENT_PHASE_STARTED, "phase": "A", "claimed_by": "s3"},
+            ],
+        }
+        self.assertEqual(st.attempts_for_phase(data, "A"), 1)
+
+    def test_attempts_for_phase_interleaved_reset_and_retry(self) -> None:
+        # STARTED, RETRY_REQUESTED, STARTED, ATTEMPTS_RESET, STARTED → 1
+        data = {
+            "events": [
+                {"type": st.EVENT_PHASE_STARTED, "phase": "A", "claimed_by": "s1"},
+                {"type": st.EVENT_RETRY_REQUESTED, "phase": "A"},
+                {"type": st.EVENT_PHASE_STARTED, "phase": "A", "claimed_by": "s2"},
+                {"type": st.EVENT_ATTEMPTS_RESET, "phase": "A", "operator": True},
+                {"type": st.EVENT_PHASE_STARTED, "phase": "A", "claimed_by": "s3"},
+            ],
+        }
+        self.assertEqual(st.attempts_for_phase(data, "A"), 1)
+
+    def test_release_claim_without_reset_flag_unchanged(self) -> None:
+        # Regression guard: bare release-claim must not emit EVENT_ATTEMPTS_RESET.
+        # Use --force to ensure the release proceeds regardless of heartbeat age.
+        self._write(lambda d: _stamp_claim(d, phase="A", heartbeat_age_seconds=30))
+        main(self._argv("--force"))
+        events = self._read()["events"]
+        reset_evts = [e for e in events if e["type"] == st.EVENT_ATTEMPTS_RESET]
+        self.assertEqual(reset_evts, [])
+
 
 if __name__ == "__main__":
     unittest.main()

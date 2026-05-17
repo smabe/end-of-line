@@ -129,6 +129,10 @@ EVENT_WORKTREE_RETAINED_AHEAD = "worktree_retained_ahead"
 # Operator bumped a live claim's lease_expires without state-file hand-editing.
 # Fields: phase, extended_by_minutes, new_expires, operator (True).
 EVENT_LEASE_EXTENDED = "lease_extended"
+# Operator released a claim with --reset-attempts; zeroes the phase's attempt
+# budget so the next dispatch doesn't count operator-driven aborts against it.
+# Fields: phase, operator (True).
+EVENT_ATTEMPTS_RESET = "attempts_reset"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
@@ -508,9 +512,10 @@ def latest_event(
 def attempts_for_phase(data: dict, phase_id: str) -> int:
     """Count phase_started events for this phase, scoped to the most recent retry.
 
-    Durable across claim clears. `clu retry` appends EVENT_RETRY_REQUESTED to
-    move the floor — only phase_starteds after that point count, so the
-    supervisor's max-attempts cap doesn't re-halt the plan on the next tick.
+    Durable across claim clears. `clu retry` appends EVENT_RETRY_REQUESTED and
+    `clu release-claim --reset-attempts` appends EVENT_ATTEMPTS_RESET to move
+    the floor — only phase_starteds after the most recent of either count, so
+    operator-driven aborts don't burn the phase's attempt budget.
 
     Systemic failures (PATH bug, rate limit, auth) emit EVENT_SYSTEMIC_FAILURE
     naming the token that hit them. The corresponding phase_started is
@@ -518,7 +523,10 @@ def attempts_for_phase(data: dict, phase_id: str) -> int:
     """
     floor = -1
     for i, evt in enumerate(data["events"]):
-        if evt.get("type") == EVENT_RETRY_REQUESTED and evt.get("phase") == phase_id:
+        if (
+            evt.get("type") in (EVENT_RETRY_REQUESTED, EVENT_ATTEMPTS_RESET)
+            and evt.get("phase") == phase_id
+        ):
             floor = i
     systemic_tokens = {
         evt.get("token")

@@ -563,6 +563,11 @@ def main(argv: list[str] | None = None) -> int:
         "--reason", default="",
         help="Optional explanation, recorded in the audit event.",
     )
+    p_release_claim.add_argument(
+        "--reset-attempts", action="store_true", default=False,
+        help="Zero the phase's attempts counter on release (for operator-driven "
+             "aborts that shouldn't burn against max_attempts_per_phase).",
+    )
 
     p_answer = sub.add_parser("answer", help="Answer a pending blocker")
     add_common(p_answer)
@@ -2827,7 +2832,10 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
             fields["reason"] = args.reason
         st.release_claim(data)
         st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
-    print(f"Released claim on {args.plan}/{phase}.")
+        if args.reset_attempts:
+            st.append_event(data, st.EVENT_ATTEMPTS_RESET, phase=phase, operator=True)
+    suffix = " Attempts reset." if args.reset_attempts else ""
+    print(f"Released claim on {args.plan}/{phase}.{suffix}")
     return ExitCode.OK
 
 
