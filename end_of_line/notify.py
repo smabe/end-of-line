@@ -153,14 +153,52 @@ def in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:
     return is_quiet_hours(now, start, end)
 
 
+# iMessage handles longer bodies, but past this cap they're hard to read on
+# phone preview and AppleScript-via-argv gets fussy. Past the cap, fall back
+# to a short body that still carries the terminal-answer command.
+BLOCKER_BODY_SOFT_LIMIT = 800
+_QUESTION_TRUNCATE = 200
+_OPTION_TRUNCATE = 80
+
+
+def _truncate_at_word(s: str, max_len: int) -> str:
+    if len(s) <= max_len:
+        return s
+    cut = s.rfind(" ", 0, max_len - 1)
+    if cut <= 0:
+        cut = max_len - 1
+    return s[:cut].rstrip() + "…"
+
+
 def render_blocker(
     plan_slug: str, blocker_id: str, phase: str, question: str, options: list[str],
 ) -> str:
-    opts = "\n".join(f"[{i}] {o}" for i, o in enumerate(options))
-    return (
-        f"❓ {plan_slug}/{blocker_id} [{phase}]\n{question}\n{opts}\n\n"
+    q = _truncate_at_word(question, _QUESTION_TRUNCATE)
+    answer_cmd = f"clu answer --plan {plan_slug} {blocker_id} <choice>"
+    if options:
+        opts_block = "\n".join(
+            f"[{i}] {_truncate_at_word(o, _OPTION_TRUNCATE)}"
+            for i, o in enumerate(options)
+        )
+        middle = f"{q}\n{opts_block}\n\n"
+    else:
+        middle = f"{q}\n\n"
+    # Reply hint here is the user-facing prompt for notify_inbound.REPLY_RE
+    # — changing the grammar without updating that regex orphans iMessage
+    # replies from the answer pipeline.
+    body = (
+        f"❓ {plan_slug}/{blocker_id} [{phase}]\n{middle}"
         f"Reply: `{plan_slug} <number>` or just the number if this is the "
-        f"only open question."
+        f"only open question.\n"
+        f"Terminal: {answer_cmd}"
+    )
+    if len(body) <= BLOCKER_BODY_SOFT_LIMIT:
+        return body
+    n = len(options)
+    noun = "option" if n == 1 else "options"
+    return (
+        f"❓ {plan_slug}/{blocker_id} [{phase}]\n{q}\n\n"
+        f"{n} {noun}. Run `{answer_cmd}` to answer."
     )
 
 
