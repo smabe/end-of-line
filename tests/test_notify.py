@@ -69,96 +69,88 @@ class QuietHoursTestCase(unittest.TestCase):
 
 
 class NotifyDispatchTestCase(unittest.TestCase):
-    """notify() — quiet-hour gating, missing config, sender injection."""
+    """notify() — quiet-hour gating, missing config, backend injection."""
 
-    def setUp(self) -> None:
-        self.sent: list[tuple[str, str]] = []
-
-    def _sender(self, to: str, body: str) -> None:
-        self.sent.append((to, body))
-
-    def _spec(self, **overrides) -> NotifySpec:
-        base = {
-            "imessage_to": "+15551234567",
-            "quiet_hours": ("22:00", "08:00"),
-        }
-        base.update(overrides)
-        return NotifySpec(**base)
+    def _spec(self, *, to: str = "+15551234567", quiet_hours=("22:00", "08:00")) -> NotifySpec:
+        return NotifySpec.imessage_only(to, quiet_hours=quiet_hours)
 
     def test_sends_during_loud_hours(self) -> None:
-        ok = notify.notify(
-            self._spec(), notify.KIND_BLOCKER, "hello",
-            now=_dt.datetime(2026, 5, 11, 12, 0),
-            sender=self._sender,
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            ok = notify.notify(
+                self._spec(), notify.KIND_BLOCKER, "hello",
+                now=_dt.datetime(2026, 5, 11, 12, 0),
+            )
         self.assertTrue(ok)
-        self.assertEqual(self.sent, [("+15551234567", "hello")])
+        m.assert_called_once_with("+15551234567", "hello")
 
     def test_suppresses_during_quiet_hours(self) -> None:
-        ok = notify.notify(
-            self._spec(), notify.KIND_BLOCKER, "hello",
-            now=_dt.datetime(2026, 5, 11, 2, 0),
-            sender=self._sender,
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            ok = notify.notify(
+                self._spec(), notify.KIND_BLOCKER, "hello",
+                now=_dt.datetime(2026, 5, 11, 2, 0),
+            )
         self.assertFalse(ok)
-        self.assertEqual(self.sent, [])
+        m.assert_not_called()
 
     def test_skips_when_no_handle_configured(self) -> None:
-        ok = notify.notify(
-            self._spec(imessage_to=None), notify.KIND_BLOCKER, "hello",
-            now=_dt.datetime(2026, 5, 11, 12, 0),
-            sender=self._sender,
-        )
+        spec = NotifySpec()  # no channels
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            ok = notify.notify(
+                spec, notify.KIND_BLOCKER, "hello",
+                now=_dt.datetime(2026, 5, 11, 12, 0),
+            )
         self.assertFalse(ok)
-        self.assertEqual(self.sent, [])
+        m.assert_not_called()
 
     def test_no_quiet_window_means_always_loud(self) -> None:
-        spec = NotifySpec(imessage_to="+15550000000", quiet_hours=None)
-        ok = notify.notify(
-            spec, notify.KIND_BLOCKER, "hello",
-            now=_dt.datetime(2026, 5, 11, 3, 0),
-            sender=self._sender,
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            ok = notify.notify(
+                self._spec(to="+15550000000", quiet_hours=None),
+                notify.KIND_BLOCKER, "hello",
+                now=_dt.datetime(2026, 5, 11, 3, 0),
+            )
         self.assertTrue(ok)
+        m.assert_called_once()
 
     def test_malformed_quiet_hours_treated_as_loud(self) -> None:
-        ok = notify.notify(
-            self._spec(quiet_hours=("banana", "moose")),
-            notify.KIND_BLOCKER, "hello",
-            now=_dt.datetime(2026, 5, 11, 2, 0),
-            sender=self._sender,
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            ok = notify.notify(
+                self._spec(quiet_hours=("banana", "moose")),
+                notify.KIND_BLOCKER, "hello",
+                now=_dt.datetime(2026, 5, 11, 2, 0),
+            )
         # Bad config falls open (deliver) rather than silently swallowing.
         self.assertTrue(ok)
+        m.assert_called_once()
 
     def test_sender_failure_is_swallowed(self) -> None:
-        def angry(to: str, body: str) -> None:
-            raise subprocess.SubprocessError("Messages.app is sulking")
-
-        ok = notify.notify(
-            self._spec(), notify.KIND_BLOCKER, "hello",
-            now=_dt.datetime(2026, 5, 11, 12, 0),
-            sender=angry,
-        )
+        with mock.patch.object(
+            notify_imessage.IMessageNotifier, "send",
+            side_effect=subprocess.SubprocessError("Messages.app is sulking"),
+        ):
+            ok = notify.notify(
+                self._spec(), notify.KIND_BLOCKER, "hello",
+                now=_dt.datetime(2026, 5, 11, 12, 0),
+            )
         self.assertFalse(ok)
 
     def test_halted_bypasses_quiet_hours(self) -> None:
-        ok = notify.notify(
-            self._spec(), notify.KIND_HALTED, "boom",
-            now=_dt.datetime(2026, 5, 11, 3, 0),
-            sender=self._sender,
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            ok = notify.notify(
+                self._spec(), notify.KIND_HALTED, "boom",
+                now=_dt.datetime(2026, 5, 11, 3, 0),
+            )
         self.assertTrue(ok)
-        self.assertEqual(self.sent, [("+15551234567", "boom")])
+        m.assert_called_once_with("+15551234567", "boom")
 
     def test_blocker_still_gated_during_quiet_hours(self) -> None:
-        ok = notify.notify(
-            self._spec(), notify.KIND_BLOCKER, "boom",
-            now=_dt.datetime(2026, 5, 11, 3, 0),
-            sender=self._sender,
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            ok = notify.notify(
+                self._spec(), notify.KIND_BLOCKER, "boom",
+                now=_dt.datetime(2026, 5, 11, 3, 0),
+            )
         self.assertFalse(ok)
-        self.assertEqual(self.sent, [])
+        m.assert_not_called()
 
     def test_osascript_send_uses_argv_form(self) -> None:
         """The `--` separator + argv is what keeps Messages.app safe against
@@ -175,13 +167,13 @@ class NotifyDispatchTestCase(unittest.TestCase):
 
     def test_writes_inbox_event_when_plan_slug_and_project_root_provided(self) -> None:
         writes: list[dict] = []
-        notify.notify(
-            self._spec(), notify.KIND_BLOCKER, "Pick framework?\n[0] FastAPI",
-            now=_dt.datetime(2026, 5, 11, 12, 0),
-            sender=self._sender,
-            plan_slug="test-plan", project_root="/some/proj",
-            inbox_writer=lambda **kw: writes.append(kw),
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send"):
+            notify.notify(
+                self._spec(), notify.KIND_BLOCKER, "Pick framework?\n[0] FastAPI",
+                now=_dt.datetime(2026, 5, 11, 12, 0),
+                plan_slug="test-plan", project_root="/some/proj",
+                inbox_writer=lambda **kw: writes.append(kw),
+            )
         self.assertEqual(len(writes), 1)
         entry = writes[0]
         self.assertEqual(entry["type"], notify.KIND_BLOCKER)
@@ -191,28 +183,102 @@ class NotifyDispatchTestCase(unittest.TestCase):
 
     def test_writes_inbox_event_even_during_quiet_hours(self) -> None:
         writes: list[dict] = []
-        ok = notify.notify(
-            self._spec(), notify.KIND_BLOCKER, "Pick framework?",
-            now=_dt.datetime(2026, 5, 11, 3, 0),  # quiet
-            sender=self._sender,
-            plan_slug="test-plan", project_root="/x",
-            inbox_writer=lambda **kw: writes.append(kw),
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            ok = notify.notify(
+                self._spec(), notify.KIND_BLOCKER, "Pick framework?",
+                now=_dt.datetime(2026, 5, 11, 3, 0),  # quiet
+                plan_slug="test-plan", project_root="/x",
+                inbox_writer=lambda **kw: writes.append(kw),
+            )
         # iMessage suppressed during quiet hours.
         self.assertFalse(ok)
-        self.assertEqual(self.sent, [])
+        m.assert_not_called()
         # But inbox event still recorded — Claude needs the signal next turn.
         self.assertEqual(len(writes), 1)
 
     def test_skips_inbox_write_when_plan_slug_missing(self) -> None:
         writes: list[dict] = []
-        notify.notify(
-            self._spec(), notify.KIND_BLOCKER, "hello",
-            now=_dt.datetime(2026, 5, 11, 12, 0),
-            sender=self._sender,
-            inbox_writer=lambda **kw: writes.append(kw),
-        )
+        with mock.patch("end_of_line.notify_imessage._osascript_send"):
+            notify.notify(
+                self._spec(), notify.KIND_BLOCKER, "hello",
+                now=_dt.datetime(2026, 5, 11, 12, 0),
+                inbox_writer=lambda **kw: writes.append(kw),
+            )
         self.assertEqual(writes, [])
+
+
+class ChannelDispatchTestCase(unittest.TestCase):
+    """Channel-routing tests: kinds filter, enabled gate, unregistered kind."""
+
+    def _imessage_spec(self, *, kinds=None, enabled=True) -> "NotifySpec":
+        from end_of_line.config import ChannelSpec, NotifySpec
+        ch = ChannelSpec(kind="imessage", kinds=kinds, enabled=enabled, params={"to": "+1"})
+        return NotifySpec(channels=(ch,))
+
+    def test_dispatcher_fires_only_matching_channels(self) -> None:
+        from end_of_line.config import ChannelSpec, NotifySpec
+        sends: list[str] = []
+        ch_halted = ChannelSpec(kind="imessage", kinds=frozenset({"halted"}), params={"to": "+1"})
+        ch_all = ChannelSpec(kind="imessage", kinds=None, params={"to": "+2"})
+        spec = NotifySpec(channels=(ch_halted, ch_all))
+        with mock.patch("end_of_line.notify_imessage.IMessageNotifier.send",
+                        side_effect=lambda *a, **kw: sends.append(kw.get("plan_slug", "") or a[0])):
+            notify.notify(spec, notify.KIND_BLOCKER, "body",
+                          now=_dt.datetime(2026, 5, 11, 12, 0))
+        # only the unfiltered channel fires for KIND_BLOCKER
+        self.assertEqual(len(sends), 1)
+
+    def test_dispatcher_fires_all_when_kinds_none(self) -> None:
+        sends: list = []
+        spec = self._imessage_spec(kinds=None)
+        with mock.patch("end_of_line.notify_imessage.IMessageNotifier.send",
+                        side_effect=lambda *a, **kw: sends.append(True)):
+            notify.notify(spec, notify.KIND_HALTED, "body",
+                          now=_dt.datetime(2026, 5, 11, 12, 0))
+        self.assertEqual(len(sends), 1)
+
+    def test_dispatcher_skips_disabled_channel(self) -> None:
+        sends: list = []
+        spec = self._imessage_spec(enabled=False)
+        with mock.patch("end_of_line.notify_imessage.IMessageNotifier.send",
+                        side_effect=lambda *a, **kw: sends.append(True)):
+            result = notify.notify(spec, notify.KIND_BLOCKER, "body",
+                                   now=_dt.datetime(2026, 5, 11, 12, 0))
+        self.assertFalse(result)
+        self.assertEqual(sends, [])
+
+    def test_dispatcher_skips_unregistered_kind_with_warning(self) -> None:
+        from end_of_line.config import ChannelSpec, NotifySpec
+        spec = NotifySpec(channels=(ChannelSpec(kind="discord", params={"bot_token": "x", "user_id": "y"}),))
+        import io
+        buf = io.StringIO()
+        with mock.patch("sys.stderr", buf):
+            result = notify.notify(spec, notify.KIND_BLOCKER, "body",
+                                   now=_dt.datetime(2026, 5, 11, 12, 0))
+        self.assertFalse(result)
+        self.assertIn("discord", buf.getvalue())
+
+    def test_quiet_hours_gate_applied_before_channel_loop(self) -> None:
+        from end_of_line.config import NotifySpec
+        sends: list = []
+        spec = NotifySpec.imessage_only("+1", quiet_hours=("22:00", "08:00"))
+        with mock.patch("end_of_line.notify_imessage.IMessageNotifier.send",
+                        side_effect=lambda *a, **kw: sends.append(True)):
+            result = notify.notify(spec, notify.KIND_BLOCKER, "body",
+                                   now=_dt.datetime(2026, 5, 11, 3, 0))
+        self.assertFalse(result)
+        self.assertEqual(sends, [])
+
+    def test_halt_bypass_works_across_channels(self) -> None:
+        from end_of_line.config import NotifySpec
+        sends: list = []
+        spec = NotifySpec.imessage_only("+1", quiet_hours=("22:00", "08:00"))
+        with mock.patch("end_of_line.notify_imessage.IMessageNotifier.send",
+                        side_effect=lambda *a, **kw: sends.append(True)):
+            result = notify.notify(spec, notify.KIND_HALTED, "body",
+                                   now=_dt.datetime(2026, 5, 11, 3, 0))
+        self.assertTrue(result)
+        self.assertEqual(len(sends), 1)
 
 
 class NotifyIntegrationTestCase(unittest.TestCase):

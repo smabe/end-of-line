@@ -161,7 +161,7 @@ class _SystemicFixture(unittest.TestCase):
             project_root=self.project,
             plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command=cmd),
-            notify=NotifySpec(imessage_to="+15550000000", quiet_hours=None),
+            notify=NotifySpec.imessage_only("+15550000000"),
         )
 
     def _result(self) -> TickResult:
@@ -302,7 +302,7 @@ class MultiPlanIndependenceTestCase(unittest.TestCase):
         return ProjectConfig(
             project_root=self.project, plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command=cmd),
-            notify=NotifySpec(imessage_to="+15550000000", quiet_hours=None),
+            notify=NotifySpec.imessage_only("+15550000000"),
         )
 
     def test_two_plans_independently_pause(self) -> None:

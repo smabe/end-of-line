@@ -22,8 +22,6 @@ _NOTIFIER_REGISTRY: dict[str, type] = {
     "imessage": IMessageNotifier,
 }
 
-Sender = Callable[[str, str], None]
-
 KIND_BLOCKER = "blocker"
 KIND_STALLED = "stalled"
 KIND_COMPLETED = "completed"
@@ -74,7 +72,6 @@ def notify(
     body: str,
     *,
     now: _dt.datetime | None = None,
-    sender: Sender | None = None,
     plan_slug: str | None = None,
     project_root: str | None = None,
     inbox_writer: Callable[..., str] | None = None,
@@ -110,19 +107,23 @@ def notify(
     now = now or _dt.datetime.now()
     if in_quiet_window(spec, now) and kind not in QUIET_HOURS_BYPASS_KINDS:
         return False
-    if not spec.imessage_to:
-        return False
-    try:
-        if sender is not None:
-            sender(spec.imessage_to, body)
-        else:
-            _NOTIFIER_REGISTRY["imessage"](spec.imessage_to).send(
-                kind, body, plan_slug=plan_slug or "", blocker_id=None,
-            )
-        return True
-    except (subprocess.SubprocessError, OSError) as exc:
-        print(f"notify: send failed ({kind}): {exc}", file=sys.stderr)
-        return False
+    sent_any = False
+    for ch in spec.channels:
+        notifier_cls = _NOTIFIER_REGISTRY.get(ch.kind)
+        if notifier_cls is None:
+            print(f"notify: unknown channel kind '{ch.kind}' — skipping", file=sys.stderr)
+            continue
+        if not ch.enabled:
+            continue
+        if ch.kinds is not None and kind not in ch.kinds:
+            continue
+        try:
+            notifier = notifier_cls.from_spec(ch)
+            notifier.send(kind, body, plan_slug=plan_slug or "", blocker_id=None)
+            sent_any = True
+        except (subprocess.SubprocessError, OSError) as exc:
+            print(f"notify: send failed ({kind} via {ch.kind}): {exc}", file=sys.stderr)
+    return sent_any
 
 
 def in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:

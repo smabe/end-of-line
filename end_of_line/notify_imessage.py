@@ -6,6 +6,10 @@ the body never touches the AppleScript source.
 from __future__ import annotations
 
 import subprocess
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import ChannelSpec
 
 # osascript-friendly AppleScript: argv carries the handle + body so we
 # don't have to escape user-controlled text into the script source.
@@ -37,6 +41,10 @@ class IMessageNotifier:
 
     def __init__(self, to: str) -> None:
         self.to = to
+
+    @classmethod
+    def from_spec(cls, channel: "ChannelSpec") -> "IMessageNotifier":
+        return cls(channel.params["to"])
 
     def send(
         self,

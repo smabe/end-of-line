@@ -78,7 +78,7 @@ class _Base(unittest.TestCase):
                 kind="shell", command="echo phase",
                 repair_command=repair_command,
             ),
-            notify=NotifySpec(imessage_to="self"),
+            notify=NotifySpec.imessage_only("self"),
         )
 
     def _set_backup_in_corrupt(self, payload_bytes: bytes) -> None:
