@@ -15,7 +15,7 @@ from end_of_line.cli import main
 from end_of_line.config import ProjectConfig, DispatchSpec
 from end_of_line.dispatch import dispatch_for_tick
 from end_of_line.supervisor import TickResult
-from tests import isolate_registry
+from tests import CluTestCase
 
 
 PLAN = """\
@@ -29,20 +29,16 @@ PLAN = """\
 """
 
 
-class DispatchTestCase(unittest.TestCase):
+class DispatchTestCase(CluTestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.project = Path(self._tmp.name)
-        isolate_registry(self, self.project)
+        super().setUp()
+        self.project = self.tmp_path
         (self.project / "plans").mkdir()
         (self.project / "plans" / "t.md").write_text(PLAN)
         main(["init", "--project", str(self.project), "--plan", "t"])
         self.state_path = self.project / "plans" / ".orchestrator" / "t.state.json"
         with st.mutate(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
 
     def _cfg(self, cmd: str, path: str = "") -> ProjectConfig:
         return ProjectConfig(

@@ -2,9 +2,29 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+
+class CluTestCase(unittest.TestCase):
+    """unittest base that isolates XDG paths and sets CLU_TEST_MODE=1.
+
+    Subclasses MUST call `super().setUp()` BEFORE any registry/inbox-
+    touching code. Pairs with the phase-2 XDG guard, which refuses
+    writes to real ~/.config/clu/ under CLU_TEST_MODE=1.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp_path = Path(tmp.name)
+        isolate_registry(self, self.tmp_path)
+        patcher = mock.patch.dict(os.environ, {"CLU_TEST_MODE": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 def isolate_registry(testcase: unittest.TestCase, tmp_path: Path) -> None:
