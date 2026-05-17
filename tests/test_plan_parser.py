@@ -81,6 +81,42 @@ class TestSessionsIndex(unittest.TestCase):
         self.assertEqual(phases[0].id, "a")
         self.assertEqual(phases[0].plan_file, "foo-a.md")
 
+    def test_handles_backticked_markdown_link(self) -> None:
+        """Regression guard for #44: author wrote `[`file.md`](file.md)`
+        for navigation; parser should tolerate it instead of crashing
+        with a cryptic InvalidSlug deep in the stack."""
+        body = """\
+# Plan
+
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| A | [`foo-a.md`](foo-a.md) | thing | 1h |
+"""
+        p = self._write(body, name="foo.md")
+        phases = parse_sessions_index(p)
+        self.assertEqual(len(phases), 1)
+        self.assertEqual(phases[0].id, "a")
+        self.assertEqual(phases[0].plan_file, "foo-a.md")
+
+    def test_handles_plain_markdown_link(self) -> None:
+        """Same tolerance without inner backticks: `[file.md](file.md)`."""
+        body = """\
+# Plan
+
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| A | [foo-a.md](foo-a.md) | thing | 1h |
+"""
+        p = self._write(body, name="foo.md")
+        phases = parse_sessions_index(p)
+        self.assertEqual(len(phases), 1)
+        self.assertEqual(phases[0].id, "a")
+        self.assertEqual(phases[0].plan_file, "foo-a.md")
+
 
 if __name__ == "__main__":
     unittest.main()

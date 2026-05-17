@@ -17,6 +17,10 @@ _SESSIONS_HEADER_RE = re.compile(
     r"^##\s+Sessions?\s+index\s*$", re.MULTILINE | re.IGNORECASE
 )
 _SEPARATOR_RE = re.compile(r"^\|[\s\-:|]+\|\s*$")
+# `[text](target)` — natural Sessions-index navigation syntax. Author intent
+# is the bracketed text (the displayed filename); target may diverge but the
+# parser keys off the file-name derivation, so prefer text. #44.
+_MD_LINK_RE = re.compile(r"^\[(.+?)\]\([^)]*\)$")
 
 
 @dataclass
@@ -61,7 +65,11 @@ def parse_sessions_index(plan_path: Path) -> list[Phase]:
             cells = _split_row(stripped)
             if len(cells) < 4:
                 continue
-            plan_file = cells[1].strip().strip("`")
+            raw = cells[1].strip()
+            link_match = _MD_LINK_RE.match(raw)
+            if link_match:
+                raw = link_match.group(1).strip()
+            plan_file = raw.strip("`")
             scope = cells[2].strip()
             effort = cells[3].strip()
             basename = Path(plan_file).stem
