@@ -242,13 +242,49 @@ When the operator says `ship` (or equivalent):
        description="clu <slug> phase progress",
        persistent=True,
        timeout_ms=3600000,
-       command="clu watch --project . --plan <slug>"
+       command="clu watch --project . --plan <slug> --task-list"
    )
    ```
    Each state transition (phase started/completed/blocked/halted)
    arrives as a notification, so you see what clu is doing without
    polling. The operator's UserPromptSubmit hook handles AFK surfacing
    separately; this is the at-desk live feed.
+
+### Reacting to task-list protocol notifications
+
+With `--task-list`, the Monitor stream emits two line shapes:
+
+- `TASK_CREATE task=<id> status=pending` — bootstrap lines, one
+  per plan + phase, arrive together within ~200ms at startup.
+- `TASK_UPDATE task=<id> status=<state> msg="<one-liner>"` —
+  fired as state transitions happen. `<state>` is one of
+  `pending` / `in_progress` / `completed`.
+
+**On the bootstrap batch (TASK_CREATE lines):** call `TaskCreate`
+once with all matching tasks. The parent task (`task=<slug>`,
+no `/phase`) is the top-level row; child tasks (`task=<slug>/<phase>`)
+are children of the parent. All start `pending`.
+
+**On each TASK_UPDATE:** call `TaskUpdate` matching by task_id.
+The `msg` field carries the human-readable transition reason
+(e.g. `"BLOCKED b-12 — should I proceed with X?"` or
+`"HALTED (max attempts on foundation)"`) — surface significant
+msgs to the operator via PushNotification when the user would
+want to act now (halts, blockers).
+
+**Out-of-order arrivals:** if a `TASK_UPDATE` arrives for a
+task_id you haven't seen a `TASK_CREATE` for (race condition,
+rare), buffer it ~1s and retry. If still no matching task,
+create it on-the-fly with the update's status.
+
+**Non-`TASK_*` lines:** the snapshot baseline (`[snapshot] slug:
+status, active=...`) and any text-mode lines that leak through
+are operator-context only — ignore in the TaskCreate flow.
+
+If the operator hasn't installed the new skill content yet
+(`clu install-skill --force --only clu-plan`), the auto-arm
+reverts to text mode and notifications won't have the protocol
+prefix — fall back to free-text interpretation.
 
 If the operator only wants the files authored (not queued yet), stop
 after step 1. Don't run `clu init` without explicit operator intent.
@@ -383,7 +419,7 @@ Monitor(
     description="clu auth-cleanup phase progress",
     persistent=True,
     timeout_ms=3600000,
-    command="clu watch --project . --plan auth-cleanup"
+    command="clu watch --project . --plan auth-cleanup --task-list"
 )
 ```
 
