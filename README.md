@@ -39,6 +39,16 @@ For the inbound iMessage poller, grant Full Disk Access to the pipx venv python 
 
 (Optional) Install the LaunchAgents from `examples/` for cron-driven dispatch — see `docs/operations.md`.
 
+(Optional, contributor-only) This repo uses [graphify](https://github.com/karpathy/graphify) to keep an up-to-date knowledge graph of the codebase at `graphify-out/` (god nodes, communities, surprising connections) so Claude Code can answer "where is X defined" without grepping the whole tree. The graph is regenerated on every code-touching commit by a local post-commit hook. Git doesn't track the hook itself or the local Claude settings, so each clone runs setup once:
+
+```bash
+pipx install graphifyy   # one-time, system-wide
+graphify hook install    # post-commit + post-checkout regen (AST-only, no LLM)
+graphify claude install  # CLAUDE.md section + PreToolUse hook to consult the graph
+```
+
+`graphify-out/` is gitignored — the graph is per-clone, not a committed artifact.
+
 ## Working with clu
 
 `clu install-skill` ships five skills:
