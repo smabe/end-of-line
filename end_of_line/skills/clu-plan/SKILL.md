@@ -79,12 +79,18 @@ This is the same disciplined-exploration pattern from `/plan` step
 approval), because the master's Locked-decisions section commits to
 specific file paths and behaviors that need ground-truth grounding.
 
-### Step 3: Draft master + sub-plan files IN MEMORY
+### Step 3: Draft all files in memory
 
-**Do not write to disk yet.** Draft all files in the conversation as
-markdown code blocks. The operator-approval mandate from the user's
-CLAUDE.md applies: novel plan files require `ship` from the operator
-before they land on disk.
+**Do not write to disk yet.** Draft the master file AND every sub-plan
+in memory — every file must be ready to write the moment the operator
+says `ship`. The operator-approval mandate from the user's CLAUDE.md
+applies: novel plan files require `ship` from the operator before they
+land on disk.
+
+Drafting all sub-plans up-front is mandatory even though only the
+master is shown in Step 4. The worker dispatched after `clu init` will
+read a sub-plan that exists or fail; you can't lazily author them on
+ship.
 
 #### Master template
 
@@ -189,17 +195,31 @@ See `plans/<slug>.md`. Summary:
 - **<another>** — <...>
 ```
 
-### Step 4: Show all files and await `ship`
+### Step 4: Present the master only and await `ship`
 
-After drafting all files in memory, present them to the operator with
-this exact framing:
+After drafting all files in memory, present **only the master file**
+to the operator with this exact framing:
 
-> Here's the plan — master + N sub-plan files. Read them over and say
-> `ship` to write + queue, or tell me what to change.
+> Here's the master — N sub-plan files drafted alongside it in memory.
+> Read the master (locked decisions, non-goals, Sessions index) and
+> say `ship` to write + queue, or tell me what to change. If you want
+> to see a specific sub-plan before shipping, name it and I'll expand
+> it inline.
 
-Then **wait**. Do not write to disk. Silence is not approval. If the
-operator returns with edits, apply them to the in-memory draft and
-re-show.
+Then **wait**. Do not write to disk. Silence is not approval.
+
+Sub-plans are intentionally NOT dumped in chat by default. The design
+judgment lives in the master (locked decisions, non-goals, Sessions
+index); sub-plans are derivative worker-facing detail bounded by those
+decisions and are rarely the thing that flips an approval. Pre-rendering
+a 7-sub-plan dump is the slowest part of a clu-plan conversation and
+mostly doesn't change the operator's decision.
+
+If the operator asks to see a specific sub-plan, expand THAT one inline
+— don't volunteer the others. If the operator returns with edits to
+the master, apply them to the in-memory draft (including propagating
+any locked-decision changes into the affected sub-plans) and re-show
+the master.
 
 ### Step 5: On `ship`, write files + optionally init/queue
 
@@ -380,46 +400,15 @@ Smallest-first.
 | rotation | `auth-cleanup-rotation.md` | 24h token rotation + 5min grace (closes #100 #101) | 2h |
 ```
 
-**Sub-plan** (`plans/auth-cleanup-timeout.md`):
-```markdown
-# auth-cleanup-timeout — session timeout (#100)
+Both sub-plan files (`plans/auth-cleanup-timeout.md` and
+`plans/auth-cleanup-rotation.md`) are drafted in memory alongside the
+master — each following the sub-plan template above (Locked decisions /
+Read first / Produce / Failure modes / `clu complete` exit) — but are
+NOT shown in chat. The master's Sessions index names them; the operator
+can ask to expand either inline before shipping.
 
-You are phase `timeout` of the `auth-cleanup` plan. Add a configurable
-session timeout that returns 401 on expired sessions, prompting the
-client to re-login.
-
-## Locked decisions (do NOT re-litigate)
-See `plans/auth-cleanup.md`. Summary:
-- 30-min default via `AUTH_SESSION_TIMEOUT` env var.
-- `/auth/refresh` returns 401 when age > timeout.
-
-## Read first
-- `server/auth.py:45-80` — current `Session` dataclass.
-- `server/auth.py:120-140` — `validate_session` body.
-- `tests/test_auth.py` — existing patterns.
-
-## Produce
-1. **Failing tests first.** New `test_session_expires_after_timeout`
-   and `test_session_within_timeout_validates`.
-2. **Implementation.**
-   - `server/auth.py`: read `AUTH_SESSION_TIMEOUT` at module load,
-     default 1800 (30 min). In `validate_session`, check
-     `age > timeout` and return 401 before the existing checks.
-3. **Acceptance.** Both new tests green; existing 47 auth tests still
-   pass.
-4. **Commit + complete.**
-   - `auth-cleanup: phase timeout — session timeout + 401 on expire (#100)`
-   - `clu complete --plan auth-cleanup --phase timeout --token <T>`
-
-## Failure modes to watch
-- **Time mocking** — use `freezegun` or `unittest.mock.patch('time.time')`;
-  don't rely on `time.sleep`.
-- **Timezone bugs** — store session timestamps as UTC; the existing
-  Session dataclass uses `datetime.utcnow()` (verify).
-```
-
-The second sub-plan (`auth-cleanup-rotation.md`) follows the same
-shape. After both are authored:
+Operator says `ship`. Both sub-plans get written from in-memory drafts
+in the same write pipeline as the master:
 
 ```bash
 git add plans/auth-cleanup*.md
