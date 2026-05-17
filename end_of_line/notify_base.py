@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import Iterable, NamedTuple, Protocol, runtime_checkable
 
 from . import state as st
 
@@ -75,6 +75,48 @@ def route_reply(
         return Reply(open_blockers[0], digit)
     picked = _pick_by_last_pinged(open_blockers, digit)
     return Reply(picked, digit) if picked else None
+
+
+@dataclass
+class BlockerDetail:
+    project_root: Path
+    plan_slug: str
+    phase_id: str
+    blocker_id: str
+    question: str
+    options: tuple[str, ...]
+
+
+def open_blockers_with_details(
+    entries: Iterable,
+    project_root: Path | str,
+) -> list[BlockerDetail]:
+    """All open blockers for a given project root, with question + options.
+
+    Returns every unanswered blocker (not just the first per plan) for plans
+    whose project_root resolves to the given path. Tolerant of missing/stale
+    registry entries.
+    """
+    from . import registry  # local import to avoid potential circular at module level
+
+    target = str(Path(project_root).resolve())
+    out: list[BlockerDetail] = []
+    for row in entries:
+        if str(Path(row.project_root).resolve()) != target:
+            continue
+        data = registry.load_entry_state(row)
+        if data is None:
+            continue
+        for b in st.open_blockers(data):
+            out.append(BlockerDetail(
+                project_root=Path(row.project_root),
+                plan_slug=row.plan_slug,
+                phase_id=b["phase_id"],
+                blocker_id=b["id"],
+                question=b.get("question", ""),
+                options=tuple(b.get("options", [])),
+            ))
+    return out
 
 
 def _pick_by_last_pinged(

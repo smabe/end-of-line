@@ -20,7 +20,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import inbox
+from end_of_line import inbox, registry, state as st
+from end_of_line.notify_base import BlockerDetail, open_blockers_with_details
 
 from tests import isolate_monitor_marker
 
@@ -175,6 +176,137 @@ class HookSurfacingTests(HookTestBase):
         # ceiling, don't delete the test.
         _, _, _, elapsed = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertLess(elapsed, 2.0)
+
+
+class BlockerSurfacingTests(HookTestBase):
+    """Tests for the active-blocker section emitted by the hook."""
+
+    def _seed_plan(
+        self, project: Path, slug: str, blockers: list[dict],
+    ) -> None:
+        """Write state file with given blockers and register the plan."""
+        sp = project / "plans" / ".orchestrator" / f"{slug}.state.json"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        with st.locked(sp):
+            data = st.empty_state(slug, "plans")
+            data["blockers"] = blockers
+            st.save_atomic(sp, data)
+        registry.register(project, slug)
+
+    def _open_blocker(
+        self, bid: str, phase: str = "p1",
+        question: str = "Which approach?",
+        options: list[str] | None = None,
+    ) -> dict:
+        return {
+            "id": bid, "phase_id": phase, "type": st.BLOCKER_INPUT,
+            "question": question,
+            "options": options or ["Option A", "Option B"],
+            "context": "",
+            "asked_at": st.utcnow(), "answer": None, "answered_at": None,
+        }
+
+    def test_hook_surfaces_active_blocker(self) -> None:
+        self._seed_plan(self.proj, "my-plan", [
+            self._open_blocker(
+                "q-1", phase="impl",
+                question="Which database?",
+                options=["SQLite", "PostgreSQL"],
+            )
+        ])
+        rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("## Active blockers", ctx)
+        self.assertIn("Plan `my-plan`", ctx)
+        self.assertIn("phase `impl`", ctx)
+        self.assertIn("blocker `q-1`", ctx)
+        self.assertIn("Which database?", ctx)
+        self.assertIn("[0] SQLite", ctx)
+        self.assertIn("[1] PostgreSQL", ctx)
+        self.assertIn("clu answer", ctx)
+
+    def test_hook_omits_blockers_section_when_none_open(self) -> None:
+        # Write an inbox event so the hook produces output we can inspect.
+        inbox.write_event(
+            type="halted", plan_slug="my-plan",
+            project_root=str(self.proj), summary="plan halted",
+        )
+        # No BLOCKED plans registered — section must be absent.
+        rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("## Active blockers", ctx)
+
+    def test_hook_surfaces_multiple_blockers_across_plans(self) -> None:
+        self._seed_plan(self.proj, "plan-a", [
+            self._open_blocker("q-1", question="Question A?",
+                               options=["Yes", "No"])
+        ])
+        self._seed_plan(self.proj, "plan-b", [
+            self._open_blocker("q-2", question="Question B?",
+                               options=["Fast", "Slow"])
+        ])
+        rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("plan-a", ctx)
+        self.assertIn("plan-b", ctx)
+        self.assertIn("Question A?", ctx)
+        self.assertIn("Question B?", ctx)
+
+    def test_hook_scopes_blockers_to_current_project(self) -> None:
+        proj_b = self.tmp / "proj-b"
+        proj_b.mkdir()
+        self._seed_plan(self.proj, "plan-a", [
+            self._open_blocker("q-1", question="Proj A question?")
+        ])
+        self._seed_plan(proj_b, "plan-b", [
+            self._open_blocker("q-2", question="Proj B question?")
+        ])
+        rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Proj A question?", ctx)
+        self.assertNotIn("Proj B question?", ctx)
+
+    def test_hook_caps_blockers_at_10(self) -> None:
+        for i in range(12):
+            slug = f"plan-{i:02d}"
+            self._seed_plan(self.proj, slug, [
+                self._open_blocker(f"q-{i}", question=f"Question {i}?")
+            ])
+        rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("## Active blockers", ctx)
+        self.assertIn("+2 more", ctx)
+        self.assertEqual(ctx.count("Question:"), 10)
+
+    def test_open_blockers_with_details_includes_question(self) -> None:
+        proj = self.tmp / "proj-unit"
+        proj.mkdir()
+        self._seed_plan(proj, "test-plan", [
+            self._open_blocker(
+                "q-1", phase="build",
+                question="Pick an option",
+                options=["Alpha", "Beta", "Gamma"],
+            )
+        ])
+        entries = registry.entries()
+        result = open_blockers_with_details(entries, proj)
+        self.assertEqual(len(result), 1)
+        d = result[0]
+        self.assertEqual(d.plan_slug, "test-plan")
+        self.assertEqual(d.phase_id, "build")
+        self.assertEqual(d.blocker_id, "q-1")
+        self.assertEqual(d.question, "Pick an option")
+        self.assertEqual(d.options, ("Alpha", "Beta", "Gamma"))
 
 
 if __name__ == "__main__":
