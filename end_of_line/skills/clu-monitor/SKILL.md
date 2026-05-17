@@ -106,6 +106,20 @@ writes — quiet hours gate them, but inbox writes happen
 unconditionally because the inbox is for the operator's *next* turn,
 not for waking them.
 
+## Live in-session feed (`clu watch`)
+
+The inbox hook is the *AFK* channel — it batches events into the next
+user prompt. For *live* streaming while the operator is at-desk, use
+`clu watch` inside Claude's Monitor tool:
+
+```
+Monitor(command="clu watch --project . --all", persistent=True)
+```
+
+Each state transition emits one stdout line, surfaced as a
+notification. The two channels are complementary: inbox for the
+walk-away path, watch for the live-feed path.
+
 ## Failure modes
 
 - **`clu install-hook` not on PATH.** The user's clu install is broken
