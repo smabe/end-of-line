@@ -19,6 +19,7 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 - **`/plan` convention.** Phase declarations come from the master plan's `## Sessions index` markdown table. The parser is 80 lines.
 - **System cron is the heartbeat.** No long-running orchestrator process. Each tick is ~50ms of Python; the supervisor itself burns zero LLM tokens. Workers are the only thing that costs API money.
 - **iMessage round-trips.** Outbound via `osascript`; inbound via a tiny LaunchAgent that polls `chat.db` and routes replies back into `clu answer`. Quiet hours (default 22:00–08:00) gate non-halt notifications.
+- **Three observation surfaces.** iMessage for halts and blockers (loud, your phone), the inbox hook for AFK pickup (quiet, Claude's next message), `clu watch` for live in-session streaming (Claude's `Monitor` tool, at-desk). Same event stream, three audiences.
 
 ## Install
 
