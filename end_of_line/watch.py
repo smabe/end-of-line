@@ -2,7 +2,11 @@
 (Claude's Monitor tool). See plans/clu-watch.md."""
 from __future__ import annotations
 
-from typing import Any, Callable
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any, Callable, TextIO
 
 from . import state as st
 
@@ -174,6 +178,77 @@ if _Q_REJECTED:
         f"{slug}: queue rejected {e.get('slug', '?')} from phase "
         f"{e.get('source_phase', '?')} ({e.get('reason', '?')})"
     )
+
+
+def _slug_for_path(path: Path) -> str:
+    return path.stem.removesuffix(".state")
+
+
+def _snapshot_line(slug: str, data: dict) -> str:
+    claim = data.get("current_claim")
+    active = f"active={claim['phase_id']}" if claim else "active=none"
+    return f"[snapshot] {slug}: {data['status']}, {active}"
+
+
+def stream_loop(
+    state_paths: list[Path],
+    *,
+    json_mode: bool = False,
+    verbose: bool = False,
+    sink: TextIO | None = None,
+    poll_interval: float = 1.0,
+    max_ticks: int | None = None,
+    _before_first_tick: Callable[[], None] | None = None,
+) -> int:
+    """Poll state files, emit projected events. Returns ExitCode.OK (0).
+
+    `_before_first_tick` is a test seam called once after the baseline
+    snapshot and before the first poll tick — lets tests inject events
+    without threading.
+    """
+    if sink is None:
+        sink = sys.stdout
+    cursors: dict[Path, int] = {}
+
+    for path in list(state_paths):
+        try:
+            data = st.load(path)
+        except (FileNotFoundError, OSError, json.JSONDecodeError, st.SchemaVersionMismatch):
+            continue
+        slug = _slug_for_path(path)
+        print(_snapshot_line(slug, data), file=sink, flush=True)
+        cursors[path] = len(data.get("events", []))
+
+    if _before_first_tick is not None:
+        _before_first_tick()
+
+    ticks = 0
+    try:
+        while max_ticks is None or ticks < max_ticks:
+            for path in list(cursors.keys()):
+                try:
+                    data = st.load(path)
+                except (FileNotFoundError, OSError, json.JSONDecodeError, st.SchemaVersionMismatch):
+                    cursors.pop(path, None)
+                    continue
+                events = data.get("events", [])
+                slug = _slug_for_path(path)
+                for evt in events[cursors[path]:]:
+                    line_or_none = project_event(evt, slug, verbose=verbose)
+                    if line_or_none is None:
+                        continue
+                    if json_mode:
+                        print(json.dumps({"ts": evt.get("ts"), "slug": slug, "event": evt}),
+                              file=sink, flush=True)
+                    else:
+                        print(line_or_none, file=sink, flush=True)
+                cursors[path] = len(events)
+            ticks += 1
+            if max_ticks is None or ticks < max_ticks:
+                time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        print("", file=sink, flush=True)
+    return 0
 
 
 def project_event(
