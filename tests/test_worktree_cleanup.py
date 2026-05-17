@@ -86,14 +86,30 @@ class WorktreeCleanupBase(unittest.TestCase):
     def _state_path(self, slug: str) -> Path:
         return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
 
-    def _init_plan(self, slug: str, body_tmpl: str = PLAN_BODY_TWO_PHASES_TMPL) -> Path:
-        (self.project / "plans" / f"{slug}.md").write_text(body_tmpl.format(slug=slug))
+    def _init_plan(
+        self, slug: str, body_tmpl: str = PLAN_BODY_TWO_PHASES_TMPL, *, worktree: bool = True,
+    ) -> Path:
+        plan_md = self.project / "plans" / f"{slug}.md"
+        plan_md.write_text(body_tmpl.format(slug=slug))
+        _git(self.project, "add", f"plans/{slug}.md")
+        _git(self.project, "commit", "-m", f"add {slug} plan")
+        _git(self.project, "push", "origin", "main")
+        init_args = ["init", "--project", str(self.project), "--plan", slug]
+        if worktree:
+            init_args.append("--worktree")
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            main([
-                "init", "--project", str(self.project), "--plan", slug,
-                "--worktree",
-            ])
+            main(init_args)
         return self._state_path(slug)
+
+    def _archive(self, slug: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["archive", "--project", str(self.project), "--plan", slug])
+        return rc, out.getvalue(), err.getvalue()
+
+    def _set_status(self, slug: str, status: str) -> None:
+        with st.mutate(self._state_path(slug)) as data:
+            data["status"] = status
 
     def _claim_phase(self, slug: str, phase: str) -> str:
         state_path = self._state_path(slug)
@@ -180,18 +196,6 @@ class CmdCompleteCleanupTests(WorktreeCleanupBase):
 
 
 class CmdArchiveTests(WorktreeCleanupBase):
-    def _archive(self, slug: str) -> tuple[int, str, str]:
-        out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            rc = main([
-                "archive", "--project", str(self.project), "--plan", slug,
-            ])
-        return rc, out.getvalue(), err.getvalue()
-
-    def _set_status(self, slug: str, status: str) -> None:
-        with st.mutate(self._state_path(slug)) as data:
-            data["status"] = status
-
     def test_happy_path_cleans_when_reachable(self) -> None:
         self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
         self._set_status("alpha", st.STATUS_DONE)
@@ -222,11 +226,7 @@ class CmdArchiveTests(WorktreeCleanupBase):
     def test_idempotent_when_no_worktree(self) -> None:
         # Init without --worktree → state has no worktree record → archive
         # should be a clean no-op success.
-        (self.project / "plans" / "alpha.md").write_text(
-            PLAN_BODY_ONE_PHASE_TMPL.format(slug="alpha"),
-        )
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            main(["init", "--project", str(self.project), "--plan", "alpha"])
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
         self._set_status("alpha", st.STATUS_DONE)
         rc, stdout, _ = self._archive("alpha")
         self.assertEqual(rc, 0)
@@ -256,10 +256,6 @@ class CmdWorktreeGcUpstreamTests(WorktreeCleanupBase):
             ])
         return rc, out.getvalue(), err.getvalue()
 
-    def _set_status(self, slug: str, status: str) -> None:
-        with st.mutate(self._state_path(slug)) as data:
-            data["status"] = status
-
     def test_gc_retains_branch_ahead_of_origin(self) -> None:
         self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
         self._add_ahead_commit("alpha")
@@ -280,6 +276,56 @@ class CmdWorktreeGcUpstreamTests(WorktreeCleanupBase):
         rc, stdout, _ = self._gc("--confirm")
         self.assertEqual(rc, 0)
         self.assertIn("removed", stdout)
+
+
+class CmdArchivePlanMoveTests(WorktreeCleanupBase):
+    """Plan-file git-mv step added to cmd_archive in #31."""
+
+    def test_moves_plan_file(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, _, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.project / "plans" / "alpha.md").exists())
+        self.assertTrue((self.project / "plans" / "shipped" / "alpha.md").exists())
+
+    def test_creates_shipped_dir_if_missing(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        self._set_status("alpha", st.STATUS_DONE)
+        self.assertFalse((self.project / "plans" / "shipped").exists())
+        rc, _, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.project / "plans" / "shipped").is_dir())
+
+    def test_idempotent_on_missing_plan_file(self) -> None:
+        # File already moved/deleted from plans/ → skip silently, exit 0.
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        self._set_status("alpha", st.STATUS_DONE)
+        (self.project / "plans" / "alpha.md").unlink()
+        rc, _, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+
+    def test_git_mv_failure_surfaces(self) -> None:
+        # Plan file exists on disk but is NOT tracked by git → git mv fails.
+        plan_md = self.project / "plans" / "alpha.md"
+        plan_md.write_text(PLAN_BODY_ONE_PHASE_TMPL.format(slug="alpha"))
+        # Intentionally NOT git-adding the file.
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            main(["init", "--project", str(self.project), "--plan", "alpha"])
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, _, stderr = self._archive("alpha")
+        self.assertNotEqual(rc, 0)
+        self.assertTrue(
+            "git" in stderr.lower() or "alpha.md" in stderr,
+            f"expected git/filename mention in stderr; got: {stderr!r}",
+        )
+
+    def test_status_print_mentions_plan_move(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, stdout, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertIn("shipped", stdout.lower())
 
 
 if __name__ == "__main__":

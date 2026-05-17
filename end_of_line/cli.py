@@ -2873,6 +2873,7 @@ def cmd_archive(args) -> int:
     state_path = cfg.state_path(args.plan)
     if not state_path.exists():
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
+    plan_moved = False
     with st.mutate(state_path) as data:
         if data["status"] == st.STATUS_RUNNING:
             return _die(
@@ -2885,14 +2886,43 @@ def cmd_archive(args) -> int:
             cfg, data, trigger="archive", require_all_phases_done=False,
         )
         after = st.get_worktree(data)
+        plan_dir = cfg.project_root / cfg.plan_dir
+        plan_md = plan_dir / f"{args.plan}.md"
+        if plan_md.exists():
+            shipped_dir = plan_dir / "shipped"
+            shipped_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                subprocess.run(
+                    ["git", "mv", str(plan_md), str(shipped_dir / plan_md.name)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(cfg.project_root),
+                    timeout=30,
+                )
+                plan_moved = True
+            except subprocess.CalledProcessError as exc:
+                return _die(
+                    ExitCode.GENERIC,
+                    f"git mv failed for {plan_md.name}: {exc.stderr.strip() or str(exc)}",
+                )
+            except subprocess.TimeoutExpired:
+                return _die(
+                    ExitCode.GENERIC,
+                    f"git mv timed out for {plan_md}",
+                )
+    move_note = " Plan file moved to shipped/." if plan_moved else ""
     if before is None:
-        print(f"Archive {args.plan}: no worktree to clean.")
+        print(f"Archive {args.plan}: no worktree to clean.{move_note}")
     elif after is None:
-        print(f"Archive {args.plan}: removed {before['path']} (branch {before['branch']}).")
+        print(
+            f"Archive {args.plan}: removed {before['path']} "
+            f"(branch {before['branch']}).{move_note}",
+        )
     else:
         print(
             f"Archive {args.plan}: retained {before['path']} "
-            f"(branch {before['branch']} ahead of origin).",
+            f"(branch {before['branch']} ahead of origin).{move_note}",
         )
     return ExitCode.OK
 

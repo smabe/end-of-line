@@ -408,6 +408,22 @@ clu resume --plan <slug>
 There is no `clu worktree reattach` subcommand in v1 — operator
 edits state JSON by hand for rare recovery.
 
+### Archiving a plan
+
+`clu archive --project P --plan S` is the standard post-ship step. It does
+two things in one command:
+
+1. **Worktree cleanup** — removes the clu-managed worktree + branch if the
+   branch is fully reachable from origin; retains with a warning when ahead.
+2. **Plan-file move** — `git mv plans/<slug>.md plans/shipped/<slug>.md`
+   (staging the rename; commit separately). Creates `plans/shipped/` if it
+   doesn't exist. Skips silently when the plan file is already gone (e.g.
+   manually moved in a prior run). Surfaces as `WORKTREE_SETUP_FAILED` if
+   the file exists but `git mv` fails (e.g. not tracked, conflicts).
+
+After archiving, run `clu unregister --all-archived` to prune the host
+registry entry.
+
 ### Cleanup with `clu worktree gc`
 
 ```bash
@@ -844,6 +860,7 @@ wait or when the worker's exit pattern wouldn't naturally release
 | `clu resume --project P --plan S` | Un-pause |
 | `clu retry --project P --plan S [--phase X]` | Clear max-attempts on a halted phase |
 | `clu release-claim --project P --plan S [--force] [--reason ...]` | Clear a stuck `current_claim` after a dead worker |
+| `clu archive --project P --plan S` | Clean up worktree + branch and move `plans/<slug>.md` to `plans/shipped/<slug>.md` via `git mv`. Idempotent — skips the file move if the plan file is already gone. |
 | `clu unregister --project P --plan S` | Drop a plan from the host registry (state file untouched) |
 | `clu unregister --all-archived [--dry-run]` | Prune every registry entry whose master plan file no longer exists. Use after archiving plans (e.g. `post-ship`). `--dry-run` previews. |
 | `clu queue add <slug>... [--front] [--project P]` | Append (or `--front` prepend) one or more plan slugs to the project's queue. Multi-arg is atomic — any validation failure rejects the whole batch |
