@@ -223,8 +223,9 @@ def main(argv: list[str] | None = None) -> int:
 
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument(
-            "--project", type=Path, required=True,
-            help="Project root (contains .orchestrator.json)",
+            "--project", type=Path, default=None,
+            help="Project root (contains .orchestrator.json). "
+                 "Defaults to the current working directory.",
         )
         p.add_argument("--plan", required=True, help="Plan slug")
 
@@ -778,7 +779,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
-        cfg = load_project_config(args.project)
+        cfg = load_project_config(_resolve_project_arg(args))
         state_path = cfg.state_path(args.plan)
     except st.InvalidSlug as exc:
         return _die(ExitCode.INVALID_SLUG, str(exc))
