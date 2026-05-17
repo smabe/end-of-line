@@ -20,6 +20,7 @@ from `{token}` in the dispatch command template.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import functools
 import hashlib
 import json
@@ -156,6 +157,7 @@ class ExitCode(IntEnum):
     SPAWN_CAP = 5
     UNKNOWN_TASK = 6
     STATUS_TRANSITION = 7
+    INVALID_VALUE = 8
     # Repair worker's intent: "I won't touch this — would lose data."
     # clu's validation rejects the result anyway regardless of rc, so
     # this code is purely a legibility win when reading worker logs.
@@ -252,6 +254,21 @@ def main(argv: list[str] | None = None) -> int:
         "--base-ref", default=None, dest="base_ref",
         help="With --worktree: ref to fork the new branch from "
              "(default: HEAD). Ignored without --worktree.",
+    )
+    p_init.add_argument(
+        "--lease-ttl-minutes", type=int, default=None,
+        dest="lease_ttl_minutes",
+        help="Override default lease TTL (minutes). Default: 30.",
+    )
+    p_init.add_argument(
+        "--stalled-heartbeat-minutes", type=int, default=None,
+        dest="stalled_heartbeat_minutes",
+        help="Override stall threshold (minutes). Default: 10.",
+    )
+    p_init.add_argument(
+        "--max-attempts-per-phase", type=int, default=None,
+        dest="max_attempts_per_phase",
+        help="Override max phase attempts. Default: 3.",
     )
 
     p_register = sub.add_parser(
@@ -520,6 +537,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Phase to clear attempts on. Defaults to the most-recent halt.",
     )
 
+    p_extend_lease = sub.add_parser(
+        "extend-lease",
+        help="Extend a running claim's lease by N minutes (operator escape hatch).",
+    )
+    add_common(p_extend_lease)
+    p_extend_lease.add_argument(
+        "minutes", type=int, help="Minutes to add to the current lease expiry",
+    )
+
     p_release_claim = sub.add_parser(
         "release-claim",
         help="Clear a stuck current_claim (operator escape hatch). Refuses "
@@ -536,6 +562,11 @@ def main(argv: list[str] | None = None) -> int:
     p_release_claim.add_argument(
         "--reason", default="",
         help="Optional explanation, recorded in the audit event.",
+    )
+    p_release_claim.add_argument(
+        "--reset-attempts", action="store_true", default=False,
+        help="Zero the phase's attempts counter on release (for operator-driven "
+             "aborts that shouldn't burn against max_attempts_per_phase).",
     )
 
     p_answer = sub.add_parser("answer", help="Answer a pending blocker")
@@ -676,6 +707,7 @@ def main(argv: list[str] | None = None) -> int:
         "pause": cmd_pause,
         "resume": cmd_resume,
         "retry": cmd_retry,
+        "extend-lease": cmd_extend_lease,
         "release-claim": cmd_release_claim,
         "prior-blocker": cmd_prior_blocker,
         "logs": cmd_logs,
@@ -1027,6 +1059,18 @@ def _maybe_print_worktree_conflict_hint(
 
 
 def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
+    for attr, label in [
+        ("lease_ttl_minutes", "--lease-ttl-minutes"),
+        ("stalled_heartbeat_minutes", "--stalled-heartbeat-minutes"),
+        ("max_attempts_per_phase", "--max-attempts-per-phase"),
+    ]:
+        val = getattr(args, attr, None)
+        if val is not None and val <= 0:
+            return _die(
+                ExitCode.INVALID_VALUE,
+                f"{label} must be a positive integer, got {val}",
+            )
+
     worktree_record: dict | None = None
     if args.worktree is not False:
         result = _setup_worktree(args, cfg)
@@ -1044,6 +1088,14 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
                     _rollback_worktree(cfg.project_root, worktree_record)
                 return 1
             data = st.empty_state(args.plan, cfg.plan_dir)
+            for key in (
+                "lease_ttl_minutes",
+                "stalled_heartbeat_minutes",
+                "max_attempts_per_phase",
+            ):
+                val = getattr(args, key, None)
+                if val is not None:
+                    data["config"][key] = val
             if worktree_record is not None:
                 data["worktree"] = worktree_record
             st.save_atomic(state_path, data)
@@ -2723,6 +2775,42 @@ def cmd_retry(args, cfg: ProjectConfig, state_path: Path) -> int:
     return ExitCode.OK
 
 
+def cmd_extend_lease(args, cfg: ProjectConfig, state_path: Path) -> int:
+    if args.minutes <= 0:
+        return _die(
+            ExitCode.INVALID_VALUE,
+            f"minutes must be positive, got {args.minutes}",
+        )
+    with st.mutate(state_path) as data:
+        claim = data.get("current_claim")
+        if claim is None:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"no claim to extend on {args.plan}",
+            )
+        current = _dt.datetime.strptime(
+            claim["lease_expires"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        baseline = max(current, now)
+        new_expires = (baseline + _dt.timedelta(minutes=args.minutes)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        claim["lease_expires"] = new_expires
+        st.append_event(
+            data, st.EVENT_LEASE_EXTENDED,
+            phase=claim["phase_id"],
+            extended_by_minutes=args.minutes,
+            new_expires=new_expires,
+            operator=True,
+        )
+    print(
+        f"Extended {args.plan}/{claim['phase_id']} lease by "
+        f"{args.minutes} min → {new_expires}"
+    )
+    return ExitCode.OK
+
+
 def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         claim = data.get("current_claim")
@@ -2750,7 +2838,10 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
             fields["reason"] = args.reason
         st.release_claim(data)
         st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
-    print(f"Released claim on {args.plan}/{phase}.")
+        if args.reset_attempts:
+            st.append_event(data, st.EVENT_ATTEMPTS_RESET, phase=phase, operator=True)
+    suffix = " Attempts reset." if args.reset_attempts else ""
+    print(f"Released claim on {args.plan}/{phase}.{suffix}")
     return ExitCode.OK
 
 

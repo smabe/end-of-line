@@ -732,8 +732,17 @@ through this.
 - Operator-side commands: `cmd_init`, `cmd_tick`, `cmd_tick_all`,
   `cmd_status`, `cmd_register`, `cmd_unregister`, `cmd_list`,
   `cmd_fleet`, `cmd_pause`, `cmd_resume`, `cmd_retry`, `cmd_answer`,
+  `cmd_extend_lease`, `cmd_release_claim`,
   `cmd_queue` (+ `cmd_queue_add`, `cmd_queue_list`, `cmd_queue_remove`),
   `cmd_worktree` (+ `cmd_worktree_gc`).
+- `cmd_extend_lease(args)` — add N minutes to the live claim's expiry.
+  `--project`, `--plan`, positional `minutes` (int, >0). New expiry =
+  `max(now, current_expires) + timedelta(minutes=N)`. Appends
+  `EVENT_LEASE_EXTENDED`. Operator-only; no `--token`.
+- `cmd_release_claim(args)` — force-release the current claim. Flags:
+  `--force` (skip the fresh-heartbeat guard), `--reason` (audit string),
+  `--reset-attempts` (append `EVENT_ATTEMPTS_RESET` so next dispatch's
+  attempt counter starts from zero).
 - `cmd_tick_all` is the host-scoped cron entry point: walks
   `registry.entries()` and runs the per-plan tick + dispatch + notify
   dance for each, then makes a second pass over distinct project_roots

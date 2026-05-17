@@ -10,7 +10,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
-from end_of_line.supervisor import tick
+from end_of_line.supervisor import _detect_stalled, tick
 from tests import CluTestCase
 
 
@@ -196,6 +196,62 @@ class StalledSupervisorTestCase(CluTestCase):
         _backdate_claim(self.state_path, minutes=99)
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "lease_expired")
+
+
+class NoHeartbeatGuardTestCase(unittest.TestCase):
+    """phase_stalled suppressed when last_heartbeat_at == started_at (#27)."""
+
+    # Use +00:00 format so Python 3.9 fromisoformat can parse them.
+    _STARTED = "2020-01-01T00:00:00+00:00"
+    _PAST_HEARTBEAT = "2020-01-01T11:45:00+00:00"
+    _EXPIRED_LEASE = "2020-01-01T00:30:00+00:00"
+
+    def _make_data(
+        self,
+        *,
+        last_heartbeat_at: str,
+        started_at: str = _STARTED,
+        lease_expires: str = "2099-01-01T00:00:00+00:00",
+    ) -> dict:
+        data = st.empty_state("test-plan", "plans")
+        data["current_claim"] = {
+            "phase_id": "a",
+            "claimed_by": "session-aaaa1111bbbb2222",
+            "lease_expires": lease_expires,
+            "started_at": started_at,
+            "last_heartbeat_at": last_heartbeat_at,
+            "attempts": 1,
+        }
+        data["config"]["stalled_heartbeat_minutes"] = 1
+        return data
+
+    def test_no_heartbeat_does_not_emit_phase_stalled(self) -> None:
+        """Guard suppresses phase_stalled when last_heartbeat_at == started_at."""
+        data = self._make_data(last_heartbeat_at=self._STARTED)
+        result = _detect_stalled(data)
+        self.assertIsNone(result)
+        stalled = [e for e in data["events"] if e["type"] == st.EVENT_PHASE_STALLED]
+        self.assertEqual(stalled, [])
+
+    def test_real_heartbeat_past_threshold_still_emits(self) -> None:
+        """Regression: phase_stalled still emits when worker HAS heartbeated."""
+        data = self._make_data(last_heartbeat_at=self._PAST_HEARTBEAT)
+        result = _detect_stalled(data)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.action, "stalled")
+        stalled = [e for e in data["events"] if e["type"] == st.EVENT_PHASE_STALLED]
+        self.assertEqual(len(stalled), 1)
+
+    def test_no_heartbeat_lease_expiry_still_catches(self) -> None:
+        """No-heartbeat workers are still detected when their lease expires."""
+        data = self._make_data(
+            last_heartbeat_at=self._STARTED, lease_expires=self._EXPIRED_LEASE,
+        )
+        released = st.release_if_expired(data)
+        self.assertTrue(released)
+        self.assertIsNone(data["current_claim"])
+        expired = [e for e in data["events"] if e["type"] == st.EVENT_LEASE_EXPIRED]
+        self.assertEqual(len(expired), 1)
 
 
 if __name__ == "__main__":
