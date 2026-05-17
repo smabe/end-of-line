@@ -56,10 +56,21 @@ class BootstrapEmissionTest(unittest.TestCase):
         lines = sink.getvalue().splitlines()
         self.assertEqual(lines, [
             "TASK_CREATE task=my-plan status=pending",
-            "TASK_CREATE task=my-plan/a status=pending",
-            "TASK_CREATE task=my-plan/b status=pending",
-            "TASK_CREATE task=my-plan/c status=pending",
+            "TASK_CREATE task=my-plan/a parent=my-plan status=pending",
+            "TASK_CREATE task=my-plan/b parent=my-plan status=pending",
+            "TASK_CREATE task=my-plan/c parent=my-plan status=pending",
         ])
+
+    def test_bootstrap_parent_line_has_no_parent_field(self):
+        slug = "my-plan"
+        state = self._state_path(slug)
+        self._write_master(slug, ["a"])
+        sink = io.StringIO()
+        bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
+        lines = sink.getvalue().splitlines()
+        parent_line = lines[0]
+        self.assertEqual(parent_line, "TASK_CREATE task=my-plan status=pending")
+        self.assertNotIn("parent=", parent_line)
 
     def test_bootstrap_missing_master_file_errors(self):
         slug = "ghost-plan"
@@ -92,11 +103,11 @@ class BootstrapEmissionTest(unittest.TestCase):
         lines = sink.getvalue().splitlines()
         self.assertEqual(lines, [
             "TASK_CREATE task=plan-alpha status=pending",
-            "TASK_CREATE task=plan-alpha/x status=pending",
-            "TASK_CREATE task=plan-alpha/y status=pending",
+            "TASK_CREATE task=plan-alpha/x parent=plan-alpha status=pending",
+            "TASK_CREATE task=plan-alpha/y parent=plan-alpha status=pending",
             "TASK_CREATE task=plan-beta status=pending",
-            "TASK_CREATE task=plan-beta/p status=pending",
-            "TASK_CREATE task=plan-beta/q status=pending",
+            "TASK_CREATE task=plan-beta/p parent=plan-beta status=pending",
+            "TASK_CREATE task=plan-beta/q parent=plan-beta status=pending",
         ])
 
     def test_bootstrap_state_path_pointing_at_missing_state_skips(self):

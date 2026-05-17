@@ -18,8 +18,16 @@ class PerEventCoverageTest(unittest.TestCase):
         )
         self.assertEqual(
             out,
-            'TASK_UPDATE task=my-plan/foundation status=in_progress msg="started (attempt 1)"',
+            'TASK_UPDATE task=my-plan/foundation parent=my-plan status=in_progress msg="started (attempt 1)"',
         )
+
+    def test_phase_scoped_events_include_parent_field(self):
+        out = project_event_task(
+            _evt(st.EVENT_PHASE_COMPLETED, phase="foundation"),
+            "my-plan",
+        )
+        self.assertIsNotNone(out)
+        self.assertIn("parent=my-plan", out)
 
     def test_phase_completed_emits_completed(self):
         out = project_event_task(
@@ -64,6 +72,7 @@ class PerEventCoverageTest(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertIn("task=my-plan ", out)  # no /phase
         self.assertNotIn("my-plan/", out)
+        self.assertNotIn("parent=", out)  # parent line itself has no parent
         self.assertIn("status=completed", out)
 
     def test_paused_uses_parent_task_id(self):
@@ -71,6 +80,7 @@ class PerEventCoverageTest(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertIn("task=my-plan ", out)
         self.assertNotIn("my-plan/", out)
+        self.assertNotIn("parent=", out)
         self.assertIn("status=in_progress", out)
         self.assertIn("paused", out)
 
@@ -78,6 +88,7 @@ class PerEventCoverageTest(unittest.TestCase):
         out = project_event_task(_evt(st.EVENT_RESUMED), "my-plan")
         self.assertIsNotNone(out)
         self.assertIn("task=my-plan ", out)
+        self.assertNotIn("parent=", out)
         self.assertNotIn("my-plan/", out)
         self.assertIn("status=in_progress", out)
 

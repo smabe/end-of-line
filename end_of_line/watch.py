@@ -213,6 +213,19 @@ def _escape_msg(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _task_line(
+    verb: str,
+    task_id: str,
+    *,
+    parent: str | None = None,
+    status: str,
+    msg: str | None = None,
+) -> str:
+    parent_field = f" parent={parent}" if parent else ""
+    msg_field = f' msg="{msg}"' if msg is not None else ""
+    return f"{verb} task={task_id}{parent_field} status={status}{msg_field}"
+
+
 def _task_msg_for(event: dict[str, Any]) -> str:
     t = event.get("type")
     if t == st.EVENT_PHASE_STARTED:
@@ -256,12 +269,14 @@ def project_event_task(
 
     if t in _PLAN_SCOPED_EVENTS:
         task_id = plan_slug
+        parent = None
     else:
         phase = event.get("phase", "?")
         task_id = f"{plan_slug}/{phase}"
+        parent = plan_slug
 
     msg = _escape_msg(_task_msg_for(event))
-    return f'TASK_UPDATE task={task_id} status={status} msg="{msg}"'
+    return _task_line("TASK_UPDATE", task_id, parent=parent, status=status, msg=msg)
 
 
 def _slug_for_path(path: Path) -> str:
@@ -289,9 +304,11 @@ def bootstrap_task_list(
         plan_path = cfg.project_root / cfg.plan_dir / f"{slug}.md"
         if not plan_path.exists():
             raise FileNotFoundError(f"no master plan at {plan_path}")
-        print(f"TASK_CREATE task={slug} status=pending", file=sink, flush=True)
+        print(_task_line("TASK_CREATE", slug, status="pending"),
+              file=sink, flush=True)
         for phase in parse_sessions_index(plan_path):
-            print(f"TASK_CREATE task={slug}/{phase.id} status=pending",
+            print(_task_line("TASK_CREATE", f"{slug}/{phase.id}",
+                             parent=slug, status="pending"),
                   file=sink, flush=True)
 
 

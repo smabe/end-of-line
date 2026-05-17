@@ -254,19 +254,34 @@ When the operator says `ship` (or equivalent):
 
 With `--task-list`, the Monitor stream emits two line shapes:
 
-- `TASK_CREATE task=<id> status=pending` — bootstrap lines, one
-  per plan + phase, arrive together within ~200ms at startup.
-- `TASK_UPDATE task=<id> status=<state> msg="<one-liner>"` —
+- `TASK_CREATE task=<id> [parent=<slug>] status=pending` —
+  bootstrap lines, one per plan + phase, arrive together within
+  ~200ms at startup. The parent line (plan itself, `task=<slug>`,
+  no `/phase`) has NO `parent=` field. Child lines
+  (`task=<slug>/<phase>`) always carry `parent=<slug>`.
+- `TASK_UPDATE task=<id> [parent=<slug>] status=<state> msg="<one-liner>"` —
   fired as state transitions happen. `<state>` is one of
-  `pending` / `in_progress` / `completed`.
+  `pending` / `in_progress` / `completed`. `parent=` is present
+  on phase-scoped events and absent on plan-scoped events
+  (`plan_completed`, `paused`, `resumed`).
 
 **On the bootstrap batch (TASK_CREATE lines):** call `TaskCreate`
-once with all matching tasks. The parent task (`task=<slug>`,
-no `/phase`) is the top-level row; child tasks (`task=<slug>/<phase>`)
-are children of the parent. All start `pending`.
+once with all matching tasks, ALL `status=pending`. The TaskCreate
+API is flat — there's no `parent_id` field — so signal the
+hierarchy visually in each child's `subject`:
 
-**On each TASK_UPDATE:** call `TaskUpdate` matching by task_id.
-The `msg` field carries the human-readable transition reason
+- Parent (`task=<slug>`, no `parent=`): `subject = <slug>`.
+- Child (`task=<slug>/<phase>`, with `parent=<slug>`):
+  `subject = "└ <phase>"` — that's a U+2514 box-drawing
+  character, single ASCII space, then the phase id. Lock this
+  glyph verbatim so every plan renders the same tree.
+
+**On each TASK_UPDATE:** call `TaskUpdate` matching by `task=`
+(the task_id). **Do NOT re-set `subject`** — only update
+`status` and `description` / `activeForm` to the `msg` content.
+Re-setting the subject would either churn the row text or strip
+the `└ ` glyph mid-stream and visually un-nest the tree. The
+`msg` field carries the human-readable transition reason
 (e.g. `"BLOCKED b-12 — should I proceed with X?"` or
 `"HALTED (max attempts on foundation)"`) — surface significant
 msgs to the operator via PushNotification when the user would
@@ -275,7 +290,9 @@ want to act now (halts, blockers).
 **Out-of-order arrivals:** if a `TASK_UPDATE` arrives for a
 task_id you haven't seen a `TASK_CREATE` for (race condition,
 rare), buffer it ~1s and retry. If still no matching task,
-create it on-the-fly with the update's status.
+create it on-the-fly with the update's status — apply the
+same nesting convention: if the line carries `parent=<slug>`,
+prefix the subject with `└ ` and the phase id.
 
 **Non-`TASK_*` lines:** the snapshot baseline (`[snapshot] slug:
 status, active=...`) and any text-mode lines that leak through

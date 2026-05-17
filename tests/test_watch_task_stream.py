@@ -113,7 +113,7 @@ class TaskListStreamTest(CluTestCase):
             ),
         )
         out = sink.getvalue()
-        self.assertIn('TASK_UPDATE task=my-plan/foundation status=completed msg="completed"', out)
+        self.assertIn('TASK_UPDATE task=my-plan/foundation parent=my-plan status=completed msg="completed"', out)
 
     def test_task_list_mode_skips_default_text_lines(self) -> None:
         sink = io.StringIO()

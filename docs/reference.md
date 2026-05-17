@@ -687,20 +687,24 @@ emits one concise line per meaningful transition to stdout.
 - `project_event_task(event, plan_slug, *, verbose=False) -> str | None` —
   task-list projector. Same inputs as `project_event`; returns a
   `TASK_CREATE` or `TASK_UPDATE` protocol line for Claude's TaskCreate
-  UI, or `None` for events with no task-list representation. Status
-  mapping: `phase_started` → `in_progress`, `phase_completed` →
-  `completed`, `plan_completed` → `TASK_UPDATE task=<slug>
-  status=completed`, blocked/stalled/paused/resumed → `in_progress`
-  with a descriptive `msg=`. Double-quotes in `msg` are escaped; msg is
-  capped at 100 chars. See `_TASK_STATUS_MAP` for the full mapping.
+  UI, or `None` for events with no task-list representation. Phase-
+  scoped lines carry `parent=<slug>` (right after `task=`); plan-scoped
+  lines (`plan_completed`, `paused`, `resumed`) omit it. Status mapping:
+  `phase_started` → `in_progress`, `phase_completed` → `completed`,
+  `plan_completed` → `TASK_UPDATE task=<slug> status=completed`,
+  blocked/stalled/paused/resumed → `in_progress` with a descriptive
+  `msg=`. Double-quotes in `msg` are escaped; msg is capped at 100
+  chars. See `_TASK_STATUS_MAP` for the full mapping.
 - `bootstrap_task_list(state_paths, cfg_loader, sink)` — emit one
   `TASK_CREATE task=<slug> status=pending` line for each watched plan,
-  followed by one `TASK_CREATE task=<slug>/<phase_id> status=pending`
-  per phase in the master plan's `## Sessions index`. Called by
-  `stream_loop` before the first poll tick when `task_list_mode=True`.
-  `cfg_loader` is a callable `(state_path) -> ProjectConfig` so tests
-  can inject fakes. Missing master plan → `UNKNOWN_TASK` (6). Empty
-  Sessions index → emits only the parent TASK_CREATE.
+  followed by one `TASK_CREATE task=<slug>/<phase_id> parent=<slug>
+  status=pending` per phase in the master plan's `## Sessions index`.
+  The parent line itself omits `parent=`; child lines always include
+  it. Called by `stream_loop` before the first poll tick when
+  `task_list_mode=True`. `cfg_loader` is a callable
+  `(state_path) -> ProjectConfig` so tests can inject fakes. Missing
+  master plan → `UNKNOWN_TASK` (6). Empty Sessions index → emits only
+  the parent TASK_CREATE.
 - `stream_loop(state_paths, *, json_mode, verbose, sink, poll_interval,
   max_ticks, _before_first_tick, task_list_mode) -> int` — poll loop
   over a list of state file paths. On startup, emits a `[snapshot]`

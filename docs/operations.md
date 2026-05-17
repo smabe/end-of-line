@@ -728,13 +728,19 @@ clu watch --project . --plan my-feature --task-list
 **Line shapes**
 
 ```
-TASK_CREATE task=<slug>/<phase_id> status=pending
 TASK_CREATE task=<slug> status=pending
-TASK_UPDATE task=<slug>/<phase_id> status=<status> msg="<message>"
+TASK_CREATE task=<slug>/<phase_id> parent=<slug> status=pending
+TASK_UPDATE task=<slug>/<phase_id> parent=<slug> status=<status> msg="<message>"
 TASK_UPDATE task=<slug> status=completed
 ```
 
-- `task=<slug>` (no `/phase`) is the parent task for the plan itself.
+- `task=<slug>` (no `/phase`) is the parent task for the plan itself —
+  the `parent=` field is **absent** on these plan-scoped lines.
+- `task=<slug>/<phase_id>` (with `/phase`) is a child task — the
+  `parent=<slug>` field is **always present** so the agent can render
+  visual nesting. Claude Code's TaskCreate UI is flat (no `parent_id`
+  field), so `/clu-plan` SKILL.md instructs the agent to prefix child
+  subjects with `└ ` (U+2514 + space) to render the tree.
 - `msg` is double-quote-delimited; inner `"` and `\` are escaped. Max
   100 chars (truncated with ellipsis).
 
