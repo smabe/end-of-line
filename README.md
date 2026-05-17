@@ -171,6 +171,8 @@ If a worker calls `clu block`, clu releases the claim and sends an iMessage. Whe
 
 The bundled skill also encodes **9 universal quality mandates** — TDD before logic changes, structured commit messages, `command -v` fallbacks for external tools, re-running the project's primary check from a fresh process before `clu complete`, and so on. See `end_of_line/skills/clu-phase/SKILL.md` for the full list. Each mandate earned its slot by capturing a witnessed failure mode from real worker sessions, not hypothetical good advice. Project-specific rules (test framework, naming conventions, files to avoid) layer on top via your project's `CLAUDE.md`.
 
+Workers can also chain a follow-up plan into the project queue mid-phase via `clu queue add <slug> --token <T> --plan <source-plan> --phase <source-phase>`. The new plan lands in the queue with lineage stamped (which plan, which phase, a fingerprinted token — the raw token is never persisted). Per-phase cap is 3 by default (`max_queue_adds_per_phase` in the plan's config block). See [`docs/contract.md`](docs/contract.md) for the full worker-enqueue contract.
+
 ## Operator commands
 
 | Command | Purpose |

@@ -89,7 +89,9 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     {"ts": "ISO8601", "type": "lease_expired",   "phase": "..."},
     {"ts": "ISO8601", "type": "task_spawned",    "task": "task-1", "source": "simplify"},
     {"ts": "ISO8601", "type": "plan_completed"},
-    {"ts": "ISO8601", "type": "queue_popped",   "slug": "...", "added_at": "...", "added_by": "operator", "position": 1},
+    {"ts": "ISO8601", "type": "queue_popped",   "slug": "...", "added_at": "...", "added_by": "operator | worker", "position": 1},
+    {"ts": "ISO8601", "type": "queue_appended", "slug": "...", "source_plan": "...", "source_phase": "...", "source_token_fp": "...", "reason": "...", "position": 1},
+    {"ts": "ISO8601", "type": "queue_rejected", "slug": "...", "source_plan": "...", "source_phase": "...", "reason": "cap | missing_plan_file"},
     {"ts": "ISO8601", "type": "worktree_missing", "phase": "...", "token": "...", "worktree_path": "..."},
     {"ts": "ISO8601", "type": "worktree_conflict_warning", "other_slug": "..."},
     {"ts": "ISO8601", "type": "lease_extended", "phase": "...", "extended_by_minutes": 15, "new_expires": "...", "operator": true},
@@ -119,6 +121,13 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 - `lease_extended` — emitted by `clu extend-lease` (operator-only; no `--token` required). Fields: `phase` (current phase id), `extended_by_minutes` (the argument passed), `new_expires` (ISO-8601 UTC string of the new expiry), `operator: true`. Semantics: `new_expires = max(now, current_lease_expires) + timedelta(minutes=N)`, so extending an already-expired (stalled) claim anchors from `now`, never backwards.
 - `attempts_reset` — emitted alongside `claim_force_released` when `clu release-claim --reset-attempts` is passed. Fields: `phase`, `operator: true`. Resets the attempt floor so the next dispatch starts fresh. `attempts_for_phase()` counts `phase_started` events after the most-recent of EITHER `retry_requested` OR `attempts_reset` — both act as floor markers; most-recent wins.
 
+### Worker-enqueue event semantics
+
+- `queue_appended` — emitted in the **source plan's** `events` array (not a separate project-level log) when a worker successfully appends a slug to the project queue. Fields: `slug` (the enqueued plan), `source_plan` (the worker's plan), `source_phase` (the worker's phase), `source_token_fp` (sha256 fingerprint of the token, first 8 hex chars — raw token never persisted), `reason` (optional free-text from `--reason`), `position` (1-based queue position at append time).
+- `queue_rejected` — emitted in the **source plan's** `events` array when a worker-enqueue attempt is refused. Fields: `slug`, `source_plan`, `source_phase`, `reason` — either `"cap"` (per-phase add cap reached) or `"missing_plan_file"` (the target `<plan_dir>/<slug>.md` does not exist).
+
+Both events ride in the **source plan's** state file so the worker's audit trail is co-located with the rest of its phase actions.
+
 ### Stall-detector guard
 
 `phase_stalled` is suppressed when `last_heartbeat_at == started_at` (the canonical `claude --print` case: stdout buffers until exit, so the bundled `/clu-phase` skill never calls `clu heartbeat` between tool calls and the heartbeat timestamp never advances). The lease-expiry path (`lease_expired`) still fires on genuinely-silent workers via `_detect_lease_expired` — the guard only mutes the chatty per-threshold ping, not the final timeout. Closes #27.
@@ -134,8 +143,13 @@ Per-project queue file at `<project_root>/<plan_dir>/.orchestrator/queue.json`. 
     {
       "slug": "next-plan-slug",
       "added_at": "ISO8601",
-      "added_by": "operator",
-      "position_at_add": "tail | front"
+      "added_by": "operator | worker",
+      "position_at_add": "tail | front",
+      // Worker-enqueue fields — nullable; operator-side entries leave all four as null.
+      "source_plan": "source-plan-slug | null",
+      "source_phase": "source-phase-id | null",
+      "source_token_fp": "sha256(token)[:8] | null",
+      "reason": "free-text string | null"
     }
   ],
   "history": [
@@ -290,6 +304,7 @@ Inbox-vs-iMessage asymmetry: every `notify()` call with `plan_slug` + `project_r
 | 7 | `STATUS_TRANSITION` | Refused state change (pause → resume on `done`, etc.) |
 | 9 | `REPAIR_DECLINED` | Repair worker refusing to touch the file (legibility-only — clu still validates) |
 | 10 | `WORKTREE_SETUP_FAILED` | `clu init --worktree` rolled back: git worktree add succeeded but a downstream step (state save) failed, and we tore the worktree + branch back down |
+| 11 | `QUEUE_CAP` | Worker tried `clu queue add` but exceeded `max_queue_adds_per_phase` (default 3). Operator path is uncapped. |
 
 ## Plan markdown contract
 
@@ -336,14 +351,26 @@ A worker is a fresh process that runs ONE phase. It must:
    clu spawn --project P --plan S --source simplify --phase X --title "..." --description "..."
    ```
    Never file as a GH issue. Spawned tasks are first-class members of the plan.
-5. **On blocked ambiguity**:
+5. **To chain a follow-up plan into the project queue mid-phase** (v2 worker-enqueue):
+   ```bash
+   clu queue add <slug> --project P --plan S --phase X --token <token> [--reason "..."]
+   ```
+   The `--token` flag switches `clu queue add` into worker mode. Worker mode:
+   - Requires `--plan` + `--phase`; forbids `--front`; accepts exactly one slug.
+   - Validates the slug (syntax, plan-file existence, registered-project check).
+   - Acquires state lock first, queue lock second (never reverse — see architecture.md).
+   - Checks `max_queue_adds_per_phase` (default 3; counts over `queue + history` where `source_plan == S AND source_phase == X`). Exceeds cap → emits `EVENT_QUEUE_REJECTED` + exits `ExitCode.QUEUE_CAP` (11).
+   - Idempotency: if the slug is already pending or in-flight → silently no-op (prints position); if in history → exits `STATUS_TRANSITION` (7) — hitting this is a worker bug.
+   - On success: emits `EVENT_QUEUE_APPENDED` in the source plan's events; fingerprints the token (`sha256(token)[:8]`) onto the queue entry (raw token never persisted); exits 0.
+   - `@_translate_claim_mismatch` wraps the worker path so a bad token exits 4 (`CLAIM_MISMATCH`).
+6. **On blocked ambiguity**:
    ```bash
    clu block --project P --plan S --phase X \
      --question "..." --option A --option B --context "..." \
      [--type blocked_replan]
    ```
    This releases the claim and writes the blocker.
-6. **On unrecoverable failure**: just exit. The lease expires and the supervisor retries (up to `max_attempts_per_phase`).
+7. **On unrecoverable failure**: just exit. The lease expires and the supervisor retries (up to `max_attempts_per_phase`).
 
 ## Cron snippet
 
