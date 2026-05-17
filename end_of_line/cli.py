@@ -33,7 +33,7 @@ from collections.abc import Iterator
 from enum import IntEnum
 from pathlib import Path
 
-from . import dispatch, fleet, monitor, notify, queue, registry, state as st
+from . import dispatch, fleet, monitor, notify, queue, registry, state as st, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
@@ -667,6 +667,25 @@ def main(argv: list[str] | None = None) -> int:
         help="Stream new lines as they're appended (like `tail -f`)",
     )
 
+    p_watch = sub.add_parser(
+        "watch",
+        help="Stream state-machine events for one plan, one project, "
+             "or every registered plan. One line per transition; "
+             "designed for AI-agent consumption via Claude's Monitor.",
+    )
+    p_watch.add_argument("--project", type=Path, default=None)
+    _watch_scope = p_watch.add_mutually_exclusive_group()
+    _watch_scope.add_argument("--plan", default=None, dest="watch_plan")
+    _watch_scope.add_argument(
+        "--all", action="store_true", default=False, dest="watch_all",
+    )
+    p_watch.add_argument("--json", action="store_true", default=False)
+    p_watch.add_argument("--verbose", action="store_true", default=False)
+    p_watch.add_argument(
+        "--interval", type=float, default=None,
+        help="Poll interval seconds (default: 1.0 single-project, 5.0 with --all)",
+    )
+
     p_prior_blocker = sub.add_parser(
         "prior-blocker",
         help="Print the answer for the phase's most recent answered blocker (exit 0); "
@@ -722,6 +741,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_archive(args)
     if args.cmd == "blockers":
         return cmd_blockers(args)
+    if args.cmd == "watch":
+        return cmd_watch(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -2812,6 +2833,53 @@ def _follow_log(
                 time.sleep(poll_interval)
             except KeyboardInterrupt:
                 return ExitCode.OK
+
+
+def cmd_watch(args) -> int:
+    """Stream state-machine events — one line per transition.
+
+    Resolves state paths from the registry, then delegates to
+    watch.stream_loop. Exit on SIGINT → ExitCode.OK.
+    """
+    state_paths: list[Path] = []
+    plan_slug: str | None = getattr(args, "watch_plan", None)
+    all_mode: bool = getattr(args, "watch_all", False)
+
+    if all_mode:
+        for e in registry.entries():
+            if args.project is None or (
+                Path(e.project_root).resolve() == args.project.resolve()
+            ):
+                cfg = load_project_config(Path(e.project_root))
+                state_paths.append(cfg.state_path(e.plan_slug))
+    elif plan_slug:
+        project_root = _resolve_project_arg(args)
+        cfg = load_project_config(project_root)
+        registered = any(
+            Path(e.project_root).resolve() == project_root
+            and e.plan_slug == plan_slug
+            for e in registry.entries()
+        )
+        if not registered:
+            return _die(ExitCode.UNKNOWN_TASK,
+                        f"plan {plan_slug!r} is not registered in {project_root}")
+        state_paths.append(cfg.state_path(plan_slug))
+    else:
+        project_root = _resolve_project_arg(args)
+        cfg = load_project_config(project_root)
+        for e in registry.entries():
+            if Path(e.project_root).resolve() == project_root:
+                state_paths.append(cfg.state_path(e.plan_slug))
+
+    interval = args.interval if args.interval is not None else (
+        5.0 if all_mode else 1.0
+    )
+    return watch.stream_loop(
+        state_paths,
+        json_mode=args.json,
+        verbose=args.verbose,
+        poll_interval=interval,
+    )
 
 
 def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:
