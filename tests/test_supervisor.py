@@ -103,15 +103,40 @@ class SupervisorTestCase(unittest.TestCase):
         self.assertEqual(result.action, "plan_done")
         self.assertEqual(self._read()["status"], "done")
 
-    def test_skips_phase_with_open_blocker(self) -> None:
+    def test_open_blocker_pins_lane_idle(self) -> None:
+        # When phase A files a blocker the claim releases but A stays
+        # pending-not-complete. The supervisor MUST NOT dispatch the
+        # successor phase B — plan-file ordering encodes an implicit
+        # dependency that successors should not race past the blocked
+        # phase. Lane-pin = "any open blocker on this plan halts
+        # dispatch until consumed" (#28).
         with st.locked(self.state_path):
             data = st.load(self.state_path)
             st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
             st.save_atomic(self.state_path, data)
         result = tick(self.state_path, self.cfg)
-        # Should not dispatch a; should dispatch b instead
+        self.assertEqual(result.action, "idle")
+        self.assertIn("blocker", result.detail.lower())
+
+    def test_lane_unpins_after_answer_consumed(self) -> None:
+        # Open blocker pins; once operator answers AND the consume tick
+        # runs (priority 4), the lane reopens and dispatch resumes.
+        with st.locked(self.state_path):
+            data = st.load(self.state_path)
+            bid = st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
+            st.save_atomic(self.state_path, data)
+        self.assertEqual(tick(self.state_path, self.cfg).action, "idle")
+        with st.locked(self.state_path):
+            data = st.load(self.state_path)
+            st.answer_blocker(data, bid, "X")
+            st.save_atomic(self.state_path, data)
+        # First post-answer tick consumes the blocker (priority 4).
+        self.assertEqual(tick(self.state_path, self.cfg).action, "blocker_resumed")
+        # Next tick dispatches phase A — successor B is still gated by
+        # plan-file order, which is the right behavior.
+        result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "dispatch")
-        self.assertEqual(result.phase_id, "b")
+        self.assertEqual(result.phase_id, "a")
 
     def _age_blocker_past_sla(self) -> str:
         """Add a blocker on phase 'a' and backdate it past the 24h SLA."""

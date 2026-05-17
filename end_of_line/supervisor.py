@@ -296,6 +296,16 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 f"phase={claim['phase_id']} in_flight lease={claim['lease_expires']}",
             ))
 
+        # Any open blocker on this plan pins the lane: plan-file order
+        # encodes implicit dependencies between phases, so dispatching the
+        # successor while the predecessor is blocked routinely violates a
+        # "must merge before" constraint. Operator answers + priority-4
+        # consume re-opens the lane. (#28)
+        if blockers := st.open_blockers(data):
+            return _attach(TickResult(
+                "idle", f"open_blocker={blockers[0]['id']} pins lane",
+            ))
+
         plan_path = config.project_root / config.plan_dir / f"{data['plan_slug']}.md"
         phases = parse_sessions_index(plan_path)
         if not phases:
