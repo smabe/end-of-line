@@ -1,3 +1,9 @@
+---
+name: clu-plan
+description: Author a clu-format plan (master + sub-plan files) ready for `clu init` + `clu queue add` dispatch. Use when the user wants to scope a feature for clu-orchestrated execution, mentions queueing plans, or says "plan this for clu". For non-clu projects, falls back to /plan with a pointer.
+user_invocable: true
+---
+
 <!--
 Bundled with clu so /clu-plan installs are self-contained. The canonical
 copy is end_of_line/skills/clu-plan/SKILL.md in the clu repo. To replace
@@ -5,12 +11,6 @@ this bundled copy with a symlink to your own version, run
 `clu install-skill --only clu-plan --force` after putting your SKILL.md
 at ~/.claude/skills/clu-plan/SKILL.md.
 -->
-
----
-name: clu-plan
-description: Author a clu-format plan (master + sub-plan files) ready for `clu init` + `clu queue add` dispatch. Use when the user wants to scope a feature for clu-orchestrated execution, mentions queueing plans, or says "plan this for clu". For non-clu projects, falls back to /plan with a pointer.
-user_invocable: true
----
 
 ## You are the clu-plan authoring skill
 
