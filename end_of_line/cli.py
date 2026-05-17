@@ -707,6 +707,13 @@ def main(argv: list[str] | None = None) -> int:
     p_watch.add_argument("--json", action="store_true", default=False)
     p_watch.add_argument("--verbose", action="store_true", default=False)
     p_watch.add_argument(
+        "--task-list", action="store_true", default=False,
+        dest="watch_task_list",
+        help="Emit TASK_CREATE/TASK_UPDATE protocol lines for "
+             "Claude's TaskCreate UI (mutex with --json and --all). "
+             "See docs/operations.md § 'Task-list mode'.",
+    )
+    p_watch.add_argument(
         "--interval", type=float, default=None,
         help="Poll interval seconds (default: 1.0 single-project, 5.0 with --all)",
     )
@@ -2873,6 +2880,14 @@ def cmd_watch(args) -> int:
     state_paths: list[Path] = []
     plan_slug: str | None = getattr(args, "watch_plan", None)
     all_mode: bool = getattr(args, "watch_all", False)
+    task_list_mode: bool = getattr(args, "watch_task_list", False)
+
+    if task_list_mode and args.json:
+        return _die(ExitCode.GENERIC, "--task-list and --json are mutually exclusive")
+    if task_list_mode and all_mode:
+        return _die(ExitCode.GENERIC,
+                    "--task-list requires --plan or single-project "
+                    "(mutually exclusive with --all)")
 
     if all_mode:
         for e in registry.entries():
@@ -2903,12 +2918,16 @@ def cmd_watch(args) -> int:
     interval = args.interval if args.interval is not None else (
         5.0 if all_mode else 1.0
     )
-    return watch.stream_loop(
-        state_paths,
-        json_mode=args.json,
-        verbose=args.verbose,
-        poll_interval=interval,
-    )
+    try:
+        return watch.stream_loop(
+            state_paths,
+            json_mode=args.json,
+            task_list_mode=task_list_mode,
+            verbose=args.verbose,
+            poll_interval=interval,
+        )
+    except FileNotFoundError as exc:
+        return _die(ExitCode.UNKNOWN_TASK, str(exc))
 
 
 def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:

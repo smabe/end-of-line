@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from . import state as st
+from .plan_parser import parse_sessions_index
 
 _DEFAULT_VISIBLE: frozenset[str] = frozenset(filter(None, {
     st.EVENT_PHASE_STARTED,
@@ -180,8 +181,118 @@ if _Q_REJECTED:
     )
 
 
+_TASK_STATUS_MAP: dict[str, str] = {
+    st.EVENT_PHASE_STARTED: "in_progress",
+    st.EVENT_PHASE_COMPLETED: "completed",
+    st.EVENT_PHASE_BLOCKED: "in_progress",
+    st.EVENT_PHASE_MAX_ATTEMPTS: "in_progress",
+    st.EVENT_SYSTEMIC_FAILURE: "in_progress",
+    st.EVENT_PLAN_COMPLETED: "completed",
+    st.EVENT_PAUSED: "in_progress",
+    st.EVENT_RESUMED: "in_progress",
+    st.EVENT_PHASE_STALLED: "in_progress",
+}
+
+_TASK_VERBOSE_STATUS_MAP: dict[str, str] = {
+    st.EVENT_LEASE_EXTENDED: "in_progress",
+    st.EVENT_LEASE_EXPIRED: "in_progress",
+    st.EVENT_CLAIM_FORCE_RELEASED: "in_progress",
+    st.EVENT_ATTEMPTS_RESET: "in_progress",
+    st.EVENT_STUCK_BLOCKER_REPINGED: "in_progress",
+    st.EVENT_STALLED_CLAIM_NOTIFIED: "in_progress",
+    st.EVENT_WORKTREE_ATTACHED: "in_progress",
+}
+
+# Events where task_id is the plan slug alone (no /phase segment)
+_PLAN_SCOPED_EVENTS: frozenset[str] = frozenset({
+    st.EVENT_PLAN_COMPLETED, st.EVENT_PAUSED, st.EVENT_RESUMED,
+})
+
+
+def _escape_msg(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _task_msg_for(event: dict[str, Any]) -> str:
+    t = event.get("type")
+    if t == st.EVENT_PHASE_STARTED:
+        return f"started (attempt {event.get('attempts', 1)})"
+    if t == st.EVENT_PHASE_COMPLETED:
+        return "completed"
+    if t == st.EVENT_PHASE_BLOCKED:
+        bid = event.get("blocker_id", "?")
+        q = _trunc(event.get("question") or "")
+        return f"BLOCKED {bid} — {q}" if q else f"BLOCKED {bid}"
+    if t == st.EVENT_PHASE_MAX_ATTEMPTS:
+        return f"HALTED (max attempts on {event.get('phase', '?')})"
+    if t == st.EVENT_SYSTEMIC_FAILURE:
+        sig = _trunc(event.get("signature") or "")
+        return f"SYSTEMIC FAILURE — {sig}"
+    if t == st.EVENT_PLAN_COMPLETED:
+        return "plan done"
+    if t == st.EVENT_PAUSED:
+        reason = _trunc(event.get("reason") or "")
+        return f"paused — {reason}" if reason else "paused"
+    if t == st.EVENT_RESUMED:
+        return "resumed"
+    if t == st.EVENT_PHASE_STALLED:
+        return "stalled"
+    return (t or "").replace("_", " ")
+
+
+def project_event_task(
+    event: dict[str, Any],
+    plan_slug: str,
+    *,
+    verbose: bool = False,
+) -> str | None:
+    t = event.get("type")
+    if t not in _TASK_STATUS_MAP:
+        if not (verbose and t in _TASK_VERBOSE_STATUS_MAP):
+            return None
+        status = _TASK_VERBOSE_STATUS_MAP[t]
+    else:
+        status = _TASK_STATUS_MAP[t]
+
+    if t in _PLAN_SCOPED_EVENTS:
+        task_id = plan_slug
+    else:
+        phase = event.get("phase", "?")
+        task_id = f"{plan_slug}/{phase}"
+
+    msg = _escape_msg(_task_msg_for(event))
+    return f'TASK_UPDATE task={task_id} status={status} msg="{msg}"'
+
+
 def _slug_for_path(path: Path) -> str:
     return path.stem.removesuffix(".state")
+
+
+def _state_path_to_project(state_path: Path) -> Path:
+    # <project>/plans/.orchestrator/<slug>.state.json — walk up 3 levels
+    return state_path.parent.parent.parent
+
+
+def bootstrap_task_list(
+    state_paths: list[Path],
+    cfg_loader: Callable[[Path], Any],
+    sink: TextIO,
+) -> None:
+    """Emit TASK_CREATE task=<slug>[/<phase>] status=pending lines, one per plan+phase."""
+    for state_path in state_paths:
+        if not state_path.exists():
+            continue
+        slug = _slug_for_path(state_path)
+        if not slug:
+            continue
+        cfg = cfg_loader(state_path)
+        plan_path = cfg.project_root / cfg.plan_dir / f"{slug}.md"
+        if not plan_path.exists():
+            raise FileNotFoundError(f"no master plan at {plan_path}")
+        print(f"TASK_CREATE task={slug} status=pending", file=sink, flush=True)
+        for phase in parse_sessions_index(plan_path):
+            print(f"TASK_CREATE task={slug}/{phase.id} status=pending",
+                  file=sink, flush=True)
 
 
 def _snapshot_line(slug: str, data: dict) -> str:
@@ -194,21 +305,28 @@ def stream_loop(
     state_paths: list[Path],
     *,
     json_mode: bool = False,
+    task_list_mode: bool = False,
     verbose: bool = False,
     sink: TextIO | None = None,
     poll_interval: float = 1.0,
     max_ticks: int | None = None,
     _before_first_tick: Callable[[], None] | None = None,
+    cfg_loader: Callable[[Path], Any] | None = None,
 ) -> int:
     """Poll state files, emit projected events. Returns ExitCode.OK (0).
 
     `_before_first_tick` is a test seam called once after the baseline
     snapshot and before the first poll tick — lets tests inject events
     without threading.
+
+    `task_list_mode` routes events through `project_event_task` and
+    emits a TASK_CREATE bootstrap before the snapshot baseline.
+    Mutually exclusive with `json_mode` (CLI gates this).
     """
     if sink is None:
         sink = sys.stdout
     cursors: dict[Path, int] = {}
+    baseline: list[tuple[str, dict]] = []
 
     for path in list(state_paths):
         try:
@@ -216,8 +334,17 @@ def stream_loop(
         except (FileNotFoundError, OSError, json.JSONDecodeError, st.SchemaVersionMismatch):
             continue
         slug = _slug_for_path(path)
-        print(_snapshot_line(slug, data), file=sink, flush=True)
         cursors[path] = len(data.get("events", []))
+        baseline.append((slug, data))
+
+    if task_list_mode:
+        if cfg_loader is None:
+            from .cli import load_project_config  # lazy — cli imports watch, avoid cycle
+            cfg_loader = lambda sp: load_project_config(_state_path_to_project(sp))
+        bootstrap_task_list(list(cursors.keys()), cfg_loader, sink)
+
+    for slug, data in baseline:
+        print(_snapshot_line(slug, data), file=sink, flush=True)
 
     if _before_first_tick is not None:
         _before_first_tick()
@@ -234,7 +361,10 @@ def stream_loop(
                 events = data.get("events", [])
                 slug = _slug_for_path(path)
                 for evt in events[cursors[path]:]:
-                    line_or_none = project_event(evt, slug, verbose=verbose)
+                    if task_list_mode:
+                        line_or_none = project_event_task(evt, slug, verbose=verbose)
+                    else:
+                        line_or_none = project_event(evt, slug, verbose=verbose)
                     if line_or_none is None:
                         continue
                     if json_mode:
