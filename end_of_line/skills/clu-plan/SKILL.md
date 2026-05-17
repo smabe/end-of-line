@@ -236,6 +236,20 @@ When the operator says `ship` (or equivalent):
    clu list  # fleet view
    ```
 
+6. **Arm live progress monitoring** via the Monitor tool:
+   ```
+   Monitor(
+       description="clu <slug> phase progress",
+       persistent=True,
+       timeout_ms=3600000,
+       command="clu watch --project . --plan <slug>"
+   )
+   ```
+   Each state transition (phase started/completed/blocked/halted)
+   arrives as a notification, so you see what clu is doing without
+   polling. The operator's UserPromptSubmit hook handles AFK surfacing
+   separately; this is the at-desk live feed.
+
 If the operator only wants the files authored (not queued yet), stop
 after step 1. Don't run `clu init` without explicit operator intent.
 
@@ -361,6 +375,16 @@ git push origin main
 clu init --project . --plan auth-cleanup --worktree --no-claude-md
 clu queue add --project . auth-cleanup
 clu queue list --project .
+```
+
+Then arm live monitoring:
+```
+Monitor(
+    description="clu auth-cleanup phase progress",
+    persistent=True,
+    timeout_ms=3600000,
+    command="clu watch --project . --plan auth-cleanup"
+)
 ```
 
 ## Notes on integrations with other skills

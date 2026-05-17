@@ -669,6 +669,51 @@ This project uses clu for autonomous plan execution.
   `/plan` is the generic single-file fallback.
 ```
 
+### Live in-session feed (`clu watch`)
+
+The inbox hook is the **AFK channel**: events accumulate while you're
+away and surface into Claude on your next message. `clu watch` is the
+**at-desk channel**: a live stream of state transitions emitted to
+stdout as they happen, one line per event.
+
+```bash
+# Watch a single plan (default 1s poll):
+clu watch --project . --plan my-feature
+
+# Watch every plan in the current project:
+clu watch --project .
+
+# Watch every plan on the host (5s poll by default):
+clu watch --all
+
+# JSON lines for jq downstream:
+clu watch --project . --plan my-feature --json | jq '.event.type'
+
+# Include verbose bookkeeping events (lease expiry, force-releases, etc.):
+clu watch --project . --verbose
+```
+
+On startup, `clu watch` prints a `[snapshot]` baseline per plan
+(current status + active phase), then streams any new events as the
+state files change. SIGINT exits cleanly.
+
+**Pairing with Claude's Monitor tool** — when a Claude Code session
+starts a clu plan, arm `Monitor` immediately after `clu queue add`:
+
+```python
+Monitor(command="clu watch --project . --plan my-feature", persistent=True)
+```
+
+Each stdout line becomes a notification; Claude acts on BLOCKED events
+(surfaces the question), PLAN DONE events (kicks off `/post-ship`),
+and dispatch failures (surfaces the error). The `/clu-plan` skill
+arms this automatically.
+
+Inbox (`/clu-monitor`) and `clu watch` are complementary: both run in
+the same session without conflict. The inbox surfaces events from
+between sessions (across `/clear` or restart boundaries); `clu watch`
+covers the current session live.
+
 ## Troubleshooting
 
 ### Inbound poller crash-loops
