@@ -238,6 +238,32 @@ class HardlinkTargetTests(InstallSkillTestBase):
         )
 
 
+class DirectorySymlinkTests(InstallSkillTestBase):
+    """target.parent is a directory symlink (operator's canonical setup:
+    ~/.claude/skills/<name> → ~/projects/abe-skills/skills/<name>).
+    install-skill must warn on stderr then succeed (follow-into is intentional).
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.canonical = self.home / "abe-skills" / "skills" / "clu-phase"
+        self.canonical.mkdir(parents=True)
+        self.target.parent.parent.mkdir(parents=True, exist_ok=True)
+        # ~/.claude/skills/clu-phase is a symlink to the canonical dir
+        self.target.parent.symlink_to(self.canonical)
+
+    def test_install_skill_warns_on_directory_symlink(self):
+        rc, _, err = self._run("--only", "clu-phase")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertIn("warning", err)
+        self.assertIn("symlink", err)
+        self.assertTrue((self.canonical / "SKILL.md").exists())
+
+    def test_directory_symlink_warning_exit_code_zero(self):
+        rc, _, _ = self._run("--only", "clu-phase")
+        self.assertEqual(rc, int(ExitCode.OK))
+
+
 class ClaudeMdNoteTests(InstallSkillTestBase):
     """`--add-claude-md-note` / `--no-claude-md-note` flow.
 

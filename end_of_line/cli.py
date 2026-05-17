@@ -1377,6 +1377,12 @@ def cmd_install_skill(args) -> int:
                 f"symlink clu owns). Pass --force to overwrite, or "
                 f"--only <other> to skip {name}. No skills were installed.",
             )
+        if target.parent.is_symlink():
+            print(
+                f"warning: {target.parent} is a symlink → "
+                f"{target.parent.resolve()}; install-skill will write through",
+                file=sys.stderr,
+            )
         plans.append((name, bundled, target, exists))
 
     if args.dry_run:
