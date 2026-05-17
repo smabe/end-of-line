@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from . import state as st
+from .plan_parser import parse_sessions_index
 
 _DEFAULT_VISIBLE: frozenset[str] = frozenset(filter(None, {
     st.EVENT_PHASE_STARTED,
@@ -265,6 +266,28 @@ def project_event_task(
 
 def _slug_for_path(path: Path) -> str:
     return path.stem.removesuffix(".state")
+
+
+def bootstrap_task_list(
+    state_paths: list[Path],
+    cfg_loader: Callable[[Path], Any],
+    sink: TextIO,
+) -> None:
+    """Emit TASK_CREATE task=<slug>[/<phase>] status=pending lines, one per plan+phase."""
+    for state_path in state_paths:
+        if not state_path.exists():
+            continue
+        slug = _slug_for_path(state_path)
+        if not slug:
+            continue
+        cfg = cfg_loader(state_path)
+        plan_path = cfg.project_root / cfg.plan_dir / f"{slug}.md"
+        if not plan_path.exists():
+            raise FileNotFoundError(f"no master plan at {plan_path}")
+        print(f"TASK_CREATE task={slug} status=pending", file=sink, flush=True)
+        for phase in parse_sessions_index(plan_path):
+            print(f"TASK_CREATE task={slug}/{phase.id} status=pending",
+                  file=sink, flush=True)
 
 
 def _snapshot_line(slug: str, data: dict) -> str:
