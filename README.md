@@ -26,12 +26,12 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 git clone https://github.com/smabe/end-of-line.git
 cd end-of-line
 pipx install -e .          # puts `clu` on $PATH via its own venv
-clu install-skill          # copies the bundled skills (/clu-phase + /plan + /brainstorm + /clu-monitor) into ~/.claude/skills/
+clu install-skill          # copies the bundled skills (/clu-phase + /plan + /clu-plan + /brainstorm + /clu-monitor) into ~/.claude/skills/
 ```
 
 On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path that works without `--break-system-packages`.
 
-`clu install-skill` writes four bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
+`clu install-skill` writes five bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
 
 After installing the skills, run `/clu-monitor` once in Claude Code to install a `UserPromptSubmit` hook that surfaces clu's events into Claude's context on your next message — type "ok" after walking back and Claude already knows what halted, completed, or stuck. Idempotent — re-running prints the current install status. State file: `~/.config/clu/monitor.json`.
 
@@ -41,11 +41,12 @@ For the inbound iMessage poller, grant Full Disk Access to the pipx venv python 
 
 ## Working with clu
 
-`clu install-skill` ships four skills:
+`clu install-skill` ships five skills:
 
 - **`/clu-phase`** — the worker skill clu's dispatch invokes for each phase. Required for clu to function; you don't run it directly. The dispatch command in `.orchestrator.json` (see [Configure a project](#configure-a-project)) launches Claude with this skill so each phase honors the worker callback contract.
-- **`/plan`** — authorship skill for writing plans clu can orchestrate. Drops a file at `plans/<slug>.md` in your project with a `## Sessions index` table — that table is what clu's parser reads to know which phases to dispatch.
-- **`/brainstorm`** — parallel-persona pre-planning. Launches 3-6 agents (UX, engineer, QA, …) in parallel to analyze a feature from different angles, then consolidates their outputs into a master plan. Useful before `/plan` when the problem space is fuzzy and you'd rather explore than guess.
+- **`/plan`** — generic project-agnostic authorship skill. Drops a single file at `plans/<slug>.md` with Goal / Files-to-touch / Failure-modes / Done-criteria sections. Use this for solo human-authored plans in any project. Does NOT produce the Sessions-index format clu's supervisor needs — for clu-dispatched plans use `/clu-plan`.
+- **`/clu-plan`** — clu-format authorship: produces a master with `## Sessions index` table PLUS one sub-plan file per phase (the worker brief). Use this whenever you intend to dispatch the plan via `clu queue add`. Refuses with a pointer to `/plan` in non-clu projects.
+- **`/brainstorm`** — parallel-persona pre-planning. Launches 3-6 agents (UX, engineer, QA, …) in parallel to analyze a feature from different angles, then consolidates their outputs into a master plan. Useful before `/plan` or `/clu-plan` when the problem space is fuzzy and you'd rather explore than guess.
 - **`/clu-monitor`** — one-shot setup skill that registers a `UserPromptSubmit` hook in `~/.claude/settings.json`. The hook surfaces clu's events (halts, blockers, plan completions, queue lifecycle, stuck-blocker re-pings, stalled claims) into Claude's context on every user message, so walking back to a session always has Claude already aware of what happened. Run once per machine; idempotent via the marker at `~/.config/clu/monitor.json`.
 
 ### Recommended workflow
