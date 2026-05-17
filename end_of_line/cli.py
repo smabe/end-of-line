@@ -169,6 +169,9 @@ class ExitCode(IntEnum):
     # branch back down. Distinct exit so callers can tell setup failure from
     # an invalid-slug or status-transition refusal.
     WORKTREE_SETUP_FAILED = 10
+    # Worker called `clu queue add` but has already hit the per-phase cap
+    # (default: DEFAULT_MAX_QUEUE_ADDS_PER_PHASE). Operator path is uncapped.
+    QUEUE_CAP = 11
 
 
 def _die(rc: ExitCode | int, msg: str) -> int:
