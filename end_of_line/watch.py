@@ -268,6 +268,11 @@ def _slug_for_path(path: Path) -> str:
     return path.stem.removesuffix(".state")
 
 
+def _state_path_to_project(state_path: Path) -> Path:
+    # <project>/plans/.orchestrator/<slug>.state.json — walk up 3 levels
+    return state_path.parent.parent.parent
+
+
 def bootstrap_task_list(
     state_paths: list[Path],
     cfg_loader: Callable[[Path], Any],
@@ -300,21 +305,28 @@ def stream_loop(
     state_paths: list[Path],
     *,
     json_mode: bool = False,
+    task_list_mode: bool = False,
     verbose: bool = False,
     sink: TextIO | None = None,
     poll_interval: float = 1.0,
     max_ticks: int | None = None,
     _before_first_tick: Callable[[], None] | None = None,
+    cfg_loader: Callable[[Path], Any] | None = None,
 ) -> int:
     """Poll state files, emit projected events. Returns ExitCode.OK (0).
 
     `_before_first_tick` is a test seam called once after the baseline
     snapshot and before the first poll tick — lets tests inject events
     without threading.
+
+    `task_list_mode` routes events through `project_event_task` and
+    emits a TASK_CREATE bootstrap before the snapshot baseline.
+    Mutually exclusive with `json_mode` (CLI gates this).
     """
     if sink is None:
         sink = sys.stdout
     cursors: dict[Path, int] = {}
+    baseline: list[tuple[str, dict]] = []
 
     for path in list(state_paths):
         try:
@@ -322,8 +334,17 @@ def stream_loop(
         except (FileNotFoundError, OSError, json.JSONDecodeError, st.SchemaVersionMismatch):
             continue
         slug = _slug_for_path(path)
-        print(_snapshot_line(slug, data), file=sink, flush=True)
         cursors[path] = len(data.get("events", []))
+        baseline.append((slug, data))
+
+    if task_list_mode:
+        if cfg_loader is None:
+            from .cli import load_project_config  # lazy — cli imports watch, avoid cycle
+            cfg_loader = lambda sp: load_project_config(_state_path_to_project(sp))
+        bootstrap_task_list(list(cursors.keys()), cfg_loader, sink)
+
+    for slug, data in baseline:
+        print(_snapshot_line(slug, data), file=sink, flush=True)
 
     if _before_first_tick is not None:
         _before_first_tick()
@@ -340,7 +361,10 @@ def stream_loop(
                 events = data.get("events", [])
                 slug = _slug_for_path(path)
                 for evt in events[cursors[path]:]:
-                    line_or_none = project_event(evt, slug, verbose=verbose)
+                    if task_list_mode:
+                        line_or_none = project_event_task(evt, slug, verbose=verbose)
+                    else:
+                        line_or_none = project_event(evt, slug, verbose=verbose)
                     if line_or_none is None:
                         continue
                     if json_mode:
