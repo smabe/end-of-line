@@ -67,8 +67,10 @@ This project uses clu for autonomous plan execution.
 - `clu queue list` for pending; `clu list` for fleet status.
 - Run `/clu-monitor` once per machine for background notifications on
   halts and blockers (status: `~/.config/clu/monitor.json`).
-- The `/plan` and `/brainstorm` skills (bundled via `clu install-skill`)
-  are the canonical authoring + pre-planning entry points.
+- The `/plan`, `/clu-plan`, and `/brainstorm` skills (bundled via
+  `clu install-skill`) are the canonical authoring + pre-planning entry
+  points. `/plan` is project-agnostic; `/clu-plan` produces the master +
+  sub-plan files clu's supervisor expects for queue dispatch.
 """
 
 
@@ -1277,7 +1279,7 @@ def _refuse_on_corrupt_queue(queue_path: Path, exc: Exception) -> int:
     return _die(ExitCode.GENERIC, "\n".join(lines))
 
 
-BUNDLED_SKILLS = ("clu-phase", "plan", "brainstorm", "clu-monitor")
+BUNDLED_SKILLS = ("clu-phase", "plan", "brainstorm", "clu-monitor", "clu-plan")
 
 _CLU_NOTE_START = "<!-- clu:start autonomous-loop-pacing -->"
 _CLU_NOTE_END = "<!-- clu:end autonomous-loop-pacing -->"
