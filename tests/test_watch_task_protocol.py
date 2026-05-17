@@ -103,6 +103,49 @@ class PerEventCoverageTest(unittest.TestCase):
         self.assertIn("status=in_progress", out)
 
 
+class FullLineShapeTest(unittest.TestCase):
+    """Freeze the exact TASK_UPDATE line shape for the operationally
+    significant msg paths: BLOCKED, MAX_ATTEMPTS, SYSTEMIC_FAILURE.
+    The msg content is the operator's signal-to-act trigger via
+    PushNotification, per /clu-plan SKILL.md."""
+
+    def test_phase_blocked_full_line_shape(self):
+        out = project_event_task(
+            _evt(st.EVENT_PHASE_BLOCKED, phase="design",
+                 blocker_id="blk-42",
+                 question="Postgres or sqlite?"),
+            "my-plan",
+        )
+        self.assertEqual(
+            out,
+            'TASK_UPDATE task=my-plan/design parent=my-plan '
+            'status=in_progress msg="BLOCKED blk-42 — Postgres or sqlite?"',
+        )
+
+    def test_phase_max_attempts_full_line_shape(self):
+        out = project_event_task(
+            _evt(st.EVENT_PHASE_MAX_ATTEMPTS, phase="build", attempts=3),
+            "my-plan",
+        )
+        self.assertEqual(
+            out,
+            'TASK_UPDATE task=my-plan/build parent=my-plan '
+            'status=in_progress msg="HALTED (max attempts on build)"',
+        )
+
+    def test_systemic_failure_full_line_shape(self):
+        out = project_event_task(
+            _evt(st.EVENT_SYSTEMIC_FAILURE, signature="OOMKilled",
+                 phase="impl", log_path="/tmp/x.log"),
+            "my-plan",
+        )
+        self.assertEqual(
+            out,
+            'TASK_UPDATE task=my-plan/impl parent=my-plan '
+            'status=in_progress msg="SYSTEMIC FAILURE — OOMKilled"',
+        )
+
+
 class FilteredEventsTest(unittest.TestCase):
 
     def test_task_spawned_returns_none(self):

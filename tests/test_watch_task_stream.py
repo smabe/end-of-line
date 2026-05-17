@@ -115,6 +115,31 @@ class TaskListStreamTest(CluTestCase):
         out = sink.getvalue()
         self.assertIn('TASK_UPDATE task=my-plan/foundation parent=my-plan status=completed msg="completed"', out)
 
+    def test_task_list_mode_emits_blocked_msg_through_stream(self) -> None:
+        """End-to-end: BLOCKED event routed through stream_loop produces
+        the full TASK_UPDATE line including blocker_id + question in msg.
+        Regression guard for the operationally significant msg path —
+        #42 receipt."""
+        sink = io.StringIO()
+        stream_loop(
+            [self.state_path],
+            task_list_mode=True,
+            sink=sink, poll_interval=0, max_ticks=1,
+            cfg_loader=_cfg_loader(self.project),
+            _before_first_tick=lambda: _append_event(
+                self.state_path,
+                _evt(st.EVENT_PHASE_BLOCKED, phase="design",
+                     blocker_id="blk-99",
+                     question="Postgres or sqlite?")
+            ),
+        )
+        out = sink.getvalue()
+        self.assertIn(
+            'TASK_UPDATE task=my-plan/design parent=my-plan '
+            'status=in_progress msg="BLOCKED blk-99 — Postgres or sqlite?"',
+            out,
+        )
+
     def test_task_list_mode_skips_default_text_lines(self) -> None:
         sink = io.StringIO()
         stream_loop(
