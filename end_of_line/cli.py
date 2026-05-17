@@ -1742,8 +1742,53 @@ def cmd_queue(args) -> int:
     return _die(ExitCode.GENERIC, f"unknown queue subcommand {args.queue_cmd!r}")
 
 
+@_translate_claim_mismatch
 def _cmd_queue_add_worker(args) -> int:
-    return _die(ExitCode.GENERIC, "worker-mode queue add not yet implemented")
+    slug = args.slugs[0]
+    try:
+        st.validate_slug(slug, kind="plan slug")
+        st.validate_slug(args.source_plan, kind="plan slug")
+        st.validate_slug(args.source_phase, kind="phase id")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    cfg = load_project_config(_resolve_project_arg(args))
+    source_state_path = cfg.state_path(args.source_plan)
+    if not source_state_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no state for plan {args.source_plan!r}")
+
+    plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
+    if not plan_file.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
+
+    token_fp = hashlib.sha256(args.token.encode()).hexdigest()[:8]
+    queue_path = cfg.queue_path()
+
+    # Lock order: state lock outer, queue lock inner.
+    with st.mutate(source_state_path) as state_data:
+        st.assert_claim_match(state_data, args.token, args.source_phase)
+        with queue.mutate(queue_path) as qdata:
+            qdata["queue"].append({
+                "slug": slug,
+                "added_at": st.utcnow(),
+                "added_by": "worker",
+                "position_at_add": "tail",
+                "source_plan": args.source_plan,
+                "source_phase": args.source_phase,
+                "source_token_fp": token_fp,
+                "reason": args.reason,
+            })
+            pos = len(qdata["queue"])
+        event_fields: dict = {
+            "slug": slug,
+            "source_phase": args.source_phase,
+            "token_fp": token_fp,
+        }
+        if args.reason is not None:
+            event_fields["reason"] = args.reason
+        st.append_event(state_data, st.EVENT_QUEUE_APPENDED, **event_fields)
+    print(f"queued at position {pos}")
+    return ExitCode.OK
 
 
 def cmd_queue_add(args) -> int:

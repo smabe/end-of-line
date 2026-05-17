@@ -94,17 +94,17 @@ class WorkerModeGateTestCase(unittest.TestCase):
         self.assertIn("single slug", err)
 
     def test_token_combo_passes_parse_layer(self) -> None:
-        """Valid worker-mode args reach the stub and get the sentinel message."""
+        """Valid worker-mode args reach dispatch (fails on missing source state)."""
         _write_plan(self.project, "foo")
         rc, err = _stderr([
             "queue", "add", "foo",
             "--token", "T",
-            "--plan", "X",
-            "--phase", "Y",
+            "--plan", "source-plan",
+            "--phase", "phase-a",
             "--project", str(self.project),
         ])
-        self.assertEqual(rc, ExitCode.GENERIC)
-        self.assertIn("not yet implemented", err)
+        # No state.json for source-plan → UNKNOWN_TASK, proving we're past argparse.
+        self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
 
     def test_operator_mode_unchanged(self) -> None:
         """Operator add without --token still returns OK (regression guard)."""
