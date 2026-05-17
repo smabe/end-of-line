@@ -183,6 +183,16 @@ A clean end-to-end against a real project.
    adds the plan to `~/.config/clu/registry.json` so the tick driver
    picks it up.
 
+   Three optional knobs let you override the per-plan defaults at init time:
+
+   | Flag | Default | What it controls |
+   |---|---|---|
+   | `--lease-ttl-minutes N` | 30 | How long a worker claim is valid before `lease_expired` fires |
+   | `--stalled-heartbeat-minutes N` | 10 | Threshold for `phase_stalled` (suppressed when no heartbeat received yet — see stall guard below) |
+   | `--max-attempts-per-phase N` | 3 | How many times a phase may retry before the plan halts on `max_attempts_exhausted` |
+
+   All three accept positive integers only; `≤0` is rejected at parse time.
+
 4. **First tick.** Either wait 5 minutes for launchd, or fire it
    manually:
 
@@ -645,6 +655,20 @@ every ~10 seconds; `/tmp/clu-inbound.err` repeats one of:
   Re-grant FDA on **exactly** the path in `ProgramArguments[0]` of the
   plist, then `launchctl bootout` + `bootstrap` to re-pick-up.
 
+### `phase_stalled` not firing for a worker I think is stuck
+
+**Expected behavior since #27:** `phase_stalled` is suppressed when a
+worker has never sent a heartbeat (i.e., `last_heartbeat_at ==
+started_at`). This is the canonical `claude --print` case: stdout is
+buffered until the process exits, so the bundled `/clu-phase` skill
+never calls `clu heartbeat` between tool calls.
+
+For these workers, watch `lease_expires` in `clu status` instead. When
+the lease expires, the supervisor fires `lease_expired`, releases the
+claim, and retries — the plan advances (or halts) exactly as before.
+`phase_stalled` is still emitted for workers that called `clu heartbeat`
+at least once and then went quiet.
+
 ### Worker dispatches but never completes
 
 Symptom: `clu status` shows a live claim that ages past
@@ -802,6 +826,21 @@ The throttle file lives next to the queue at
 `queue.json.repair-attempts`. If you want to retry auto-repair after
 hitting the cap, delete it.
 
+### Extending a live lease
+
+If a worker is still running but has consumed most of its 30-minute
+window (visible in `clu status` as a short `lease_expires`), extend
+from the operator side without touching the worker:
+
+```bash
+clu extend-lease --project P --plan S 20   # add 20 more minutes
+```
+
+The new expiry is `max(now, current_lease_expires) + timedelta(minutes=N)`,
+so it's safe to call on an already-past lease (stalled claim) — it
+extends from now, never backwards. Positive integers only; `≤0`
+rejected. Appends a `lease_extended` event to the audit log.
+
 ### Stuck claim that won't release
 
 If the state file shows a live claim whose worker is definitely dead
@@ -833,6 +872,18 @@ exactly once. Reach for `release-claim` when 30 minutes is too long to
 wait or when the worker's exit pattern wouldn't naturally release
 (e.g., a Popen orphan whose lease is still in the future).
 
+When you release a claim because the scope changed or you pulled the
+worker for a non-worker-fault reason (config fix, mid-flight abort),
+add `--reset-attempts` so the attempt counter doesn't penalize the next
+dispatch:
+
+```bash
+clu release-claim --project P --plan S --reason "scope changed" --reset-attempts
+```
+
+This appends an `attempts_reset` event alongside `claim_force_released`,
+and the next `phase_started` for the same phase starts fresh from zero.
+
 ## Day-to-day commands
 
 | Command | Purpose |
@@ -843,7 +894,8 @@ wait or when the worker's exit pattern wouldn't naturally release
 | `clu pause --project P --plan S [--reason ...]` | Stop dispatching new phases |
 | `clu resume --project P --plan S` | Un-pause |
 | `clu retry --project P --plan S [--phase X]` | Clear max-attempts on a halted phase |
-| `clu release-claim --project P --plan S [--force] [--reason ...]` | Clear a stuck `current_claim` after a dead worker |
+| `clu extend-lease --project P --plan S MINUTES` | Add N minutes to the live claim's lease (operator-only) |
+| `clu release-claim --project P --plan S [--force] [--reason ...] [--reset-attempts]` | Clear a stuck `current_claim`; `--reset-attempts` zeroes the attempt counter so the next dispatch starts fresh |
 | `clu unregister --project P --plan S` | Drop a plan from the host registry (state file untouched) |
 | `clu unregister --all-archived [--dry-run]` | Prune every registry entry whose master plan file no longer exists. Use after archiving plans (e.g. `post-ship`). `--dry-run` previews. |
 | `clu queue add <slug>... [--front] [--project P]` | Append (or `--front` prepend) one or more plan slugs to the project's queue. Multi-arg is atomic — any validation failure rejects the whole batch |

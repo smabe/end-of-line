@@ -91,7 +91,9 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     {"ts": "ISO8601", "type": "plan_completed"},
     {"ts": "ISO8601", "type": "queue_popped",   "slug": "...", "added_at": "...", "added_by": "operator", "position": 1},
     {"ts": "ISO8601", "type": "worktree_missing", "phase": "...", "token": "...", "worktree_path": "..."},
-    {"ts": "ISO8601", "type": "worktree_conflict_warning", "other_slug": "..."}
+    {"ts": "ISO8601", "type": "worktree_conflict_warning", "other_slug": "..."},
+    {"ts": "ISO8601", "type": "lease_extended", "phase": "...", "extended_by_minutes": 15, "new_expires": "...", "operator": true},
+    {"ts": "ISO8601", "type": "attempts_reset", "phase": "...", "operator": true}
   ]
 }
 ```
@@ -111,6 +113,15 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 
 - `worktree_missing` — emitted by `dispatch_for_tick` when `state.worktree` exists but `path` is either gone from disk or no longer a valid git working dir (operator deleted the dir, or ran `git worktree prune`). The plan is paused (status → PAUSED), the just-made claim is released without burning a phase attempt, and a KIND_HALTED iMessage names the path. Recovery: restore the dir or hand-edit `state.worktree`, then `clu resume`.
 - `worktree_conflict_warning` — emitted by `clu tick-all`'s post-loop conflict scan when two active plans in the same project both lack a worktree record. Only the lexicographically-smaller slug in the pair emits the event (`other_slug` names the peer); both plans update their `in_conflict_with` field. Auto-clears when one side transitions out of "active" (claim ends or status leaves RUNNING).
+
+### Operator claim-control event semantics
+
+- `lease_extended` — emitted by `clu extend-lease` (operator-only; no `--token` required). Fields: `phase` (current phase id), `extended_by_minutes` (the argument passed), `new_expires` (ISO-8601 UTC string of the new expiry), `operator: true`. Semantics: `new_expires = max(now, current_lease_expires) + timedelta(minutes=N)`, so extending an already-expired (stalled) claim anchors from `now`, never backwards.
+- `attempts_reset` — emitted alongside `claim_force_released` when `clu release-claim --reset-attempts` is passed. Fields: `phase`, `operator: true`. Resets the attempt floor so the next dispatch starts fresh. `attempts_for_phase()` counts `phase_started` events after the most-recent of EITHER `retry_requested` OR `attempts_reset` — both act as floor markers; most-recent wins.
+
+### Stall-detector guard
+
+`phase_stalled` is suppressed when `last_heartbeat_at == started_at` (the canonical `claude --print` case: stdout buffers until exit, so the bundled `/clu-phase` skill never calls `clu heartbeat` between tool calls and the heartbeat timestamp never advances). The lease-expiry path (`lease_expired`) still fires on genuinely-silent workers via `_detect_lease_expired` — the guard only mutes the chatty per-threshold ping, not the final timeout. Closes #27.
 
 ## Queue schema
 

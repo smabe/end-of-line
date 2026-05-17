@@ -81,6 +81,11 @@ def _detect_stalled(data: dict) -> TickResult | None:
     claim = data.get("current_claim")
     if not claim or claim.get("stalled_notified"):
         return None
+    # `claude --print` workers buffer stdout; bundled /clu-phase doesn't
+    # call `clu heartbeat`. Lease expiry still catches silent workers via
+    # _detect_lease_expired. (#27)
+    if claim.get("last_heartbeat_at") == claim.get("started_at"):
+        return None
     threshold = data["config"].get(
         "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
     )
