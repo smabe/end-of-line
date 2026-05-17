@@ -422,6 +422,22 @@ def main(argv: list[str] | None = None) -> int:
         "--project", type=Path, default=None,
         help="Project root (defaults to CWD).",
     )
+    p_queue_add.add_argument(
+        "--token", default=None,
+        help="Worker claim token (switches to worker mode).",
+    )
+    p_queue_add.add_argument(
+        "--plan", dest="source_plan", default=None,
+        help="Source plan slug (required in worker mode).",
+    )
+    p_queue_add.add_argument(
+        "--phase", dest="source_phase", default=None,
+        help="Source phase id (required in worker mode).",
+    )
+    p_queue_add.add_argument(
+        "--reason", default=None,
+        help="Optional reason text logged on the queue entry.",
+    )
     p_queue_list = queue_subs.add_parser(
         "list", help="Show the pending queue and any recent failures.",
     )
@@ -1726,7 +1742,24 @@ def cmd_queue(args) -> int:
     return _die(ExitCode.GENERIC, f"unknown queue subcommand {args.queue_cmd!r}")
 
 
+def _cmd_queue_add_worker(args) -> int:
+    return _die(ExitCode.GENERIC, "worker-mode queue add not yet implemented")
+
+
 def cmd_queue_add(args) -> int:
+    if args.token is not None:
+        if args.source_plan is None or args.source_phase is None:
+            return _die(ExitCode.GENERIC, "--token requires --plan and --phase")
+        if args.front:
+            return _die(ExitCode.GENERIC,
+                        "--front is operator-only (forbidden with --token)")
+        if len(args.slugs) != 1:
+            return _die(ExitCode.GENERIC, "--token requires a single slug")
+        return _cmd_queue_add_worker(args)
+    if args.source_plan is not None or args.source_phase is not None:
+        return _die(ExitCode.GENERIC,
+                    "--plan/--phase require --token (worker mode only)")
+
     slugs = list(args.slugs)
 
     # Slug regex first — cheapest validation, do it for all.
@@ -1791,6 +1824,10 @@ def cmd_queue_add(args) -> int:
                 "added_at": st.utcnow(),
                 "added_by": "operator",
                 "position_at_add": "front" if args.front else "tail",
+                "source_plan": None,
+                "source_phase": None,
+                "source_token_fp": None,
+                "reason": args.reason,
             }
             for slug in slugs
         ]
