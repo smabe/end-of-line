@@ -16,3 +16,7 @@ dist/
 
 # Claude Code session state (transcripts, snapshots). Not source.
 .claude/
+
+# graphify knowledge graph — regenerated on every commit by the
+# post-commit hook (`graphify hook install`). Not source.
+graphify-out/
