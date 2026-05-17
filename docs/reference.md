@@ -684,20 +684,43 @@ emits one concise line per meaningful transition to stdout.
   `None` if the event is filtered out. Verbose-only events return
   `None` when `verbose=False`. All field truncation (100-char cap) and
   phase-prefix logic lives here.
+- `project_event_task(event, plan_slug, *, verbose=False) -> str | None` —
+  task-list projector. Same inputs as `project_event`; returns a
+  `TASK_CREATE` or `TASK_UPDATE` protocol line for Claude's TaskCreate
+  UI, or `None` for events with no task-list representation. Status
+  mapping: `phase_started` → `in_progress`, `phase_completed` →
+  `completed`, `plan_completed` → `TASK_UPDATE task=<slug>
+  status=completed`, blocked/stalled/paused/resumed → `in_progress`
+  with a descriptive `msg=`. Double-quotes in `msg` are escaped; msg is
+  capped at 100 chars. See `_TASK_STATUS_MAP` for the full mapping.
+- `bootstrap_task_list(state_paths, cfg_loader, sink)` — emit one
+  `TASK_CREATE task=<slug> status=pending` line for each watched plan,
+  followed by one `TASK_CREATE task=<slug>/<phase_id> status=pending`
+  per phase in the master plan's `## Sessions index`. Called by
+  `stream_loop` before the first poll tick when `task_list_mode=True`.
+  `cfg_loader` is a callable `(state_path) -> ProjectConfig` so tests
+  can inject fakes. Missing master plan → `UNKNOWN_TASK` (6). Empty
+  Sessions index → emits only the parent TASK_CREATE.
 - `stream_loop(state_paths, *, json_mode, verbose, sink, poll_interval,
-  max_ticks, _before_first_tick) -> int` — poll loop over a list of
-  state file paths. On startup, emits a `[snapshot]` baseline line per
-  plan (current status + active phase), sets per-path cursors, then
-  polls at `poll_interval` seconds. New events since the last tick are
-  projected through `project_event` and written to `sink`. Returns
-  `ExitCode.OK` (0) on SIGINT. `max_ticks` and `_before_first_tick`
-  are test seams; omit in production.
+  max_ticks, _before_first_tick, task_list_mode) -> int` — poll loop
+  over a list of state file paths. On startup, emits a `[snapshot]`
+  baseline line per plan (current status + active phase), sets
+  per-path cursors, then polls at `poll_interval` seconds. New events
+  since the last tick are projected through `project_event` (text
+  mode), `project_event_task` (task-list mode), or the JSON encoder
+  (json mode) and written to `sink`. Returns `ExitCode.OK` (0) on
+  SIGINT. `max_ticks`, `_before_first_tick`, and `task_list_mode` are
+  test seams / mode switches; `task_list_mode=False` by default.
+  `json_mode` and `task_list_mode` are mutually exclusive.
 - `_DEFAULT_VISIBLE` — `frozenset` of event type strings emitted by
   default (phase starts/completes, blocks, answers, max-attempts,
   stalls, dispatch failures, worktree issues, queue pops, etc.).
 - `_VERBOSE_ONLY` — `frozenset` for noisy bookkeeping events (lease
   expiry, force-releases, heartbeat-based notifications, worktree
   lifecycle). Only emitted with `verbose=True`.
+- `_TASK_STATUS_MAP` — `dict` mapping event type strings to
+  `(status, msg_template)` pairs for the task-list projector. Hard-
+  coded; not configurable.
 
 **Invariants and gotchas**
 
@@ -916,9 +939,12 @@ through this.
   registry-wide with `--all`), then delegates to
   `watch.stream_loop`. Args: `--project PATH`, `--plan SLUG` (mutually
   exclusive with `--all`), `--all`, `--json`, `--verbose`,
-  `--interval FLOAT`. Default mode (no `--plan`/`--all`): every
-  registered plan in the CWD project. Exit codes: `OK` on SIGINT;
-  `UNKNOWN_TASK` if `--plan` isn't registered.
+  `--interval FLOAT`, `--task-list`. Default mode (no
+  `--plan`/`--all`): every registered plan in the CWD project. Exit
+  codes: `OK` on SIGINT; `UNKNOWN_TASK` if `--plan` isn't registered.
+  `--task-list` and `--json` are mutually exclusive; `--task-list` and
+  `--all` are mutually exclusive (v1 limitation — multi-plan task trees
+  deferred).
 - `cmd_logs(args)` — tail the active worker's log
   (`<project>/plans/.orchestrator/logs/<phase>.<token>.log`); falls
   back to the newest log file when no claim is live. `--follow` for

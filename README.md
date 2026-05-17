@@ -36,7 +36,7 @@ On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path tha
 
 After installing the skills, run `/clu-monitor` once in Claude Code to install a `UserPromptSubmit` hook that surfaces clu's events into Claude's context on your next message — type "ok" after walking back and Claude already knows what halted, completed, or stuck. Idempotent — re-running prints the current install status. State file: `~/.config/clu/monitor.json`.
 
-For a live in-session feed, `clu watch` streams state-machine events to stdout as they happen — one line per transition. It's the at-desk sibling to the inbox hook: the inbox catches events from between sessions; `clu watch` covers the current session live. The `/clu-plan` skill arms `Monitor(command="clu watch --project . --plan <slug>", persistent=True)` automatically after `clu queue add`, so Claude-driven sessions get a live feed hands-free.
+For a live in-session feed, `clu watch` streams state-machine events to stdout as they happen — one line per transition. It's the at-desk sibling to the inbox hook: the inbox catches events from between sessions; `clu watch` covers the current session live. The `/clu-plan` skill arms `Monitor(command="clu watch --project . --plan <slug> --task-list", persistent=True)` automatically after `clu queue add`, so Claude-driven sessions get a live feed that populates the native TaskCreate UI hands-free. Add `--task-list` to emit `TASK_CREATE`/`TASK_UPDATE` protocol lines instead of text; omit it for plain-text output (compatible with `--json` for jq pipelines).
 
 For the inbound iMessage poller, grant Full Disk Access to the pipx venv python (System Settings → Privacy & Security → Full Disk Access → add `~/.local/pipx/venvs/end-of-line/bin/python3`). Without it, the poller can't open `chat.db`.
 
@@ -186,7 +186,7 @@ Workers can also chain a follow-up plan into the project queue mid-phase via `cl
 | `clu register` / `clu unregister` | Manual registry edits |
 | `clu status` | Pretty-print one plan's current state, with a `Reason:` line for paused/halted plans |
 | `clu logs [--follow]` | Tail the active worker's log (falls back to the newest log if idle) |
-| `clu watch [--plan SLUG\|--all] [--json] [--verbose] [--interval N]` | Stream state-machine events live — one line per transition. Default: every plan in the CWD project. SIGINT exits cleanly. Pair with Claude's `Monitor` tool for an in-session live feed |
+| `clu watch [--plan SLUG\|--all] [--json] [--verbose] [--interval N] [--task-list]` | Stream state-machine events live — one line per transition. Default: every plan in the CWD project. SIGINT exits cleanly. Pair with Claude's `Monitor` tool for an in-session live feed. `--task-list` emits `TASK_CREATE`/`TASK_UPDATE` protocol lines for Claude's native TaskCreate UI (mutually exclusive with `--json`/`--all`) |
 | `clu tick` | One supervisor decision step on one plan; spawns a worker if a phase is ready. `--dry-tick` skips spawn (debug only) |
 | `clu tick-all` | Tick every registered plan once (host-scoped; what cron runs) |
 | `clu answer <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |

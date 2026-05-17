@@ -714,6 +714,88 @@ the same session without conflict. The inbox surfaces events from
 between sessions (across `/clear` or restart boundaries); `clu watch`
 covers the current session live.
 
+#### Task-list mode (`--task-list`)
+
+`--task-list` switches the output to a deterministic protocol that Claude
+can parse to populate the native TaskCreate / TaskUpdate UI. Each Monitor
+notification is one structured line; Claude calls `TaskCreate` /
+`TaskUpdate` based on the prefix.
+
+```bash
+clu watch --project . --plan my-feature --task-list
+```
+
+**Line shapes**
+
+```
+TASK_CREATE task=<slug>/<phase_id> status=pending
+TASK_CREATE task=<slug> status=pending
+TASK_UPDATE task=<slug>/<phase_id> status=<status> msg="<message>"
+TASK_UPDATE task=<slug> status=completed
+```
+
+- `task=<slug>` (no `/phase`) is the parent task for the plan itself.
+- `msg` is double-quote-delimited; inner `"` and `\` are escaped. Max
+  100 chars (truncated with ellipsis).
+
+**Status mapping**
+
+| Event | Status | msg |
+|---|---|---|
+| `phase_started` | `in_progress` | `"attempt N"` |
+| `phase_completed` | `completed` | `""` |
+| `phase_blocked` | `in_progress` | `"BLOCKED: <question> [<id>]"` |
+| `phase_max_attempts` | `in_progress` | `"HALTED (max attempts)"` |
+| `systemic_failure` | `in_progress` | `"SYSTEMIC FAILURE: <sig>"` |
+| `plan_completed` | `completed` | parent task update |
+| `event_paused` | `in_progress` | `"paused"` |
+| `event_resumed` | `in_progress` | `"resumed"` |
+| `phase_stalled` | `in_progress` | `"stalled"` |
+| other default-visible events | (skipped) | — |
+
+Verbose-only events are still gated by `--verbose`; when both `--verbose`
+and `--task-list` are active they emit as `in_progress` updates with a
+relevant `msg`.
+
+**Bootstrap-then-stream ordering**
+
+On startup, before the snapshot baseline, `--task-list` emits a
+`TASK_CREATE` batch — one parent line for the plan, then one per phase in
+the master plan's `## Sessions index`. Claude should batch all
+`TASK_CREATE` lines arriving within ~200ms as a single `TaskCreate`
+invocation. After bootstrap, event-driven `TASK_UPDATE` lines stream
+as transitions happen.
+
+If the master plan file is missing, the command exits with `UNKNOWN_TASK`
+(6): `no master plan at <path>`. An empty Sessions index is not an error
+— only the parent TASK_CREATE is emitted and TASK_UPDATE lines populate
+phases ad-hoc.
+
+**Exclusions**
+
+- `--task-list` and `--json` are mutually exclusive (`--task-list and
+  --json are mutually exclusive`).
+- `--task-list` and `--all` are mutually exclusive in v1 (`--task-list
+  requires --plan or single-project (mutually exclusive with --all)`).
+  Multi-plan task trees are deferred.
+
+**Claude usage via `/clu-plan`**
+
+The `/clu-plan` skill arms `Monitor` automatically after `clu queue add`:
+
+```python
+Monitor(
+    command="clu watch --project . --plan my-feature --task-list",
+    persistent=True,
+)
+```
+
+When a `TASK_CREATE` batch arrives, call `TaskCreate` with one task per
+line. When a `TASK_UPDATE` arrives, call `TaskUpdate` matching by
+`task_id`. If a `TASK_UPDATE` arrives for an unknown task (race), buffer
+1 s and retry; if still unmatched, create the task on-the-fly with the
+update's status.
+
 ## Troubleshooting
 
 ### Inbound poller crash-loops
