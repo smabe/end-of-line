@@ -367,6 +367,20 @@ def main(argv: list[str] | None = None) -> int:
              "hooks intact) and clear the monitor marker.",
     )
 
+    p_blockers = sub.add_parser(
+        "blockers", help="List or show open blockers on a plan",
+    )
+    blockers_subs = p_blockers.add_subparsers(dest="blockers_cmd")
+    p_blockers_list = blockers_subs.add_parser(
+        "list", help="List open blockers on the plan",
+    )
+    add_common(p_blockers_list)
+    p_blockers_show = blockers_subs.add_parser(
+        "show", help="Show a blocker by id with full context and events",
+    )
+    add_common(p_blockers_show)
+    p_blockers_show.add_argument("blocker_id")
+
     p_queue = sub.add_parser(
         "queue",
         help="Manage the project's plan queue (operator-only in v1).",
@@ -654,6 +668,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(args)
     if args.cmd == "archive":
         return cmd_archive(args)
+    if args.cmd == "blockers":
+        return cmd_blockers(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -2916,6 +2932,78 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
         project_root=str(cfg.project_root.resolve()),
     )
     print(f"Blocked {blocker_id} on phase {args.phase}")
+    return ExitCode.OK
+
+
+def cmd_blockers(args) -> int:
+    if args.blockers_cmd == "list":
+        return cmd_blockers_list(args)
+    if args.blockers_cmd == "show":
+        return cmd_blockers_show(args)
+    print(
+        "usage: clu blockers {list|show} --project PATH --plan SLUG",
+        file=sys.stderr,
+    )
+    return _die(ExitCode.GENERIC, f"unknown blockers subcommand {args.blockers_cmd!r}")
+
+
+def cmd_blockers_list(args) -> int:
+    st.validate_slug(args.plan, kind="plan slug")
+    cfg = load_project_config(args.project.resolve())
+    state_path = cfg.state_path(args.plan)
+    if not state_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
+    data = st.load(state_path, expected_version=st.SCHEMA_VERSION)
+    open_blockers = [b for b in data.get("blockers", []) if b.get("answer") is None]
+    if not open_blockers:
+        print(f"no open blockers on {args.plan}")
+        return ExitCode.OK
+    for b in open_blockers:
+        print(f"{b['id']} [{b['phase_id']}] (asked {b['asked_at']})")
+        print(f"  {b['question']}")
+        if b.get("options"):
+            print("  Options:")
+            for i, opt in enumerate(b["options"]):
+                print(f"    {i}. {opt}")
+        print()
+    return ExitCode.OK
+
+
+def cmd_blockers_show(args) -> int:
+    st.validate_slug(args.plan, kind="plan slug")
+    cfg = load_project_config(args.project.resolve())
+    state_path = cfg.state_path(args.plan)
+    if not state_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
+    data = st.load(state_path, expected_version=st.SCHEMA_VERSION)
+    blocker = next(
+        (b for b in data.get("blockers", []) if b["id"] == args.blocker_id),
+        None,
+    )
+    if blocker is None:
+        return _die(
+            ExitCode.UNKNOWN_TASK,
+            f"no blocker {args.blocker_id} on {args.plan}",
+        )
+    print(f"{blocker['id']} [{blocker['phase_id']}]")
+    print(f"  asked: {blocker['asked_at']}")
+    if blocker.get("answer") is not None:
+        print(f"  answer: {blocker['answer']} (at {blocker['answered_at']})")
+    print(f"  question: {blocker['question']}")
+    if blocker.get("context"):
+        print(f"  context: {blocker['context']}")
+    if blocker.get("options"):
+        print("  Options:")
+        for i, opt in enumerate(blocker["options"]):
+            print(f"    {i}. {opt}")
+    related = [
+        e for e in data.get("events", [])
+        if e.get("blocker_id") == args.blocker_id
+    ]
+    if related:
+        print("  Events:")
+        for e in related:
+            print(f"    {e.get('ts', '?')} {e.get('type', '?')}")
     return ExitCode.OK
 
 

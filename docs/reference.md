@@ -733,7 +733,8 @@ through this.
   `cmd_status`, `cmd_register`, `cmd_unregister`, `cmd_list`,
   `cmd_fleet`, `cmd_pause`, `cmd_resume`, `cmd_retry`, `cmd_answer`,
   `cmd_queue` (+ `cmd_queue_add`, `cmd_queue_list`, `cmd_queue_remove`),
-  `cmd_worktree` (+ `cmd_worktree_gc`).
+  `cmd_worktree` (+ `cmd_worktree_gc`),
+  `cmd_blockers` (+ `cmd_blockers_list`, `cmd_blockers_show`).
 - `cmd_tick_all` is the host-scoped cron entry point: walks
   `registry.entries()` and runs the per-plan tick + dispatch + notify
   dance for each, then makes a second pass over distinct project_roots
@@ -756,6 +757,17 @@ through this.
 - `cmd_queue_remove(args)` — pop the named pending slug + append a
   `history` entry with outcome `removed`. Returns `UNKNOWN_TASK` if the
   slug isn't pending.
+- `cmd_blockers(args)` — dispatch on `args.blockers_cmd` to `list` or
+  `show`. Bare `clu blockers` (no subcommand) prints usage to stderr
+  and exits `GENERIC`.
+- `cmd_blockers_list(args)` — read-only: prints open blockers (where
+  `answer is None`) from `data["blockers"]` with id, phase, asked_at,
+  question, and numbered options. Empty case prints `"no open blockers
+  on <plan>"` to stdout and exits `OK`.
+- `cmd_blockers_show(args)` — read-only: prints full payload for one
+  blocker by id (question, options, context, asked_at, answer if set)
+  plus any related events from `data["events"]` where
+  `event.blocker_id` matches. Not-found → `UNKNOWN_TASK`.
 - `_advance_queue_for_project(project_root)` — the supervisor-side
   queue-pop step (see `architecture.md` § "Queue advancement").
 - `_detect_worktree_conflicts_for_project(project_root)` — the
