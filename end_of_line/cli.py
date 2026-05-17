@@ -56,6 +56,23 @@ def _maybe_print_monitor_tip() -> None:
     print(_MONITOR_TIP, end="")
 
 
+def _maybe_print_watch_tip(
+    *, scope: str, slug: str | None = None, quiet: bool = False,
+) -> None:
+    if quiet:
+        return
+    if scope == "plan" and slug:
+        print(
+            f"\nTip: `clu watch --project . --plan {slug}` "
+            f"streams state events (use with Claude's Monitor tool)."
+        )
+    elif scope == "all":
+        print(
+            "\nTip: `clu watch --project . --all` streams "
+            "every queued plan (use with Claude's Monitor tool)."
+        )
+
+
 _CLU_SECTION_RE = re.compile(r"^##\s+clu\s*$", re.IGNORECASE | re.MULTILINE)
 
 _CLU_SECTION_TEMPLATE = """
@@ -275,6 +292,10 @@ def main(argv: list[str] | None = None) -> int:
         dest="max_attempts_per_phase",
         help="Override max phase attempts. Default: 3.",
     )
+    p_init.add_argument(
+        "--quiet", action="store_true",
+        help="Suppress post-init tips (useful for scripts).",
+    )
 
     p_register = sub.add_parser(
         "register",
@@ -437,6 +458,10 @@ def main(argv: list[str] | None = None) -> int:
     p_queue_add.add_argument(
         "--reason", default=None,
         help="Optional reason text logged on the queue entry.",
+    )
+    p_queue_add.add_argument(
+        "--quiet", action="store_true",
+        help="Suppress post-add tips (useful for scripts).",
     )
     p_queue_list = queue_subs.add_parser(
         "list", help="Show the pending queue and any recent failures.",
@@ -1173,6 +1198,9 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     )
     _maybe_handle_claude_md_injection(cfg, args)
     _maybe_print_monitor_tip()
+    _maybe_print_watch_tip(
+        scope="plan", slug=args.plan, quiet=getattr(args, "quiet", False),
+    )
     return 0
 
 
@@ -1967,6 +1995,7 @@ def cmd_queue_add(args) -> int:
     if len(slugs) > 1:
         print(f"queued {len(slugs)} plans")
     _maybe_print_monitor_tip()
+    _maybe_print_watch_tip(scope="all", quiet=getattr(args, "quiet", False))
     return ExitCode.OK
 
 
