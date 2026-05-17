@@ -24,6 +24,13 @@ _NOTIFIER_REGISTRY: dict[str, type] = {
     "discord": DiscordNotifier,
 }
 
+_GLOBAL_SUPPRESS: bool = False
+
+
+def set_global_suppress(v: bool) -> None:
+    global _GLOBAL_SUPPRESS
+    _GLOBAL_SUPPRESS = v
+
 KIND_BLOCKER = "blocker"
 KIND_STALLED = "stalled"
 KIND_COMPLETED = "completed"
@@ -104,6 +111,8 @@ def notify(
         except OSError as exc:
             # Never let a broken inbox dir block the iMessage path.
             print(f"notify: inbox write failed ({kind}): {exc}", file=sys.stderr)
+    if _GLOBAL_SUPPRESS:
+        return False
     # Quiet hours are user-facing wall-clock semantics — local time is the
     # whole point. Don't switch this to UTC to match state.py.
     now = now or _dt.datetime.now()

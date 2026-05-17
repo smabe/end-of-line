@@ -470,9 +470,124 @@ lose its worktree.
 entry whose state file still has a `worktree` record, naming the
 orphan path. Recovery: `clu worktree gc --include-archived --confirm`.
 
-## iMessage notification model
+## Setup: iMessage (macOS only)
 
-Outbound — fired during supervisor ticks via `osascript`. Kinds:
+Configure during `clu init` (interactive prompt on macOS) or directly in `.orchestrator.json`:
+
+```json
+"notify": {
+  "channels": [
+    {"kind": "imessage", "to": "you@example.com", "enabled": true}
+  ],
+  "quiet_hours": ["22:00", "08:00"]
+}
+```
+
+`to` must be your iMessage self-chat handle (your own number or Apple ID email). clu
+sends from your Mac to yourself; you answer from your phone.
+
+Grant Full Disk Access to the pipx venv python so the inbound poller can open `chat.db`
+(System Settings → Privacy & Security → Full Disk Access → add
+`~/.local/pipx/venvs/end-of-line/bin/python3`).
+
+Install the inbound LaunchAgent:
+
+```bash
+cp examples/clu.inbound.plist ~/Library/LaunchAgents/com.clu.inbound.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.inbound.plist
+```
+
+Verify with `clu notify-test` after setup.
+
+## Setup: Discord (any OS)
+
+Discord works on macOS, Linux, and Windows — the only backend that doesn't require
+platform-specific privileges.
+
+**One-time Discord app setup:**
+
+1. Go to `https://discord.com/developers/applications` → "New Application" → name it
+   (e.g. "clu").
+2. Under "Bot": enable the bot, copy the **Bot Token**.
+3. Enable **Message Content Intent** under "Privileged Gateway Intents".
+4. Under "OAuth2 → URL Generator": scope = `bot`, permissions = "Send Messages" +
+   "Read Messages/View Channels". Copy the generated URL and open it to invite the bot
+   to a personal server (create one if needed).
+5. In your server settings → "Privacy Settings": enable "Allow direct messages from
+   server members."
+6. Get your **user ID**: Settings → Advanced → enable Developer Mode, then right-click
+   your own username → "Copy User ID."
+
+Add to `.orchestrator.json`:
+
+```json
+"notify": {
+  "channels": [
+    {"kind": "discord", "bot_token": "Bot.Token.Here", "user_id": "123456789"}
+  ],
+  "quiet_hours": ["22:00", "08:00"]
+}
+```
+
+Install the inbound poller:
+
+```bash
+# macOS
+cp examples/clu.discord_inbound.plist ~/Library/LaunchAgents/com.clu.discord_inbound.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.discord_inbound.plist
+
+# Linux (systemd)
+cp examples/clu-discord-inbound.service ~/.config/systemd/user/
+systemctl --user enable --now clu-discord-inbound
+```
+
+Verify with `clu notify-test --channel discord`.
+
+## Setup: clu-watch only (zero external transport)
+
+Skip outbound transport entirely — clu's inbox hook surfaces events into the active
+Claude Code session on your next message. No iMessage handle, no bot token needed.
+
+1. `channels: []` (empty or omit `notify.channels`) in `.orchestrator.json`.
+2. Run `/clu-monitor` once in Claude Code to install the inbox hook.
+
+All notification events still appear in the Claude Code session when you're at your
+desk. You won't get phone pings when you're AFK — that's the tradeoff.
+
+## Suppressing notifications
+
+Four levers, from narrowest to broadest:
+
+| Lever | Scope | Preserves credentials |
+|---|---|---|
+| Per-kind `kinds` filter | Channel only fires for listed notification kinds | Yes |
+| `"enabled": false` on a channel | Channel silenced, config kept | Yes |
+| `clu --no-notify <cmd>` | Single CLI invocation | N/A |
+| `channels: []` | Permanent silence; inbox writes still happen | Yes |
+
+**Per-kind filter** — fire only on halts and blockers:
+```json
+{"kind": "discord", "bot_token": "...", "user_id": "...", "kinds": ["halted", "blocker"]}
+```
+
+**Disable without deleting** — useful when a bot token is temporarily revoked:
+```json
+{"kind": "discord", "bot_token": "...", "user_id": "...", "enabled": false}
+```
+
+**Single-invocation suppress** — debug or dry-run a command without real DMs:
+```bash
+clu --no-notify tick --project . --plan my-feature
+```
+
+**Permanent silence** — inbox hook still works; just no outbound sends:
+```json
+"notify": {"channels": []}
+```
+
+## Notification model
+
+Outbound — fired during supervisor ticks. Kinds:
 
 | Kind | When | Quiet hours |
 |---|---|---|
@@ -502,15 +617,10 @@ Inbound reply grammar — locked at `^\s*(<plan-slug>\s+)?[0-9]\s*$`:
 - `<plan-slug> <digit>` — picks the option for the named plan's first
   open blocker. Always honored when the slug matches.
 
-The `notify.imessage.to` handle should be **your iMessage self-chat
-handle** (your own number or Apple ID email). clu sends from your Mac to
-yourself; you answer from your phone. Without an active iMessage
-conversation to that handle, `osascript` will fail silently.
-
 ## Background monitoring
 
-clu sends iMessages on halts, blockers, plan completions, and queue
-events when `notify.imessage_to` is configured. That covers the
+clu sends notifications on halts, blockers, plan completions, and queue
+events through configured channels. That covers the
 "operator on their phone, away from the keyboard" case.
 
 The remaining gap is in-session signaling: when you walk back to an

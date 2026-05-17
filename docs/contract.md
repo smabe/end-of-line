@@ -267,9 +267,45 @@ Mark-and-sweep dedup: the hook moves a surfaced event into `processed/` after em
 
 Helpers in `end_of_line/inbox.py`: `inbox_root`, `write_event`, `read_unprocessed`, `mark_processed`, `list_for_project`. Writes use atomic `tmp + rename` (the dirs are short-lived per event — no flock). Corrupt files are silently skipped on read so a malformed sibling can't kill the hook.
 
+## Notify config schema
+
+`notify` in `.orchestrator.json`:
+
+```jsonc
+"notify": {
+  "channels": [
+    // iMessage (macOS only)
+    {"kind": "imessage", "to": "+1...", "kinds": null, "enabled": true},
+    // Discord (any OS)
+    {"kind": "discord", "bot_token": "...", "user_id": "...", "kinds": null, "enabled": true}
+  ],
+  "quiet_hours": ["22:00", "08:00"],  // local wall-clock, wraps overnight; null = never quiet
+  "inbound_auto_tick": true           // trigger a tick on inbound reply
+}
+```
+
+**ChannelSpec fields:**
+
+| Field | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `kind` | string | yes | — | `"imessage"` or `"discord"` |
+| `kinds` | string[] \| null | no | null | Notification kinds to send (null = all) |
+| `enabled` | bool | no | true | `false` silences the channel without deleting it |
+| `to` | string | if `kind=imessage` | — | iMessage self-chat handle |
+| `bot_token` | string | if `kind=discord` | — | Discord bot token |
+| `user_id` | string | if `kind=discord` | — | Discord user ID to DM |
+
+**Auto-migration:** if `notify.imessage.to` is present and `notify.channels` is absent,
+clu synthesizes `channels: [{kind: "imessage", to: <value>}]` at config load. No file
+is rewritten — existing flat-shape configs continue to work transparently.
+
+**Default:** `channels: []` (empty or omitted) = clu-watch-only mode. Inbox hook still
+works; no outbound sends. Not an error — operators who only use the in-session surface
+opt in to this mode intentionally.
+
 ## Notification kinds
 
-The outbound iMessage adapter (`notify.py`) classifies every send by kind. Quiet hours (default 22:00–08:00 local) gate every kind not in `notify.QUIET_HOURS_BYPASS_KINDS`.
+The outbound router (`notify.py`) classifies every send by kind. Quiet hours (default 22:00–08:00 local) gate every kind not in `notify.QUIET_HOURS_BYPASS_KINDS`.
 
 | Kind | Trigger | Quiet hours |
 |---|---|---|

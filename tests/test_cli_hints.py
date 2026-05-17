@@ -75,6 +75,7 @@ class _BaseHintsCase(unittest.TestCase):
     def _init(self, *extra: str) -> tuple[int, str]:
         return self._run(
             "init", "--project", str(self.project), "--plan", "test-plan",
+            "--no-notify-prompt",  # tests focus on CLAUDE.md / monitor tips, not notify
             *extra,
         )
 
