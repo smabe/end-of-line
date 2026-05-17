@@ -684,6 +684,38 @@ def _resolve_ref(project_root: Path, ref: str) -> str | None:
     return result.stdout.strip()
 
 
+def _remove_worktree_and_branch(
+    project_root: Path,
+    path: str,
+    branch: str,
+    *,
+    delete_branch: bool = True,
+    timeout: int | None = None,
+) -> tuple[tuple[bool, str], tuple[bool, str]]:
+    """Run `git worktree remove --force <path>` and optionally drop the
+    branch with `git branch -D <branch>`.
+
+    Best-effort: never raises on git failure. Returns
+    `((worktree_ok, worktree_stderr), (branch_ok, branch_stderr))` so
+    callers decide whether to log, event, or ignore the outcome. When
+    `delete_branch=False`, the branch tuple is `(True, "")` so consumers
+    don't need to special-case the skip.
+    """
+    wt = subprocess.run(
+        ["git", "-C", str(project_root), "worktree", "remove",
+         "--force", path],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    wt_pair = (wt.returncode == 0, wt.stderr.strip())
+    if not delete_branch:
+        return wt_pair, (True, "")
+    br = subprocess.run(
+        ["git", "-C", str(project_root), "branch", "-D", branch],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return wt_pair, (br.returncode == 0, br.stderr.strip())
+
+
 def _rollback_worktree(project_root: Path, record: dict) -> None:
     """Tear down a worktree + branch created by `_setup_worktree`.
 
@@ -691,15 +723,7 @@ def _rollback_worktree(project_root: Path, record: dict) -> None:
     (state save failure) surfaces cleanly. Operator can mop up via
     `clu worktree gc` or `git worktree prune` if a step fails.
     """
-    subprocess.run(
-        ["git", "-C", str(project_root), "worktree", "remove",
-         "--force", record["path"]],
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(project_root), "branch", "-D", record["branch"]],
-        capture_output=True,
-    )
+    _remove_worktree_and_branch(project_root, record["path"], record["branch"])
 
 
 def _setup_worktree(args, cfg: ProjectConfig) -> dict | int:
@@ -1980,30 +2004,21 @@ def cmd_worktree_gc(args) -> int:
                 print(f"  skipped: {slug}: status changed since list")
                 continue
 
-        remove_result = subprocess.run(
-            ["git", "-C", str(cfg.project_root), "worktree", "remove",
-             "--force", wt["path"]],
-            capture_output=True, text=True, timeout=30,
+        (wt_ok, wt_err), (br_ok, br_err) = _remove_worktree_and_branch(
+            cfg.project_root, wt["path"], wt["branch"],
+            delete_branch=args.delete_branch,
+            timeout=30,
         )
-        if remove_result.returncode != 0:
-            print(
-                f"  failed: {slug}: {remove_result.stderr.strip()}",
-                file=sys.stderr,
-            )
+        if not wt_ok:
+            print(f"  failed: {slug}: {wt_err}", file=sys.stderr)
             continue
         print(f"  removed: {slug}  →  {wt['path']}")
         removed += 1
 
         if args.delete_branch:
-            branch_result = subprocess.run(
-                ["git", "-C", str(cfg.project_root), "branch", "-D",
-                 wt["branch"]],
-                capture_output=True, text=True, timeout=30,
-            )
-            if branch_result.returncode != 0:
+            if not br_ok:
                 print(
-                    f"  branch removal failed for {slug}: "
-                    f"{branch_result.stderr.strip()}",
+                    f"  branch removal failed for {slug}: {br_err}",
                     file=sys.stderr,
                 )
             else:
