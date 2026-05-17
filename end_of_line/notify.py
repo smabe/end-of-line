@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from .notify_discord import DiscordNotifier
 from .notify_imessage import IMessageNotifier
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
 _NOTIFIER_REGISTRY: dict[str, type] = {
     "imessage": IMessageNotifier,
+    "discord": DiscordNotifier,
 }
 
 KIND_BLOCKER = "blocker"

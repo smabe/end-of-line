@@ -249,14 +249,14 @@ class ChannelDispatchTestCase(unittest.TestCase):
 
     def test_dispatcher_skips_unregistered_kind_with_warning(self) -> None:
         from end_of_line.config import ChannelSpec, NotifySpec
-        spec = NotifySpec(channels=(ChannelSpec(kind="discord", params={"bot_token": "x", "user_id": "y"}),))
+        spec = NotifySpec(channels=(ChannelSpec(kind="slack", params={}),))
         import io
         buf = io.StringIO()
         with mock.patch("sys.stderr", buf):
             result = notify.notify(spec, notify.KIND_BLOCKER, "body",
                                    now=_dt.datetime(2026, 5, 11, 12, 0))
         self.assertFalse(result)
-        self.assertIn("discord", buf.getvalue())
+        self.assertIn("slack", buf.getvalue())
 
     def test_quiet_hours_gate_applied_before_channel_loop(self) -> None:
         from end_of_line.config import NotifySpec
