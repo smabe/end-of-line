@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 
 from . import state as st
+from ._xdg_guard import assert_xdg_safe
 
 SCHEMA_VERSION = 2
 
@@ -33,7 +34,9 @@ SCHEMA_VERSION = 2
 def marker_path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME")
     root = Path(base) if base else Path.home() / ".config"
-    return root / "clu" / "monitor.json"
+    path = root / "clu" / "monitor.json"
+    assert_xdg_safe(path)
+    return path
 
 
 def _empty() -> dict:

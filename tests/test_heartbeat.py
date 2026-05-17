@@ -4,7 +4,6 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,7 +11,7 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import isolate_registry
+from tests import CluTestCase
 
 
 PLAN_BODY = """\
@@ -92,13 +91,12 @@ class HeartbeatStateTestCase(unittest.TestCase):
         self.assertTrue(st.is_claim_stalled(claim, threshold_minutes=10, now=now))
 
 
-class HeartbeatCliTestCase(unittest.TestCase):
+class HeartbeatCliTestCase(CluTestCase):
     """End-to-end CLI invocation."""
 
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.project = Path(self._tmp.name)
-        isolate_registry(self, self.project)
+        super().setUp()
+        self.project = self.tmp_path
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         subprocess.run(["git", "init", "-q"], cwd=self.project, check=True)
@@ -108,9 +106,6 @@ class HeartbeatCliTestCase(unittest.TestCase):
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
         with st.mutate(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
 
     def test_heartbeat_cli_succeeds_with_matching_token(self) -> None:
         rc = main([
@@ -131,16 +126,12 @@ class HeartbeatCliTestCase(unittest.TestCase):
         self.assertEqual(rc, 4)
 
 
-class StalledSupervisorTestCase(unittest.TestCase):
+class StalledSupervisorTestCase(CluTestCase):
     """Supervisor surfaces stalled claims as a first-class action."""
 
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.project = Path(self._tmp.name)
-        # Redirect XDG_CONFIG_HOME so the supervisor's inbox.write_event
-        # calls (stalled-claim emissions) land in the tmp dir, not the
-        # operator's real ~/.config/clu/inbox/.
-        isolate_registry(self, self.project)
+        super().setUp()
+        self.project = self.tmp_path
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         self.cfg = ProjectConfig(
@@ -154,9 +145,6 @@ class StalledSupervisorTestCase(unittest.TestCase):
         self.state_path.parent.mkdir(parents=True)
         with st.locked(self.state_path):
             st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
 
     def _read(self) -> dict:
         return json.loads(self.state_path.read_text())

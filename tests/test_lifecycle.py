@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import io
 import json
-import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import isolate_registry
+from tests import CluTestCase
 
 
 PLAN_BODY = """\
@@ -25,11 +24,10 @@ PLAN_BODY = """\
 """
 
 
-class LifecycleTestCase(unittest.TestCase):
+class LifecycleTestCase(CluTestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.project = Path(self._tmp.name)
-        isolate_registry(self, self.project)
+        super().setUp()
+        self.project = self.tmp_path
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         self.state_path = (
@@ -37,9 +35,6 @@ class LifecycleTestCase(unittest.TestCase):
         )
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
 
     def _read(self) -> dict:
         return json.loads(self.state_path.read_text())

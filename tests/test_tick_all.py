@@ -8,14 +8,13 @@ tick-all does the same in Python so per-plan exceptions can be caught
 from __future__ import annotations
 
 import io
-import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import isolate_registry
+from tests import CluTestCase
 
 
 PLAN_BODY = """\
@@ -29,17 +28,12 @@ PLAN_BODY = """\
 """
 
 
-class TickAllTestCase(unittest.TestCase):
+class TickAllTestCase(CluTestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-        isolate_registry(self, self.tmp)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
+        super().setUp()
 
     def _make_project(self, name: str, plan: str = "test-plan") -> Path:
-        project = self.tmp / name
+        project = self.tmp_path / name
         (project / "plans").mkdir(parents=True)
         (project / "plans" / f"{plan}.md").write_text(PLAN_BODY)
         rc = main(["init", "--project", str(project), "--plan", plan])

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,7 +11,7 @@ from end_of_line import state as st
 from end_of_line.config import ProjectConfig, DispatchSpec, NotifySpec
 from end_of_line.supervisor import tick
 
-from tests import isolate_registry
+from tests import CluTestCase
 
 
 PLAN_BODY = """\
@@ -27,14 +26,10 @@ PLAN_BODY = """\
 """
 
 
-class SupervisorTestCase(unittest.TestCase):
+class SupervisorTestCase(CluTestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.project = Path(self._tmp.name)
-        # Redirect XDG_CONFIG_HOME so the supervisor's inbox.write_event
-        # calls (stuck-blocker / stalled-claim emissions) land in the tmp
-        # dir, not the operator's real ~/.config/clu/inbox/.
-        isolate_registry(self, self.project)
+        super().setUp()
+        self.project = self.tmp_path
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         self.cfg = ProjectConfig(
@@ -47,9 +42,6 @@ class SupervisorTestCase(unittest.TestCase):
         data = st.empty_state("test-plan", "plans")
         with st.locked(self.state_path):
             st.save_atomic(self.state_path, data)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
 
     def _read(self) -> dict:
         return json.loads(self.state_path.read_text())

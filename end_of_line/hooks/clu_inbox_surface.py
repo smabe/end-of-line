@@ -90,6 +90,9 @@ def _build_context(events: Iterable[dict]) -> str:
 
 
 def main() -> int:
+    # Guard against shell-env inheritance of CLU_TEST_MODE — a hook invoked
+    # from a test-mode shell must not false-trip the XDG guard.
+    os.environ.pop("CLU_TEST_MODE", None)
     try:
         # Consume stdin so Claude Code doesn't see a broken-pipe on its
         # write side. We don't actually need the payload.
