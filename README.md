@@ -26,7 +26,7 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 git clone https://github.com/smabe/end-of-line.git
 cd end-of-line
 pipx install -e .          # puts `clu` on $PATH via its own venv
-clu install-skill          # copies the bundled skills (/clu-phase + /plan + /clu-plan + /brainstorm + /clu-monitor) into ~/.claude/skills/
+clu install-skill          # copies the 5 bundled skills (/clu-phase + /plan + /clu-plan + /brainstorm + /clu-monitor) into ~/.claude/skills/
 ```
 
 On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path that works without `--break-system-packages`.
@@ -51,25 +51,25 @@ For the inbound iMessage poller, grant Full Disk Access to the pipx venv python 
 
 ### Recommended workflow
 
-For non-trivial work, the combo is **brainstorm → grill-me → plan → clu**:
+For non-trivial work, the combo is **brainstorm → grill-me → clu-plan → clu**:
 
 1. **`/brainstorm`** — parallel personas explore the design space and consolidate into a master plan.
 2. **`/grill-me`** by Matt Pocock ([source](https://github.com/mattpocock/skills), installed separately) — interviews you relentlessly until each decision branch is resolved.
-3. **`/plan`** — commit the agreed approach to `plans/<slug>.md` with the `## Sessions index` table clu's parser expects.
+3. **`/clu-plan`** — commit the agreed approach to `plans/<slug>.md` PLUS one sub-plan file per phase, in the `## Sessions index` shape clu's parser expects. (Use `/plan` instead for solo human-driven work in a project that won't be clu-dispatched.)
 4. **`clu init`** — hand it to clu, which dispatches each phase as a cold-context worker subprocess.
 
 Each skill is independent — use one, all four, or none. The combo just makes ambitious work less likely to drift mid-flight. `/grill-me` is the only piece clu doesn't bundle; install it yourself when you want it.
 
 ### Minimum plan shape clu can orchestrate
 
-If you skip the bundled `/plan` and hand-roll a plan, clu's parser needs the master file (`plans/<slug>.md`) to contain a `## Sessions index` table:
+If you skip the bundled `/clu-plan` and hand-roll a plan, clu's parser needs the master file (`plans/<slug>.md`) to contain a `## Sessions index` table:
 
 | Session | Plan file | Scope | Effort |
 |---|---|---|---|
 | phase-a | `<slug>-phase-a.md` | one-line scope | time est |
 | phase-b | `<slug>-phase-b.md` | one-line scope | time est |
 
-Each row points to a sub-plan file in the same `plans/` directory. The bundled `/plan` produces this shape by default.
+Each row points to a sub-plan file in the same `plans/` directory. The bundled `/clu-plan` produces this shape (master + one sub-plan per phase) by default. `/plan` does NOT — it writes a single file with no Sessions-index table and is the right choice only for solo human-driven projects you don't intend to dispatch through clu.
 
 ## Configure a project
 
@@ -98,7 +98,7 @@ The dispatch command above launches Claude with the `/clu-phase` skill. Run `clu
 
 ## Bootstrap a plan
 
-Write a master plan with a `## Sessions index` table (this is the `/plan` skill's convention):
+Write a master plan with a `## Sessions index` table (this is the `/clu-plan` skill's convention):
 
 ```markdown
 # my-feature
@@ -177,13 +177,18 @@ The bundled skill also encodes **9 universal quality mandates** — TDD before l
 | `clu pause [--reason ...]` | Halt dispatching new phases |
 | `clu resume` | Un-pause |
 | `clu retry [--phase X]` | Clear max-attempts on a halted phase and resume |
-| `clu release-claim [--force] [--reason ...]` | Escape hatch when a worker dies holding the lease |
+| `clu release-claim [--force] [--reason ...] [--reset-attempts]` | Escape hatch when a worker dies holding the lease. `--reset-attempts` zeroes the attempt counter so the next dispatch starts fresh (use when the abort is operator-fault, not worker-fault) |
+| `clu extend-lease --project P --plan S MINUTES` | Add N minutes to the live claim's lease without touching the worker. Anchors from `max(now, current_expires)` so it's safe to call on an already-expired claim |
 | `clu task-done <task_id>` | Mark a spawned follow-up done |
-| `clu install-skill [--force] [--dry-run] [--only <name>]` | (Re-)install the bundled skills (`/clu-phase` + `/plan` + `/brainstorm` + `/clu-monitor`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it) |
+| `clu blockers list \| show` | Read-only inspection: `list` shows every open blocker for a plan (id, phase, question, numbered options); `show <id>` prints the full payload plus related events |
+| `clu archive --project P --plan S` | Post-ship cleanup: removes the clu-managed worktree + branch (when reachable from origin) AND `git mv plans/<slug>.md plans/shipped/<slug>.md`. Idempotent on the file-move step |
+| `clu install-skill [--force] [--dry-run] [--only <name>] [--list]` | (Re-)install the 5 bundled skills (`/clu-phase` + `/plan` + `/clu-plan` + `/brainstorm` + `/clu-monitor`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it); `--list` enumerates bundled skills and exits |
 | `clu install-hook` / `clu uninstall-hook` | Register or remove the `UserPromptSubmit` hook in `~/.claude/settings.json` that surfaces clu's inbox events into the active Claude session. `/clu-monitor` is the user-facing wrapper |
 | `clu doctor --project P` | Smoke-test what a worker subprocess sees (PATH + resolved binary locations). No state writes |
 | `clu unregister --all-archived [--dry-run]` | Batch-prune registry entries whose master plan file no longer exists. `--dry-run` previews without mutating |
 | `clu worktree gc [--project P] [--confirm] [--delete-branch] [--include-archived]` | List or remove worktrees of done/halted plans. Default is dry-run; `--confirm` runs `git worktree remove --force` (and `--delete-branch` adds `git branch -D`) |
+| `clu worktree attach --project P --plan S [PATH] [--branch B] [--base-ref REF]` | Retrofit a worktree onto a plan that was init'd without one |
+| `clu worktree reattach --project P --plan S` | Recovery: re-create the worktree dir from the path + branch already recorded in `state.worktree` (use after an external `git worktree remove`) |
 
 ## State schema
 
@@ -206,7 +211,7 @@ Sketch — see `docs/contract.md` for the full schema:
 
 ```
 end_of_line/          # the package (cli, supervisor, state, notify, dispatch, …)
-end_of_line/skills/   # bundled skills (/clu-phase worker, /plan authorship, /brainstorm pre-planning, /clu-monitor in-session signaling) installed via `clu install-skill`
+end_of_line/skills/   # bundled skills (/clu-phase worker, /plan + /clu-plan authorship, /brainstorm pre-planning, /clu-monitor in-session signaling) installed via `clu install-skill`
 end_of_line/hooks/    # bundled UserPromptSubmit hook script that surfaces inbox events into Claude's context
 tests/                # unittest suite
 plans/                # active plan files (dogfooded — this repo uses clu on itself)

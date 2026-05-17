@@ -33,7 +33,7 @@ the path that works without `--break-system-packages`.
 Once `clu` is on `$PATH`, install the bundled skills:
 
 ```bash
-clu install-skill                       # interactive — installs three
+clu install-skill                       # interactive — installs five
                                         # skills + prompts about CLAUDE.md
 clu install-skill --add-claude-md-note  # non-interactive, accept the note
 clu install-skill --no-claude-md-note   # non-interactive, skip the note
@@ -406,17 +406,27 @@ missing dir and pauses the plan with `EVENT_WORKTREE_MISSING`. The
 iMessage names the orphan path. Recovery:
 
 ```bash
-# Option 1: restore the worktree
+# Option 1: restore the original worktree on disk
 git worktree add /path/from/iMessage clu/<slug>
 clu resume --plan <slug>
 
-# Option 2: drop the worktree association (revert to main-repo runs)
-# Edit state.json directly: remove the "worktree" key.
+# Option 2: re-create the worktree using the state's recorded path/branch
+clu worktree reattach --project P --plan <slug>
+clu resume --plan <slug>
+
+# Option 3: retrofit a worktree onto a plan that wasn't init'd with one
+clu worktree attach --project P --plan <slug> [PATH] [--branch B] [--base-ref REF]
 clu resume --plan <slug>
 ```
 
-There is no `clu worktree reattach` subcommand in v1 — operator
-edits state JSON by hand for rare recovery.
+`reattach` re-runs `git worktree add` against the path + branch already
+persisted in `state.worktree`; use it when the dir was deleted but
+state still points at the right destination. `attach` is for the
+inverse case — a plan that was init'd without `--worktree` and now
+needs one (e.g. another plan is starting in the same project and you
+want to avoid the conflict warning); both flow through the same
+`_setup_worktree` helper as `clu init --worktree`, so the same
+refusal/rollback rules apply.
 
 ### Archiving a plan
 
@@ -532,7 +542,7 @@ Walk back to Claude after a notification, type literally anything
 
 ```bash
 $ clu install-skill --force      # one-time; installs /clu-phase + /plan
-                                 # + /brainstorm + /clu-monitor
+                                 # + /clu-plan + /brainstorm + /clu-monitor
 $ # then, in a Claude Code session opened in any project:
 $ /clu-monitor
 Installed UserPromptSubmit hook → /Users/you/.../end_of_line/hooks/clu_inbox_surface.py
@@ -653,8 +663,10 @@ This project uses clu for autonomous plan execution.
 - `clu queue list` for pending; `clu list` for fleet status.
 - Run `/clu-monitor` once per machine for background notifications on
   halts and blockers (status: `~/.config/clu/monitor.json`).
-- The `/plan` and `/brainstorm` skills (bundled via `clu install-skill`)
-  are the canonical authoring + pre-planning entry points.
+- The `/plan`, `/clu-plan`, and `/brainstorm` skills (bundled via
+  `clu install-skill`) are the canonical authoring + pre-planning entry
+  points. `/clu-plan` produces the clu-format master + sub-plan files;
+  `/plan` is the generic single-file fallback.
 ```
 
 ## Troubleshooting
@@ -694,11 +706,13 @@ Check, in order:
 
 1. The per-worker log at `<project>/plans/.orchestrator/logs/<phase>.<token>.log`.
    The worker writes stderr there. Crash on import = look for traceback.
-2. Whether the `/clu-phase` skill is installed for the worker. Copy
-   `examples/clu-phase-skill.md` to `~/.claude/skills/clu-phase/SKILL.md`.
-   Without it, the worker has no contract to follow and exits without
-   calling `clu complete` — you'll see the 30-minute lease eventually
-   expire and the attempts counter tick up.
+2. Whether the `/clu-phase` skill is installed for the worker. Run
+   `clu install-skill --only clu-phase` to drop the bundled skill into
+   `~/.claude/skills/clu-phase/SKILL.md` (or copy
+   `examples/clu-phase-skill.md` by hand if you want the legacy
+   single-file form). Without it, the worker has no contract to follow
+   and exits without calling `clu complete` — you'll see the 30-minute
+   lease eventually expire and the attempts counter tick up.
 3. The dispatch command in `.orchestrator.json`. The template variables
    are `{plan_slug}`, `{phase_id}`, `{token}`, `{state_file}`,
    `{project}`. Typos in those names are silent — `claude` just sees a
@@ -919,6 +933,13 @@ and the next `phase_started` for the same phase starts fresh from zero.
 | `clu queue list [--project P]` (or bare `clu queue`) | Show pending queue + recent failures |
 | `clu queue remove <slug> [--project P]` | Drop a pending slug (moves it to history) |
 | `clu answer --project P --plan S <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |
+| `clu blockers list --project P --plan S` | Read-only: list open blockers (id, phase, asked-at, question, numbered options) |
+| `clu blockers show --project P --plan S <id>` | Read-only: full payload for one blocker (question, options, context, answer if set) + related events |
+| `clu logs --project P --plan S [--follow]` | Tail the active worker's log (falls back to the newest log if idle) |
+| `clu doctor --project P` | Smoke-test what a worker subprocess sees (PATH + resolved binary locations). No state writes |
+| `clu worktree gc [--project P] [--confirm] [--delete-branch] [--include-archived]` | List or remove worktrees of done/halted plans (see "Per-plan worktrees") |
+| `clu worktree attach --project P --plan S [PATH] [--branch B] [--base-ref REF]` | Retrofit a worktree onto a plan init'd without one |
+| `clu worktree reattach --project P --plan S` | Re-create the worktree dir from the path/branch already in `state.worktree` (recovery for an externally-removed dir) |
 
 The full CLI surface — including worker-side commands like `complete`,
 `block`, `spawn`, `heartbeat`, `task-done` — lives under the `cli`

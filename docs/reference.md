@@ -730,12 +730,17 @@ through this.
   worker-side command wears this so forged tokens get a uniform exit.
 - `main(argv)` — argparse + dispatch table.
 - Operator-side commands: `cmd_init`, `cmd_tick`, `cmd_tick_all`,
-  `cmd_status`, `cmd_register`, `cmd_unregister`, `cmd_list`,
+  `cmd_status`, `cmd_register`, `cmd_unregister` (+
+  `cmd_unregister_one`, `cmd_unregister_all_archived`), `cmd_list`,
   `cmd_fleet`, `cmd_pause`, `cmd_resume`, `cmd_retry`, `cmd_answer`,
-  `cmd_extend_lease`, `cmd_release_claim`,
+  `cmd_extend_lease`, `cmd_release_claim`, `cmd_archive`, `cmd_logs`,
+  `cmd_prior_blocker`,
   `cmd_queue` (+ `cmd_queue_add`, `cmd_queue_list`, `cmd_queue_remove`),
-  `cmd_worktree` (+ `cmd_worktree_gc`),
-  `cmd_blockers` (+ `cmd_blockers_list`, `cmd_blockers_show`).
+  `cmd_worktree` (+ `cmd_worktree_gc`, `cmd_worktree_attach`,
+  `cmd_worktree_reattach`),
+  `cmd_blockers` (+ `cmd_blockers_list`, `cmd_blockers_show`),
+  `cmd_install_skill`, `cmd_install_hook`, `cmd_uninstall_hook`,
+  `cmd_doctor`.
 - `cmd_extend_lease(args)` — add N minutes to the live claim's expiry.
   `--project`, `--plan`, positional `minutes` (int, >0). New expiry =
   `max(now, current_expires) + timedelta(minutes=N)`. Appends
@@ -803,6 +808,52 @@ through this.
   branch -D`, `--include-archived` widens to plans whose master
   `<slug>.md` is gone. Action-time re-reads each candidate's status
   so a `clu retry` mid-gc doesn't lose its worktree.
+- `cmd_worktree_attach(args)` — retrofit a worktree onto a plan that
+  was init'd without `--worktree`. Reuses `_setup_worktree` so the
+  same refusals (`WORKTREE_SETUP_FAILED`) and rollback-on-state-save-
+  failure shape apply. Refuses if `state.worktree` already exists.
+- `cmd_worktree_reattach(args)` — recovery: re-create the worktree
+  dir from the `path` + `branch` already recorded in `state.worktree`,
+  using `git worktree add`. Refuses on a non-git target path so an
+  operator can't silently re-attach to a directory git no longer
+  manages. Distinct from `attach` — `attach` adds a worktree record
+  where none exists, `reattach` materializes an existing record.
+- `cmd_archive(args)` — post-ship cleanup: removes the clu-managed
+  worktree + branch (when fully reachable from origin; warns and
+  retains when ahead) AND `git mv plans/<slug>.md
+  plans/shipped/<slug>.md`. Idempotent on the file-move step (skips
+  if already gone). Surfaces `WORKTREE_SETUP_FAILED` if `git mv` fails
+  with the file present.
+- `cmd_unregister_all_archived(args)` — batch prune of registry
+  entries whose master plan file no longer exists. `--dry-run`
+  previews. Emits a per-entry stderr warning when the orphan state
+  file still has a `worktree` record (the operator should follow up
+  with `clu worktree gc --include-archived --confirm`).
+- `cmd_install_skill(args)` — copies the bundled `end_of_line/skills/*`
+  trees into `~/.claude/skills/`. Flags: `--force` (overwrite regular
+  files; symlinks always overwritten), `--dry-run` (preview), `--only
+  <name>` (one skill), `--list` (enumerate bundled skills + exit).
+  Also handles the `--add-claude-md-note` / `--no-claude-md-note` pair
+  that appends an idempotent autonomous-loop hint to `~/.claude/CLAUDE.md`.
+- `cmd_install_hook(args)` / `cmd_uninstall_hook(args)` — register or
+  remove the `UserPromptSubmit` hook in `~/.claude/settings.json` that
+  surfaces inbox events into the active Claude Code session. The
+  `/clu-monitor` skill is the user-facing wrapper; the CLI is the
+  underlying mechanism. Both maintain the v2 marker at
+  `~/.config/clu/monitor.json`.
+- `cmd_doctor(args)` — smoke-test what a worker subprocess sees:
+  prints the effective PATH (after `dispatch.build_worker_env`),
+  resolves common tools (`claude`, `gh`, `git`, `python3`), and exits
+  `OK` / `GENERIC` based on whether the required ones are found. No
+  state writes — purely diagnostic.
+- `cmd_logs(args)` — tail the active worker's log
+  (`<project>/plans/.orchestrator/logs/<phase>.<token>.log`); falls
+  back to the newest log file when no claim is live. `--follow` for
+  `tail -f` semantics.
+- `cmd_prior_blocker(args)` — worker-side helper that prints the most
+  recent answered blocker for the current phase, so a re-dispatched
+  worker can read the operator's choice without parsing state.json
+  itself.
 - `_resolve_project_arg(args)` — centralizes the four-site
   `args.project or Path.cwd()` pattern with uniform `.resolve()`.
   `getattr` tolerates the bare `clu queue` shape where the
