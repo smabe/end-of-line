@@ -115,6 +115,17 @@ EVENT_WORKTREE_CONFLICT_WARNING = "worktree_conflict_warning"
 # already-init'd plan (e.g. resume flow where worktrees were built by hand).
 # Distinguishes operator-attached from init-created in the audit trail.
 EVENT_WORKTREE_ATTACHED = "worktree_attached"
+# Worktree + branch cleanup at plan end (cmd_complete on last phase,
+# cmd_archive, or cmd_worktree_gc when commits are upstream-reachable).
+# Fields: path, branch, worktree_removed, branch_removed, worktree_error,
+# branch_error, trigger ("complete" / "archive" / "gc"). state.worktree is
+# cleared to None alongside this event.
+EVENT_WORKTREE_CLEANED = "worktree_cleaned"
+# Cleanup skipped because the branch has commits not reachable from
+# origin/<default>. Fields: path, branch, reason, ahead_commits (list of
+# short SHAs), trigger. state.worktree is left in place so the operator
+# can push or force-delete manually.
+EVENT_WORKTREE_RETAINED_AHEAD = "worktree_retained_ahead"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"

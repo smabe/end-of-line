@@ -34,6 +34,7 @@ from pathlib import Path
 
 from . import dispatch, fleet, monitor, notify, queue, registry, state as st
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
+from .plan_parser import parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
 
@@ -258,6 +259,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Add a (project, plan) pair to the host registry (auto-runs on init)",
     )
     add_common(p_register)
+
+    p_archive = sub.add_parser(
+        "archive",
+        help="Wrap up a finished/paused plan: clean up its worktree + "
+             "branch when commits are upstream-reachable, or retain + "
+             "warn when ahead of origin. Idempotent.",
+    )
+    p_archive.add_argument(
+        "--project", type=Path, required=True, help="Project root.",
+    )
+    p_archive.add_argument(
+        "--plan", required=True, help="Plan slug.",
+    )
 
     p_unregister = sub.add_parser(
         "unregister",
@@ -638,6 +652,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_unregister(args)
     if args.cmd == "doctor":
         return cmd_doctor(args)
+    if args.cmd == "archive":
+        return cmd_archive(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -714,6 +730,127 @@ def _remove_worktree_and_branch(
         capture_output=True, text=True, timeout=timeout,
     )
     return wt_pair, (br.returncode == 0, br.stderr.strip())
+
+
+def _resolve_default_branch(project_root: Path) -> str | None:
+    """Read `origin`'s default branch name (e.g. 'main', 'master').
+
+    Uses `git symbolic-ref refs/remotes/origin/HEAD`; returns None when
+    the remote isn't configured or HEAD isn't set, so callers can fall
+    back to retain-and-warn rather than guess.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(project_root), "symbolic-ref",
+         "refs/remotes/origin/HEAD"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    ref = result.stdout.strip()
+    return ref.rsplit("/", 1)[-1] if "/" in ref else None
+
+
+def _is_branch_reachable_from_origin(
+    project_root: Path, branch: str,
+) -> tuple[bool, str]:
+    """True iff every commit on `branch` is reachable from
+    `origin/<default-branch>`, OR no origin is configured.
+
+    Returns `(reachable, reason)`. When there's no origin remote there's
+    no upstream to be "ahead of" — the operator's local state IS the
+    only state, so cleanup is safe; the reason field documents the
+    skip ("no origin remote configured") and the caller can surface it
+    in the audit event. Only returns False when an origin exists AND
+    the branch has commits not on origin/<default>.
+    """
+    default = _resolve_default_branch(project_root)
+    if default is None:
+        return True, "no origin remote configured"
+    result = subprocess.run(
+        ["git", "-C", str(project_root), "merge-base", "--is-ancestor",
+         branch, f"origin/{default}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        return True, ""
+    if result.returncode == 1:
+        return False, f"branch ahead of origin/{default}"
+    return False, f"git merge-base failed: {result.stderr.strip() or 'unknown'}"
+
+
+def _commits_ahead_of_origin(
+    project_root: Path, branch: str,
+) -> list[str]:
+    """Short SHAs of commits on `branch` not on origin/<default>.
+
+    Empty list when there are no unreachable commits or when the lookup
+    fails — callers use this only for diagnostic context on the retain
+    event, so a best-effort empty list is fine.
+    """
+    default = _resolve_default_branch(project_root)
+    if default is None:
+        return []
+    result = subprocess.run(
+        ["git", "-C", str(project_root), "log", "--format=%h",
+         f"origin/{default}..{branch}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def _maybe_cleanup_worktree(
+    cfg: ProjectConfig,
+    data: dict,
+    *,
+    trigger: str,
+    require_all_phases_done: bool,
+) -> None:
+    """Best-effort worktree cleanup at plan end. Mutates `data` in place.
+
+    Used by `cmd_complete` (with `require_all_phases_done=True` so
+    interim completions don't yank the worktree out from under pending
+    phases) and `cmd_archive` (with `False` — the operator explicitly
+    asked for cleanup). On success: removes worktree + branch and
+    clears `state.worktree`, appending `EVENT_WORKTREE_CLEANED`. On
+    "branch ahead of origin": leaves both in place and appends
+    `EVENT_WORKTREE_RETAINED_AHEAD` with the unreachable SHAs.
+    """
+    wt = st.get_worktree(data)
+    if wt is None:
+        return
+    if require_all_phases_done:
+        plan_path = cfg.project_root / cfg.plan_dir / f"{data['plan_slug']}.md"
+        try:
+            phases = parse_sessions_index(plan_path)
+        except (OSError, ValueError):
+            return
+        completed = st.completed_phase_ids(data)
+        if not phases or not all(p.id in completed for p in phases):
+            return
+    reachable, reason = _is_branch_reachable_from_origin(
+        cfg.project_root, wt["branch"],
+    )
+    if not reachable:
+        ahead = _commits_ahead_of_origin(cfg.project_root, wt["branch"])
+        st.append_event(
+            data, st.EVENT_WORKTREE_RETAINED_AHEAD,
+            path=wt["path"], branch=wt["branch"],
+            reason=reason, ahead_commits=ahead, trigger=trigger,
+        )
+        return
+    (wt_ok, wt_err), (br_ok, br_err) = _remove_worktree_and_branch(
+        cfg.project_root, wt["path"], wt["branch"], timeout=30,
+    )
+    st.append_event(
+        data, st.EVENT_WORKTREE_CLEANED,
+        path=wt["path"], branch=wt["branch"],
+        worktree_removed=wt_ok, branch_removed=br_ok,
+        worktree_error=wt_err, branch_error=br_err,
+        trigger=trigger,
+    )
+    data["worktree"] = None
 
 
 def _rollback_worktree(project_root: Path, record: dict) -> None:
@@ -2004,6 +2141,18 @@ def cmd_worktree_gc(args) -> int:
                 print(f"  skipped: {slug}: status changed since list")
                 continue
 
+        reachable, reason = _is_branch_reachable_from_origin(
+            cfg.project_root, wt["branch"],
+        )
+        if not reachable:
+            print(
+                f"  retained: {slug}: {reason} — push or "
+                f"`git -C {cfg.project_root} worktree remove --force "
+                f"{wt['path']}` to force.",
+                file=sys.stderr,
+            )
+            continue
+
         (wt_ok, wt_err), (br_ok, br_err) = _remove_worktree_and_branch(
             cfg.project_root, wt["path"], wt["branch"],
             delete_branch=args.delete_branch,
@@ -2695,7 +2844,50 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
             data, st.EVENT_PHASE_COMPLETED,
             phase=args.phase, commits=list(args.commits),
         )
+        _maybe_cleanup_worktree(
+            cfg, data, trigger="complete", require_all_phases_done=True,
+        )
     print(f"Completed phase {args.phase}")
+    return ExitCode.OK
+
+
+def cmd_archive(args) -> int:
+    """Plan-level wrap: clean up the worktree + branch when commits are
+    upstream-reachable; retain-and-warn when ahead.
+
+    Refuses when the plan is still RUNNING — `clu pause` or `clu halt`
+    first if the operator means to abandon mid-flight. Idempotent
+    against an already-clean state (no worktree record → no-op success).
+    """
+    try:
+        st.validate_slug(args.plan, kind="plan slug")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+    cfg = load_project_config(args.project.resolve())
+    state_path = cfg.state_path(args.plan)
+    if not state_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
+    with st.mutate(state_path) as data:
+        if data["status"] == st.STATUS_RUNNING:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"plan {args.plan!r} is still RUNNING — pause or halt "
+                f"first, or wait for plan_done before archiving",
+            )
+        before = st.get_worktree(data)
+        _maybe_cleanup_worktree(
+            cfg, data, trigger="archive", require_all_phases_done=False,
+        )
+        after = st.get_worktree(data)
+    if before is None:
+        print(f"Archive {args.plan}: no worktree to clean.")
+    elif after is None:
+        print(f"Archive {args.plan}: removed {before['path']} (branch {before['branch']}).")
+    else:
+        print(
+            f"Archive {args.plan}: retained {before['path']} "
+            f"(branch {before['branch']} ahead of origin).",
+        )
     return ExitCode.OK
 
 

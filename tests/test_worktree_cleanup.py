@@ -1,0 +1,286 @@
+"""Worktree cleanup on plan end (#34).
+
+Three callers share the upstream-reachability gate
+`_is_branch_reachable_from_origin`:
+
+- `cmd_complete` opportunistic cleanup when its completion finishes the
+  last pending phase
+- `cmd_archive` explicit plan-level cleanup
+- `cmd_worktree_gc` retrofit — retain-and-warn when branch is ahead
+
+Fixture wires up a bare origin remote so the reachable / ahead branches
+can both be exercised against real git state. The no-origin case is
+already covered by `tests/test_worktree_gc.py` (which doesn't configure
+a remote and expects pre-#34 behavior to be preserved)."""
+from __future__ import annotations
+
+import io
+import subprocess
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+
+from end_of_line import state as st
+from end_of_line.cli import ExitCode, main
+from tests import isolate_registry
+
+
+# Plan-file basenames must be `<slug>-<phase>.md` so plan_parser extracts
+# clean phase ids ("a", "b") instead of treating the whole basename as the id.
+PLAN_BODY_TWO_PHASES_TMPL = """\
+# T
+
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| A | `{slug}-a.md` | thing | 1h |
+| B | `{slug}-b.md` | thing | 1h |
+"""
+
+PLAN_BODY_ONE_PHASE_TMPL = """\
+# T
+
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| A | `{slug}-a.md` | thing | 1h |
+"""
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, check=True,
+    )
+
+
+class WorktreeCleanupBase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.parent = Path(self._tmp.name)
+        self.project = self.parent / "myrepo"
+        self.project.mkdir()
+        isolate_registry(self, self.parent)
+        (self.project / "plans").mkdir()
+        _git(self.project, "init", "-q")
+        _git(self.project, "config", "user.email", "t@t")
+        _git(self.project, "config", "user.name", "t")
+        _git(self.project, "commit", "--allow-empty", "-m", "init")
+        _git(self.project, "branch", "-M", "main")
+        # Bare origin remote so origin/<default> is a real ref.
+        self.origin = self.parent / "origin.git"
+        subprocess.run(
+            ["git", "init", "-q", "--bare", str(self.origin)],
+            check=True, capture_output=True,
+        )
+        _git(self.project, "remote", "add", "origin", str(self.origin))
+        _git(self.project, "push", "-u", "origin", "main")
+        _git(self.project, "remote", "set-head", "origin", "main")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _state_path(self, slug: str) -> Path:
+        return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
+
+    def _init_plan(self, slug: str, body_tmpl: str = PLAN_BODY_TWO_PHASES_TMPL) -> Path:
+        (self.project / "plans" / f"{slug}.md").write_text(body_tmpl.format(slug=slug))
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            main([
+                "init", "--project", str(self.project), "--plan", slug,
+                "--worktree",
+            ])
+        return self._state_path(slug)
+
+    def _claim_phase(self, slug: str, phase: str) -> str:
+        state_path = self._state_path(slug)
+        with st.mutate(state_path) as data:
+            token = st.claim_phase(data, phase, lease_minutes=10)
+        return token
+
+    def _complete(self, slug: str, phase: str, token: str) -> tuple[int, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main([
+                "complete", "--project", str(self.project), "--plan", slug,
+                "--phase", phase, "--token", token,
+            ])
+        return rc, err.getvalue()
+
+    def _add_ahead_commit(self, slug: str) -> None:
+        """Add a commit on the worktree's branch so it's ahead of origin."""
+        data = st.load(self._state_path(slug))
+        wt = st.get_worktree(data)
+        assert wt is not None
+        _git(Path(wt["path"]), "commit", "--allow-empty", "-m", "ahead")
+
+    def _wt_record(self, slug: str) -> dict | None:
+        return st.get_worktree(st.load(self._state_path(slug)))
+
+
+class CmdCompleteCleanupTests(WorktreeCleanupBase):
+    def test_completes_last_phase_cleans_up_when_reachable(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        token = self._claim_phase("alpha", "a")
+        rc, _ = self._complete("alpha", "a", token)
+        self.assertEqual(rc, 0)
+        record = self._wt_record("alpha")
+        self.assertIsNone(record)
+        events = st.load(self._state_path("alpha"))["events"]
+        kinds = [e.get("type") for e in events]
+        self.assertIn(st.EVENT_WORKTREE_CLEANED, kinds)
+
+    def test_completes_interim_phase_leaves_worktree_in_place(self) -> None:
+        # Two-phase plan: completing A is NOT plan end → no cleanup.
+        self._init_plan("alpha", PLAN_BODY_TWO_PHASES_TMPL)
+        before = self._wt_record("alpha")
+        self.assertIsNotNone(before)
+        token = self._claim_phase("alpha", "a")
+        rc, _ = self._complete("alpha", "a", token)
+        self.assertEqual(rc, 0)
+        # Worktree record still present.
+        self.assertIsNotNone(self._wt_record("alpha"))
+        # No CLEANED event yet.
+        events = st.load(self._state_path("alpha"))["events"]
+        kinds = [e.get("type") for e in events]
+        self.assertNotIn(st.EVENT_WORKTREE_CLEANED, kinds)
+
+    def test_completes_last_phase_retains_when_ahead(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        self._add_ahead_commit("alpha")  # worktree branch now ahead of origin/main
+        token = self._claim_phase("alpha", "a")
+        rc, _ = self._complete("alpha", "a", token)
+        self.assertEqual(rc, 0)
+        # Worktree record retained.
+        self.assertIsNotNone(self._wt_record("alpha"))
+        events = st.load(self._state_path("alpha"))["events"]
+        retain_evts = [e for e in events if e.get("type") == st.EVENT_WORKTREE_RETAINED_AHEAD]
+        self.assertEqual(len(retain_evts), 1)
+        evt = retain_evts[0]
+        self.assertEqual(evt["trigger"], "complete")
+        self.assertTrue(evt["ahead_commits"], "expected at least one ahead SHA")
+
+    def test_complete_without_worktree_is_noop(self) -> None:
+        # Init without --worktree → no record → cleanup helper short-circuits.
+        (self.project / "plans" / "alpha.md").write_text(
+            PLAN_BODY_ONE_PHASE_TMPL.format(slug="alpha"),
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            main(["init", "--project", str(self.project), "--plan", "alpha"])
+        token = self._claim_phase("alpha", "a")
+        rc, _ = self._complete("alpha", "a", token)
+        self.assertEqual(rc, 0)
+        events = st.load(self._state_path("alpha"))["events"]
+        kinds = [e.get("type") for e in events]
+        self.assertNotIn(st.EVENT_WORKTREE_CLEANED, kinds)
+        self.assertNotIn(st.EVENT_WORKTREE_RETAINED_AHEAD, kinds)
+
+
+class CmdArchiveTests(WorktreeCleanupBase):
+    def _archive(self, slug: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main([
+                "archive", "--project", str(self.project), "--plan", slug,
+            ])
+        return rc, out.getvalue(), err.getvalue()
+
+    def _set_status(self, slug: str, status: str) -> None:
+        with st.mutate(self._state_path(slug)) as data:
+            data["status"] = status
+
+    def test_happy_path_cleans_when_reachable(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, stdout, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertIsNone(self._wt_record("alpha"))
+        self.assertIn("removed", stdout)
+
+    def test_retains_when_ahead(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        self._add_ahead_commit("alpha")
+        self._set_status("alpha", st.STATUS_HALTED)
+        rc, stdout, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(self._wt_record("alpha"))
+        self.assertIn("retained", stdout)
+        events = st.load(self._state_path("alpha"))["events"]
+        kinds = [e.get("type") for e in events]
+        self.assertIn(st.EVENT_WORKTREE_RETAINED_AHEAD, kinds)
+
+    def test_refuses_running_status(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        # Default after init is STATUS_RUNNING.
+        rc, _stdout, stderr = self._archive("alpha")
+        self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
+        self.assertIn("running", stderr.lower())
+
+    def test_idempotent_when_no_worktree(self) -> None:
+        # Init without --worktree → state has no worktree record → archive
+        # should be a clean no-op success.
+        (self.project / "plans" / "alpha.md").write_text(
+            PLAN_BODY_ONE_PHASE_TMPL.format(slug="alpha"),
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            main(["init", "--project", str(self.project), "--plan", "alpha"])
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, stdout, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertIn("no worktree", stdout)
+
+    def test_archive_then_archive_is_idempotent(self) -> None:
+        # First archive removes; second archive sees None → "no worktree".
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        self._set_status("alpha", st.STATUS_DONE)
+        rc1, _stdout1, _ = self._archive("alpha")
+        self.assertEqual(rc1, 0)
+        rc2, stdout2, _ = self._archive("alpha")
+        self.assertEqual(rc2, 0)
+        self.assertIn("no worktree", stdout2)
+
+    def test_refuses_unknown_plan(self) -> None:
+        rc, _stdout, _stderr = self._archive("nonexistent")
+        self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
+
+
+class CmdWorktreeGcUpstreamTests(WorktreeCleanupBase):
+    def _gc(self, *extra: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main([
+                "worktree", "gc", "--project", str(self.project), *extra,
+            ])
+        return rc, out.getvalue(), err.getvalue()
+
+    def _set_status(self, slug: str, status: str) -> None:
+        with st.mutate(self._state_path(slug)) as data:
+            data["status"] = status
+
+    def test_gc_retains_branch_ahead_of_origin(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        self._add_ahead_commit("alpha")
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, _stdout, stderr = self._gc("--confirm")
+        self.assertEqual(rc, 0)
+        # Worktree is preserved on disk.
+        self.assertIsNotNone(self._wt_record("alpha"))
+        wt_path = Path(self._wt_record("alpha")["path"])
+        self.assertTrue(wt_path.exists())
+        self.assertIn("retained", stderr.lower())
+        self.assertIn("ahead", stderr.lower())
+
+    def test_gc_removes_when_reachable(self) -> None:
+        # Plan with origin configured but branch == origin/main → reachable.
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, stdout, _ = self._gc("--confirm")
+        self.assertEqual(rc, 0)
+        self.assertIn("removed", stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
