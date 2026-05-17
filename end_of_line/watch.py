@@ -180,6 +180,89 @@ if _Q_REJECTED:
     )
 
 
+_TASK_STATUS_MAP: dict[str, str] = {
+    st.EVENT_PHASE_STARTED: "in_progress",
+    st.EVENT_PHASE_COMPLETED: "completed",
+    st.EVENT_PHASE_BLOCKED: "in_progress",
+    st.EVENT_PHASE_MAX_ATTEMPTS: "in_progress",
+    st.EVENT_SYSTEMIC_FAILURE: "in_progress",
+    st.EVENT_PLAN_COMPLETED: "completed",
+    st.EVENT_PAUSED: "in_progress",
+    st.EVENT_RESUMED: "in_progress",
+    st.EVENT_PHASE_STALLED: "in_progress",
+}
+
+_TASK_VERBOSE_STATUS_MAP: dict[str, str] = {
+    st.EVENT_LEASE_EXTENDED: "in_progress",
+    st.EVENT_LEASE_EXPIRED: "in_progress",
+    st.EVENT_CLAIM_FORCE_RELEASED: "in_progress",
+    st.EVENT_ATTEMPTS_RESET: "in_progress",
+    st.EVENT_STUCK_BLOCKER_REPINGED: "in_progress",
+    st.EVENT_STALLED_CLAIM_NOTIFIED: "in_progress",
+    st.EVENT_WORKTREE_ATTACHED: "in_progress",
+}
+
+# Events where task_id is the plan slug alone (no /phase segment)
+_PLAN_SCOPED_EVENTS: frozenset[str] = frozenset({
+    st.EVENT_PLAN_COMPLETED, st.EVENT_PAUSED, st.EVENT_RESUMED,
+})
+
+
+def _escape_msg(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _task_msg_for(event: dict[str, Any]) -> str:
+    t = event.get("type")
+    if t == st.EVENT_PHASE_STARTED:
+        return f"started (attempt {event.get('attempts', 1)})"
+    if t == st.EVENT_PHASE_COMPLETED:
+        return "completed"
+    if t == st.EVENT_PHASE_BLOCKED:
+        bid = event.get("blocker_id", "?")
+        q = _trunc(event.get("question") or "")
+        return f"BLOCKED {bid} — {q}" if q else f"BLOCKED {bid}"
+    if t == st.EVENT_PHASE_MAX_ATTEMPTS:
+        return f"HALTED (max attempts on {event.get('phase', '?')})"
+    if t == st.EVENT_SYSTEMIC_FAILURE:
+        sig = _trunc(event.get("signature") or "")
+        return f"SYSTEMIC FAILURE — {sig}"
+    if t == st.EVENT_PLAN_COMPLETED:
+        return "plan done"
+    if t == st.EVENT_PAUSED:
+        reason = _trunc(event.get("reason") or "")
+        return f"paused — {reason}" if reason else "paused"
+    if t == st.EVENT_RESUMED:
+        return "resumed"
+    if t == st.EVENT_PHASE_STALLED:
+        return "stalled"
+    return (t or "").replace("_", " ")
+
+
+def project_event_task(
+    event: dict[str, Any],
+    plan_slug: str,
+    *,
+    verbose: bool = False,
+) -> str | None:
+    t = event.get("type")
+    if t not in _TASK_STATUS_MAP:
+        if not (verbose and t in _TASK_VERBOSE_STATUS_MAP):
+            return None
+        status = _TASK_VERBOSE_STATUS_MAP[t]
+    else:
+        status = _TASK_STATUS_MAP[t]
+
+    if t in _PLAN_SCOPED_EVENTS:
+        task_id = plan_slug
+    else:
+        phase = event.get("phase", "?")
+        task_id = f"{plan_slug}/{phase}"
+
+    msg = _escape_msg(_task_msg_for(event))
+    return f'TASK_UPDATE task={task_id} status={status} msg="{msg}"'
+
+
 def _slug_for_path(path: Path) -> str:
     return path.stem.removesuffix(".state")
 
