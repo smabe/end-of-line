@@ -1,12 +1,8 @@
-"""Outbound notification adapter — iMessage via osascript.
+"""Outbound notification router.
 
-clu runs from cron and the worker runs in a separate process, so the
-notification path must be self-contained: no MCP, no long-running daemon,
-no network. Calling Messages.app via osascript is the cheapest thing that
-delivers to the user's phone without standing up new infra.
-
-Quiet hours gate every kind defined here. If you add a kind that must
-bypass quiet hours (halts, emergency stale escalations), include it in
+Routes notifications through configured backends (phase 1: iMessage only).
+Quiet hours gate every kind defined here. If you add a kind that must bypass
+quiet hours (halts, emergency stale escalations), include it in
 QUIET_HOURS_BYPASS_KINDS.
 """
 from __future__ import annotations
@@ -17,8 +13,16 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from .notify_imessage import IMessageNotifier
+
 if TYPE_CHECKING:
     from .config import NotifySpec
+
+_NOTIFIER_REGISTRY: dict[str, type] = {
+    "imessage": IMessageNotifier,
+}
+
+Sender = Callable[[str, str], None]
 
 KIND_BLOCKER = "blocker"
 KIND_STALLED = "stalled"
@@ -41,32 +45,6 @@ QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
     KIND_QUEUE_REPAIR_FAILED,
     KIND_QUEUE_CORRUPT,
 })
-
-# osascript-friendly AppleScript: argv carries the handle + body so we
-# don't have to escape user-controlled text into the script source.
-_APPLESCRIPT = """
-on run argv
-    set toHandle to item 1 of argv
-    set body to item 2 of argv
-    tell application "Messages"
-        set targetService to 1st service whose service type = iMessage
-        set targetBuddy to buddy toHandle of targetService
-        send body to targetBuddy
-    end tell
-end run
-""".strip()
-
-Sender = Callable[[str, str], None]
-
-
-def _osascript_send(to: str, body: str) -> None:
-    """Fire-and-forget — don't block the cron tick on a hung Messages.app."""
-    subprocess.Popen(
-        ["osascript", "-e", _APPLESCRIPT, "--", to, body],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
 
 
 def parse_hhmm(s: str) -> _dt.time:
@@ -101,10 +79,10 @@ def notify(
     project_root: str | None = None,
     inbox_writer: Callable[..., str] | None = None,
 ) -> bool:
-    """Send an iMessage if quiet hours / config permit. Returns True if sent.
+    """Send a notification if quiet hours / config permit. Returns True if sent.
 
-    Stays best-effort — on osascript failure we log to stderr and return False
-    so a broken Messages.app can't take down the supervisor.
+    Stays best-effort — on backend failure we log to stderr and return False
+    so a broken backend can't take down the supervisor.
 
     When `plan_slug` and `project_root` are both provided, also drops an
     inbox event so the next Claude turn sees the same signal — independent
@@ -135,7 +113,12 @@ def notify(
     if not spec.imessage_to:
         return False
     try:
-        (sender or _osascript_send)(spec.imessage_to, body)
+        if sender is not None:
+            sender(spec.imessage_to, body)
+        else:
+            _NOTIFIER_REGISTRY["imessage"](spec.imessage_to).send(
+                kind, body, plan_slug=plan_slug or "", blocker_id=None,
+            )
         return True
     except (subprocess.SubprocessError, OSError) as exc:
         print(f"notify: send failed ({kind}): {exc}", file=sys.stderr)

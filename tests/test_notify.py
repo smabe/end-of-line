@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import notify, state as st
+from end_of_line import notify, notify_imessage, state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
@@ -163,8 +163,8 @@ class NotifyDispatchTestCase(unittest.TestCase):
     def test_osascript_send_uses_argv_form(self) -> None:
         """The `--` separator + argv is what keeps Messages.app safe against
         user-controlled text in the body. Lock the invocation shape."""
-        with mock.patch("end_of_line.notify.subprocess.Popen") as popen:
-            notify._osascript_send("+15551234567", "hi from clu")
+        with mock.patch("end_of_line.notify_imessage.subprocess.Popen") as popen:
+            notify_imessage._osascript_send("+15551234567", "hi from clu")
         args = popen.call_args.args[0]
         self.assertEqual(args[0], "osascript")
         self.assertEqual(args[1], "-e")
@@ -242,7 +242,7 @@ class NotifyIntegrationTestCase(unittest.TestCase):
         # mock.patch auto-restores on tearDown even if a test raises mid-way,
         # which a direct rebind of notify._osascript_send wouldn't.
         patcher = mock.patch.object(
-            notify, "_osascript_send",
+            notify_imessage, "_osascript_send",
             side_effect=lambda to, body: self.sent.append((to, body)),
         )
         patcher.start()
