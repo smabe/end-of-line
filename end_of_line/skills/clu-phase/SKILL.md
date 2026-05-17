@@ -6,7 +6,7 @@ user_invocable: false
 
 ## You are a clu phase worker
 
-This skill is fired by `claude --print '/clu-phase <plan_slug> <phase_id> <token> <state_file>'` — clu's dispatch.command launches one Claude session per phase, in headless `--print` mode, with the working directory set to the project root.
+This skill is fired by `claude --print '/clu-phase <plan_slug> <phase_id> <token> <state_file>'` — clu's dispatch.command launches one Claude session per phase, in headless `--print` mode, with the working directory set to **the dispatch cwd**: the canonical project root if the plan was init'd without `--worktree`, OR the plan's worktree root (e.g. `/Users/me/projects/foo-<slug>`) if it was. **They are not always the same place.** See "Where you are" below.
 
 You are not interacting with a human. The user is asleep / at lunch / not at their terminal. Output goes to a log file at `<project>/plans/.orchestrator/logs/<phase>.<token>.log`. The only way to communicate back to the user is via `clu block` (which sends an iMessage they can reply to).
 
@@ -49,12 +49,40 @@ If you exit without calling one of these:
 
 **Repeat: never exit without calling complete or block.** Even if the work was a no-op (already done), call `clu complete`. Even if you're stuck and confused, call `clu block` with a clear question instead of just quitting.
 
+## Where you are (CRITICAL — git ops vs clu ops)
+
+clu supports per-plan git worktrees (see `clu init --worktree`). When in use, the dispatch cwd is the **worktree root** (e.g. `/Users/me/projects/foo-routing-impl`) on the plan's dedicated branch (`clu/routing-impl`). The **canonical project root** (`/Users/me/projects/foo`) is a different directory on a different branch (usually `main`).
+
+These two roots play different roles in your work:
+
+| You need to... | Use |
+|---|---|
+| `git add` / `git commit` / `git diff` — code changes for the phase | **`$WORKTREE_ROOT`** (= your current `pwd`). The dispatch put you here on the right branch. |
+| Read or modify files for this phase's diff | **`$WORKTREE_ROOT`** (relative paths work — your cwd IS the worktree). |
+| Run `clu complete / block / heartbeat / prior-blocker` — pass `--project ...` | **`$PROJECT_ROOT`** (canonical). clu's state file + registry live here, not in the worktree. |
+| Read `$STATE` directly (it's an absolute path) | No `cd` needed. |
+
+**The silent-clobber failure mode:** if you `cd $PROJECT_ROOT && git commit`, your commit lands on the canonical project's current branch (usually `main`) instead of `clu/<slug>`. clu has no way to detect or correct this — the commit looks successful, `clu complete` accepts it, but the next phase dispatches off a stale branch tip and the operator has to reconcile branches by hand. **This actually happens** — see issue #36 for the post-mortem. Don't be the worker that recurs it.
+
+Compute and emit both roots at the start so this is visible in your log:
+
+```bash
+WORKTREE_ROOT=$(pwd)
+PROJECT_ROOT=$(cd "$(dirname "$STATE")/../.." && pwd)
+if [ "$WORKTREE_ROOT" != "$PROJECT_ROOT" ]; then
+    echo "dispatched in worktree: $WORKTREE_ROOT"
+    echo "canonical project root: $PROJECT_ROOT"
+fi
+```
+
+If `WORKTREE_ROOT != PROJECT_ROOT`, treat it as a flashing-red sign: **every `git` command stays in `$WORKTREE_ROOT`.** If you `cd` for any reason (to read a canonical-only file, run a clu CLI command), either `cd "$WORKTREE_ROOT"` back before the next git op, or use `git -C "$WORKTREE_ROOT" ...` explicitly. Verify by running `git rev-parse --abbrev-ref HEAD` immediately before any `git commit` — the answer MUST be the `clu/<slug>` branch, not `main`.
+
 ## Resume-after-answer
 
 If a prior blocker on this phase has been answered, clu has re-dispatched you to continue. Ask clu:
 
 ```bash
-if answer=$(clu prior-blocker --project "$PROJECT" --plan "$PLAN" --phase "$PHASE"); then
+if answer=$(clu prior-blocker --project "$PROJECT_ROOT" --plan "$PLAN" --phase "$PHASE"); then
     echo "resuming with prior answer: $answer"
 fi
 ```
@@ -65,18 +93,20 @@ If you see an answered blocker, that means: you asked a question previously, the
 
 ## Step-by-step protocol
 
-1. **Capture the four arguments** from the prompt. Call them `PLAN`, `PHASE`, `TOKEN`, `STATE`. Compute `PROJECT` from the state path:
+1. **Capture the four arguments** from the prompt. Call them `PLAN`, `PHASE`, `TOKEN`, `STATE`. Compute both roots (see "Where you are" above):
    ```bash
-   PROJECT=$(cd "$(dirname "$STATE")/../.." && pwd)
+   WORKTREE_ROOT=$(pwd)
+   PROJECT_ROOT=$(cd "$(dirname "$STATE")/../.." && pwd)
    ```
+   If they differ, you are in a worktree. Git ops stay in `$WORKTREE_ROOT`; `clu --project` calls take `$PROJECT_ROOT`.
 
 2. **Check for resume**: inspect `$STATE` for an answered blocker on `$PHASE`. If found, factor the answer into your plan for this run.
 
-3. **Read the master plan** at `$PROJECT/plans/$PLAN.md`. Find the row in `## Sessions index` whose phase id matches `$PHASE` (the parser strips the master-stem prefix from the plan_file basename — see `end_of_line/plan_parser.py`). The row's "Plan file" cell points to the sub-plan markdown.
+3. **Read the master plan** at `$WORKTREE_ROOT/plans/$PLAN.md` (the plan files live on your branch in the worktree — same content as `$PROJECT_ROOT/plans/`, but reading from your worktree keeps you anchored). Find the row in `## Sessions index` whose phase id matches `$PHASE` (the parser strips the master-stem prefix from the plan_file basename — see `end_of_line/plan_parser.py`). The row's "Plan file" cell points to the sub-plan markdown.
 
-4. **Read the sub-plan** at `$PROJECT/plans/<plan_file>`. This is the scope. Do exactly what it says. Don't scope-creep.
+4. **Read the sub-plan** at `$WORKTREE_ROOT/plans/<plan_file>`. This is the scope. Do exactly what it says. Don't scope-creep.
 
-5. **Do the work.** Use the editing/test/commit tools you have. Follow the project's CLAUDE.md (TDD, /simplify after non-trivial work, structured commit messages, etc.). When you commit, capture the SHA — `git rev-parse HEAD` after each `git commit`.
+5. **Do the work.** Use the editing/test/commit tools you have. Follow the project's CLAUDE.md (TDD, /simplify after non-trivial work, structured commit messages, etc.). When you commit, capture the SHA — `git rev-parse HEAD` after each `git commit`. **Before every `git commit`, verify the branch:** `git rev-parse --abbrev-ref HEAD` should print `clu/$PLAN` (NOT `main`). If it prints `main`, you've drifted out of the worktree — `cd "$WORKTREE_ROOT"` and re-stage before committing.
 
 6. **Decide the exit path**:
    - Work is done and tests are green → `clu complete --commit <each SHA>`
