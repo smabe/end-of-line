@@ -12,4 +12,4 @@ path.
 
 | Session | Plan file | Scope | Effort |
 |---|---|---|---|
-| blocker | [`blocker-smoke-blocker.md`](blocker-smoke-blocker.md) | trigger BLOCKED, resume after answer | 10m |
+| blocker | `blocker-smoke-blocker.md` | trigger BLOCKED, resume after answer | 10m |

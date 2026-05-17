@@ -26,4 +26,4 @@ expiry → tick 2 dispatch → 1 min lease expiry → MAX_ATTEMPTS fires).
 
 | Session | Plan file | Scope | Effort |
 |---|---|---|---|
-| fail | [`halt-smoke-fail.md`](halt-smoke-fail.md) | exit without callback, twice | 2m |
+| fail | `halt-smoke-fail.md` | exit without callback, twice | 2m |
