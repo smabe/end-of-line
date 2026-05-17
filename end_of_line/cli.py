@@ -20,6 +20,7 @@ from `{token}` in the dispatch command template.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import functools
 import hashlib
 import json
@@ -536,6 +537,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Phase to clear attempts on. Defaults to the most-recent halt.",
     )
 
+    p_extend_lease = sub.add_parser(
+        "extend-lease",
+        help="Extend a running claim's lease by N minutes (operator escape hatch).",
+    )
+    add_common(p_extend_lease)
+    p_extend_lease.add_argument(
+        "minutes", type=int, help="Minutes to add to the current lease expiry",
+    )
+
     p_release_claim = sub.add_parser(
         "release-claim",
         help="Clear a stuck current_claim (operator escape hatch). Refuses "
@@ -692,6 +702,7 @@ def main(argv: list[str] | None = None) -> int:
         "pause": cmd_pause,
         "resume": cmd_resume,
         "retry": cmd_retry,
+        "extend-lease": cmd_extend_lease,
         "release-claim": cmd_release_claim,
         "prior-blocker": cmd_prior_blocker,
         "logs": cmd_logs,
@@ -2750,6 +2761,42 @@ def cmd_retry(args, cfg: ProjectConfig, state_path: Path) -> int:
         data["status"] = st.STATUS_RUNNING
         st.append_event(data, st.EVENT_RETRY_REQUESTED, phase=phase)
     print(f"Retrying {args.plan}/{phase}.")
+    return ExitCode.OK
+
+
+def cmd_extend_lease(args, cfg: ProjectConfig, state_path: Path) -> int:
+    if args.minutes <= 0:
+        return _die(
+            ExitCode.INVALID_VALUE,
+            f"minutes must be positive, got {args.minutes}",
+        )
+    with st.mutate(state_path) as data:
+        claim = data.get("current_claim")
+        if claim is None:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"no claim to extend on {args.plan}",
+            )
+        current = _dt.datetime.strptime(
+            claim["lease_expires"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        baseline = max(current, now)
+        new_expires = (baseline + _dt.timedelta(minutes=args.minutes)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        claim["lease_expires"] = new_expires
+        st.append_event(
+            data, st.EVENT_LEASE_EXTENDED,
+            phase=claim["phase_id"],
+            extended_by_minutes=args.minutes,
+            new_expires=new_expires,
+            operator=True,
+        )
+    print(
+        f"Extended {args.plan}/{claim['phase_id']} lease by "
+        f"{args.minutes} min → {new_expires}"
+    )
     return ExitCode.OK
 
 

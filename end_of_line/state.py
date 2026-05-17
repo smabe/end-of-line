@@ -126,6 +126,9 @@ EVENT_WORKTREE_CLEANED = "worktree_cleaned"
 # short SHAs), trigger. state.worktree is left in place so the operator
 # can push or force-delete manually.
 EVENT_WORKTREE_RETAINED_AHEAD = "worktree_retained_ahead"
+# Operator bumped a live claim's lease_expires without state-file hand-editing.
+# Fields: phase, extended_by_minutes, new_expires, operator (True).
+EVENT_LEASE_EXTENDED = "lease_extended"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
