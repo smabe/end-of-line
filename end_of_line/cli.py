@@ -25,6 +25,7 @@ import functools
 import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -167,6 +168,51 @@ def _maybe_handle_claude_md_injection(
         )
 
 
+def _prompt_yn(question: str, *, default: bool) -> bool:
+    hint = "[Y/n]" if default else "[y/N]"
+    print(f"\n{question} {hint}: ", end="", flush=True)
+    resp = input().strip().lower()
+    if not resp:
+        return default
+    return resp in {"y", "yes"}
+
+
+def _maybe_handle_notify_prompts(
+    cfg: "ProjectConfig", args: argparse.Namespace,
+) -> None:
+    """Interactive iMessage/Discord channel setup during `clu init`.
+
+    Skipped when --no-notify-prompt is passed, or when stdin is not a TTY
+    (scripts, worker subprocesses, CI). Writes results to .orchestrator.json.
+    """
+    if not getattr(args, "notify_prompt", True):
+        return
+    if not sys.stdin.isatty():
+        return
+    channels: list[dict] = []
+    try:
+        if _prompt_yn("Wire iMessage?", default=platform.system() == "Darwin"):
+            to = input("  iMessage handle (phone or email): ").strip()
+            if to:
+                channels.append({"kind": "imessage", "to": to})
+        if _prompt_yn("Wire Discord?", default=False):
+            token = input("  Discord bot token: ").strip()
+            user_id = input("  Discord user ID: ").strip()
+            if token and user_id:
+                channels.append({"kind": "discord", "bot_token": token, "user_id": user_id})
+    except EOFError:
+        return  # stdin closed or non-interactive; skip prompt without writing
+    cfg_path = cfg.project_root / CONFIG_FILENAME
+    try:
+        raw: dict = json.loads(cfg_path.read_text())
+    except FileNotFoundError:
+        raw = {}
+    except json.JSONDecodeError:
+        raw = {}
+    raw.setdefault("notify", {})["channels"] = channels
+    cfg_path.write_text(json.dumps(raw, indent=2) + "\n")
+
+
 class ExitCode(IntEnum):
     OK = 0
     GENERIC = 1
@@ -215,6 +261,11 @@ def _translate_claim_mismatch(fn):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="clu", description="End of Line — plan orchestrator (clu CLI)"
+    )
+    parser.add_argument(
+        "--no-notify", action="store_true", default=False, dest="no_notify",
+        help="Suppress all outbound notify sends for this invocation "
+             "(inbox writes are unaffected). Useful for debugging or dry-runs.",
     )
     # required=False so bare `clu` falls through to the fleet view — the
     # daily-driver entry point. `clu list` keeps the dumb name+root listing
@@ -297,6 +348,11 @@ def main(argv: list[str] | None = None) -> int:
         "--quiet", action="store_true",
         help="Suppress post-init tips (useful for scripts).",
     )
+    p_init.add_argument(
+        "--no-notify-prompt", action="store_false", dest="notify_prompt",
+        help="Skip the interactive notify channel setup prompts.",
+    )
+    p_init.set_defaults(notify_prompt=True)
 
     p_register = sub.add_parser(
         "register",
@@ -719,6 +775,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Poll interval seconds (default: 1.0 single-project, 5.0 with --all)",
     )
 
+    p_notify_test = sub.add_parser(
+        "notify-test",
+        help="Send a test notification through configured channels and report "
+             "per-channel status. Useful for verifying credentials after setup.",
+    )
+    p_notify_test.add_argument(
+        "--project", type=Path, default=None,
+        help="Project root (contains .orchestrator.json). Defaults to cwd.",
+    )
+    p_notify_test.add_argument(
+        "--channel", default=None, metavar="KIND",
+        help="Test a specific channel kind only (e.g. imessage, discord).",
+    )
+
     p_prior_blocker = sub.add_parser(
         "prior-blocker",
         help="Print the answer for the phase's most recent answered blocker (exit 0); "
@@ -745,6 +815,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    if getattr(args, "no_notify", False):
+        notify.set_global_suppress(True)
+        print("notify: suppressed via --no-notify", file=sys.stderr)
     # Host-scoped commands skip the per-plan ProjectConfig load (which
     # requires --project). Bare `clu` is the fleet view; `clu list` is the
     # name-only listing kept for scripting.
@@ -776,6 +849,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_blockers(args)
     if args.cmd == "watch":
         return cmd_watch(args)
+    if args.cmd == "notify-test":
+        return cmd_notify_test(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -1205,6 +1280,7 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
         cfg.project_root, args.plan, worktree_record is not None,
     )
     _maybe_handle_claude_md_injection(cfg, args)
+    _maybe_handle_notify_prompts(cfg, args)
     _maybe_print_monitor_tip()
     _maybe_print_watch_tip(
         scope="plan", slug=args.plan, quiet=getattr(args, "quiet", False),
@@ -1423,7 +1499,7 @@ def _refuse_on_corrupt_queue(queue_path: Path, exc: Exception) -> int:
     return _die(ExitCode.GENERIC, "\n".join(lines))
 
 
-BUNDLED_SKILLS = ("clu-phase", "plan", "brainstorm", "clu-monitor", "clu-plan")
+BUNDLED_SKILLS = ("brainstorm", "clu-monitor", "clu-phase", "clu-plan", "clu-reply", "plan")
 
 _CLU_NOTE_START = "<!-- clu:start autonomous-loop-pacing -->"
 _CLU_NOTE_END = "<!-- clu:end autonomous-loop-pacing -->"
@@ -3398,6 +3474,45 @@ def cmd_blockers_show(args) -> int:
         print("  Events:")
         for e in related:
             print(f"    {e.get('ts', '?')} {e.get('type', '?')}")
+    return ExitCode.OK
+
+
+def cmd_notify_test(args) -> int:
+    """Fire a test notification through configured channels, reporting per-channel status.
+
+    Skips disabled channels. Never touches inbox — outbound transport only.
+    """
+    cfg = load_project_config(_resolve_project_arg(args))
+    channels = (
+        [c for c in cfg.notify.channels if c.kind == args.channel]
+        if args.channel
+        else cfg.notify.channels
+    )
+    if not channels:
+        print(
+            "No channels configured. Run `clu init` to add one, "
+            "or edit `.orchestrator.json` directly.",
+            file=sys.stderr,
+        )
+        return ExitCode.GENERIC
+    for ch in channels:
+        if not ch.enabled:
+            print(f"{ch.kind}: SKIPPED (disabled)")
+            continue
+        notifier_cls = notify._NOTIFIER_REGISTRY.get(ch.kind)
+        if notifier_cls is None:
+            print(f"{ch.kind}: SKIPPED (unknown kind)")
+            continue
+        notifier = notifier_cls.from_spec(ch)
+        try:
+            msg_id = notifier.send(
+                notify.KIND_COMPLETED, "clu notify smoke test",
+                plan_slug="_test", blocker_id=None,
+            )
+            suffix = f" (msg {msg_id})" if msg_id else ""
+            print(f"{ch.kind}: OK{suffix}")
+        except Exception as exc:
+            print(f"{ch.kind}: FAILED ({exc!r})")
     return ExitCode.OK
 
 

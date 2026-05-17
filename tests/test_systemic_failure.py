@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import notify, state as st
+from end_of_line import notify, notify_imessage, state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.dispatch import (
@@ -147,7 +147,7 @@ class _SystemicFixture(unittest.TestCase):
         self.log_path = self.log_dir / f"a.{self.token}.log"
         self.sent: list[tuple[str, str]] = []
         patcher = mock.patch.object(
-            notify, "_osascript_send",
+            notify_imessage, "_osascript_send",
             side_effect=lambda to, body: self.sent.append((to, body)),
         )
         patcher.start()
@@ -161,7 +161,7 @@ class _SystemicFixture(unittest.TestCase):
             project_root=self.project,
             plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command=cmd),
-            notify=NotifySpec(imessage_to="+15550000000", quiet_hours=None),
+            notify=NotifySpec.imessage_only("+15550000000"),
         )
 
     def _result(self) -> TickResult:
@@ -289,7 +289,7 @@ class MultiPlanIndependenceTestCase(unittest.TestCase):
         main(["init", "--project", str(self.project), "--plan", "t2"])
         self.sent: list[tuple[str, str]] = []
         patcher = mock.patch.object(
-            notify, "_osascript_send",
+            notify_imessage, "_osascript_send",
             side_effect=lambda to, body: self.sent.append((to, body)),
         )
         patcher.start()
@@ -302,7 +302,7 @@ class MultiPlanIndependenceTestCase(unittest.TestCase):
         return ProjectConfig(
             project_root=self.project, plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command=cmd),
-            notify=NotifySpec(imessage_to="+15550000000", quiet_hours=None),
+            notify=NotifySpec.imessage_only("+15550000000"),
         )
 
     def test_two_plans_independently_pause(self) -> None:

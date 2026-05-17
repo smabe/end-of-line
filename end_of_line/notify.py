@@ -1,12 +1,8 @@
-"""Outbound notification adapter — iMessage via osascript.
+"""Outbound notification router.
 
-clu runs from cron and the worker runs in a separate process, so the
-notification path must be self-contained: no MCP, no long-running daemon,
-no network. Calling Messages.app via osascript is the cheapest thing that
-delivers to the user's phone without standing up new infra.
-
-Quiet hours gate every kind defined here. If you add a kind that must
-bypass quiet hours (halts, emergency stale escalations), include it in
+Routes notifications through configured backends (phase 1: iMessage only).
+Quiet hours gate every kind defined here. If you add a kind that must bypass
+quiet hours (halts, emergency stale escalations), include it in
 QUIET_HOURS_BYPASS_KINDS.
 """
 from __future__ import annotations
@@ -17,8 +13,23 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from .notify_discord import DiscordNotifier
+from .notify_imessage import IMessageNotifier
+
 if TYPE_CHECKING:
     from .config import NotifySpec
+
+_NOTIFIER_REGISTRY: dict[str, type] = {
+    "imessage": IMessageNotifier,
+    "discord": DiscordNotifier,
+}
+
+_GLOBAL_SUPPRESS: bool = False
+
+
+def set_global_suppress(v: bool) -> None:
+    global _GLOBAL_SUPPRESS
+    _GLOBAL_SUPPRESS = v
 
 KIND_BLOCKER = "blocker"
 KIND_STALLED = "stalled"
@@ -41,32 +52,6 @@ QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
     KIND_QUEUE_REPAIR_FAILED,
     KIND_QUEUE_CORRUPT,
 })
-
-# osascript-friendly AppleScript: argv carries the handle + body so we
-# don't have to escape user-controlled text into the script source.
-_APPLESCRIPT = """
-on run argv
-    set toHandle to item 1 of argv
-    set body to item 2 of argv
-    tell application "Messages"
-        set targetService to 1st service whose service type = iMessage
-        set targetBuddy to buddy toHandle of targetService
-        send body to targetBuddy
-    end tell
-end run
-""".strip()
-
-Sender = Callable[[str, str], None]
-
-
-def _osascript_send(to: str, body: str) -> None:
-    """Fire-and-forget — don't block the cron tick on a hung Messages.app."""
-    subprocess.Popen(
-        ["osascript", "-e", _APPLESCRIPT, "--", to, body],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
 
 
 def parse_hhmm(s: str) -> _dt.time:
@@ -96,15 +81,14 @@ def notify(
     body: str,
     *,
     now: _dt.datetime | None = None,
-    sender: Sender | None = None,
     plan_slug: str | None = None,
     project_root: str | None = None,
     inbox_writer: Callable[..., str] | None = None,
 ) -> bool:
-    """Send an iMessage if quiet hours / config permit. Returns True if sent.
+    """Send a notification if quiet hours / config permit. Returns True if sent.
 
-    Stays best-effort — on osascript failure we log to stderr and return False
-    so a broken Messages.app can't take down the supervisor.
+    Stays best-effort — on backend failure we log to stderr and return False
+    so a broken backend can't take down the supervisor.
 
     When `plan_slug` and `project_root` are both provided, also drops an
     inbox event so the next Claude turn sees the same signal — independent
@@ -127,19 +111,30 @@ def notify(
         except OSError as exc:
             # Never let a broken inbox dir block the iMessage path.
             print(f"notify: inbox write failed ({kind}): {exc}", file=sys.stderr)
+    if _GLOBAL_SUPPRESS:
+        return False
     # Quiet hours are user-facing wall-clock semantics — local time is the
     # whole point. Don't switch this to UTC to match state.py.
     now = now or _dt.datetime.now()
     if in_quiet_window(spec, now) and kind not in QUIET_HOURS_BYPASS_KINDS:
         return False
-    if not spec.imessage_to:
-        return False
-    try:
-        (sender or _osascript_send)(spec.imessage_to, body)
-        return True
-    except (subprocess.SubprocessError, OSError) as exc:
-        print(f"notify: send failed ({kind}): {exc}", file=sys.stderr)
-        return False
+    sent_any = False
+    for ch in spec.channels:
+        notifier_cls = _NOTIFIER_REGISTRY.get(ch.kind)
+        if notifier_cls is None:
+            print(f"notify: unknown channel kind '{ch.kind}' — skipping", file=sys.stderr)
+            continue
+        if not ch.enabled:
+            continue
+        if ch.kinds is not None and kind not in ch.kinds:
+            continue
+        try:
+            notifier = notifier_cls.from_spec(ch)
+            notifier.send(kind, body, plan_slug=plan_slug or "", blocker_id=None)
+            sent_any = True
+        except (subprocess.SubprocessError, OSError) as exc:
+            print(f"notify: send failed ({kind} via {ch.kind}): {exc}", file=sys.stderr)
+    return sent_any
 
 
 def in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:

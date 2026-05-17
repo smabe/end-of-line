@@ -18,7 +18,7 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 - **Append-only event log.** Phase claims, completions, lease expirations, blockers — all derivable from `events[]`. State corruption is recoverable by replaying.
 - **`/plan` convention.** Phase declarations come from the master plan's `## Sessions index` markdown table. The parser is 80 lines.
 - **System cron is the heartbeat.** No long-running orchestrator process. Each tick is ~50ms of Python; the supervisor itself burns zero LLM tokens. Workers are the only thing that costs API money.
-- **iMessage round-trips.** Outbound via `osascript`; inbound via a tiny LaunchAgent that polls `chat.db` and routes replies back into `clu answer`. Quiet hours (default 22:00–08:00) gate non-halt notifications.
+- **Pluggable notification backends.** iMessage (macOS, via `osascript` + `chat.db` poll) and Discord (any OS, REST) ship out of the box; the protocol is open for more. Quiet hours (default 22:00–08:00) gate non-halt notifications. In-session-only mode (`channels: []`) skips outbound entirely — the inbox hook covers that case.
 - **Three observation surfaces.** iMessage for halts and blockers (loud, your phone), the inbox hook for AFK pickup (quiet, Claude's next message), `clu watch` for live in-session streaming (Claude's `Monitor` tool, at-desk). Same event stream, three audiences.
 
 ## Install
@@ -38,9 +38,7 @@ After installing the skills, run `/clu-monitor` once in Claude Code to install a
 
 For a live in-session feed, `clu watch` streams state-machine events to stdout as they happen — one line per transition. It's the at-desk sibling to the inbox hook: the inbox catches events from between sessions; `clu watch` covers the current session live. The `/clu-plan` skill arms `Monitor(command="clu watch --project . --plan <slug> --task-list", persistent=True)` automatically after `clu queue add`, so Claude-driven sessions get a live feed that populates the native TaskCreate UI hands-free. Add `--task-list` to emit `TASK_CREATE`/`TASK_UPDATE` protocol lines instead of text; omit it for plain-text output (compatible with `--json` for jq pipelines).
 
-For the inbound iMessage poller, grant Full Disk Access to the pipx venv python (System Settings → Privacy & Security → Full Disk Access → add `~/.local/pipx/venvs/end-of-line/bin/python3`). Without it, the poller can't open `chat.db`.
-
-(Optional) Install the LaunchAgents from `examples/` for cron-driven dispatch — see `docs/operations.md`.
+(Optional) Install LaunchAgents / systemd units from `examples/` for cron-driven dispatch and inbound polling — see `docs/operations.md` for setup per backend (iMessage, Discord, or in-session-only).
 
 (Optional, contributor-only) This repo uses [graphify](https://github.com/karpathy/graphify) to keep an up-to-date knowledge graph of the codebase at `graphify-out/` (god nodes, communities, surprising connections) so Claude Code can answer "where is X defined" without grepping the whole tree. The graph is regenerated on every code-touching commit by a local post-commit hook. Git doesn't track the hook itself or the local Claude settings, so each clone runs setup once:
 
@@ -86,7 +84,7 @@ Each row points to a sub-plan file in the same `plans/` directory. The bundled `
 
 ## Configure a project
 
-Drop a `.orchestrator.json` at your project root (it's gitignored by example since it holds your iMessage handle):
+Drop a `.orchestrator.json` at your project root. `clu init` prompts for notify config interactively; or write it by hand:
 
 ```json
 {
@@ -96,16 +94,26 @@ Drop a `.orchestrator.json` at your project root (it's gitignored by example sin
     "command": "claude --print --permission-mode bypassPermissions --max-budget-usd 3.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'"
   },
   "notify": {
-    "imessage": {"to": "you@example.com"},
+    "channels": [
+      {"kind": "imessage", "to": "you@example.com"}
+    ],
     "quiet_hours": ["22:00", "08:00"]
   }
 }
 ```
 
+Three notification modes — pick one or combine:
+
+- **iMessage (macOS):** `{"kind": "imessage", "to": "<your-handle>"}`. Requires Full Disk Access for the pipx venv python and the inbound LaunchAgent (`examples/clu.inbound.plist`).
+- **Discord (any OS):** `{"kind": "discord", "bot_token": "...", "user_id": "..."}`. Bot DMs you directly; inbound poller in `examples/clu.discord_inbound.plist` / `examples/clu-discord-inbound.service`. See `docs/operations.md` for the Discord app setup walkthrough.
+- **In-session only:** `"channels": []` — no phone pings, but the inbox hook surfaces events into Claude Code on your next message. Great for local-only work.
+
+Other config fields:
+
 - `dispatch.command` gets `{plan_slug}`, `{phase_id}`, `{token}`, `{state_file}`, `{project}` substituted (all shlex-quoted) before launching.
-- `dispatch.path` (optional) — colon-separated PATH passed to the worker subprocess as `env={**os.environ, "PATH": ...}`. Set this when workers need to resolve tools like `gh` or `pipx` from `~/.local/bin` or `/opt/homebrew/bin` that the LaunchAgent's default PATH doesn't include. `~` is expanded per segment at load time, so `~/.local/bin` works. Empty/unset = inherit the parent env. Example: `"/opt/homebrew/bin:/usr/local/bin:~/.local/bin:/usr/bin:/bin"`.
-- `notify.imessage.to` should be your iMessage self-chat handle (your own number or Apple ID email) — clu DMs you when a worker opens a blocker, when a phase stalls, when the plan halts, or when it completes.
+- `dispatch.path` (optional) — colon-separated PATH for the worker subprocess. `~` is expanded per segment. Empty/unset = inherit parent env.
 - `quiet_hours` is `[start, end]` in local wall-clock time; wraps overnight. Halt notifications bypass it (see `notify.QUIET_HOURS_BYPASS_KINDS`).
+- `clu --no-notify <cmd>` suppresses outbound sends for a single invocation (debug/dry-run). `clu notify-test` fires a test notification through all configured channels.
 
 The dispatch command above launches Claude with the `/clu-phase` skill. Run `clu install-skill` to drop it into `~/.claude/skills/clu-phase/SKILL.md`, or write your own equivalent — anything that honors the worker callback contract (always call `clu complete` or `clu block` before exiting) will work.
 

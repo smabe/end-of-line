@@ -1,0 +1,16 @@
+[Unit]
+Description=clu Discord inbound poller
+After=network.target
+
+[Service]
+# Replace /usr/bin/python3 with the path to the python that has end_of_line
+# installed (e.g. the result of `which python3` in the venv).
+# Replace /path/to/your/project with the directory containing .orchestrator.json.
+ExecStart=/usr/bin/python3 -m end_of_line.notify_discord_inbound --project /path/to/your/project
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

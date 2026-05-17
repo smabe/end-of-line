@@ -23,12 +23,29 @@ from typing import Iterable
 # directly via `python /path/to/clu_inbox_surface.py` — Claude Code's
 # UserPromptSubmit hook invokes it that way, with no package context. The
 # pipx venv that installed end_of_line guarantees the absolute import resolves.
-from end_of_line import inbox
+from end_of_line import inbox, registry
+from end_of_line.notify_base import BlockerDetail, open_blockers_with_details
 
 MAX_EVENTS = 20
+MAX_BLOCKERS = 10
 # Buffer under the documented 10K additionalContext cap; leaves room for
 # the truncation footer and any inflation Claude Code may apply.
 MAX_CONTEXT_CHARS = 9500
+
+SECTION_HEADER = "\n## Active blockers\n\n"
+BLOCKER_TEMPLATE = (
+    "Plan `{slug}`, phase `{phase}`, blocker `{blocker_id}`:\n"
+    "Question: {question}\n"
+    "Options:\n"
+    "{options_list}\n"
+)
+INSTRUCTION = (
+    "\nIf the user's next message reads as a reply to one of these "
+    "blockers (letter, number, or natural pick), call "
+    "`clu answer --plan <slug> <blocker_id> <answer>` via Bash. "
+    "If multiple blockers are open and the reply is ambiguous, ask "
+    "the user which plan they mean — don't guess.\n"
+)
 
 
 def _log_path() -> Path:
@@ -89,6 +106,30 @@ def _build_context(events: Iterable[dict]) -> str:
     return out
 
 
+def _build_blockers_section(blockers: list[BlockerDetail]) -> str:
+    if not blockers:
+        return ""
+    capped = blockers[:MAX_BLOCKERS]
+    overflow = len(blockers) - MAX_BLOCKERS
+    parts = []
+    for b in capped:
+        opts = "\n".join(f"  [{i}] {opt}" for i, opt in enumerate(b.options))
+        parts.append(BLOCKER_TEMPLATE.format(
+            slug=b.plan_slug,
+            phase=b.phase_id,
+            blocker_id=b.blocker_id,
+            question=b.question,
+            options_list=opts,
+        ))
+    body = "\n".join(parts)
+    if overflow > 0:
+        body += (
+            f"\n... +{overflow} more open blockers — "
+            "see `clu list` for the full set."
+        )
+    return SECTION_HEADER + body + INSTRUCTION
+
+
 def main() -> int:
     # Guard against shell-env inheritance of CLU_TEST_MODE — a hook invoked
     # from a test-mode shell must not false-trip the XDG guard.
@@ -99,9 +140,21 @@ def main() -> int:
         _ = sys.stdin.read()
         project_root = _resolve_project_root()
         events = inbox.list_for_project(project_root)
-        context = _build_context(events)
-        if not context:
+        events_context = _build_context(events)
+
+        entries = registry.entries()
+        blockers = open_blockers_with_details(entries, project_root)
+        blockers_section = _build_blockers_section(blockers)
+
+        if events_context and blockers_section:
+            context = events_context + "\n\n" + blockers_section
+        elif events_context:
+            context = events_context
+        elif blockers_section:
+            context = blockers_section
+        else:
             return 0
+
         payload = {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
