@@ -111,6 +111,10 @@ EVENT_STALLED_CLAIM_NOTIFIED = "stalled_claim_notified"
 # worktrees — suppression flag lives on each plan's `in_conflict_with` field.
 EVENT_WORKTREE_MISSING = "worktree_missing"
 EVENT_WORKTREE_CONFLICT_WARNING = "worktree_conflict_warning"
+# Operator ran `clu worktree attach` to retrofit a worktree record onto an
+# already-init'd plan (e.g. resume flow where worktrees were built by hand).
+# Distinguishes operator-attached from init-created in the audit trail.
+EVENT_WORKTREE_ATTACHED = "worktree_attached"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"

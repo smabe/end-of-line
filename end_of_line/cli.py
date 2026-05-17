@@ -390,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_worktree = sub.add_parser(
         "worktree",
-        help="Manage per-plan git worktrees (subcommands: gc, reattach).",
+        help="Manage per-plan git worktrees (subcommands: gc, reattach, attach).",
     )
     worktree_subs = p_worktree.add_subparsers(dest="worktree_cmd")
     p_worktree_gc = worktree_subs.add_parser(
@@ -433,6 +433,23 @@ def main(argv: list[str] | None = None) -> int:
         "--path", type=Path, required=True,
         help="New worktree path. Must already exist and be a valid "
              "git working directory (this command does NOT create one).",
+    )
+
+    p_worktree_attach = worktree_subs.add_parser(
+        "attach",
+        help="Retrofit a worktree record onto an already-init'd plan "
+             "(use when the operator built the worktree by hand).",
+    )
+    p_worktree_attach.add_argument(
+        "--project", type=Path, required=True, help="Project root.",
+    )
+    p_worktree_attach.add_argument(
+        "--plan", required=True, help="Plan slug.",
+    )
+    p_worktree_attach.add_argument(
+        "--path", type=Path, required=True,
+        help="Existing worktree path. Must be a valid git working "
+             "directory on a branch (not detached HEAD).",
     )
 
     p_doctor = sub.add_parser(
@@ -1758,8 +1775,10 @@ def cmd_worktree(args) -> int:
         return cmd_worktree_gc(args)
     if args.worktree_cmd == "reattach":
         return cmd_worktree_reattach(args)
+    if args.worktree_cmd == "attach":
+        return cmd_worktree_attach(args)
     print(
-        "usage: clu worktree {gc|reattach} [...]",
+        "usage: clu worktree {gc|reattach|attach} [...]",
         file=sys.stderr,
     )
     return _die(
@@ -1812,6 +1831,94 @@ def cmd_worktree_reattach(args) -> int:
     print(
         f"Reattached {args.plan}: {old_path} → {new_path} "
         f"(branch: {existing['branch']})",
+    )
+    return ExitCode.OK
+
+
+def autodetect_branch_and_base_ref(
+    worktree_path: Path,
+) -> tuple[str, str]:
+    """Read current branch + HEAD SHA from an existing git worktree.
+
+    Returns `(branch, sha)` with both fields stripped. Empty `branch`
+    means detached HEAD — caller decides whether to refuse. Best-effort:
+    git failures surface as empty strings so the caller can produce a
+    single message rather than juggling two subprocess error paths.
+    """
+    branch = subprocess.run(
+        ["git", "-C", str(worktree_path), "branch", "--show-current"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    sha = subprocess.run(
+        ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return branch, sha
+
+
+def cmd_worktree_attach(args) -> int:
+    """Write a `state.worktree` record onto a plan that has none.
+
+    Retrofit path for plans where the operator built the worktree by
+    hand after `clu init` (without `--worktree`) had already created the
+    state file. Mirrors `cmd_worktree_reattach` minus the "must already
+    have a record" precondition, plus autodetection of branch + base_ref
+    from the worktree's HEAD.
+    """
+    try:
+        st.validate_slug(args.plan, kind="plan slug")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+    cfg = load_project_config(args.project.resolve())
+    state_path = cfg.state_path(args.plan)
+    if not state_path.exists():
+        return _die(
+            ExitCode.UNKNOWN_TASK,
+            f"no state at {state_path}",
+        )
+
+    new_path = args.path.expanduser().resolve()
+    if not dispatch.worktree_alive(new_path):
+        return _die(
+            ExitCode.GENERIC,
+            f"{new_path} is not a valid git working directory "
+            f"(refusing to attach to a non-git path)",
+        )
+
+    branch, sha = autodetect_branch_and_base_ref(new_path)
+    if not branch:
+        return _die(
+            ExitCode.GENERIC,
+            f"{new_path} is on a detached HEAD — attach requires a "
+            f"named branch. Run `git -C {new_path} checkout -b <name>` "
+            f"first.",
+        )
+    if not sha:
+        return _die(
+            ExitCode.GENERIC,
+            f"{new_path}: could not resolve HEAD commit",
+        )
+
+    with st.mutate(state_path) as data:
+        if st.get_worktree(data) is not None:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"plan {args.plan!r} already has a worktree record — "
+                f"use `clu worktree reattach` to repoint it",
+            )
+        data["worktree"] = {
+            "path": str(new_path),
+            "branch": branch,
+            "base_ref": sha,
+        }
+        st.append_event(
+            data, st.EVENT_WORKTREE_ATTACHED,
+            path=str(new_path), branch=branch, base_ref=sha,
+        )
+    print(
+        f"Attached {args.plan}: {new_path}\n"
+        f"  Branch: {branch}\n"
+        f"  Base:   {sha}",
     )
     return ExitCode.OK
 
