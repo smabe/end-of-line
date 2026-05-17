@@ -670,6 +670,55 @@ mark-and-sweep dedup into a `processed/` subdir.
 - `notify.notify()` for the integration point that writes inbox events
   alongside iMessage sends.
 
+### `watch.py`
+
+Streaming projection of plan state-machine events for AI-agent
+consumption (Claude's `Monitor` tool). Polls state files on disk and
+emits one concise line per meaningful transition to stdout.
+
+**Key types and functions**
+
+- `project_event(event, plan_slug, *, verbose=False) -> str | None` —
+  pure projector. Given a raw event dict and the plan slug, returns a
+  rendered one-liner (e.g. `"my-plan/setup: started (attempt 1)"`) or
+  `None` if the event is filtered out. Verbose-only events return
+  `None` when `verbose=False`. All field truncation (100-char cap) and
+  phase-prefix logic lives here.
+- `stream_loop(state_paths, *, json_mode, verbose, sink, poll_interval,
+  max_ticks, _before_first_tick) -> int` — poll loop over a list of
+  state file paths. On startup, emits a `[snapshot]` baseline line per
+  plan (current status + active phase), sets per-path cursors, then
+  polls at `poll_interval` seconds. New events since the last tick are
+  projected through `project_event` and written to `sink`. Returns
+  `ExitCode.OK` (0) on SIGINT. `max_ticks` and `_before_first_tick`
+  are test seams; omit in production.
+- `_DEFAULT_VISIBLE` — `frozenset` of event type strings emitted by
+  default (phase starts/completes, blocks, answers, max-attempts,
+  stalls, dispatch failures, worktree issues, queue pops, etc.).
+- `_VERBOSE_ONLY` — `frozenset` for noisy bookkeeping events (lease
+  expiry, force-releases, heartbeat-based notifications, worktree
+  lifecycle). Only emitted with `verbose=True`.
+
+**Invariants and gotchas**
+
+- `project_event` is a pure function — no I/O, no state mutation. Safe
+  to call from tests without any setup.
+- Queue v2 constants (`EVENT_QUEUE_APPENDED`, `EVENT_QUEUE_REJECTED`)
+  are spliced in via `getattr(st, ..., None)` — the module loads
+  cleanly on builds that predate the queue-worker-callback merge.
+- `stream_loop` silently drops state paths that go missing mid-watch
+  (plan archived while watching) — the cursor map entry is removed and
+  no error is emitted.
+- `_slug_for_path` extracts the plan slug from `<slug>.state.json` by
+  stripping the `.state` suffix from the stem. Relies on the canonical
+  naming convention from `state.state_path_for`.
+
+**See also**
+
+- `cli.py` `cmd_watch` for the argument-parsing wrapper.
+- `operations.md` § "Live in-session feed (`clu watch`)" for usage and
+  Monitor-tool pairing.
+
 ### `fleet.py`
 
 Pure projection: take every registry entry, project into a one-line
@@ -740,7 +789,7 @@ through this.
   `cmd_worktree_reattach`),
   `cmd_blockers` (+ `cmd_blockers_list`, `cmd_blockers_show`),
   `cmd_install_skill`, `cmd_install_hook`, `cmd_uninstall_hook`,
-  `cmd_doctor`.
+  `cmd_doctor`, `cmd_watch`.
 - `cmd_extend_lease(args)` — add N minutes to the live claim's expiry.
   `--project`, `--plan`, positional `minutes` (int, >0). New expiry =
   `max(now, current_expires) + timedelta(minutes=N)`. Appends
@@ -862,6 +911,14 @@ through this.
   resolves common tools (`claude`, `gh`, `git`, `python3`), and exits
   `OK` / `GENERIC` based on whether the required ones are found. No
   state writes — purely diagnostic.
+- `cmd_watch(args)` — streaming state-event feed. Resolves state
+  paths from the registry (single plan, all plans in a project, or
+  registry-wide with `--all`), then delegates to
+  `watch.stream_loop`. Args: `--project PATH`, `--plan SLUG` (mutually
+  exclusive with `--all`), `--all`, `--json`, `--verbose`,
+  `--interval FLOAT`. Default mode (no `--plan`/`--all`): every
+  registered plan in the CWD project. Exit codes: `OK` on SIGINT;
+  `UNKNOWN_TASK` if `--plan` isn't registered.
 - `cmd_logs(args)` — tail the active worker's log
   (`<project>/plans/.orchestrator/logs/<phase>.<token>.log`); falls
   back to the newest log file when no claim is live. `--follow` for
