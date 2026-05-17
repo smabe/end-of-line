@@ -105,6 +105,27 @@ class TestBlockers(TempStateMixin, unittest.TestCase):
         with self.assertRaises(KeyError):
             st.answer_blocker(data, bid, "Y")
 
+    def test_add_emits_event_with_question(self) -> None:
+        """Regression guard for #46: the EVENT_PHASE_BLOCKED payload
+        must carry the question text so the --task-list projector
+        renders the full BLOCKED msg, not just the blocker_id."""
+        data = st.empty_state("foo", "plans")
+        st.add_blocker(data, "phase-a", "Postgres or sqlite?", ["yes", "no"])
+        event = data["events"][-1]
+        self.assertEqual(event["type"], st.EVENT_PHASE_BLOCKED)
+        self.assertEqual(event["question"], "Postgres or sqlite?")
+        self.assertEqual(event["phase"], "phase-a")
+        self.assertEqual(event["blocker_id"], "q-1")
+
+    def test_add_emits_event_with_empty_question(self) -> None:
+        """Empty question still serializes as an empty string on the
+        event so projector code (which uses `event.get('question') or
+        ''`) handles both None and '' uniformly."""
+        data = st.empty_state("foo", "plans")
+        st.add_blocker(data, "phase-a", "", [])
+        event = data["events"][-1]
+        self.assertEqual(event["question"], "")
+
 
 class TestLockfileSymlink(TempStateMixin, unittest.TestCase):
     def test_refuses_symlink_lockfile(self) -> None:

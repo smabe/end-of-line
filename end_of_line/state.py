@@ -440,7 +440,10 @@ def add_blocker(
         "answer": None,
         "answered_at": None,
     })
-    append_event(data, EVENT_PHASE_BLOCKED, phase=phase_id, blocker_id=blocker_id)
+    append_event(
+        data, EVENT_PHASE_BLOCKED,
+        phase=phase_id, blocker_id=blocker_id, question=question,
+    )
     return blocker_id
 
 
