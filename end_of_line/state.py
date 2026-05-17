@@ -51,6 +51,7 @@ DEFAULT_LEASE_TTL_MIN = 30
 DEFAULT_SLA_HOURS = 24
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_SPAWNS_PER_PHASE = 10
+DEFAULT_MAX_QUEUE_ADDS_PER_PHASE = 3
 DEFAULT_STALLED_HEARTBEAT_MIN = 10
 
 # Plan status (`data["status"]`)
@@ -98,6 +99,12 @@ EVENT_RETRY_REQUESTED = "retry_requested"
 # added_at, added_by, position. Worker dispatched after this event lands
 # sees it in its initial state read.
 EVENT_QUEUE_POPPED = "queue_popped"
+# Written to the *source plan's* events array when a worker enqueues a
+# follow-up plan (queue_appended) or is rejected by a gate (queue_rejected).
+# Logging against the source plan co-locates the audit trail with the
+# worker's other actions.
+EVENT_QUEUE_APPENDED = "queue_appended"
+EVENT_QUEUE_REJECTED = "queue_rejected"
 # Gap-fill notifications surfaced both via iMessage (cmd_tick) and inbox
 # (next Claude turn). REPINGED fires every 30 minutes per blocker;
 # CLAIM_NOTIFIED fires once per (claim, transition) pair.
@@ -174,6 +181,7 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
             "blocked_question_sla_hours": DEFAULT_SLA_HOURS,
             "max_attempts_per_phase": DEFAULT_MAX_ATTEMPTS,
             "max_spawns_per_phase": DEFAULT_MAX_SPAWNS_PER_PHASE,
+            "max_queue_adds_per_phase": DEFAULT_MAX_QUEUE_ADDS_PER_PHASE,
             "stalled_heartbeat_minutes": DEFAULT_STALLED_HEARTBEAT_MIN,
         },
         "events": [],

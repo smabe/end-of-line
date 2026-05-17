@@ -169,6 +169,9 @@ class ExitCode(IntEnum):
     # branch back down. Distinct exit so callers can tell setup failure from
     # an invalid-slug or status-transition refusal.
     WORKTREE_SETUP_FAILED = 10
+    # Worker called `clu queue add` but has already hit the per-phase cap
+    # (default: DEFAULT_MAX_QUEUE_ADDS_PER_PHASE). Operator path is uncapped.
+    QUEUE_CAP = 11
 
 
 def _die(rc: ExitCode | int, msg: str) -> int:
@@ -418,6 +421,22 @@ def main(argv: list[str] | None = None) -> int:
     p_queue_add.add_argument(
         "--project", type=Path, default=None,
         help="Project root (defaults to CWD).",
+    )
+    p_queue_add.add_argument(
+        "--token", default=None,
+        help="Worker claim token (switches to worker mode).",
+    )
+    p_queue_add.add_argument(
+        "--plan", dest="source_plan", default=None,
+        help="Source plan slug (required in worker mode).",
+    )
+    p_queue_add.add_argument(
+        "--phase", dest="source_phase", default=None,
+        help="Source phase id (required in worker mode).",
+    )
+    p_queue_add.add_argument(
+        "--reason", default=None,
+        help="Optional reason text logged on the queue entry.",
     )
     p_queue_list = queue_subs.add_parser(
         "list", help="Show the pending queue and any recent failures.",
@@ -1723,7 +1742,126 @@ def cmd_queue(args) -> int:
     return _die(ExitCode.GENERIC, f"unknown queue subcommand {args.queue_cmd!r}")
 
 
+def _slug_is_running(slug: str, cfg: ProjectConfig) -> bool:
+    """True when slug has a live current_claim in the project registry."""
+    project_str = str(cfg.project_root)
+    for entry in registry.entries():
+        if entry.plan_slug == slug and entry.project_root == project_str:
+            state_data = registry.load_entry_state(entry)
+            if state_data and state_data.get("current_claim"):
+                return True
+    return False
+
+
+@_translate_claim_mismatch
+def _cmd_queue_add_worker(args) -> int:
+    slug = args.slugs[0]
+    try:
+        st.validate_slug(slug, kind="plan slug")
+        st.validate_slug(args.source_plan, kind="plan slug")
+        st.validate_slug(args.source_phase, kind="phase id")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    cfg = load_project_config(_resolve_project_arg(args))
+    source_state_path = cfg.state_path(args.source_plan)
+    if not source_state_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no state for plan {args.source_plan!r}")
+
+    plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
+    token_fp = hashlib.sha256(args.token.encode()).hexdigest()[:8]
+    queue_path = cfg.queue_path()
+
+    # Lock order: state lock outer, queue lock inner.
+    with st.mutate(source_state_path) as state_data:
+        st.assert_claim_match(state_data, args.token, args.source_phase)
+
+        # Plan-file existence check inside state lock so rejection event is atomic.
+        if not plan_file.exists():
+            st.append_event(
+                state_data, st.EVENT_QUEUE_REJECTED,
+                slug=slug, source_phase=args.source_phase, reason="missing_plan_file",
+            )
+            return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
+
+        cap = state_data["config"].get(
+            "max_queue_adds_per_phase", st.DEFAULT_MAX_QUEUE_ADDS_PER_PHASE
+        )
+
+        with queue.mutate(queue_path) as qdata:
+            # Cap: count source-tagged entries across pending + history.
+            existing_count = sum(
+                1 for e in qdata["queue"] + qdata["history"]
+                if e.get("source_plan") == args.source_plan
+                and e.get("source_phase") == args.source_phase
+            )
+            if existing_count >= cap:
+                st.append_event(
+                    state_data, st.EVENT_QUEUE_REJECTED,
+                    slug=slug, source_phase=args.source_phase, reason="cap",
+                )
+                return _die(
+                    ExitCode.QUEUE_CAP,
+                    f"phase {args.source_phase!r} hit queue cap of {cap}",
+                )
+
+            # Idempotency: pending slug (check first — active intent wins over history).
+            pending = {e["slug"]: i + 1 for i, e in enumerate(qdata["queue"])}
+            if slug in pending:
+                print(f"already queued: {slug} (position {pending[slug]})")
+                return ExitCode.OK
+
+            # Idempotency: running slug (popped, in-flight).
+            if _slug_is_running(slug, cfg):
+                print(f"already queued: {slug} (running)")
+                return ExitCode.OK
+
+            # Idempotency: done slug (in history → error).
+            if slug in {e["slug"] for e in qdata["history"]}:
+                return _die(
+                    ExitCode.STATUS_TRANSITION,
+                    f"{slug!r} already ran in this queue; "
+                    "remove from history or pick a different slug",
+                )
+
+            qdata["queue"].append({
+                "slug": slug,
+                "added_at": st.utcnow(),
+                "added_by": "worker",
+                "position_at_add": "tail",
+                "source_plan": args.source_plan,
+                "source_phase": args.source_phase,
+                "source_token_fp": token_fp,
+                "reason": args.reason,
+            })
+            pos = len(qdata["queue"])
+
+        event_fields: dict = {
+            "slug": slug,
+            "source_phase": args.source_phase,
+            "token_fp": token_fp,
+        }
+        if args.reason is not None:
+            event_fields["reason"] = args.reason
+        st.append_event(state_data, st.EVENT_QUEUE_APPENDED, **event_fields)
+    print(f"queued at position {pos}")
+    return ExitCode.OK
+
+
 def cmd_queue_add(args) -> int:
+    if args.token is not None:
+        if args.source_plan is None or args.source_phase is None:
+            return _die(ExitCode.GENERIC, "--token requires --plan and --phase")
+        if args.front:
+            return _die(ExitCode.GENERIC,
+                        "--front is operator-only (forbidden with --token)")
+        if len(args.slugs) != 1:
+            return _die(ExitCode.GENERIC, "--token requires a single slug")
+        return _cmd_queue_add_worker(args)
+    if args.source_plan is not None or args.source_phase is not None:
+        return _die(ExitCode.GENERIC,
+                    "--plan/--phase require --token (worker mode only)")
+
     slugs = list(args.slugs)
 
     # Slug regex first — cheapest validation, do it for all.
@@ -1788,6 +1926,10 @@ def cmd_queue_add(args) -> int:
                 "added_at": st.utcnow(),
                 "added_by": "operator",
                 "position_at_add": "front" if args.front else "tail",
+                "source_plan": None,
+                "source_phase": None,
+                "source_token_fp": None,
+                "reason": args.reason,
             }
             for slug in slugs
         ]
@@ -1922,6 +2064,12 @@ def cmd_queue_list(args) -> int:
             for i, entry in enumerate(pending, start=1)
         ]
         print(_format_table(["POS", "SLUG", "STATUS", "NOTE"], rows))
+        for i, entry in enumerate(pending, start=1):
+            if entry.get("added_by") == "worker":
+                src = f"{entry['source_plan']}/{entry['source_phase']}"
+                print(f"  {i}: (from {src})")
+                if entry.get("reason"):
+                    print(f"     reason: {entry['reason']}")
 
     if history:
         print()

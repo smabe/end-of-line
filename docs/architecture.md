@@ -226,6 +226,46 @@ normal-pop branch nests `state.locked(state_path)` *inside*
 `queue.mutate(queue_path)`. Don't invert; the queue is the higher-level
 resource and must be acquired first.
 
+### Worker enqueue flow
+
+A worker running a phase can append a follow-up plan to the project
+queue mid-flight via `clu queue add <slug> --token T --plan S --phase X`.
+This is the reverse direction of queue advancement — the queue-pop path
+reads from the queue into state; the worker-enqueue path writes from
+state into the queue.
+
+**Validation order inside `cmd_queue_add` (worker mode):**
+
+1. Slug syntax via `state.validate_slug`.
+2. Plan-file existence: `<plan_dir>/<slug>.md` must exist. Absent →
+   `EVENT_QUEUE_REJECTED` with `reason="missing_plan_file"` + exit
+   `UNKNOWN_TASK` (6).
+3. Registered-project check (same as the operator path).
+4. **Acquire source plan's state lock** (via `st.mutate`) and call
+   `assert_claim_match` — verifies the token is still live and matches
+   the declared `--plan`/`--phase`. A stale or forged token exits
+   `CLAIM_MISMATCH` (4) via `@_translate_claim_mismatch`.
+5. Inside the same `st.mutate` window: check the per-phase add cap
+   (count `queue + history` entries where `source_plan == S AND
+   source_phase == X`; if `>= max_queue_adds_per_phase` → emit
+   `EVENT_QUEUE_REJECTED` with `reason="cap"` + exit `QUEUE_CAP` (11)).
+6. **Acquire queue lock** (via `queue.mutate`) — nested inside the state
+   lock from step 4. This is the load-bearing lock-ordering rule:
+   **state lock first, queue lock second — never reverse.** Reversing
+   risks a deadlock with the queue-advancement path, which takes the
+   queue lock first (step 6 of the normal-pop branch above) and then
+   opens the target state file. Crossing the order creates a classic
+   ABBA cycle.
+7. Apply idempotency: pending slug → no-op; in-flight slug → no-op;
+   history slug → exit `STATUS_TRANSITION` (7).
+8. Append the entry (with `source_plan`, `source_phase`,
+   `source_token_fp`, `reason`) + append `EVENT_QUEUE_APPENDED` to the
+   source plan's events. Both writes happen inside the same nested-lock
+   window so they're atomic with respect to each other.
+
+**Token fingerprint.** `sha256(token.encode()).hexdigest()[:8]` — computed
+once at append time. The raw token is never written to disk.
+
 ## Worktree conflict scan
 
 After queue advancement, `cmd_tick_all` runs

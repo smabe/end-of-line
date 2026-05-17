@@ -720,9 +720,9 @@ through this.
 
 - `ExitCode` — IntEnum: `OK`, `GENERIC`, `INVALID_SLUG`, `BAD_SHA`,
   `CLAIM_MISMATCH`, `SPAWN_CAP`, `UNKNOWN_TASK`, `STATUS_TRANSITION`,
-  `REPAIR_DECLINED`, `WORKTREE_SETUP_FAILED`. Cron and inbound poller
-  key off these codes. See `contract.md` § "Exit codes" for the full
-  table.
+  `REPAIR_DECLINED`, `WORKTREE_SETUP_FAILED`, `QUEUE_CAP`. Cron and
+  inbound poller key off these codes. See `contract.md` § "Exit codes"
+  for the full table.
 - `_die(rc, msg)` — write `error: <msg>` to stderr, return `int(rc)`.
   Use this from every error path; don't return bare ints.
 - `_translate_claim_mismatch(fn)` — decorator that catches a leaked
@@ -760,9 +760,25 @@ through this.
   remove. Bare `clu queue` (`queue_cmd is None`) routes to `cmd_queue_list`,
   mirroring bare `clu` → `cmd_fleet`.
 - `cmd_queue_add(args)` — append (or `--front` prepend) a plan slug to
-  the project's queue. Refuses with a bootstrap message if the project
-  has no registered plans; refuses if `<plan_dir>/<slug>.md` doesn't
-  exist; refuses with `STATUS_TRANSITION` on duplicate.
+  the project's queue. Two modes selected by the presence of `--token`:
+  - **Operator mode** (no `--token`): multi-slug, `--front` allowed;
+    refuses with a bootstrap message if no registered plans; refuses on
+    `<plan_dir>/<slug>.md` absence; refuses with `STATUS_TRANSITION` on
+    duplicate. Operator path is uncapped.
+  - **Worker mode** (`--token T --plan S --phase X`): single slug,
+    `--front` forbidden. Runs full claim validation, per-phase add cap
+    (`max_queue_adds_per_phase`), and the nested lock sequence (state
+    lock first, queue lock second). Emits `EVENT_QUEUE_APPENDED` or
+    `EVENT_QUEUE_REJECTED` in the source plan's events. See
+    `architecture.md` § "Worker enqueue flow" for the full validation
+    order. Decorated with `@_translate_claim_mismatch`.
+- `_cmd_queue_add_worker(args, cfg, queue_path)` — the worker-mode
+  dispatch path extracted from `cmd_queue_add`. Sibling of `cmd_spawn`:
+  both are worker callbacks that take `--token`, both wear
+  `@_translate_claim_mismatch`, both open the source state under
+  `st.mutate` before touching secondary resources (queue vs spawned-
+  task list). Not a public CLI subcommand — called only by
+  `cmd_queue_add` after mode discrimination.
 - `cmd_queue_list(args)` — render the pending queue + a `Recent
   failures:` tail of the last 10 history entries. Uses `registry.entries`
   + `registry.load_entry_state` to derive a STATUS column per pending
