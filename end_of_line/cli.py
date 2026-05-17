@@ -2064,6 +2064,12 @@ def cmd_queue_list(args) -> int:
             for i, entry in enumerate(pending, start=1)
         ]
         print(_format_table(["POS", "SLUG", "STATUS", "NOTE"], rows))
+        for i, entry in enumerate(pending, start=1):
+            if entry.get("added_by") == "worker":
+                src = f"{entry['source_plan']}/{entry['source_phase']}"
+                print(f"  {i}: (from {src})")
+                if entry.get("reason"):
+                    print(f"     reason: {entry['reason']}")
 
     if history:
         print()
