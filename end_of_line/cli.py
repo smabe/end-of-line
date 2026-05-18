@@ -3359,12 +3359,19 @@ def _perform_archive(
         after = st.get_worktree(data)
         plan_dir = cfg.project_root / cfg.plan_dir
         plan_md = plan_dir / f"{plan}.md"
+        sources: list[Path] = []
         if plan_md.exists():
+            sources.append(plan_md)
+        sources.extend(
+            s for s in sorted(plan_dir.glob(f"{plan}-*.md"))
+            if s.parent == plan_dir
+        )
+        if sources:
             shipped_dir = plan_dir / "shipped"
             shipped_dir.mkdir(parents=True, exist_ok=True)
             try:
                 subprocess.run(
-                    ["git", "mv", str(plan_md), str(shipped_dir / plan_md.name)],
+                    ["git", "mv", *[str(s) for s in sources], str(shipped_dir)],
                     check=True,
                     capture_output=True,
                     text=True,
@@ -3378,6 +3385,20 @@ def _perform_archive(
         raise _git_mv_exc
     if unregister:
         registry.unregister(cfg.project_root, plan)
+        # Auto-archive mode: commit the staged moves so the worktree is
+        # clean for the next tick. Operator-driven cmd_archive
+        # (unregister=False) leaves commits to the operator.
+        diff = subprocess.run(
+            ["git", "-C", str(cfg.project_root),
+             "diff", "--cached", "--quiet"],
+            capture_output=True,
+        )
+        if diff.returncode != 0:
+            subprocess.run(
+                ["git", "-C", str(cfg.project_root), "commit",
+                 "-m", f"chore: auto-archive {plan} (post-merge cleanup)"],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
     return before, after, plan_moved
 
 

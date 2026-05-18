@@ -6,6 +6,7 @@ a STATUS_DONE plan's worktree branch has been merged into origin/main.
 from __future__ import annotations
 
 import json
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -182,6 +183,58 @@ class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
         with mock.patch("end_of_line.state.is_branch_merged_into", return_value=True):
             second = run_rules(self.project, [updated_p])
         self.assertIsNone(second)
+
+    def test_fires_moves_sub_plans_alongside_master(self) -> None:
+        _make_tracked_plan_file(self.project, "alpha")
+        # Worker authored two sub-plan files and committed them.
+        for phase in ("schema", "engine"):
+            sub = self.project / "plans" / f"alpha-{phase}.md"
+            sub.write_text(f"# alpha-{phase}\n")
+            _git(self.project, "add", f"plans/alpha-{phase}.md")
+        _git(self.project, "commit", "-m", "add alpha sub-plans")
+
+        p = _make_done_plan_with_worktree(self.project, "alpha", branch="clu/alpha")
+        registry.register(self.project, "alpha")
+
+        with mock.patch("end_of_line.state.is_branch_merged_into", return_value=True):
+            result = run_rules(self.project, [p])
+
+        self.assertIsNotNone(result)
+        # All three files in shipped/, none in plans/ root
+        for name in ("alpha.md", "alpha-schema.md", "alpha-engine.md"):
+            self.assertFalse(
+                (self.project / "plans" / name).exists(),
+                f"expected plans/{name} moved out of root",
+            )
+            self.assertTrue(
+                (self.project / "plans" / "shipped" / name).exists(),
+                f"expected plans/shipped/{name} present",
+            )
+
+    def test_fires_commits_archive_moves(self) -> None:
+        _make_tracked_plan_file(self.project, "alpha")
+        p = _make_done_plan_with_worktree(self.project, "alpha", branch="clu/alpha")
+        registry.register(self.project, "alpha")
+
+        with mock.patch("end_of_line.state.is_branch_merged_into", return_value=True):
+            result = run_rules(self.project, [p])
+
+        self.assertIsNotNone(result)
+        # Auto-archive should have committed its staged moves — nothing
+        # left in the index. Untracked files (state dirs) are fine.
+        diff = subprocess.run(
+            ["git", "-C", str(self.project), "diff", "--cached", "--quiet"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(diff.returncode, 0,
+                         "expected no staged changes after auto-archive")
+        # HEAD commit message mentions auto-archive of this slug.
+        msg = subprocess.run(
+            ["git", "-C", str(self.project), "log", "-1", "--format=%s"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertIn("auto-archive", msg.lower())
+        self.assertIn("alpha", msg)
 
     def test_first_eligible_wins_in_registry_order(self) -> None:
         _make_tracked_plan_file(self.project, "alpha")
