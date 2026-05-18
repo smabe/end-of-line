@@ -168,7 +168,9 @@ def utcnow_compact() -> str:
 
 
 def parse_iso(ts: str) -> _dt.datetime:
-    # Python 3.11+ fromisoformat handles trailing 'Z' natively.
+    # Python 3.9's fromisoformat doesn't accept the trailing 'Z'; normalize it.
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
     return _dt.datetime.fromisoformat(ts)
 
 
