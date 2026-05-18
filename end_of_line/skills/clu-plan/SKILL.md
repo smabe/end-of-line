@@ -120,6 +120,19 @@ on what's already settled vs. what they get to decide.>
 - <natural adjacent work being deferred>
 - <scope creep risk>
 
+## Files touched
+
+List every file the plan creates or modifies, plus API hotspots
+(public function signatures, schema fields, config keys) downstream
+plans might rely on. The operator scans this at queue time to spot
+overlaps when scheduling parallel batches — overlapping `## Files
+touched` sections mean serialize, not parallelize. Unchecked semantic
+conflicts across worktrees were the canonical failure (clu #50;
+`cmd_answer` argparse drift, merge SHA `1816c0f`).
+
+- `<path/to/file>` — <P1 NEW | P1, P3 modified> — <one-line note; flag API hotspots>
+- `<another path>` — <phase tags> — <note>
+
 ## Per-phase done checklist
 
 - TDD: failing tests first.
@@ -340,6 +353,15 @@ after step 1. Don't run `clu init` without explicit operator intent.
 - **Operator-approval mandate (user CLAUDE.md) applies.** Novel plan
   files require `ship` from the operator before they land on disk.
   Silence is not approval.
+- **Master plans MUST declare `## Files touched`.** List every
+  created + modified path with the phase tag, plus API hotspots
+  (function signatures, schema fields, config keys). The operator
+  uses this at queue time to spot overlaps and serialize conflicting
+  plans before they ship — unchecked semantic conflicts across
+  worktrees were the canonical failure (clu #50; `cmd_answer`
+  argparse drift across plan-locator + blocker-lifecycle, merge SHA
+  `1816c0f`). The dry-merge gate (#50) is the safety net; this
+  section is the prevention.
 - **Plan files commit + push to main BEFORE `clu init --worktree`.**
   Otherwise the worker worktree branches off a HEAD that doesn't have
   the plan files. (Real friction documented in commit `0d8e6d0` —
@@ -383,6 +405,10 @@ Smallest-first.
 ## Non-goals
 - Don't migrate the bcrypt → argon2 hash (filed as #102).
 - Don't add admin override for the timeout (per security review).
+
+## Files touched
+- `server/auth.py` — P1, P2 modified — adds timeout + rotation. API hotspot: `validate_session` signature, `Session` dataclass.
+- `tests/test_auth.py` — P1, P2 modified — new tests for both phases.
 
 ## Per-phase done checklist
 - TDD: failing tests first.
