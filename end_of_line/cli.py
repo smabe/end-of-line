@@ -2612,30 +2612,29 @@ def cmd_tick_all(args) -> int:
                 file=sys.stderr,
             )
 
-    # Post-loop: per-project queue advancement. One pop per project per
-    # tick, guarded by a busy gate (any active claim in that project).
+    # Post-loop: per-project cross-plan rule chain (queue advancement →
+    # worktree conflict scan), first-match-wins per ADR-0002.
     # Re-read registry.entries() — claim state mutated above is what the
     # busy gate needs to see.
+    from end_of_line import cross_plan_rules  # local: avoids circular at load time
+
     seen: dict[Path, None] = {}
     for row in registry.entries():
         try:
             seen.setdefault(Path(row.project_root).resolve(), None)
         except OSError:
             continue
-    for project_root in seen:
+    for project_root in sorted(seen):
         try:
-            _advance_queue_for_project(project_root)
+            project_cfg = load_project_config(project_root)
+            plans = cross_plan_rules.load_plans_for_project(project_root, project_cfg)
+            result = cross_plan_rules.run_rules(project_root, plans)
+            if result is not None:
+                for kind, body in result.notifies:
+                    notify.notify(project_cfg.notify, kind, body)
         except Exception as exc:
             print(
-                f"tick-all queue @ {project_root}: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-        try:
-            _detect_worktree_conflicts_for_project(project_root)
-        except Exception as exc:
-            print(
-                f"tick-all worktree-conflicts @ {project_root}: "
-                f"{type(exc).__name__}: {exc}",
+                f"tick-all post-loop @ {project_root}: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
     return ExitCode.OK

@@ -16,12 +16,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import notify, state as st
-from end_of_line.cli import (
-    _detect_worktree_conflicts_for_project,
-    cmd_tick_all,
-    main,
-)
+from end_of_line import cross_plan_rules, notify, state as st
+from end_of_line.cli import main
+from end_of_line.config import load_project_config
+from end_of_line.cross_plan_rules import worktree_conflict_rule
 from tests import isolate_registry
 
 
@@ -43,8 +41,12 @@ class ConflictWarningTestCase(unittest.TestCase):
         self.project.mkdir()
         isolate_registry(self, Path(self._tmp.name))
         (self.project / "plans").mkdir()
+        self._rules_snapshot = list(cross_plan_rules._RULES)
+        cross_plan_rules._RULES.clear()
+        cross_plan_rules._RULES.append(worktree_conflict_rule)
 
     def tearDown(self) -> None:
+        cross_plan_rules._RULES[:] = self._rules_snapshot
         self._tmp.cleanup()
 
     def _init_plan(self, slug: str, *, capture: bool = False) -> str:
@@ -60,6 +62,16 @@ class ConflictWarningTestCase(unittest.TestCase):
 
     def _state_path(self, slug: str) -> Path:
         return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
+
+    def _run_conflict_rule(self) -> None:
+        """Run the worktree_conflict_rule via run_rules and fire any notifies."""
+        project = self.project.resolve()
+        cfg = load_project_config(project)
+        plans = cross_plan_rules.load_plans_for_project(project, cfg)
+        result = cross_plan_rules.run_rules(project, plans)
+        if result:
+            for kind, body in result.notifies:
+                notify.notify(cfg.notify, kind, body)
 
     # --- init-time hint -----------------------------------------------
 
@@ -115,7 +127,7 @@ class ConflictWarningTestCase(unittest.TestCase):
         self._init_plan("alpha")
         self._init_plan("beta")
         with mock.patch.object(notify, "notify") as notify_mock:
-            _detect_worktree_conflicts_for_project(self.project.resolve())
+            self._run_conflict_rule()
 
         # One notification, one canonical-pair event.
         self.assertEqual(notify_mock.call_count, 1)
@@ -140,22 +152,22 @@ class ConflictWarningTestCase(unittest.TestCase):
         self._init_plan("beta")
         # First pass emits.
         with mock.patch.object(notify, "notify"):
-            _detect_worktree_conflicts_for_project(self.project.resolve())
+            self._run_conflict_rule()
         # Second pass with no state change must NOT re-emit.
         with mock.patch.object(notify, "notify") as second_call:
-            _detect_worktree_conflicts_for_project(self.project.resolve())
+            self._run_conflict_rule()
         self.assertEqual(second_call.call_count, 0)
 
     def test_tick_clears_flag_when_sibling_pauses(self) -> None:
         self._init_plan("alpha")
         self._init_plan("beta")
         with mock.patch.object(notify, "notify"):
-            _detect_worktree_conflicts_for_project(self.project.resolve())
+            self._run_conflict_rule()
         # Pause beta → alpha's conflict resolves.
         with st.mutate(self._state_path("beta")) as data:
             data["status"] = st.STATUS_PAUSED
         with mock.patch.object(notify, "notify"):
-            _detect_worktree_conflicts_for_project(self.project.resolve())
+            self._run_conflict_rule()
         data_a = st.load(self._state_path("alpha"))
         data_b = st.load(self._state_path("beta"))
         self.assertEqual(data_a["in_conflict_with"], [])
@@ -172,7 +184,7 @@ class ConflictWarningTestCase(unittest.TestCase):
                 "base_ref": "0" * 40,
             }
         with mock.patch.object(notify, "notify") as notify_mock:
-            _detect_worktree_conflicts_for_project(self.project.resolve())
+            self._run_conflict_rule()
         self.assertEqual(notify_mock.call_count, 0)
 
     def test_tick_three_plans_emits_each_unique_pair(self) -> None:
@@ -180,7 +192,7 @@ class ConflictWarningTestCase(unittest.TestCase):
         self._init_plan("beta")
         self._init_plan("gamma")
         with mock.patch.object(notify, "notify") as notify_mock:
-            _detect_worktree_conflicts_for_project(self.project.resolve())
+            self._run_conflict_rule()
         # 3 plans → 3 unique pairs: (alpha,beta), (alpha,gamma), (beta,gamma).
         self.assertEqual(notify_mock.call_count, 3)
         data_a = st.load(self._state_path("alpha"))
@@ -207,7 +219,7 @@ class ConflictWarningTestCase(unittest.TestCase):
         with st.mutate(self._state_path("beta")) as data:
             data["in_conflict_with"] = ["alpha"]
         with mock.patch.object(notify, "notify") as notify_mock:
-            _detect_worktree_conflicts_for_project(self.project.resolve())
+            self._run_conflict_rule()
         self.assertEqual(notify_mock.call_count, 0)
 
 
