@@ -453,31 +453,54 @@ class ResolveSelfChatIdTestCase(unittest.TestCase):
             )
 
 
-class SeenRowidTestCase(unittest.TestCase):
+class InboundStateTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
+        self.state_path = self.tmp / "inbound_state.json"
+        self.legacy_path = self.tmp / "seen_msg_rowid"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def _read(self) -> dict:
+        return notify_inbound.read_inbound_state(
+            self.state_path, legacy_path=self.legacy_path,
+        )
+
+    def test_missing_file_returns_empty_defaults(self) -> None:
+        data = self._read()
+        self.assertEqual(data["schema_version"],
+                         notify_inbound.INBOUND_STATE_SCHEMA_VERSION)
+        self.assertEqual(data["last_inbound_rowid"], 0)
+        self.assertEqual(data["outbound_rowids"], {})
+
     def test_round_trip(self) -> None:
-        path = self.tmp / "seen"
-        notify_inbound.write_seen(path, 42)
-        self.assertEqual(notify_inbound.read_seen(path), 42)
+        data = self._read()
+        data["last_inbound_rowid"] = 42
+        data["outbound_rowids"]["+15551234567"] = 99
+        notify_inbound.write_inbound_state(self.state_path, data)
+        reloaded = self._read()
+        self.assertEqual(reloaded["last_inbound_rowid"], 42)
+        self.assertEqual(reloaded["outbound_rowids"], {"+15551234567": 99})
 
-    def test_missing_returns_zero(self) -> None:
-        self.assertEqual(notify_inbound.read_seen(self.tmp / "nope"), 0)
+    def test_legacy_seen_file_unlinked_on_first_read(self) -> None:
+        # Operators upgrading from the bare-int format had ~/.clu/seen_msg_rowid.
+        # First load of the new JSON state must drop the legacy file; cursor
+        # resets to 0 and the poll_once LIMIT bounds the re-scan.
+        self.legacy_path.write_text("123")
+        self._read()
+        self.assertFalse(self.legacy_path.exists())
 
-    def test_corrupt_returns_zero(self) -> None:
-        path = self.tmp / "seen"
-        path.write_text("not-a-number")
-        self.assertEqual(notify_inbound.read_seen(path), 0)
+    def test_corrupt_json_returns_defaults(self) -> None:
+        self.state_path.write_text("{not valid json")
+        self.assertEqual(self._read()["last_inbound_rowid"], 0)
 
-    def test_write_creates_parent_dir(self) -> None:
-        path = self.tmp / "deeper" / "still" / "seen"
-        notify_inbound.write_seen(path, 9)
-        self.assertEqual(notify_inbound.read_seen(path), 9)
+    def test_schema_mismatch_returns_defaults(self) -> None:
+        self.state_path.write_text(json.dumps(
+            {"schema_version": 999, "last_inbound_rowid": 50}
+        ))
+        self.assertEqual(self._read()["last_inbound_rowid"], 0)
 
 
 if __name__ == "__main__":

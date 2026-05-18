@@ -22,8 +22,10 @@ import time
 from .notify_base import REPLY_RE, OpenBlocker, Reply, route_reply  # noqa: F401
 from .notify_imessage_inbound import (  # noqa: F401
     DEFAULT_CHAT_DB,
+    DEFAULT_INBOUND_STATE_PATH,
     DEFAULT_POLL_SECONDS,
-    DEFAULT_SEEN_PATH,
+    INBOUND_STATE_SCHEMA_VERSION,
+    LEGACY_SEEN_PATH,
     POLL_BATCH_LIMIT,
     Dispatcher,
     IMessageInboundPoller,
@@ -38,8 +40,8 @@ from .notify_imessage_inbound import (  # noqa: F401
     _spawn_tick,
     open_chat_db,
     poll_once,
-    read_seen,
-    write_seen,
+    read_inbound_state,
+    write_inbound_state,
 )
 
 

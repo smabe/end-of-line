@@ -5,6 +5,7 @@ shim that re-exports this module's surface and provides the __main__ entry.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import subprocess
 import sys
@@ -17,9 +18,11 @@ from .config import load_project_config
 from .notify_base import OpenBlocker, Reply
 
 DEFAULT_CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
-DEFAULT_SEEN_PATH = Path.home() / ".clu" / "seen_msg_rowid"
+DEFAULT_INBOUND_STATE_PATH = Path.home() / ".clu" / "inbound_state.json"
+LEGACY_SEEN_PATH = Path.home() / ".clu" / "seen_msg_rowid"
 DEFAULT_POLL_SECONDS = 4
 POLL_BATCH_LIMIT = 500
+INBOUND_STATE_SCHEMA_VERSION = 1
 
 Dispatcher = Callable[[OpenBlocker, str], None]
 OpenBlockersFn = Callable[[], list[OpenBlocker]]
@@ -191,20 +194,45 @@ def _auto_tick_enabled(project_root: Path) -> bool:
         return True
 
 
-def read_seen(path: Path) -> int:
-    if not path.exists():
-        return 0
+def _empty_inbound_state() -> dict:
+    return {
+        "schema_version": INBOUND_STATE_SCHEMA_VERSION,
+        "last_inbound_rowid": 0,
+        "outbound_rowids": {},
+    }
+
+
+def _drop_legacy_seen(legacy_path: Path) -> None:
+    """One-time cleanup of the pre-JSON `seen_msg_rowid` cursor file.
+
+    The cursor resets to 0; the LIMIT cap in poll_once bounds the
+    one-time re-scan on hosts that had the legacy file.
+    """
     try:
-        return int(path.read_text().strip() or "0")
-    except (OSError, ValueError):
-        return 0
+        legacy_path.unlink()
+    except OSError:
+        pass
 
 
-def write_seen(path: Path, rowid: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(str(rowid))
-    tmp.replace(path)
+def read_inbound_state(
+    path: Path = DEFAULT_INBOUND_STATE_PATH,
+    *,
+    legacy_path: Path = LEGACY_SEEN_PATH,
+) -> dict:
+    """Load inbound state, tolerating missing / corrupt / schema-mismatched
+    files. Drops the legacy bare-int cursor file on first call."""
+    _drop_legacy_seen(legacy_path)
+    if not path.exists():
+        return _empty_inbound_state()
+    try:
+        return st.load(path, expected_version=INBOUND_STATE_SCHEMA_VERSION)
+    except (json.JSONDecodeError, OSError, st.SchemaVersionMismatch):
+        return _empty_inbound_state()
+
+
+def write_inbound_state(path: Path, data: dict) -> None:
+    """Atomic write of inbound state via state.save_atomic."""
+    st.save_atomic(path, data)
 
 
 def open_chat_db(db_path: Path = DEFAULT_CHAT_DB) -> sqlite3.Connection:
@@ -219,12 +247,14 @@ class IMessageInboundPoller:
         db_path: Path | None = None,
         registry_loader: Callable | None = None,
         self_chat_id: str | None = None,
+        state_path: Path | None = None,
     ) -> None:
         self._db_path = db_path or DEFAULT_CHAT_DB
         self._registry_loader = registry_loader or registry.entries
         self._self_chat_id = self_chat_id
+        self._state_path = state_path or DEFAULT_INBOUND_STATE_PATH
         self._conn: sqlite3.Connection | None = None
-        self._last_rowid: int | None = None  # cached; read from disk once on first poll
+        self._state: dict | None = None  # cached; read from disk once on first poll
 
     def poll(self) -> list[Reply]:
         """Run one poll iteration; dispatches matched replies internally.
@@ -239,14 +269,15 @@ class IMessageInboundPoller:
             return []
         if self._conn is None:
             self._conn = open_chat_db(self._db_path)
-        if self._last_rowid is None:
-            self._last_rowid = read_seen(DEFAULT_SEEN_PATH)
+        if self._state is None:
+            self._state = read_inbound_state(self._state_path)
+        last_rowid = self._state["last_inbound_rowid"]
         new_last = poll_once(
-            self._conn, self._last_rowid,
+            self._conn, last_rowid,
             self_chat_id=self._self_chat_id,
             entries_fn=self._registry_loader,
         )
-        if new_last != self._last_rowid:
-            write_seen(DEFAULT_SEEN_PATH, new_last)
-            self._last_rowid = new_last
+        if new_last != last_rowid:
+            self._state["last_inbound_rowid"] = new_last
+            write_inbound_state(self._state_path, self._state)
         return []
