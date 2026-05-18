@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from end_of_line import notify, queue, registry, state as st
+from end_of_line import dry_merge, notify, queue, registry, state as st
 from end_of_line.config import ProjectConfig, load_project_config
 
 log = logging.getLogger(__name__)
@@ -255,3 +257,162 @@ def worktree_conflict_rule(
 
 register_rule(queue_advancement_rule)
 register_rule(worktree_conflict_rule)
+
+
+def _git_rev_parse(project_root: Path, branch: str) -> str:
+    r = subprocess.run(
+        ["git", "-C", str(project_root), "rev-parse", branch],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise subprocess.CalledProcessError(r.returncode, r.args, r.stdout, r.stderr)
+    return r.stdout.strip()
+
+
+def _write_followup_plan_pair(
+    cfg: ProjectConfig,
+    batch_id: str,
+    ts: str,
+    result: "dry_merge.MergeResult",
+    group: list[ProjectPlan],
+) -> tuple[Path, Path]:
+    """Write master + sub-plan for a dirty merge result. Returns (master, sub)."""
+    slug = f"merge-resolve-{batch_id}-{ts}"
+    sub_slug = f"{slug}-fix"
+    plan_dir = cfg.project_root / cfg.plan_dir
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    master_path = plan_dir / f"{slug}.md"
+    sub_path = plan_dir / f"{sub_slug}.md"
+
+    sibling_slugs = ", ".join(p.slug for p in group)
+    conflict_section = ""
+    if result.conflict_files:
+        files_list = "\n".join(f"- `{f}`" for f in result.conflict_files)
+        conflict_section = f"\n## Conflict files\n\n{files_list}\n"
+    stderr_section = ""
+    if result.stderr_tail:
+        stderr_section = f"\n## Test output (tail)\n\n```\n{result.stderr_tail}\n```\n"
+
+    master_path.write_text(
+        f"# {slug} — resolve merge conflicts for batch {batch_id}\n\n"
+        f"Branches: {sibling_slugs}\n"
+        f"{conflict_section}"
+        f"{stderr_section}"
+        f"\n## Sessions index\n\n"
+        f"| Session | Plan file | Scope | Effort |\n"
+        f"|---|---|---|---|\n"
+        f"| fix | `{sub_slug}.md` | Resolve conflicts and fix failing tests | 1h |\n"
+    )
+
+    conflict_files_str = (
+        ", ".join(f"`{f}`" for f in result.conflict_files)
+        or ("the failing tests" if result.outcome == "suite_failed" else "the conflicting files")
+    )
+    sub_path.write_text(
+        f"# {sub_slug} — fix conflicts for batch {batch_id}\n\n"
+        f"Resolve conflicts in {conflict_files_str} and/or fix failing tests.\n"
+        f"Commit + push. `clu complete --plan {slug} --phase fix --token <T>`.\n"
+    )
+    return master_path, sub_path
+
+
+def dry_merge_gate_rule(
+    project_root: Path, plans: list[ProjectPlan],
+) -> RuleResult | None:
+    """Fire when ≥2 sibling DONE plans share a batch_id and have live worktrees.
+
+    Calls dry_merge.attempt_merge; on clean stamps gate_result on each plan;
+    on dirty also writes a merge-resolve follow-up plan pair to disk (not queued).
+    """
+    cfg = load_project_config(project_root)
+
+    eligible: dict[str, list[ProjectPlan]] = {}
+    for p in plans:
+        if p.state.get("status") != st.STATUS_DONE:
+            continue
+        bid = p.state.get("batch_id")
+        if not bid:
+            continue
+        if not st.get_worktree(p.state):
+            continue
+        eligible.setdefault(bid, []).append(p)
+
+    for bid, group in eligible.items():
+        if len(group) < 2:
+            continue
+
+        # Resolve HEAD SHAs for the idempotency key — drop any plan whose
+        # branch has disappeared (lag between worktree record and reality).
+        live_pairs: list[tuple[ProjectPlan, str, str]] = []
+        for p in group:
+            branch = st.get_worktree(p.state)["branch"]
+            try:
+                sha = _git_rev_parse(project_root, branch)
+                live_pairs.append((p, branch, sha))
+            except subprocess.CalledProcessError:
+                log.warning(
+                    "dry_merge_gate: branch %s not found in %s, skipping %s",
+                    branch, project_root, p.slug,
+                )
+
+        if len(live_pairs) < 2:
+            continue
+
+        live_group = [p for p, _, _ in live_pairs]
+        live_branches = [b for _, b, _ in live_pairs]
+        sha_key = "|".join(sorted(sha for _, _, sha in live_pairs))
+
+        # Idempotency: same SHA set → skip
+        if any(
+            p.state.get("gate_result", {}).get("sha_key") == sha_key
+            for p in live_group
+        ):
+            continue
+
+        test_cmd = getattr(cfg, "test_command", None)
+        result = dry_merge.attempt_merge(
+            project_root,
+            base_ref="main",
+            branches=live_branches,
+            test_command=test_cmd,
+        )
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+        gate_result_base: dict[str, Any] = {
+            "sha_key": sha_key,
+            "ts": st.utcnow(),
+            "batch_id": bid,
+            "outcome": result.outcome,
+        }
+
+        field_updates: dict[Path, dict[str, Any]] = {}
+        notifies: list[tuple[str, str]] = []
+
+        if result.outcome == "clean":
+            for p in live_group:
+                field_updates[p.state_path] = {"gate_result": gate_result_base}
+            notifies.append((
+                notify.KIND_GATE_CLEAN,
+                notify.render_gate_clean(bid, [p.slug for p in live_group]),
+            ))
+        else:
+            fu_master, _ = _write_followup_plan_pair(cfg, bid, ts, result, live_group)
+            gr = {**gate_result_base, "follow_up_plan": fu_master.name}
+            for p in live_group:
+                field_updates[p.state_path] = {"gate_result": gr}
+            notifies.append((
+                notify.KIND_GATE_DIRTY,
+                notify.render_gate_dirty(bid, result.outcome, str(fu_master)),
+            ))
+
+        return RuleResult(
+            events_per_plan={},
+            rule_name="dry_merge_gate",
+            notifies=notifies,
+            field_updates_per_plan=field_updates,
+        )
+
+    return None
+
+
+register_rule(dry_merge_gate_rule)

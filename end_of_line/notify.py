@@ -54,6 +54,8 @@ KIND_QUEUE_CORRUPT = "queue_corrupt"
 # turn regardless of quiet hours.
 # KIND_STUCK_BLOCKER is imported from state_blocker above.
 KIND_STALLED_CLAIM = "stalled_claim"
+KIND_GATE_CLEAN = "gate_clean"
+KIND_GATE_DIRTY = "gate_dirty"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
     KIND_HALTED,
@@ -208,6 +210,17 @@ def render_worktree_missing(plan_slug: str, worktree_path: str) -> str:
         f"🌳 {plan_slug} paused — worktree missing at {worktree_path}. "
         f"Restore the dir (e.g. `git worktree add`) or edit state.worktree, "
         f"then `clu resume --plan {plan_slug}`."
+    )
+
+
+def render_gate_clean(batch_id: str, slugs: list[str]) -> str:
+    return f"Batch {batch_id} dry-merge clean: {', '.join(slugs)}"
+
+
+def render_gate_dirty(batch_id: str, outcome: str, follow_up_path: str) -> str:
+    return (
+        f"Batch {batch_id} dry-merge DIRTY ({outcome}). "
+        f"Follow-up: {follow_up_path}"
     )
 
 
