@@ -282,9 +282,20 @@ def main(argv: list[str] | None = None) -> int:
     p_tick = sub.add_parser(
         "tick",
         help="Run one supervisor tick (dispatches worker by default; "
-             "use --dry-tick for state mutation only).",
+             "use --dry-tick for state mutation only). Omit --plan to "
+             "tick every plan in --project plus its cross-plan chain.",
     )
-    add_common(p_tick)
+    p_tick.add_argument(
+        "--project", type=Path, default=None,
+        help="Project root (contains .orchestrator.json). "
+             "Defaults to the current working directory.",
+    )
+    p_tick.add_argument(
+        "--plan", default=None,
+        help="Plan slug. Omit to tick every plan in the project "
+             "and run the cross-plan rule chain (queue advance, "
+             "auto-archive, worktree conflicts).",
+    )
     p_tick.add_argument(
         "--dry-tick", action="store_true",
         help="Skip worker spawn (state mutation only — debug use). "
@@ -888,6 +899,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list(args)
     if args.cmd == "tick-all":
         return cmd_tick_all(args)
+    if args.cmd == "tick":
+        return cmd_tick(args)
     if args.cmd == "install-skill":
         return cmd_install_skill(args)
     if args.cmd == "install-hook":
@@ -926,7 +939,6 @@ def main(argv: list[str] | None = None) -> int:
 
     dispatchers = {
         "init": cmd_init,
-        "tick": cmd_tick,
         "status": cmd_status,
         "spawn": cmd_spawn,
         "complete": cmd_complete,
@@ -2122,6 +2134,7 @@ def cmd_queue_add(args) -> int:
             data["queue"].extend(entries)
             positions = list(range(start, start + len(entries)))
 
+    _spawn_post_action_tick(cfg)
     for pos in positions:
         print(f"queued at position {pos}")
     if len(slugs) > 1:
@@ -2583,6 +2596,31 @@ def cmd_worktree_gc(args) -> int:
     return ExitCode.OK
 
 
+def _spawn_post_action_tick(cfg: ProjectConfig) -> None:
+    """Fire a detached project-scoped tick after a state-changing action,
+    so the next phase dispatches without waiting for the cron interval.
+
+    Must be called AFTER the `st.mutate` block has closed so the spawned
+    tick reads the post-write state. Failure is swallowed — state is
+    already on disk and the cron path will pick it up.
+    """
+    if not cfg.tick_on_action:
+        return
+    try:
+        subprocess.Popen(
+            [sys.argv[0], "tick", "--project", str(cfg.project_root.resolve())],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(
+            f"tick-on-action: spawn failed ({type(exc).__name__}: {exc}); "
+            f"cron will catch up on next tick",
+            file=sys.stderr,
+        )
+
+
 def _tick_one_plan(
     plan_slug: str, cfg: ProjectConfig, state_path: Path, *, dispatch: bool,
 ):
@@ -2613,10 +2651,58 @@ def _tick_one_plan(
     return result
 
 
-def cmd_tick(args, cfg: ProjectConfig, state_path: Path) -> int:
-    result = _tick_one_plan(args.plan, cfg, state_path, dispatch=not args.dry_tick)
-    print(result)
-    return 0
+def cmd_tick(args) -> int:
+    """Plan-scoped (`--plan X`) or project-scoped (no `--plan`) tick.
+
+    Project-scoped is the spawn target for `_spawn_post_action_tick`:
+    it ticks every plan registered to the project AND runs the
+    cross-plan rule chain (queue advance, auto-archive, worktree
+    conflicts) — same post-loop logic as `cmd_tick_all`, scoped to
+    one project so a callback in plan A doesn't drag every plan on
+    the host through a tick.
+    """
+    cfg = load_project_config(_resolve_project_arg(args))
+    if args.plan is not None:
+        try:
+            st.validate_slug(args.plan, kind="plan slug")
+        except st.InvalidSlug as exc:
+            return _die(ExitCode.INVALID_SLUG, str(exc))
+        state_path = cfg.state_path(args.plan)
+        result = _tick_one_plan(
+            args.plan, cfg, state_path, dispatch=not args.dry_tick,
+        )
+        print(result)
+        return ExitCode.OK
+
+    project_root = cfg.project_root.resolve()
+    for row in registry.entries():
+        if Path(row.project_root).resolve() != project_root:
+            continue
+        try:
+            row_cfg = load_project_config(Path(row.project_root))
+            row_state_path = row_cfg.state_path(row.plan_slug)
+            result = _tick_one_plan(
+                row.plan_slug, row_cfg, row_state_path,
+                dispatch=not args.dry_tick,
+            )
+            print(f"tick {row.plan_slug}: {result}")
+        except Exception as exc:
+            print(
+                f"tick: {row.plan_slug}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+    try:
+        plans = cross_plan_rules.load_plans_for_project(project_root, cfg)
+        rule_result = cross_plan_rules.run_rules(project_root, plans)
+        if rule_result is not None:
+            for kind, body in rule_result.notifies:
+                notify.notify(cfg.notify, kind, body)
+    except Exception as exc:
+        print(
+            f"tick post-loop @ {project_root}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+    return ExitCode.OK
 
 
 def cmd_tick_all(args) -> int:
@@ -3161,6 +3247,7 @@ def cmd_task_done(args, cfg: ProjectConfig, state_path: Path) -> int:
             task=args.task_id, commits=list(args.commits),
             forced=bool(args.force),
         )
+    _spawn_post_action_tick(cfg)
     print(f"task {args.task_id} done")
     return 0
 
@@ -3191,6 +3278,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         _maybe_cleanup_worktree(
             cfg, data, trigger="complete", require_all_phases_done=True,
         )
+    _spawn_post_action_tick(cfg)
     print(f"Completed phase {args.phase}")
     return ExitCode.OK
 
@@ -3255,6 +3343,7 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         _maybe_cleanup_worktree(
             cfg, data, trigger="force-complete", require_all_phases_done=True,
         )
+    _spawn_post_action_tick(cfg)
     print(f"Force-completed phase {args.phase}")
     return ExitCode.OK
 
@@ -3469,6 +3558,7 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
         plan_slug=args.plan,
         project_root=str(cfg.project_root.resolve()),
     )
+    _spawn_post_action_tick(cfg)
     print(f"Blocked {blocker_id} on phase {args.phase}")
     return ExitCode.OK
 

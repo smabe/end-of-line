@@ -139,6 +139,66 @@ for each registered plan. One worker per active plan per tick, capped
 by `--max-budget-usd` in your dispatch command. Pass `--dry-tick` to
 mutate state without spawning a worker — debug only.
 
+### Tick cadence
+
+The cron `StartInterval` is the **fallback** cadence; in steady state,
+state-changing CLI actions push a tick themselves and the next phase
+dispatches within ~2-3 seconds of the previous one completing.
+
+**Push-side (no waiting):** every state-changing command spawns a
+detached `clu tick --project <P>` as its last act before exiting.
+The spawned tick reads the just-written state and dispatches the next
+phase. Sites:
+
+- `clu complete` — worker finishes a phase
+- `clu block` — worker reports a blocker
+- `clu task-done` — spawned-subtask completion callback
+- `clu force-complete` — operator rescue when a worker dies with
+  work on disk
+- `clu queue add` — operator queues a new plan (first phase
+  dispatches within ~5s instead of one cron interval)
+
+The spawn is fire-and-forget: `start_new_session=True` detaches from
+the caller's process group so worker exit can't reap the tick, and
+stdout/stderr go to `/dev/null`. The per-plan `st.mutate` lock
+prevents the spawned tick from racing a coincidental cron tick.
+
+**Pull-side (fallback):** the LaunchAgent cron fires `clu tick-all`
+every `StartInterval` seconds (default **30** as of this feature, was
+60 pre-tick-on-action). The cron path mainly catches plans where no
+push happened: external state mutations, lease expirations, or
+operator activity outside the CLI.
+
+**Project-scoped tick (`clu tick --project P`).** Omitting `--plan`
+ticks every plan registered to project P, then runs the cross-plan
+rule chain (queue advance, auto-archive, worktree conflict scan).
+This is what the push-side spawns invoke — covers phase chaining,
+queue head dispatch, and cross-plan handoff in one go.
+
+**Opt-out.** Set `"tick_on_action": false` in `.orchestrator.json`
+to disable all five push sites for one project (the cron path still
+runs). The default is `true`. Use this only if a project's push
+ticks are demonstrably thrashing — the default is a near-free
+latency win.
+
+```json
+{
+  "plan_dir": "plans",
+  "tick_on_action": false,
+  ...
+}
+```
+
+Existing installs are untouched by the 60 → 30 default change.
+Re-bootstrap the LaunchAgent with the latest `examples/clu.tick.plist`
+if you want the tighter cadence:
+
+```bash
+launchctl bootout gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
+cp examples/clu.tick.plist ~/Library/LaunchAgents/com.clu.tick.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
+```
+
 ### Log locations
 
 | File | Source |

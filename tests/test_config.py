@@ -123,5 +123,28 @@ class AutoArchiveFieldTests(_ConfigTestBase):
                     load_project_config(self.root)
 
 
+class TickOnActionFieldTests(_ConfigTestBase):
+    def test_tick_on_action_defaults_to_true_when_absent(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.tick_on_action, True)
+
+    def test_tick_on_action_false_in_orchestrator_json(self) -> None:
+        self._write({"tick_on_action": False})
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.tick_on_action, False)
+
+    def test_tick_on_action_true_explicit(self) -> None:
+        self._write({"tick_on_action": True})
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.tick_on_action, True)
+
+    def test_tick_on_action_non_bool_raises_config_error(self) -> None:
+        for bad_value in ("yes", 1, 0, "true", "false"):
+            with self.subTest(value=bad_value):
+                self._write({"tick_on_action": bad_value})
+                with self.assertRaises(ConfigError):
+                    load_project_config(self.root)
+
+
 if __name__ == "__main__":
     unittest.main()
