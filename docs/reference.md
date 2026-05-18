@@ -455,13 +455,12 @@ open blocker. With more than one, the poller refuses to guess.
 - `REPLY_RE` — the compiled grammar. Uses `state.SLUG_PATTERN` as a
   fragment so drift between slug regex and inbound matching is
   impossible.
-- `open_blockers_for_host(entries)` — walks the registry, returns one
-  `OpenBlocker` per plan with an open question (first only).
 - `route_reply(text, open_blockers)` — pure function: returns
   `(target, "<digit>")` or `None`. The disambiguation rule lives here.
-- `poll_once(conn, last_rowid, *, open_blockers_fn, dispatcher)` —
-  one read of chat.db. Returns the new high-water rowid. Always
-  advances past every row read.
+- `poll_once(conn, last_rowid, *, entries_fn, shell_answer_fn, tick_spawner)` —
+  one read of chat.db; calls `state_locator.find_blocker_for_reply` for
+  each row. Returns the new high-water rowid. Always advances past every
+  row read.
 - `open_chat_db(db_path)` — opens the SQLite connection in read-only
   URI mode.
 - `read_seen(path)`, `write_seen(path, rowid)` — checkpoint helpers for
@@ -492,6 +491,32 @@ open blocker. With more than one, the poller refuses to guess.
 
 - `operations.md` for the LaunchAgent plist that keeps this alive.
 - `notify.py` for the outbound render that defines the prompt grammar.
+
+### `state_locator.py`
+
+Single-responsibility module: "which plan's blocker does this reply
+target?" Extracted from the three callers that each maintained a private
+registry walk (`notify_imessage_inbound`, `cli.cmd_answer`,
+`notify_discord_inbound`).
+
+**Key types and functions**
+
+- `LocatorResult` — dataclass: `variant` (`FOUND | AMBIGUOUS | NOT_FOUND`),
+  optional `state_path`, `blocker_id`, `answer_index`, `project_root`, and
+  `candidates: list[OpenBlocker]` for the `AMBIGUOUS` case.
+- `find_blocker_for_reply(entries, reply_text) -> LocatorResult` — walks
+  the registry, loads each plan's state file tolerantly (skipping
+  unreadable ones with a log warning), and resolves `reply_text` to a
+  single open blocker.
+
+**Invariants**
+
+- Exactly one registry walk in the codebase lives here. Callers must not
+  re-implement the walk.
+- State files that are missing, corrupt, or schema-mismatched are skipped;
+  the walk continues with the remaining plans.
+- `AMBIGUOUS` is returned when a bare digit matches multiple plans; callers
+  decide the UX (drop silently, print to stderr, etc.).
 
 ### `registry.py`
 
