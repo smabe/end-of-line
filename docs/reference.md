@@ -365,8 +365,11 @@ Renderers produce the strings; `notify()` decides whether to send.
 **Invariants and gotchas**
 
 - `osascript` is invoked via `subprocess.Popen` with
-  `start_new_session=True` and DEVNULL'd I/O. A hung Messages.app must
-  not deadlock cron.
+  `start_new_session=True` and stdout DEVNULL'd. A hung Messages.app
+  must not deadlock cron. Stderr is appended to
+  `imessage_log_path()` (default `~/.config/clu/imessage.log`) so
+  AppleScript runtime errors are debuggable — previously DEVNULL'd, all
+  failures vanished silently (#49).
 - Argv-passing: the AppleScript reads handle + body from `argv`, never
   string-interpolated into the script source. Don't refactor this
   to inline — it's the injection guard.

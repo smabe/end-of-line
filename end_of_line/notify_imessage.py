@@ -5,8 +5,12 @@ the body never touches the AppleScript source.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from ._xdg_guard import assert_xdg_safe
 
 if TYPE_CHECKING:
     from .config import ChannelSpec
@@ -26,14 +30,42 @@ end run
 """.strip()
 
 
+def imessage_log_path() -> Path:
+    """Append-mode log file capturing osascript stderr.
+
+    Lives at `$XDG_CONFIG_HOME/clu/imessage.log` (default
+    `~/.config/clu/imessage.log`). AppleScript runtime errors
+    (Automation permission denied, buddy lookup failed, Messages.app
+    not running) land here so a missed iMessage isn't undebuggable.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base) if base else Path.home() / ".config"
+    path = root / "clu" / "imessage.log"
+    assert_xdg_safe(path)
+    return path
+
+
 def _osascript_send(to: str, body: str) -> None:
-    """Fire-and-forget — don't block the cron tick on a hung Messages.app."""
-    subprocess.Popen(
-        ["osascript", "-e", _APPLESCRIPT, "--", to, body],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    """Fire-and-forget — don't block the cron tick on a hung Messages.app.
+
+    osascript stderr is appended to `imessage_log_path()` so AppleScript
+    failures (Automation permission denied, etc.) are debuggable. Previously
+    stderr was DEVNULL and all failures vanished silently (#49).
+    """
+    log_path = imessage_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Popen dups the underlying fd into the child, so closing our copy
+    # after Popen returns is safe — the child still writes to its dup.
+    log = open(log_path, "ab")
+    try:
+        subprocess.Popen(
+            ["osascript", "-e", _APPLESCRIPT, "--", to, body],
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            start_new_session=True,
+        )
+    finally:
+        log.close()
 
 
 class IMessageNotifier:

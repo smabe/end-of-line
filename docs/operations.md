@@ -1048,11 +1048,39 @@ Constraints:
 4. Force one to confirm the channel works:
 
    ```bash
-   python3 -c "from end_of_line.notify import send_imessage; send_imessage('you@example.com', 'clu test')"
+   clu notify-test --project P --channel imessage
    ```
 
    Failure here is an `osascript` / iMessage problem, not a clu
    problem.
+5. **Check the osascript stderr log** at
+   `$XDG_CONFIG_HOME/clu/imessage.log` (default
+   `~/.config/clu/imessage.log`). AppleScript runtime errors are
+   appended here. Empty file = osascript never even ran (check #4).
+   Non-empty file = AppleScript failed; the message text names the
+   specific failure (Automation permission denied, buddy lookup
+   failed, Messages.app not running). Tail it while triggering a
+   notification to catch the failure mode live:
+
+   ```bash
+   tail -f ~/.config/clu/imessage.log
+   ```
+
+6. **Automation permission for LaunchAgent dispatches.** macOS
+   requires the *parent process* of an AppleScript-driven Messages.app
+   send to have "Automation" permission for Messages. When the cron
+   tick dispatches from a LaunchAgent, the parent is the python
+   interpreter named in the plist — and LaunchAgents *cannot* show
+   the permission prompt, so a denial fails silently. Fix:
+   - System Settings → Privacy & Security → Automation → find the
+     python interpreter at the exact path in
+     `ProgramArguments[0]` of `~/Library/LaunchAgents/com.clu.tick.plist`
+     → enable "Messages" under it.
+   - If the interpreter isn't listed: run `clu notify-test --channel
+     imessage` once interactively from the same interpreter so macOS
+     surfaces the prompt, then accept.
+   - After granting, `launchctl bootout` + `bootstrap` the agent so
+     the new permission applies on the next tick.
 
 ### Plan halted on max-attempts
 
