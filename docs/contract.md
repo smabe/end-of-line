@@ -81,6 +81,23 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
   // rewrite the list.
   "in_conflict_with": ["<other-slug>", "..."],
 
+  // Optional, additive. Set at queue-pop time when the queue entry
+  // carries a batch_id (from `clu queue add --batch <name>`). Null for
+  // plans not tagged to a batch. Used by dry_merge_gate_rule to group
+  // sibling plans for integration testing.
+  "batch_id": "my-batch | null",
+
+  // Optional, additive. Stamped by dry_merge_gate_rule after running
+  // attempt_merge. Null until the gate fires for this plan.
+  "gate_result": {
+    "sha_key": "<sorted HEAD SHAs joined by |>",
+    "ts": "ISO8601",
+    "batch_id": "my-batch",
+    "outcome": "clean | textual_conflict | suite_failed",
+    // Present only on dirty outcomes:
+    "follow_up_plan": "merge-resolve-<batch>-<YYYYMMDDhhmm>.md"
+  },
+
   "events": [
     {"ts": "ISO8601", "type": "phase_started",   "phase": "a-foundation", "claimed_by": "..."},
     {"ts": "ISO8601", "type": "phase_completed", "phase": "a-foundation", "commits": ["abc123"]},
@@ -149,7 +166,11 @@ Per-project queue file at `<project_root>/<plan_dir>/.orchestrator/queue.json`. 
       "source_plan": "source-plan-slug | null",
       "source_phase": "source-phase-id | null",
       "source_token_fp": "sha256(token)[:8] | null",
-      "reason": "free-text string | null"
+      "reason": "free-text string | null",
+      // Set by `clu queue add --batch <name>` (operator-only). Null when not
+      // part of a batch. Propagated to plan state at queue-pop time so the
+      // dry-merge gate can group sibling plans without re-reading queue history.
+      "batch_id": "my-batch | null"
     }
   ],
   "history": [
@@ -267,6 +288,15 @@ Mark-and-sweep dedup: the hook moves a surfaced event into `processed/` after em
 
 Helpers in `end_of_line/inbox.py`: `inbox_root`, `write_event`, `read_unprocessed`, `mark_processed`, `list_for_project`. Writes use atomic `tmp + rename` (the dirs are short-lived per event — no flock). Corrupt files are silently skipped on read so a malformed sibling can't kill the hook.
 
+## `.orchestrator.json` top-level schema
+
+Optional fields alongside `dispatch` and `notify`:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `plan_dir` | string | `"plans"` | Subdirectory under `project_root` that holds plan files and `.orchestrator/` |
+| `test_command` | string \| null | null | Shell command run inside the scratch worktree by `dry_merge.attempt_merge` and `clu integrate`. Absent or null → textual-merge-only mode (no suite run). Treated as `shell=True`; the operator owns trust. Example: `"python3 -m unittest discover -s tests"` |
+
 ## Notify config schema
 
 `notify` in `.orchestrator.json`:
@@ -319,6 +349,8 @@ The outbound router (`notify.py`) classifies every send by kind. Quiet hours (de
 | `KIND_QUEUE_CORRUPT` | Queue corrupt + auto-repair disabled OR throttle exhausted | **Bypass** |
 | `KIND_STUCK_BLOCKER` | Open blocker un-consumed for >30 min; re-pings every 30 min | Gated |
 | `KIND_STALLED_CLAIM` | Live claim's lease expired with plan status `running`; one-shot per claim | Gated |
+| `KIND_GATE_CLEAN` | Dry-merge gate ran; all batch branches textually/suite-clean | Gated |
+| `KIND_GATE_DIRTY` | Dry-merge gate ran; textual conflict or suite failure found | **Bypass** |
 
 Bypass set: `{KIND_HALTED, KIND_QUEUE_REPAIR_FAILED, KIND_QUEUE_CORRUPT}`. These are unrecoverable-without-operator states; deferring them past quiet hours would let the chain sit silently broken until morning.
 

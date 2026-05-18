@@ -137,7 +137,9 @@ resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
 **Key types and functions**
 
 - `ProjectConfig` — dataclass: `project_root`, `plan_dir`, `dispatch`,
-  `notify`.
+  `notify`, `test_command: str | None` (shell command run inside the
+  scratch worktree by `dry_merge.attempt_merge` and `clu integrate`; null
+  = textual-merge-only).
 - `ProjectConfig.state_path(plan_slug)` — returns the canonical state
   path; raises `InvalidSlug` if resolution escapes the orchestrator dir.
 - `ProjectConfig.queue_path()` — `<project>/<plan_dir>/.orchestrator/
@@ -856,6 +858,69 @@ mutates, never writes.
 - `registry.load_entry_state` for the tolerant loader the projection
   hangs off.
 
+### `dry_merge.py`
+
+Pure-function engine for textual + suite integration testing of parallel
+branches. No state I/O; no cross-plan rule logic. Called by
+`cross_plan_rules.dry_merge_gate_rule` (automatic) and `cmd_integrate`
+(on demand).
+
+**Key types and functions**
+
+- `MergeResult` — dataclass: `outcome` (`"clean" | "textual_conflict" |
+  "suite_failed"`), `conflict_files`, `test_exit_code`, `stderr_tail`,
+  `merged_branches`, `base_sha`.
+- `attempt_merge(project_root, base_ref, branches, test_command=None, *,
+  timeout=300) → MergeResult` — resolves `base_ref` to a SHA, creates a
+  scratch worktree via `git worktree add --detach $(mktemp -d)`, merges
+  each branch sequentially with `git merge --no-ff --no-edit`. On textual
+  conflict returns immediately with `_OUTCOME_TEXTUAL_CONFLICT`. On clean
+  merge, runs `test_command` if provided; outcome is `_OUTCOME_SUITE_FAILED`
+  if the command exits non-zero. `try/finally` always tears down the scratch
+  worktree — leak prevention is load-bearing.
+
+**Invariants and gotchas**
+
+- Caller owns the trust of `test_command`: it runs with `shell=True` inside
+  the scratch worktree, no env isolation.
+- `_STDERR_TAIL_CHARS = 2000` — cap on captured stderr for `MergeResult`.
+- Teardown errors are printed to stderr but NOT re-raised. A leaked worktree
+  is better than masking the actual merge result.
+
+### `cross_plan_rules.py`
+
+Post-loop rule chain that fires once per `cmd_tick_all` cycle for each
+distinct project root. Enforces the "at most one cross-plan effect per
+project per tick" invariant, paralleling `supervisor.tick`'s per-plan chain.
+
+**Key types and functions**
+
+- `ProjectPlan` — dataclass: `slug`, `state`, `state_path`.
+- `RuleResult` — dataclass: `events_per_plan`, `rule_name`, `notifies`,
+  `field_updates_per_plan`. Applied atomically by `_apply`.
+- `ProjectRule` — `Callable[[Path, list[ProjectPlan]], RuleResult | None]`.
+- `register_rule(rule)` — append to `_RULES`. Rules run in order; first
+  non-None wins.
+- `run_rules(project_root, plans) → RuleResult | None` — iterate `_RULES`,
+  call each, apply and return on first non-None. Called by `cmd_tick_all`
+  after the worktree conflict scan.
+- `load_plans_for_project(project_root, cfg) → list[ProjectPlan]` —
+  registry walk; tolerates missing/corrupt state files (logs + skips).
+- `dry_merge_gate_rule(project_root, plans)` — fires when ≥2 DONE plans
+  share a `batch_id` and have live worktree branches. See `architecture.md`
+  § "Multi-plan batch integration gate" for trigger conditions, idempotency
+  key, and clean/dirty outcomes.
+
+**Invariants and gotchas**
+
+- `_RULES` ordering matters: `queue_advancement_rule` and
+  `worktree_conflict_rule` precede `dry_merge_gate_rule` by design.
+- Rule-first-match-wins means the gate never fires in the same tick that
+  queue advancement or conflict detection fires.
+- `_apply` takes ALL paths from both `events_per_plan` and
+  `field_updates_per_plan`; state writes are batched per path into a single
+  `st.mutate` window.
+
 ### `cli.py`
 
 argparse dispatch + the `ExitCode` enum + the `_die` helper + the
@@ -1046,6 +1111,15 @@ through this.
   unreadable.
 - `_QUEUE_LOAD_ERRORS` — `(JSONDecodeError, SchemaVersionMismatch,
   KeyError, OSError)` tuple every queue-loader wraps with `try/except`.
+- `cmd_integrate(args)` — operator-on-demand dry-merge. Accepts
+  `--project` + (`--batch B` or `--branches a,b`). Resolves branches via
+  `cross_plan_rules.load_plans_for_project` in batch mode (filters to
+  `status==done AND batch_id==B AND worktree != None`); drops branches
+  whose refs can't be `git rev-parse`-d. Calls `dry_merge.attempt_merge`
+  with `test_cmd = None if args.no_suite else cfg.test_command`. Prints
+  outcome + conflict files to stdout; exits `OK` on clean, `GENERIC` on
+  dirty. Does **not** mutate plan state and does **not** write follow-up
+  plans (the cross-plan rule owns those).
 - Worker-side commands: `cmd_complete`, `cmd_block`, `cmd_spawn`,
   `cmd_heartbeat`, `cmd_task_done`. All require `--token` matching the
   live claim, all wear `@_translate_claim_mismatch`.

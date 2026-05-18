@@ -80,5 +80,29 @@ class LoadProjectConfigTests(unittest.TestCase):
         self.assertEqual(cfg.dispatch.path, "/usr/local/bin:/usr/bin")
 
 
+class TestCommandFieldTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+
+    def _write(self, raw: dict) -> None:
+        (self.root / CONFIG_FILENAME).write_text(json.dumps(raw))
+
+    def test_test_command_default_none_when_absent(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertIsNone(cfg.test_command)
+
+    def test_test_command_field_loaded_from_orchestrator_json(self) -> None:
+        self._write({"test_command": "make test"})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.test_command, "make test")
+
+    def test_test_command_none_when_null_in_json(self) -> None:
+        self._write({"test_command": None})
+        cfg = load_project_config(self.root)
+        self.assertIsNone(cfg.test_command)
+
+
 if __name__ == "__main__":
     unittest.main()

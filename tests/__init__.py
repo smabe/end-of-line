@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +51,31 @@ def isolate_queue(testcase: unittest.TestCase, tmp_path: Path) -> None:
     registry, since `clu queue add`'s bootstrap check reads it.
     """
     isolate_registry(testcase, tmp_path)
+
+
+def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Run a git command inside `repo`. Use in tests that need real git repos."""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, check=check,
+    )
+
+
+def make_git_project(base: Path, *, subdir: str = "myrepo") -> Path:
+    """Create a minimal git project with a `plans/` dir and one initial commit.
+
+    Returns the project root. The caller's temp dir owns cleanup.
+    """
+    project = base / subdir
+    project.mkdir()
+    (project / "plans").mkdir()
+    git(project, "init", "-q", "-b", "main")
+    git(project, "config", "user.email", "t@test.invalid")
+    git(project, "config", "user.name", "Test User")
+    (project / "README").write_text("init\n")
+    git(project, "add", "README")
+    git(project, "commit", "-m", "init")
+    return project
 
 
 def isolate_monitor_marker(testcase: unittest.TestCase, tmp_path: Path) -> None:

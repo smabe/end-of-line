@@ -193,6 +193,7 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
         },
         "events": [],
         "created_at": utcnow(),
+        "batch_id": None,
     }
 
 

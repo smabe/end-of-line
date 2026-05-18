@@ -70,6 +70,7 @@ class ProjectConfig:
     plan_dir: str = "plans"
     dispatch: DispatchSpec = field(default_factory=DispatchSpec)
     notify: NotifySpec = field(default_factory=NotifySpec)
+    test_command: str | None = None
 
     def queue_path(self) -> Path:
         """Per-project queue file. Lives in the same `.orchestrator/` dir as
@@ -146,4 +147,5 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             quiet_hours=tuple(quiet) if quiet and len(quiet) == 2 else None,
             inbound_auto_tick=bool(notify_raw.get("inbound_auto_tick", True)),
         ),
+        test_command=raw.get("test_command") or None,
     )
