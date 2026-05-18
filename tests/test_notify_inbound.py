@@ -321,6 +321,138 @@ class PollOnceTestCase(unittest.TestCase):
         self.assertEqual(len(self.dispatched), 2)  # both rows still dispatched
 
 
+def _make_resolver_db(path: Path, chats: list[dict]) -> None:
+    """Build chat.db tables for `_resolve_self_chat_id` tests.
+
+    Each chat dict: chat_identifier (str), participants (list[str] of handle ids),
+    service_name (default 'iMessage'), room_name (default None), is_archived (0/1).
+    """
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, "
+        "service_name TEXT, room_name TEXT, is_archived INTEGER)"
+    )
+    conn.execute("CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT)")
+    conn.execute(
+        "CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER)"
+    )
+    handle_ids: dict[str, int] = {}
+    for i, spec in enumerate(chats, start=1):
+        conn.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, service_name, "
+            "room_name, is_archived) VALUES (?, ?, ?, ?, ?)",
+            (i, spec["chat_identifier"], spec.get("service_name", "iMessage"),
+             spec.get("room_name"), int(spec.get("is_archived", 0))),
+        )
+        for handle in spec["participants"]:
+            if handle not in handle_ids:
+                handle_ids[handle] = len(handle_ids) + 1
+                conn.execute(
+                    "INSERT INTO handle (ROWID, id) VALUES (?, ?)",
+                    (handle_ids[handle], handle),
+                )
+            conn.execute(
+                "INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (?, ?)",
+                (i, handle_ids[handle]),
+            )
+    conn.commit()
+    conn.close()
+
+
+class ResolveSelfChatIdTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.db_path = self.tmp / "chat.db"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _open(self) -> sqlite3.Connection:
+        return notify_inbound.open_chat_db(self.db_path)
+
+    def test_override_short_circuits_lookup(self) -> None:
+        # No tables built — override must not touch the DB at all.
+        _make_resolver_db(self.db_path, [])
+        conn = self._open()
+        resolved = notify_inbound._resolve_self_chat_id(
+            conn, operator_handle="+15551234567", override="explicit-id",
+        )
+        self.assertEqual(resolved, "explicit-id")
+
+    def test_single_self_chat_candidate(self) -> None:
+        _make_resolver_db(self.db_path, [
+            {"chat_identifier": "+15551234567",
+             "participants": ["+15551234567"]},
+        ])
+        resolved = notify_inbound._resolve_self_chat_id(
+            self._open(), operator_handle="+15551234567",
+        )
+        self.assertEqual(resolved, "+15551234567")
+
+    def test_no_candidate_raises(self) -> None:
+        _make_resolver_db(self.db_path, [
+            {"chat_identifier": "chat-group",
+             "participants": ["+15551234567", "+15559999999"],
+             "room_name": "group"},  # group chat — excluded
+        ])
+        with self.assertRaises(notify_inbound.SelfChatLookupError) as ctx:
+            notify_inbound._resolve_self_chat_id(
+                self._open(), operator_handle="+15551234567",
+            )
+        self.assertIn("self_chat_id", str(ctx.exception))
+
+    def test_multiple_candidates_raises_with_override_hint(self) -> None:
+        # Two distinct self-chat rows for the same handle (can happen when
+        # iCloud sync resurfaces a stale thread alongside the live one).
+        _make_resolver_db(self.db_path, [
+            {"chat_identifier": "+15551234567",
+             "participants": ["+15551234567"]},
+            {"chat_identifier": "+15551234567",
+             "participants": ["+15551234567"]},
+        ])
+        with self.assertRaises(notify_inbound.SelfChatLookupError) as ctx:
+            notify_inbound._resolve_self_chat_id(
+                self._open(), operator_handle="+15551234567",
+            )
+        self.assertIn("self_chat_id", str(ctx.exception))
+
+    def test_group_chat_excluded(self) -> None:
+        _make_resolver_db(self.db_path, [
+            {"chat_identifier": "+15551234567",
+             "participants": ["+15551234567"]},
+            {"chat_identifier": "chat-group",
+             "participants": ["+15551234567", "+15559999999"],
+             "room_name": "group"},
+        ])
+        resolved = notify_inbound._resolve_self_chat_id(
+            self._open(), operator_handle="+15551234567",
+        )
+        self.assertEqual(resolved, "+15551234567")
+
+    def test_archived_chat_excluded(self) -> None:
+        _make_resolver_db(self.db_path, [
+            {"chat_identifier": "+15551234567",
+             "participants": ["+15551234567"]},
+            {"chat_identifier": "+15551234567",
+             "participants": ["+15551234567"], "is_archived": 1},
+        ])
+        resolved = notify_inbound._resolve_self_chat_id(
+            self._open(), operator_handle="+15551234567",
+        )
+        self.assertEqual(resolved, "+15551234567")
+
+    def test_sms_service_excluded(self) -> None:
+        _make_resolver_db(self.db_path, [
+            {"chat_identifier": "+15551234567",
+             "participants": ["+15551234567"], "service_name": "SMS"},
+        ])
+        with self.assertRaises(notify_inbound.SelfChatLookupError):
+            notify_inbound._resolve_self_chat_id(
+                self._open(), operator_handle="+15551234567",
+            )
+
+
 class SeenRowidTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

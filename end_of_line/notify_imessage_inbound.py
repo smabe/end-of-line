@@ -29,6 +29,52 @@ ShellAnswerFn = Callable[[Path, str, int], None]
 log = logging.getLogger(__name__)
 
 
+class SelfChatLookupError(ValueError):
+    """Auto-resolver couldn't pin down the operator's self-chat."""
+
+
+def _resolve_self_chat_id(
+    conn: sqlite3.Connection,
+    *,
+    operator_handle: str,
+    override: str | None = None,
+) -> str:
+    """Resolve the operator's self-chat `chat_identifier`.
+
+    Honors `override` if provided. Otherwise queries chat.db for the unique
+    iMessage chat where the operator's handle is the sole participant and
+    the chat_identifier matches that handle (single-participant self-chat).
+    Group chats (`room_name` set) and archived chats are excluded.
+
+    Raises SelfChatLookupError on 0 or >1 candidates with a hint to set
+    `self_chat_id` explicitly on the iMessage channel.
+    """
+    if override is not None:
+        return override
+    rows = conn.execute(
+        "SELECT c.chat_identifier FROM chat c "
+        "JOIN chat_handle_join chj ON chj.chat_id = c.ROWID "
+        "JOIN handle h ON h.ROWID = chj.handle_id "
+        "WHERE c.service_name = 'iMessage' "
+        "AND c.room_name IS NULL AND c.is_archived = 0 "
+        "AND c.chat_identifier = h.id AND h.id = ? "
+        "GROUP BY c.ROWID HAVING COUNT(chj.handle_id) = 1",
+        (operator_handle,),
+    ).fetchall()
+    if not rows:
+        raise SelfChatLookupError(
+            f"no self-chat found for handle {operator_handle!r}; "
+            "set self_chat_id on the iMessage channel"
+        )
+    if len(rows) > 1:
+        candidates = ", ".join(repr(r[0]) for r in rows)
+        raise SelfChatLookupError(
+            f"multiple self-chat candidates for {operator_handle!r} "
+            f"({candidates}); set self_chat_id on the iMessage channel"
+        )
+    return rows[0][0]
+
+
 def _cli_dispatch(target: OpenBlocker, answer: str) -> None:
     """Fire `clu answer` as a subprocess. Raises CalledProcessError on rc!=0
     so callers know whether to auto-tick; the outer poll loop catches it so a
