@@ -73,116 +73,69 @@ For the *why* behind each, see
 | [`docs/_outline.md`](docs/_outline.md) | Structural contract for the docs library |
 | [`docs/history/`](docs/history/) | Frozen pre-Day-1 brainstorms |
 
-## Status (as of 2026-05-15)
+## Status (as of 2026-05-17)
 
-Shipped through Day 5 + the `clu-queue` plan: security + correctness
-(Day 1), UX surface + notifications + halt (Day 2), real worker
-dispatch + docs library (Day 3), backlog drain + self-contained worker
-PATH (Day 4), tick-default-dispatch + bundled skills (Day 5), and now
-per-project plan queue with auto-repair (`clu-queue`,
-[`plans/clu-queue.md`](plans/clu-queue.md) — canonical execution
-history). Eight phases shipped: primitive, add, list, pop, repair,
-footer, docs, smoke.
+The substrate is mature: per-plan **worktrees** (#24), multi-channel
+**notifications** (iMessage / Discord / clu-watch-only per #11), the
+**inbox-hook** session surface (#20) with stuck-blocker + stalled-claim
+re-pings, per-project **plan queue** + auto-repair (`clu-queue`), and
+the cron-driven supervisor with 8-priority tick chain. CLI surface
+covers the operator lease lifecycle (`extend-lease`, `release-claim
+[--reset-attempts]`, `force-complete`), worker-callback queue enqueue
+(#17), worktree GC (`clu worktree gc/attach/reattach`), and
+introspection (`clu watch [--task-list]`, `clu doctor`,
+`clu blockers`). Plan files in `plans/`; shipped plans archived to
+`plans/archive/<slug>/` (master + sub-plans), state at
+`<plan_dir>/.orchestrator/<slug>.state.json`. Architecture canonical
+in [`docs/architecture.md`](docs/architecture.md); module API map in
+[`docs/reference.md`](docs/reference.md).
 
-What the queue adds operator-side: `clu queue add/list/remove` (bare
-`clu queue` → list), a per-project queue file at
-`<plan_dir>/.orchestrator/queue.json`, the supervisor's post-loop
-queue-advancement step in `cmd_tick_all` (per-project, at-most-one pop
-per tick, head-only freeze on HALTED/PAUSED), and an opt-in auto-repair
-worker dispatched from a `dispatch.repair_command` template — with
-`queue.validate_repair` as the slug-preservation safety boundary, not
-the worker's prompt.
+**Recent ships (2026-05-15 → 2026-05-17), newest first** — for
+per-ship detail and commit ranges, follow the linked memory entries:
 
-v2 (worker-callback enqueue from inside a phase) is deferred to GitHub
-issue [#17](https://github.com/smabe/end-of-line/issues/17). Don't
-re-litigate without reading [`docs/contract.md`](docs/contract.md) §
-"Queue schema" + [`docs/architecture.md`](docs/architecture.md) §
-"Queue advancement" + "Auto-repair worker" first.
-
-**clu-monitor** — `/clu-monitor` ships as a bundled skill (#19);
-operator runs it once per machine to schedule background notifications
-on halts, stuck blockers, and stalled claims. CLI tips in `clu init` /
-`clu queue add` and the optional project CLAUDE.md injection prompt
-make Claude propose it proactively in new sessions. Marker at
-`~/.config/clu/monitor.json`; helpers in `end_of_line/monitor.py`. See
-[`docs/operations.md`](docs/operations.md) § "Background monitoring".
-
-**clu-inbox** — `/clu-monitor` now installs a `UserPromptSubmit` hook
-(phase 1: `c7aded3`) that surfaces clu events into the active Claude
-Code session on every user message, replacing the broken `/schedule`
-mechanism from #19. Inbox at `~/.config/clu/inbox/`, mark-and-sweep
-dedup into `processed/`; helpers in `end_of_line/inbox.py` and the hook
-script at `end_of_line/hooks/clu_inbox_surface.py`. Two new
-notification kinds added in the same chain (phase 2: `fa82771`):
-`stuck_blocker` (30 min re-ping until consumed) and `stalled_claim`
-(one-shot on lease expiry while status RUNNING) — both emit alongside
-the tick's primary action via `TickResult.side_notifies`. Marker schema
-bumped v1 → v2 (`is_scheduled` treats v1 as "needs reinstall"). Tests
-406 → 461. Closes [#20](https://github.com/smabe/end-of-line/issues/20).
-Follow-up `3e31551` drops the TTY refusal that blocked the
-`/clu-monitor` → Bash → `clu install-hook` path (closes
-[#21](https://github.com/smabe/end-of-line/issues/21)).
-
-**clu-worktrees** — opt-in per-plan git worktrees so concurrent plans
-in the same project can advance on isolated branches without stomping
-each other's diffs (closes [#24](https://github.com/smabe/end-of-line/issues/24)).
-Seven phases shipped 2026-05-15:
-1. constants + helper + exit code (`4fcb7b4`),
-2. `clu init --worktree [PATH] [--branch] [--base-ref]` with rollback
-   on save fail (`34dbff4`),
-3. `TickResult.worktree` snapshot + dispatch `cwd` routing (`fd7bae3`),
-4. missing-worktree detection at dispatch → `EVENT_WORKTREE_MISSING`
-   + pause + halt-bypass iMessage; extracted `_pause_and_halt` so
-   systemic-failure + missing-worktree share the pause shape (`27e40e5`),
-5. tick-time conflict scan + init-time hint; suppression via
-   `in_conflict_with` field, canonical-pair rule emits once per
-   (project, pair) onset; extracted `_plans_for_project` helper
-   (`d267c3e`),
-6. `clu worktree gc [--confirm] [--delete-branch]
-   [--include-archived]` with status re-check + 30s git timeouts;
-   `ProjectConfig.master_plan_path` + `_resolve_project_arg`
-   extractions during simplify (`47a15b1`),
-7. fleet `WT` column + `clu list` `(worktree)` annotation +
-   `clu unregister --all-archived` orphan-worktree stderr warning +
-   docs sweep (contract / architecture / operations / reference /
-   README). Tests 461 → 494. Worktree v2 (worker-callback enqueue
-   inside a phase, etc.) deferred — none filed yet.
-
-**queue-ux-hardening** — `clu queue add a b c` is now atomic
-(closes [#18](https://github.com/smabe/end-of-line/issues/18),
-`5c510a6`): single `queue.mutate` window, all-or-nothing batch
-validation, slice insertion for `--front`. `clu queue list` gains an
-`In flight: <slug> (dispatched HH:MM:SS UTC, lease until ...)` footer
-when a registered plan has an active claim (reuses the existing
-`reg_states` projection — no second registry walk). Tests 359 → 373.
-
-**green-batch** — four backlog issues drained autonomously through the
-queue (2026-05-12). `dispatch-path-tilde` expands `~` per-segment in
-`dispatch.path` at config load (#15, `b31eb69`). `install-skill-list`
-adds `clu install-skill --list` to enumerate bundled skills (#13,
-`46230e0`). `unregister-archived` adds `clu unregister --all-archived
-[--dry-run]` to batch-prune ghost registry entries (#12, `6db6740`).
-`clu-doctor` adds `clu doctor --project P` to smoke-test the worker
-subprocess environment (PATH + binary resolution), extracting
-`dispatch.build_worker_env` as the single source of truth (#14,
-`72c4bad`). Tests 337 → 359.
+- **#48 + #49 — force-complete + osascript-stderr** (`7f07392`,
+  `ca26a64`). Operator-rescue followups from notify-multi-channel.
+  `clu force-complete --plan P --phase X --commit SHA` for
+  stall-with-work-on-disk; `_osascript_send` now captures stderr to
+  `~/.config/clu/imessage.log`. Tests 816 → 835.
+- **#11 — notify-multi-channel** (`f903c71 → 15935cc`, merged
+  `bb4b6b8`). Notifier / InboundPoller protocols, Discord backend
+  (stdlib REST + reply correlation), `channels: [...]` config schema
+  with auto-migration from flat `notify.imessage`, runtime
+  `--no-notify` flag, `clu notify-test`. clu is now clone-and-go off
+  macOS. Tests 816 → 880+.
+- **#39 — clu-watch --task-list** (`c6caa7b → 6b3b39a`, merged
+  `cb6118e`). TASK_CREATE / TASK_UPDATE protocol over the watch
+  stream so AI agents can drive Claude's TaskCreate UI; /clu-plan
+  auto-arms `--task-list` Monitor. Tests 698 → 737.
+- **#37 + #38 — clu-watch** (`753a4b8 → 8b17c8f`, merged `929216f`).
+  New `end_of_line/watch.py` streams state events for AI agents;
+  /clu-plan auto-arms Monitor. Tests 614 → 698.
+- **#17 — queue-worker-callback** (`7795c5d → a4a54dc`, merged
+  `39a9af4`). v2 worker-callback queue enqueue (`clu queue add
+  --token T` from inside a phase). Tests 580 → 614.
+- **Day 5–6 small ships** — `/clu-plan` skill + cwd fix (#35 #36),
+  small-cli-fixes (#23 #31 #32), lease-claim-operator-control (#26
+  #27 #29 #30), test-isolation-base (#22), worktree-blocker-followups
+  (#25 #28 #33 #34). See `MEMORY.md` for each.
 
 **Open candidates** — pick from the backlog or propose new work:
 
-- **#4: Replan worker callback** — `STATUS_HALTED_REPLAN` exists in
-  the enum but nothing sets it. Worker callback or operator command?
-  Underspecified, needs design discussion.
-- **#10: Programmatic enforcement of mandate #9** — `clu verify` +
-  refuse-on-stale-stamp. Spec locked. Trigger to revisit: ≥2 worker
+- **#10 — clu verify + complete-refusal on stale stamp** (programmatic
+  enforcement of mandate #9). Spec locked. Trigger: ≥2 worker
   summaries observed lying about test results.
-- **#11: Pluggable notification backends** — Slack + stdout for
-  non-Mac operators. Trigger to revisit: a real non-Mac operator
-  trying clu.
-- **#17: v2 worker-callback queue enqueue** — `clu queue add --token
-  T` from inside a phase. Trigger to revisit: 30 days of v1 use +
-  ≥3 real-chain requests.
+- **#41 — clu watch --task-list batch-bootstrap.** Coalesce the
+  initial TASK_CREATE burst into a single emission so the Claude
+  TaskCreate UI binds atomically. Tightening on a just-shipped
+  subsystem.
+- **#45 — Inbound iMessage `is_from_me=0` blocks self-chat replies.**
+  Unlabeled; needs grilling. Possibly a one-liner in
+  `notify_inbound.py`.
+- **#4 — Replan worker callback.** `STATUS_HALTED_REPLAN` exists but
+  nothing sets it. Worker callback or operator command? Underspecified,
+  needs design discussion.
 - **Multi-plan inbound routing.** Day 2.4 deferred last-pinged routing
-  for ambiguous bare-digit replies. Not yet filed as an issue.
+  for ambiguous bare-digit replies. Not yet filed.
 
 ## Locked config decisions
 
