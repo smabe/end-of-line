@@ -33,7 +33,7 @@ import time
 from enum import IntEnum
 from pathlib import Path
 
-from . import cross_plan_rules, dispatch, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, watch
+from . import cross_plan_rules, dispatch, dry_merge, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
@@ -370,6 +370,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_archive.add_argument(
         "--plan", required=True, help="Plan slug.",
+    )
+
+    p_integrate = sub.add_parser(
+        "integrate",
+        help="Dry-merge a batch's branches in a scratch worktree and "
+             "optionally run the project's test_command. Operator-on-demand "
+             "replay; does NOT mutate plan state or file follow-ups (the "
+             "cross-plan rule owns that).",
+    )
+    p_integrate.add_argument("--project", type=Path, required=True)
+    p_integrate.add_argument(
+        "--batch",
+        default=None,
+        help="Batch id; resolves DONE member branches from the registry.",
+    )
+    p_integrate.add_argument(
+        "--branches",
+        default=None,
+        help="Comma-separated branch names; overrides --batch resolution.",
+    )
+    p_integrate.add_argument(
+        "--no-suite", action="store_true",
+        help="Textual-merge only — skip test_command even when configured.",
+    )
+    p_integrate.add_argument(
+        "--base-ref", default="main",
+        help="Base ref to merge off. Defaults to main.",
     )
 
     p_unregister = sub.add_parser(
@@ -887,6 +914,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_notify_test(args)
     if args.cmd == "answer":
         return cmd_answer(args)
+    if args.cmd == "integrate":
+        return cmd_integrate(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -3228,6 +3257,82 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         )
     print(f"Force-completed phase {args.phase}")
     return ExitCode.OK
+
+
+def cmd_integrate(args) -> int:
+    """Operator-on-demand dry merge of a batch's branches.
+
+    Wraps dry_merge.attempt_merge directly; does NOT mutate plan state
+    or write follow-up plan files (the cross-plan rule owns that).
+    Useful for replay-after-fix, stuck batches, or CI-side validation.
+    """
+    project_root = args.project.resolve()
+    if not project_root.is_dir():
+        return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+    cfg = load_project_config(project_root)
+
+    if args.branches:
+        branches = [b.strip() for b in args.branches.split(",") if b.strip()]
+        if len(branches) < 2:
+            return _die(
+                ExitCode.GENERIC,
+                f"--branches requires at least 2 entries; got {len(branches)} after parsing",
+            )
+    elif args.batch:
+        try:
+            st.validate_slug(args.batch, kind="batch id")
+        except st.InvalidSlug as exc:
+            return _die(ExitCode.INVALID_SLUG, str(exc))
+        plans = cross_plan_rules.load_plans_for_project(project_root, cfg)
+        eligible = [
+            p for p in plans
+            if p.state.get("status") == st.STATUS_DONE
+            and p.state.get("batch_id") == args.batch
+            and st.get_worktree(p.state) is not None
+        ]
+        branches: list[str] = []
+        for p in eligible:
+            branch = st.get_worktree(p.state)["branch"]
+            r = subprocess.run(
+                ["git", "-C", str(project_root), "rev-parse", "--verify", branch],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                branches.append(branch)
+            else:
+                print(
+                    f"integrate: branch {branch!r} not found for {p.slug!r}, skipping",
+                    file=sys.stderr,
+                )
+        if len(branches) < 2:
+            return _die(
+                ExitCode.GENERIC,
+                f"batch {args.batch!r} has fewer than 2 DONE plans with live worktree "
+                f"branches (found {len(branches)}); nothing to integrate",
+            )
+    else:
+        return _die(
+            ExitCode.GENERIC,
+            "one of --batch or --branches is required",
+        )
+
+    test_cmd = None if args.no_suite else cfg.test_command
+    result = dry_merge.attempt_merge(
+        project_root,
+        args.base_ref,
+        branches,
+        test_cmd,
+    )
+
+    print(f"outcome: {result.outcome}")
+    if result.conflict_files:
+        print(f"conflict files: {', '.join(result.conflict_files)}")
+    if result.test_exit_code is not None:
+        print(f"test exit code: {result.test_exit_code}")
+    if result.stderr_tail:
+        print(f"stderr:\n{result.stderr_tail}", file=sys.stderr)
+
+    return ExitCode.OK if result.outcome == "clean" else ExitCode.GENERIC
 
 
 def cmd_archive(args) -> int:

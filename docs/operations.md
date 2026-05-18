@@ -470,6 +470,94 @@ lose its worktree.
 entry whose state file still has a `worktree` record, naming the
 orphan path. Recovery: `clu worktree gc --include-archived --confirm`.
 
+## Multi-plan batches
+
+When two or more plans touch overlapping code and run in parallel worktrees,
+textual auto-merge may succeed while semantic conflicts slip through silently.
+The batch integration gate catches these before the operator merges to main.
+
+### Operator workflow
+
+1. `clu init --project P --plan plan-a --worktree`  
+   `clu init --project P --plan plan-b --worktree`
+
+2. Tag both as a batch when queueing:
+
+   ```
+   clu queue add --project P --batch my-batch plan-a plan-b
+   ```
+
+   `--batch` must be a valid slug. Omitting it → gate never fires for those plans.
+
+3. Workers drain to `done` on their own `clu/<slug>` branches. The dry-merge
+   gate fires automatically on the next `clu tick-all` after the second plan
+   completes:
+   - **Clean** → `KIND_GATE_CLEAN` notification; operator merges branches to
+     main and runs `clu archive` on each.
+   - **Dirty** → `KIND_GATE_DIRTY` notification (bypasses quiet hours); follow-up
+     plan files written to `plans/merge-resolve-<batch>-<ts>.md`. Operator reviews
+     the conflict report, fixes, and queues the follow-up:
+     ```
+     clu queue add --project P merge-resolve-<batch>-<ts>
+     ```
+
+4. After all branches are green and merged to main, archive each plan:
+   ```
+   clu archive --project P --plan plan-a
+   clu archive --project P --plan plan-b
+   ```
+
+### Re-running the gate manually
+
+After pushing fixes to one or more branches, replay the check without waiting
+for the next cron tick:
+
+```
+clu integrate --project P --batch my-batch
+```
+
+Or for ad-hoc cross-branch validation outside of clu plans:
+
+```
+clu integrate --project P --branches clu/plan-a,clu/plan-b
+```
+
+Flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--batch B` | — | Resolve DONE members from registry |
+| `--branches a,b` | — | Override batch resolution; use exact branch names |
+| `--no-suite` | false | Textual-merge only; skip `test_command` |
+| `--base-ref REF` | `main` | Base ref to merge off |
+
+Exit 0 = clean; exit 1 = dirty. Stdout reports outcome + conflict files.
+
+`clu integrate` does **not** mutate plan state and does **not** write
+follow-up plans — it is read-only from clu's perspective. The cross-plan
+rule owns those side effects.
+
+### Configuring `test_command`
+
+Add `test_command` to `.orchestrator.json` to run the suite inside the
+scratch worktree after a successful textual merge:
+
+```json
+{
+  "dispatch": { "command": "claude --print '{plan_slug}'" },
+  "test_command": "python3 -m unittest discover -s tests"
+}
+```
+
+`test_command` is run with `shell=True` inside the scratch worktree. It
+inherits the subprocess environment — no venv activation, no PATH
+manipulation. The operator owns the trust: whatever is in `test_command`
+runs as the clu process user. Keep it to a single test-runner invocation.
+
+Absent or `null` → textual-merge-only mode (still catches the literal
+conflict class from the canonical 2026-05-18 incident). `--no-suite`
+overrides it to textual-only even when `test_command` is set.
+
 ## Setup: iMessage (macOS only)
 
 Configure during `clu init` (interactive prompt on macOS) or directly in `.orchestrator.json`:
@@ -1244,6 +1332,7 @@ and the next `phase_started` for the same phase starts fresh from zero.
 | `clu worktree gc [--project P] [--confirm] [--delete-branch] [--include-archived]` | List or remove worktrees of done/halted plans (see "Per-plan worktrees") |
 | `clu worktree attach --project P --plan S [PATH] [--branch B] [--base-ref REF]` | Retrofit a worktree onto a plan init'd without one |
 | `clu worktree reattach --project P --plan S` | Re-create the worktree dir from the path/branch already in `state.worktree` (recovery for an externally-removed dir) |
+| `clu integrate --project P [--batch B \| --branches a,b,c] [--no-suite] [--base-ref REF]` | Dry-merge a batch's branches in a scratch worktree and run `test_command` if configured. Operator-on-demand; does NOT mutate plan state or file follow-ups. Exit 0 = clean; exit 1 = dirty |
 
 The full CLI surface — including worker-side commands like `complete`,
 `block`, `spawn`, `heartbeat`, `task-done` — lives under the `cli`

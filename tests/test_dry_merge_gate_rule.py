@@ -20,33 +20,12 @@ from end_of_line.cross_plan_rules import (
     run_rules,
 )
 from end_of_line.dry_merge import MergeResult
-from tests import CluTestCase
+from tests import CluTestCase, git as _git, make_git_project as _make_git_project
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
-def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=check,
-    )
-
-
-def _make_git_project(base: Path) -> Path:
-    """Create a minimal git project at base/myrepo with a main branch."""
-    project = base / "myrepo"
-    project.mkdir()
-    (project / "plans").mkdir()
-    _git(project, "init", "-q", "-b", "main")
-    _git(project, "config", "user.email", "t@test.invalid")
-    _git(project, "config", "user.name", "Test User")
-    (project / "README").write_text("init\n")
-    _git(project, "add", "README")
-    _git(project, "commit", "-m", "init")
-    return project
-
 
 def _make_branch(repo: Path, branch: str, filename: str, content: str) -> str:
     """Create branch with one file commit; return the branch HEAD SHA."""

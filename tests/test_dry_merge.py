@@ -7,24 +7,17 @@ incident: textual-merge succeeds but suite fails on a renamed function.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from end_of_line.dry_merge import MergeResult, attempt_merge
+from tests import git as _git
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
-def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=check,
-    )
-
 
 def _make_tmp_repo() -> Path:
     """Create a minimal git repo in a temp dir.

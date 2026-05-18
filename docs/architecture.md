@@ -310,6 +310,70 @@ when the new plan would land into an existing same-project conflict
 — giving the operator a chance to add `--worktree` before the first
 tick fires the iMessage.
 
+## Multi-plan batch integration gate
+
+When N plans drain in parallel via `clu queue add --batch <name>`, each
+worker reads the codebase as of queue-time HEAD and is blind to sibling
+workers' changes. Textual auto-merge usually succeeds, but **hidden
+semantic conflicts** — one plan renames a function while a sibling's new
+test calls it by its old name — slip through silently and only surface
+at runtime.
+
+### Rule trigger
+
+`dry_merge_gate_rule` (registered last in `cross_plan_rules._RULES`) fires
+when the post-loop rule chain runs for a project where **≥2 plans** with
+the **same non-null `batch_id`** are:
+- `status == done`
+- Have a live `worktree` record (branch still resolvable via `git rev-parse`)
+
+Eligible set is computed per `batch_id`; multiple batches may co-exist.
+
+### Idempotency
+
+The rule skips a batch whose sorted-HEAD-SHA key matches `gate_result.sha_key`
+already stamped on any member plan. Same set of commits → no re-run. The
+key advances only when a plan pushes a new commit (e.g. after repairing
+a conflict).
+
+### On clean
+
+`gate_result` is stamped on every member plan's state. `KIND_GATE_CLEAN`
+notification fires (gated by quiet hours). No plan files written; no queue
+mutation.
+
+### On dirty (textual conflict or suite failure)
+
+`gate_result` is stamped with the outcome. `KIND_GATE_DIRTY` notification
+fires (bypasses quiet hours — this is a hard stop). A follow-up plan pair
+is **written to disk** (`plans/merge-resolve-<batch>-<YYYYMMDDhhmm>.md` +
+`-fix.md`) but **not queued** — the operator runs `clu queue add
+merge-resolve-...` manually after reviewing the conflict report.
+
+### `clu integrate` — operator override
+
+`clu integrate --project P --batch B` lets the operator re-run the engine
+on demand (e.g. after fixing conflicts and pushing new commits). It wraps
+`dry_merge.attempt_merge` directly and does **not** fire the rule — no
+state mutation, no follow-up emission. Useful for replay-after-fix, stuck
+batches, or CI-side verification. `--branches a,b,c` bypasses batch
+resolution entirely for ad-hoc cross-branch checks.
+
+```
+┌── cron tick-all ──────────────────────────────┐
+│  for project in distinct:                     │
+│    advance_queue(project)                     │
+│    detect_conflicts(project)                  │
+│    run_rules(project, plans) ─────────────────┤
+│      queue_advancement_rule                   │
+│      worktree_conflict_rule                   │
+│      dry_merge_gate_rule ← fires when ≥2 DONE │
+└───────────────────────────────────────────────┘
+
+operator (on demand):
+  clu integrate --project P [--batch B | --branches a,b]
+```
+
 ## Auto-repair worker
 
 When the queue advancement step's `queue.load(queue_path)` raises
