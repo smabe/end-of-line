@@ -665,6 +665,29 @@ Configure during `clu init` (interactive prompt on macOS) or directly in `.orche
 `to` must be your iMessage self-chat handle (your own number or Apple ID email). clu
 sends from your Mac to yourself; you answer from your phone.
 
+Replies in the self-chat have `is_from_me = 1` in `chat.db` because the operator IS
+the sender. The poller scopes to one chat (your self-chat) and accepts both
+`is_from_me` values; clu's own outbound rows are skipped via an outbound-floor
+tracker (`outbound_pending.json` → `inbound_state.json.outbound_rowids[chat_id]`).
+
+By default the inbound daemon auto-resolves your self-chat by joining
+`chat → chat_handle_join → handle` for the unique iMessage chat where your handle is
+the only participant. If you have multiple self-chat candidates (e.g. iCloud sync
+resurrected a stale thread alongside the live one), the auto-resolver refuses with a
+hint to set `self_chat_id` on the channel:
+
+```json
+{"kind": "imessage", "to": "you@example.com", "self_chat_id": "you@example.com"}
+```
+
+Run `clu doctor --project <path>` to see what gets resolved. The `Notify channels:`
+section prints `self_chat=<id> (auto-resolved | override)` per iMessage channel, or
+the `SelfChatLookupError` message when neither path succeeds.
+
+State files (under `$XDG_CONFIG_HOME/clu/`, default `~/.config/clu/`):
+- `inbound_state.json` — `{schema_version, last_inbound_rowid, outbound_rowids}`
+- `outbound_pending.json` — pending marks waiting for the poller to drain
+
 Grant Full Disk Access to the pipx venv python so the inbound poller can open `chat.db`
 (System Settings → Privacy & Security → Full Disk Access → add
 `~/.local/pipx/venvs/end-of-line/bin/python3`).

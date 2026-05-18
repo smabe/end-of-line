@@ -9,6 +9,7 @@ from pathlib import Path
 
 from end_of_line import notify_inbound, registry, state as st
 from end_of_line.notify_inbound import OpenBlocker
+from tests import isolate_registry
 
 
 DEFAULT_CHAT_ID = "+15551234567"  # operator's self-chat handle for fixtures
@@ -652,6 +653,58 @@ class PollOnceFloorTestCase(unittest.TestCase):
             _locator_fn=self._mock_locator([target]),
         )
         self.assertEqual(len(self.dispatched), 1)
+
+
+class ImessageChannelFromRegistryTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        isolate_registry(self, self.tmp)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _make_project(self, slug: str, channels: list[dict] | None) -> Path:
+        project = self.tmp / slug
+        (project / "plans").mkdir(parents=True)
+        (project / ".orchestrator.json").write_text(json.dumps({
+            "plan_dir": "plans",
+            "dispatch": {"kind": "shell", "command": "echo {phase_id}"},
+            "notify": {"channels": channels} if channels else {},
+        }))
+        return project
+
+    def test_no_registered_projects_returns_none(self) -> None:
+        self.assertIsNone(notify_inbound.imessage_channel_from_registry())
+
+    def test_imessage_channel_returns_to_handle(self) -> None:
+        project = self._make_project("p", [
+            {"kind": "imessage", "to": "+15551234567"},
+        ])
+        registry.register(project, "p")
+        result = notify_inbound.imessage_channel_from_registry()
+        self.assertEqual(result, ("+15551234567", None))
+
+    def test_self_chat_id_override_returned(self) -> None:
+        project = self._make_project("p", [
+            {"kind": "imessage", "to": "+15551234567",
+             "self_chat_id": "+15551234567"},
+        ])
+        registry.register(project, "p")
+        result = notify_inbound.imessage_channel_from_registry()
+        self.assertEqual(result, ("+15551234567", "+15551234567"))
+
+    def test_disabled_channel_skipped(self) -> None:
+        project = self._make_project("p", [
+            {"kind": "imessage", "to": "+1", "enabled": False},
+        ])
+        registry.register(project, "p")
+        self.assertIsNone(notify_inbound.imessage_channel_from_registry())
+
+    def test_no_imessage_channel_returns_none(self) -> None:
+        project = self._make_project("p", None)
+        registry.register(project, "p")
+        self.assertIsNone(notify_inbound.imessage_channel_from_registry())
 
 
 if __name__ == "__main__":

@@ -354,6 +354,28 @@ def drain_outbound_marks(
     return floors
 
 
+def imessage_channel_from_registry() -> tuple[str, str | None] | None:
+    """First enabled iMessage channel across registered projects.
+
+    Returns `(operator_handle, self_chat_id_override)` or None when no
+    project on this host has an iMessage channel. The inbound daemon
+    uses this at startup to derive its chat scope without a separate
+    host-level config file — the operator's existing project notify
+    config is the source of truth.
+    """
+    for entry in registry.entries():
+        try:
+            cfg = load_project_config(Path(entry.project_root))
+        except Exception:
+            continue
+        for ch in cfg.notify.channels:
+            if ch.kind == "imessage" and ch.enabled:
+                to = ch.params.get("to")
+                if to:
+                    return (to, ch.params.get("self_chat_id"))
+    return None
+
+
 def open_chat_db(db_path: Path = DEFAULT_CHAT_DB) -> sqlite3.Connection:
     """Open chat.db read-only via SQLite URI — never widen this mode."""
     uri = f"file:{db_path}?mode=ro"

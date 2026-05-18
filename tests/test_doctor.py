@@ -182,6 +182,42 @@ class DoctorCommandTestCase(unittest.TestCase):
         after = state_path.stat().st_mtime_ns
         self.assertEqual(before, after)
 
+    def _write_cfg_with_notify(self, channels: list[dict]) -> None:
+        payload = {
+            "dispatch": {"kind": "shell", "command": "echo"},
+            "notify": {"channels": channels},
+        }
+        (self.project / ".orchestrator.json").write_text(json.dumps(payload))
+
+    def test_doctor_notify_section_absent_without_imessage(self) -> None:
+        self._write_cfg(path=os.environ["PATH"])
+        _, stdout, _ = self._run_doctor()
+        self.assertNotIn("Notify channels:", stdout)
+
+    def test_doctor_reports_override_without_chatdb(self) -> None:
+        # An explicit self_chat_id short-circuits the chat.db lookup, so
+        # doctor reports cleanly even in test environments without chat.db.
+        self._write_cfg_with_notify([
+            {"kind": "imessage", "to": "+15551234567",
+             "self_chat_id": "+15551234567"},
+        ])
+        _, stdout, _ = self._run_doctor()
+        self.assertIn("Notify channels:", stdout)
+        self.assertIn("self_chat=+15551234567", stdout)
+        self.assertIn("override", stdout)
+
+    def test_doctor_reports_resolver_error_for_unmatched_handle(self) -> None:
+        # No override + a synthetic handle that won't match the operator's
+        # real chat.db → resolver surfaces SelfChatLookupError, doctor prints
+        # the hint pointing at the override knob.
+        self._write_cfg_with_notify([
+            {"kind": "imessage", "to": "+15550000000"},
+        ])
+        _, stdout, _ = self._run_doctor()
+        self.assertIn("Notify channels:", stdout)
+        self.assertIn("self_chat_id", stdout)
+        self.assertIn("+15550000000", stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1896,9 +1896,54 @@ def cmd_doctor(args) -> int:
         print(f"  {line}")
     print(f"  (source: {source})")
 
+    _print_notify_health(cfg)
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _print_notify_health(cfg: ProjectConfig) -> None:
+    """For each iMessage channel, report self-chat resolution status.
+
+    Auto-resolve looks up the operator's unique self-chat in chat.db;
+    a `self_chat_id` param on the channel overrides the lookup. Reports
+    the resolved chat_identifier or the `SelfChatLookupError` message
+    pointing at the override path.
+    """
+    imessage_channels = [
+        c for c in cfg.notify.channels if c.kind == "imessage" and c.enabled
+    ]
+    if not imessage_channels:
+        return
+    print("\nNotify channels:")
+    from .notify_imessage_inbound import (
+        DEFAULT_CHAT_DB,
+        SelfChatLookupError,
+        _resolve_self_chat_id,
+        open_chat_db,
+    )
+    needs_chatdb = any(
+        c.params.get("self_chat_id") is None for c in imessage_channels
+    )
+    conn = None
+    if needs_chatdb:
+        try:
+            conn = open_chat_db(DEFAULT_CHAT_DB)
+        except Exception as exc:
+            print(f"  iMessage: chat.db inaccessible ({DEFAULT_CHAT_DB}) — {exc}")
+            return
+    for ch in imessage_channels:
+        to = ch.params.get("to", "<no handle>")
+        override = ch.params.get("self_chat_id")
+        try:
+            resolved = _resolve_self_chat_id(
+                conn, operator_handle=to, override=override,
+            )
+        except SelfChatLookupError as exc:
+            print(f"  iMessage[to={to}]: {exc}")
+            continue
+        source = "override" if override else "auto-resolved"
+        print(f"  iMessage[to={to}]: self_chat={resolved} ({source})")
 
 
 def _print_worktree_health(cfg: ProjectConfig) -> None:

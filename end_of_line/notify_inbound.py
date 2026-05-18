@@ -42,6 +42,7 @@ from .notify_imessage_inbound import (  # noqa: F401
     _spawn_tick,
     append_outbound_mark,
     drain_outbound_marks,
+    imessage_channel_from_registry,
     inbound_state_path,
     open_chat_db,
     outbound_pending_path,
@@ -56,7 +57,25 @@ def main(argv: list[str] | None = None) -> int:
     if not DEFAULT_CHAT_DB.exists():
         print(f"notify_inbound: chat.db not found at {DEFAULT_CHAT_DB}", file=sys.stderr)
         return 1
-    poller = IMessageInboundPoller()
+    channel = imessage_channel_from_registry()
+    if channel is None:
+        print(
+            "notify_inbound: no iMessage channel registered on this host; "
+            "polling disabled. Add an iMessage channel to a project's "
+            ".orchestrator.json (notify.channels[].kind = 'imessage').",
+            file=sys.stderr,
+        )
+        return 1
+    operator_handle, override = channel
+    try:
+        conn = open_chat_db(DEFAULT_CHAT_DB)
+        self_chat_id = _resolve_self_chat_id(
+            conn, operator_handle=operator_handle, override=override,
+        )
+    except SelfChatLookupError as exc:
+        print(f"notify_inbound: {exc}", file=sys.stderr)
+        return 1
+    poller = IMessageInboundPoller(self_chat_id=self_chat_id)
     while True:
         try:
             poller.poll()
