@@ -3335,6 +3335,52 @@ def cmd_integrate(args) -> int:
     return ExitCode.OK if result.outcome == "clean" else ExitCode.GENERIC
 
 
+def _perform_archive(
+    cfg: ProjectConfig,
+    plan: str,
+    *,
+    unregister: bool = False,
+) -> tuple[dict | None, dict | None, bool]:
+    """Shared archive engine. Returns (before, after, plan_moved).
+
+    Cleans up the worktree, moves the plan file to plans/shipped/, and
+    optionally prunes the registry entry. Raises CalledProcessError or
+    TimeoutExpired on git mv failure (state is still saved; caller decides
+    how to surface the error). Does not check STATUS_RUNNING.
+    """
+    state_path = cfg.state_path(plan)
+    plan_moved = False
+    _git_mv_exc: Exception | None = None
+    with st.mutate(state_path) as data:
+        before = st.get_worktree(data)
+        _maybe_cleanup_worktree(
+            cfg, data, trigger="archive", require_all_phases_done=False,
+        )
+        after = st.get_worktree(data)
+        plan_dir = cfg.project_root / cfg.plan_dir
+        plan_md = plan_dir / f"{plan}.md"
+        if plan_md.exists():
+            shipped_dir = plan_dir / "shipped"
+            shipped_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                subprocess.run(
+                    ["git", "mv", str(plan_md), str(shipped_dir / plan_md.name)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(cfg.project_root),
+                    timeout=30,
+                )
+                plan_moved = True
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                _git_mv_exc = exc
+    if _git_mv_exc is not None:
+        raise _git_mv_exc
+    if unregister:
+        registry.unregister(cfg.project_root, plan)
+    return before, after, plan_moved
+
+
 def cmd_archive(args) -> int:
     """Plan-level wrap: clean up the worktree + branch when commits are
     upstream-reachable; retain-and-warn when ahead.
@@ -3351,44 +3397,24 @@ def cmd_archive(args) -> int:
     state_path = cfg.state_path(args.plan)
     if not state_path.exists():
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
-    plan_moved = False
-    with st.mutate(state_path) as data:
-        if data["status"] == st.STATUS_RUNNING:
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                f"plan {args.plan!r} is still RUNNING — pause or halt "
-                f"first, or wait for plan_done before archiving",
-            )
-        before = st.get_worktree(data)
-        _maybe_cleanup_worktree(
-            cfg, data, trigger="archive", require_all_phases_done=False,
+    data = st.load(state_path)
+    if data["status"] == st.STATUS_RUNNING:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"plan {args.plan!r} is still RUNNING — pause or halt "
+            f"first, or wait for plan_done before archiving",
         )
-        after = st.get_worktree(data)
-        plan_dir = cfg.project_root / cfg.plan_dir
-        plan_md = plan_dir / f"{args.plan}.md"
-        if plan_md.exists():
-            shipped_dir = plan_dir / "shipped"
-            shipped_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                subprocess.run(
-                    ["git", "mv", str(plan_md), str(shipped_dir / plan_md.name)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=str(cfg.project_root),
-                    timeout=30,
-                )
-                plan_moved = True
-            except subprocess.CalledProcessError as exc:
-                return _die(
-                    ExitCode.GENERIC,
-                    f"git mv failed for {plan_md.name}: {exc.stderr.strip() or str(exc)}",
-                )
-            except subprocess.TimeoutExpired:
-                return _die(
-                    ExitCode.GENERIC,
-                    f"git mv timed out for {plan_md}",
-                )
+    try:
+        before, after, plan_moved = _perform_archive(cfg, args.plan, unregister=False)
+    except subprocess.CalledProcessError as exc:
+        plan_md = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
+        return _die(
+            ExitCode.GENERIC,
+            f"git mv failed for {plan_md.name}: {exc.stderr.strip() or str(exc)}",
+        )
+    except subprocess.TimeoutExpired:
+        plan_md = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
+        return _die(ExitCode.GENERIC, f"git mv timed out for {plan_md}")
     move_note = " Plan file moved to shipped/." if plan_moved else ""
     if before is None:
         print(f"Archive {args.plan}: no worktree to clean.{move_note}")

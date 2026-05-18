@@ -444,6 +444,16 @@ two things in one command:
 After archiving, run `clu unregister --all-archived` to prune the host
 registry entry.
 
+### Auto-archive on merge
+
+When using per-plan worktrees, clu can automate the post-ship cleanup step.
+After you merge `clu/<slug>` to `main` and push (`git push origin main`), the
+next cron tick detects that the branch is an ancestor of `origin/main` and
+automatically runs the archive (worktree removed, branch removed, registry
+entry pruned). The operator receives a `KIND_PLAN_AUTO_ARCHIVED` notification
+confirming the cleanup. The full operator workflow and opt-out configuration
+(`auto_archive: false`) are documented in `docs/architecture.md`.
+
 ### Cleanup with `clu worktree gc`
 
 ```bash
