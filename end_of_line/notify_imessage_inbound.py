@@ -76,25 +76,34 @@ def poll_once(
     conn: sqlite3.Connection,
     last_rowid: int,
     *,
+    self_chat_id: str,
     entries_fn: Callable[[], list[registry.PlanEntry]] = registry.entries,
     shell_answer_fn: ShellAnswerFn = _shell_clu_answer,
     tick_spawner: TickSpawner = _spawn_tick,
     _locator_fn=None,  # (list[PlanEntry], str) -> LocatorResult; None = use state_locator
 ) -> int:
-    """Scan chat.db for inbound rows after `last_rowid`. Returns new high-water.
+    """Scan chat.db for inbound rows after `last_rowid` in the operator's
+    self-chat. Returns new high-water.
+
+    Scoped to `self_chat_id` so the poller only sees one chat. No
+    `is_from_me` filter: self-chat replies have `is_from_me = 1` because
+    the operator IS the sender. Clu's own outbound rows pass the chat
+    scope but are dropped at the locator by reply-grammar narrowness.
 
     Always advances the high-water past every row we read, matched or
     not — otherwise a chatty stranger could keep the cursor stuck on an
-    old digit-shaped message and resurrect it once a future blocker
-    opens.
+    old digit-shaped message and resurrect it once a future blocker opens.
     """
     # LIMIT caps first-tick blowup (e.g. seen_rowid=0 against a chat.db with
     # a year of history); next tick advances the cursor and picks up the rest.
     rows = conn.execute(
-        "SELECT ROWID, text FROM message "
-        "WHERE ROWID > ? AND is_from_me = 0 AND text IS NOT NULL "
-        "ORDER BY ROWID ASC LIMIT ?",
-        (last_rowid, POLL_BATCH_LIMIT),
+        "SELECT m.ROWID, m.text FROM message m "
+        "JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
+        "JOIN chat c ON c.ROWID = cmj.chat_id "
+        "WHERE m.ROWID > ? AND m.text IS NOT NULL "
+        "AND c.chat_identifier = ? "
+        "ORDER BY m.ROWID ASC LIMIT ?",
+        (last_rowid, self_chat_id, POLL_BATCH_LIMIT),
     ).fetchall()
     if not rows:
         return last_rowid
@@ -163,9 +172,11 @@ class IMessageInboundPoller:
         self,
         db_path: Path | None = None,
         registry_loader: Callable | None = None,
+        self_chat_id: str | None = None,
     ) -> None:
         self._db_path = db_path or DEFAULT_CHAT_DB
         self._registry_loader = registry_loader or registry.entries
+        self._self_chat_id = self_chat_id
         self._conn: sqlite3.Connection | None = None
         self._last_rowid: int | None = None  # cached; read from disk once on first poll
 
@@ -174,15 +185,19 @@ class IMessageInboundPoller:
 
         Returns [] always — dispatch happens inside poll_once so the
         Protocol return type is satisfied without duplicating dispatch logic.
-        Phase 2+ can refactor to actual reply collection when a shared
-        dispatch loop exists.
+
+        No-op when `self_chat_id` is unset — without a chat scope the
+        poller has nothing to read.
         """
+        if self._self_chat_id is None:
+            return []
         if self._conn is None:
             self._conn = open_chat_db(self._db_path)
         if self._last_rowid is None:
             self._last_rowid = read_seen(DEFAULT_SEEN_PATH)
         new_last = poll_once(
             self._conn, self._last_rowid,
+            self_chat_id=self._self_chat_id,
             entries_fn=self._registry_loader,
         )
         if new_last != self._last_rowid:

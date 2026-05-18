@@ -11,17 +11,48 @@ from end_of_line import notify_inbound, registry, state as st
 from end_of_line.notify_inbound import OpenBlocker
 
 
-def _make_chat_db(path: Path, rows: list[tuple[int, int, str | None]]) -> None:
-    """Build a chat.db-shaped fixture. rows: [(rowid, is_from_me, text)]."""
+DEFAULT_CHAT_ID = "+15551234567"  # operator's self-chat handle for fixtures
+
+
+def _make_chat_db(path: Path, rows: list[tuple]) -> None:
+    """Build a chat.db-shaped fixture.
+
+    rows: (rowid, is_from_me, text) — uses DEFAULT_CHAT_ID for the chat scope,
+          OR (rowid, is_from_me, text, chat_identifier) for explicit scoping.
+    """
     conn = sqlite3.connect(str(path))
     conn.execute(
         "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, "
         "is_from_me INTEGER, text TEXT)"
     )
-    conn.executemany(
-        "INSERT INTO message (ROWID, is_from_me, text) VALUES (?, ?, ?)",
-        rows,
+    conn.execute(
+        "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE chat_message_join "
+        "(chat_id INTEGER, message_id INTEGER)"
+    )
+    chat_rowids: dict[str, int] = {}
+    for row in rows:
+        if len(row) == 3:
+            rowid, is_from_me, text = row
+            chat_id = DEFAULT_CHAT_ID
+        else:
+            rowid, is_from_me, text, chat_id = row
+        if chat_id not in chat_rowids:
+            chat_rowids[chat_id] = len(chat_rowids) + 1
+            conn.execute(
+                "INSERT INTO chat (ROWID, chat_identifier) VALUES (?, ?)",
+                (chat_rowids[chat_id], chat_id),
+            )
+        conn.execute(
+            "INSERT INTO message (ROWID, is_from_me, text) VALUES (?, ?, ?)",
+            (rowid, is_from_me, text),
+        )
+        conn.execute(
+            "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
+            (chat_rowids[chat_id], rowid),
+        )
     conn.commit()
     conn.close()
 
@@ -167,6 +198,7 @@ class PollOnceTestCase(unittest.TestCase):
 
     def _poll(self, conn, last, *, blockers, shell_answer_fn=None, **kw) -> int:
         kw.setdefault("tick_spawner", self._tick)
+        kw.setdefault("self_chat_id", DEFAULT_CHAT_ID)
         return notify_inbound.poll_once(
             conn, last,
             _locator_fn=kw.pop("_locator_fn", self._mock_locator(blockers)),
@@ -191,6 +223,25 @@ class PollOnceTestCase(unittest.TestCase):
         last = self._poll(conn, 0, blockers=[target])
         self.assertEqual(last, 12)
         self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 0)])
+
+    def test_self_chat_is_from_me_1_routes(self) -> None:
+        # In self-chat the operator IS the sender, so the reply row has
+        # is_from_me=1. The chat-scoped SQL must accept it.
+        _make_chat_db(self.db_path, [(1, 1, "0")])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
+        last = self._poll(conn, 0, blockers=[target])
+        self.assertEqual(last, 1)
+        self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 0)])
+
+    def test_other_chat_dropped_by_scope(self) -> None:
+        _make_chat_db(self.db_path, [(1, 0, "0", "+15559999999")])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
+        last = self._poll(conn, 0, blockers=[target])
+        # Cursor must NOT advance — out-of-scope rows aren't read at all.
+        self.assertEqual(last, 0)
+        self.assertEqual(self.dispatched, [])
 
     def test_advances_seen_on_no_match(self) -> None:
         # Otherwise a chatty stranger pinning the cursor would let an old
