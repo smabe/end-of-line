@@ -15,6 +15,14 @@ from typing import TYPE_CHECKING, Callable
 
 from .notify_discord import DiscordNotifier
 from .notify_imessage import IMessageNotifier
+from .state_blocker import (
+    BLOCKER_BODY_SOFT_LIMIT,
+    KIND_STUCK_BLOCKER,
+    render_blocker,
+    render_halted,
+    render_stalled,
+    render_stuck_blocker,
+)
 
 if TYPE_CHECKING:
     from .config import NotifySpec
@@ -44,7 +52,7 @@ KIND_QUEUE_CORRUPT = "queue_corrupt"
 # Gap-fill kinds — escalations, not emergencies, so NOT in
 # QUIET_HOURS_BYPASS_KINDS. The inbox path surfaces them on next Claude
 # turn regardless of quiet hours.
-KIND_STUCK_BLOCKER = "stuck_blocker"
+# KIND_STUCK_BLOCKER is imported from state_blocker above.
 KIND_STALLED_CLAIM = "stalled_claim"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
@@ -148,69 +156,18 @@ def in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:
     return is_quiet_hours(now, start, end)
 
 
-# iMessage handles longer bodies, but past this cap they're hard to read on
-# phone preview and AppleScript-via-argv gets fussy. Past the cap, fall back
-# to a short body that still carries the terminal-answer command.
-BLOCKER_BODY_SOFT_LIMIT = 800
-_QUESTION_TRUNCATE = 200
-_OPTION_TRUNCATE = 80
+# render_blocker, render_stalled, render_halted, render_stuck_blocker are
+# defined in state_blocker and re-exported above. Back-compat: callers that
+# import them from notify continue to work.
 
-
-def _truncate_at_word(s: str, max_len: int) -> str:
-    if len(s) <= max_len:
-        return s
-    cut = s.rfind(" ", 0, max_len - 1)
-    if cut <= 0:
-        cut = max_len - 1
-    return s[:cut].rstrip() + "…"
-
-
-def render_blocker(
-    plan_slug: str, blocker_id: str, phase: str, question: str, options: list[str],
-) -> str:
-    q = _truncate_at_word(question, _QUESTION_TRUNCATE)
-    answer_cmd = f"clu answer --plan {plan_slug} {blocker_id} <choice>"
-    if options:
-        opts_block = "\n".join(
-            f"[{i}] {_truncate_at_word(o, _OPTION_TRUNCATE)}"
-            for i, o in enumerate(options)
-        )
-        middle = f"{q}\n{opts_block}\n\n"
-    else:
-        middle = f"{q}\n\n"
-    # Reply hint here is the user-facing prompt for notify_inbound.REPLY_RE
-    # — changing the grammar without updating that regex orphans iMessage
-    # replies from the answer pipeline.
-    body = (
-        f"❓ {plan_slug}/{blocker_id} [{phase}]\n{middle}"
-        f"Reply: `{plan_slug} <number>` or just the number if this is the "
-        f"only open question.\n"
-        f"Terminal: {answer_cmd}"
-    )
-    if len(body) <= BLOCKER_BODY_SOFT_LIMIT:
-        return body
-    n = len(options)
-    noun = "option" if n == 1 else "options"
-    return (
-        f"❓ {plan_slug}/{blocker_id} [{phase}]\n{q}\n\n"
-        f"{n} {noun}. Run `{answer_cmd}` to answer."
-    )
-
-
-def render_stalled(plan_slug: str, phase: str, age_seconds: float) -> str:
-    minutes = int(age_seconds // 60)
-    return f"⚠️  {plan_slug}/{phase} stalled — no heartbeat for {minutes} min."
+__all__ = [
+    "BLOCKER_BODY_SOFT_LIMIT", "KIND_STUCK_BLOCKER",
+    "render_blocker", "render_halted", "render_stalled", "render_stuck_blocker",
+]
 
 
 def render_completed(plan_slug: str, commit_count: int) -> str:
     return f"✅ {plan_slug} done — {commit_count} commit(s)."
-
-
-def render_halted(plan_slug: str, phase: str, attempts: int) -> str:
-    return (
-        f"🛑 {plan_slug}/{phase} halted — {attempts} attempts. "
-        f"`clu retry --plan {plan_slug}` to resume."
-    )
 
 
 def render_queue_skipped(slug: str, reason: str) -> str:
@@ -228,18 +185,6 @@ def render_queue_repaired(slug_count: int, backup_path) -> str:
 
 def render_queue_repair_failed(reason: str, backup_path) -> str:
     return f"💥 queue repair failed: {reason}. reverted from backup at {backup_path}."
-
-
-def render_stuck_blocker(
-    plan_slug: str, blocker_id: str, phase: str,
-    question: str, options: list[str], age_min: int,
-) -> str:
-    opts = "\n".join(f"[{i}] {o}" for i, o in enumerate(options))
-    return (
-        f"⏰ {plan_slug}/{blocker_id} still open ({age_min}min) [{phase}]\n"
-        f"{question}\n{opts}\n\n"
-        f"Reply: `{plan_slug} <number>`."
-    )
 
 
 def render_stalled_claim(plan_slug: str, phase: str, age_min: int) -> str:
