@@ -187,6 +187,8 @@ def queue_advancement_rule(
         with st.locked(state_path):
             if not state_path.exists():
                 fresh = st.empty_state(slug, cfg.plan_dir)
+                if head.get("batch_id"):
+                    fresh["batch_id"] = head["batch_id"]
                 st.append_event(
                     fresh, st.EVENT_QUEUE_POPPED,
                     slug=slug,

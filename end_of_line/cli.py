@@ -516,6 +516,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional reason text logged on the queue entry.",
     )
     p_queue_add.add_argument(
+        "--batch", dest="batch", default=None,
+        help="Tag this batch of plans with a shared batch_id (validated as a slug). "
+             "Required for the multi-plan dry-merge gate to fire (#50).",
+    )
+    p_queue_add.add_argument(
         "--quiet", action="store_true",
         help="Suppress post-add tips (useful for scripts).",
     )
@@ -1992,6 +1997,8 @@ def cmd_queue_add(args) -> int:
         if args.front:
             return _die(ExitCode.GENERIC,
                         "--front is operator-only (forbidden with --token)")
+        if args.batch is not None:
+            return _die(ExitCode.GENERIC, "--batch is operator-only")
         if len(args.slugs) != 1:
             return _die(ExitCode.GENERIC, "--token requires a single slug")
         return _cmd_queue_add_worker(args)
@@ -2005,6 +2012,13 @@ def cmd_queue_add(args) -> int:
     for slug in slugs:
         try:
             st.validate_slug(slug, kind="plan slug")
+        except st.InvalidSlug as exc:
+            return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    batch_id = args.batch
+    if batch_id is not None:
+        try:
+            st.validate_slug(batch_id, kind="batch id")
         except st.InvalidSlug as exc:
             return _die(ExitCode.INVALID_SLUG, str(exc))
 
@@ -2067,6 +2081,7 @@ def cmd_queue_add(args) -> int:
                 "source_phase": None,
                 "source_token_fp": None,
                 "reason": args.reason,
+                "batch_id": batch_id,
             }
             for slug in slugs
         ]
