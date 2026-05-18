@@ -13,7 +13,7 @@ from end_of_line import notify, notify_imessage, state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import isolate_registry
+from tests import CluTestCase, isolate_registry
 
 
 PLAN_BODY = """\
@@ -68,7 +68,7 @@ class QuietHoursTestCase(unittest.TestCase):
         ))
 
 
-class NotifyDispatchTestCase(unittest.TestCase):
+class NotifyDispatchTestCase(CluTestCase):
     """notify() — quiet-hour gating, missing config, backend injection."""
 
     def _spec(self, *, to: str = "+15551234567", quiet_hours=("22:00", "08:00")) -> NotifySpec:
@@ -111,6 +111,20 @@ class NotifyDispatchTestCase(unittest.TestCase):
             )
         self.assertTrue(ok)
         m.assert_called_once()
+
+    def test_send_writes_outbound_pending_mark(self) -> None:
+        # After osascript fires, the notifier records a {chat_id, sent_at}
+        # mark so the inbound poller can resolve the outbound-floor on the
+        # next poll tick (otherwise clu's own row would loop back as input).
+        from end_of_line.notify_imessage import IMessageNotifier
+        from end_of_line.notify_imessage_inbound import outbound_pending_path
+        with mock.patch("end_of_line.notify_imessage._osascript_send"):
+            IMessageNotifier(to="+15551234567").send(
+                notify.KIND_BLOCKER, "body", plan_slug="p",
+            )
+        data = json.loads(outbound_pending_path().read_text())
+        self.assertEqual(len(data["marks"]), 1)
+        self.assertEqual(data["marks"][0]["chat_id"], "+15551234567")
 
     def test_malformed_quiet_hours_treated_as_loud(self) -> None:
         with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
@@ -281,10 +295,11 @@ class ChannelDispatchTestCase(unittest.TestCase):
         self.assertEqual(len(sends), 1)
 
 
-class NotifyIntegrationTestCase(unittest.TestCase):
+class NotifyIntegrationTestCase(CluTestCase):
     """CLI wiring — cmd_block and cmd_tick should call notify with the right body."""
 
     def setUp(self) -> None:
+        super().setUp()
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
         isolate_registry(self, self.project)

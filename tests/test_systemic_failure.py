@@ -22,7 +22,7 @@ from end_of_line.dispatch import (
     dispatch_for_tick,
 )
 from end_of_line.supervisor import TickResult
-from tests import isolate_registry
+from tests import CluTestCase, isolate_registry
 
 
 PLAN = """\
@@ -129,10 +129,11 @@ class MatchSignatureTestCase(unittest.TestCase):
         self.assertEqual(_match_systemic_signature(path, rc=127), "missing_binary")
 
 
-class _SystemicFixture(unittest.TestCase):
+class _SystemicFixture(CluTestCase):
     """Spin up a project + plan + claim + dispatch wiring for end-to-end tests."""
 
     def setUp(self) -> None:
+        super().setUp()
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
         isolate_registry(self, self.project)
@@ -270,7 +271,7 @@ class SystemicDispatchTestCase(_SystemicFixture):
         self.assertEqual(data["status"], st.STATUS_RUNNING)
 
 
-class MultiPlanIndependenceTestCase(unittest.TestCase):
+class MultiPlanIndependenceTestCase(CluTestCase):
     """Each plan observes systemic failure independently.
 
     No cross-plan preemption: if plan A flags a rate-limit, plan B's next
@@ -279,6 +280,7 @@ class MultiPlanIndependenceTestCase(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        super().setUp()
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
         isolate_registry(self, self.project)

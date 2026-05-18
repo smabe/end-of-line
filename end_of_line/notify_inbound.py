@@ -21,11 +21,13 @@ import time
 # Re-exports — keep old import paths working.
 from .notify_base import REPLY_RE, OpenBlocker, Reply, route_reply  # noqa: F401
 from .notify_imessage_inbound import (  # noqa: F401
+    APPLE_EPOCH_OFFSET_SECONDS,
     DEFAULT_CHAT_DB,
-    DEFAULT_INBOUND_STATE_PATH,
     DEFAULT_POLL_SECONDS,
     INBOUND_STATE_SCHEMA_VERSION,
     LEGACY_SEEN_PATH,
+    OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS,
+    OUTBOUND_PENDING_SCHEMA_VERSION,
     POLL_BATCH_LIMIT,
     Dispatcher,
     IMessageInboundPoller,
@@ -38,9 +40,14 @@ from .notify_imessage_inbound import (  # noqa: F401
     _resolve_self_chat_id,
     _shell_clu_answer,
     _spawn_tick,
+    append_outbound_mark,
+    drain_outbound_marks,
+    inbound_state_path,
     open_chat_db,
+    outbound_pending_path,
     poll_once,
     read_inbound_state,
+    unix_to_chatdb_ns,
     write_inbound_state,
 )
 

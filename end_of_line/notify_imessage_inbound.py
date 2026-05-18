@@ -6,23 +6,56 @@ shim that re-exports this module's surface and provides the __main__ entry.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 import logging
 from typing import Callable
 
 from . import registry, state as st, state_locator
+from ._xdg_guard import assert_xdg_safe
 from .config import load_project_config
 from .notify_base import OpenBlocker, Reply
 
 DEFAULT_CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
-DEFAULT_INBOUND_STATE_PATH = Path.home() / ".clu" / "inbound_state.json"
 LEGACY_SEEN_PATH = Path.home() / ".clu" / "seen_msg_rowid"
 DEFAULT_POLL_SECONDS = 4
 POLL_BATCH_LIMIT = 500
 INBOUND_STATE_SCHEMA_VERSION = 1
+OUTBOUND_PENDING_SCHEMA_VERSION = 1
+OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS = 60.0
+APPLE_EPOCH_OFFSET_SECONDS = 978_307_200  # Unix → Apple-epoch (Jan 1 2001).
+
+
+def _xdg_clu_dir() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME")
+    return Path(base) / "clu" if base else Path.home() / ".config" / "clu"
+
+
+def inbound_state_path() -> Path:
+    """Lazy path resolution — env-driven so CluTestCase isolation works."""
+    path = _xdg_clu_dir() / "inbound_state.json"
+    assert_xdg_safe(path)
+    return path
+
+
+def outbound_pending_path() -> Path:
+    path = _xdg_clu_dir() / "outbound_pending.json"
+    assert_xdg_safe(path)
+    return path
+
+
+def unix_to_chatdb_ns(unix_seconds: float) -> int:
+    """Convert Unix epoch seconds to chat.db's Apple-epoch nanoseconds.
+
+    macOS High Sierra+ stores `message.date` as nanoseconds offset from
+    2001-01-01 UTC. Bindings against this column MUST go through this
+    helper — passing raw `time.time()` lands rows 31 years in the past.
+    """
+    return int((unix_seconds - APPLE_EPOCH_OFFSET_SECONDS) * 1_000_000_000)
 
 Dispatcher = Callable[[OpenBlocker, str], None]
 OpenBlockersFn = Callable[[], list[OpenBlocker]]
@@ -126,6 +159,7 @@ def poll_once(
     last_rowid: int,
     *,
     self_chat_id: str,
+    outbound_floor: int = 0,
     entries_fn: Callable[[], list[registry.PlanEntry]] = registry.entries,
     shell_answer_fn: ShellAnswerFn = _shell_clu_answer,
     tick_spawner: TickSpawner = _spawn_tick,
@@ -136,8 +170,10 @@ def poll_once(
 
     Scoped to `self_chat_id` so the poller only sees one chat. No
     `is_from_me` filter: self-chat replies have `is_from_me = 1` because
-    the operator IS the sender. Clu's own outbound rows pass the chat
-    scope but are dropped at the locator by reply-grammar narrowness.
+    the operator IS the sender. Clu's own outbound rows are filtered by
+    `outbound_floor` — any is_from_me=1 row at-or-below the floor is
+    skipped (matches send-side `append_outbound_mark` resolved by
+    `drain_outbound_marks`).
 
     Always advances the high-water past every row we read, matched or
     not — otherwise a chatty stranger could keep the cursor stuck on an
@@ -146,7 +182,7 @@ def poll_once(
     # LIMIT caps first-tick blowup (e.g. seen_rowid=0 against a chat.db with
     # a year of history); next tick advances the cursor and picks up the rest.
     rows = conn.execute(
-        "SELECT m.ROWID, m.text FROM message m "
+        "SELECT m.ROWID, m.text, m.is_from_me FROM message m "
         "JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
         "JOIN chat c ON c.ROWID = cmj.chat_id "
         "WHERE m.ROWID > ? AND m.text IS NOT NULL "
@@ -158,7 +194,9 @@ def poll_once(
         return last_rowid
     entries = entries_fn()
     _find = _locator_fn or state_locator.find_blocker_for_reply
-    for _rowid, text in rows:
+    for rowid, text, is_from_me in rows:
+        if is_from_me == 1 and rowid <= outbound_floor:
+            continue
         result = _find(entries, text)
         if result.variant != "FOUND":
             log.info("imessage inbound: dropping %r — %s", text, result.variant)
@@ -215,12 +253,14 @@ def _drop_legacy_seen(legacy_path: Path) -> None:
 
 
 def read_inbound_state(
-    path: Path = DEFAULT_INBOUND_STATE_PATH,
+    path: Path | None = None,
     *,
     legacy_path: Path = LEGACY_SEEN_PATH,
 ) -> dict:
     """Load inbound state, tolerating missing / corrupt / schema-mismatched
     files. Drops the legacy bare-int cursor file on first call."""
+    if path is None:
+        path = inbound_state_path()
     _drop_legacy_seen(legacy_path)
     if not path.exists():
         return _empty_inbound_state()
@@ -233,6 +273,85 @@ def read_inbound_state(
 def write_inbound_state(path: Path, data: dict) -> None:
     """Atomic write of inbound state via state.save_atomic."""
     st.save_atomic(path, data)
+
+
+def _empty_outbound_pending() -> dict:
+    return {
+        "schema_version": OUTBOUND_PENDING_SCHEMA_VERSION,
+        "marks": [],
+    }
+
+
+def append_outbound_mark(
+    chat_id: str,
+    sent_at: float,
+    *,
+    path: Path | None = None,
+) -> None:
+    """Append a {chat_id, sent_at} mark for the inbound poller to drain.
+
+    Cross-process safe via state.locked_json. Best-effort by convention —
+    callers wrap in try/except so a state write failure doesn't fail the
+    send. The poll-side reply grammar still drops clu's own rows even if
+    no mark gets recorded.
+    """
+    if path is None:
+        path = outbound_pending_path()
+    with st.locked_json(
+        path,
+        expected_version=OUTBOUND_PENDING_SCHEMA_VERSION,
+        empty=_empty_outbound_pending,
+    ) as data:
+        data["marks"].append({"chat_id": chat_id, "sent_at": sent_at})
+
+
+def drain_outbound_marks(
+    conn: sqlite3.Connection,
+    *,
+    now: float | None = None,
+    path: Path | None = None,
+    sanity_timeout: float = OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS,
+) -> dict[str, int]:
+    """Resolve pending outbound marks into chat_id → max-ROWID floors.
+
+    For each mark: query the chat for the highest is_from_me=1 ROWID newer
+    than `sent_at`. If found, contribute to the floor and drop the mark.
+    If not yet visible and the mark is younger than `sanity_timeout`,
+    keep it for next tick. Older marks are dropped — silently-failed
+    osascript sends shouldn't accumulate forever.
+    """
+    if now is None:
+        now = time.time()
+    if path is None:
+        path = outbound_pending_path()
+    floors: dict[str, int] = {}
+    if not path.exists():
+        return floors
+    with st.locked_json(
+        path,
+        expected_version=OUTBOUND_PENDING_SCHEMA_VERSION,
+        empty=_empty_outbound_pending,
+    ) as data:
+        if not data["marks"]:
+            return floors
+        kept = []
+        for mark in data["marks"]:
+            chat_id = mark["chat_id"]
+            sent_at = mark["sent_at"]
+            row = conn.execute(
+                "SELECT MAX(m.ROWID) FROM message m "
+                "JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
+                "JOIN chat c ON c.ROWID = cmj.chat_id "
+                "WHERE c.chat_identifier = ? AND m.is_from_me = 1 "
+                "AND m.date > ?",
+                (chat_id, unix_to_chatdb_ns(sent_at)),
+            ).fetchone()
+            if row and row[0] is not None:
+                floors[chat_id] = max(floors.get(chat_id, 0), row[0])
+            elif now - sent_at < sanity_timeout:
+                kept.append(mark)
+        data["marks"] = kept
+    return floors
 
 
 def open_chat_db(db_path: Path = DEFAULT_CHAT_DB) -> sqlite3.Connection:
@@ -248,13 +367,21 @@ class IMessageInboundPoller:
         registry_loader: Callable | None = None,
         self_chat_id: str | None = None,
         state_path: Path | None = None,
+        pending_path: Path | None = None,
     ) -> None:
         self._db_path = db_path or DEFAULT_CHAT_DB
         self._registry_loader = registry_loader or registry.entries
         self._self_chat_id = self_chat_id
-        self._state_path = state_path or DEFAULT_INBOUND_STATE_PATH
+        self._state_path_override = state_path
+        self._pending_path_override = pending_path
         self._conn: sqlite3.Connection | None = None
         self._state: dict | None = None  # cached; read from disk once on first poll
+
+    def _state_path(self) -> Path:
+        return self._state_path_override or inbound_state_path()
+
+    def _pending_path(self) -> Path:
+        return self._pending_path_override or outbound_pending_path()
 
     def poll(self) -> list[Reply]:
         """Run one poll iteration; dispatches matched replies internally.
@@ -270,14 +397,29 @@ class IMessageInboundPoller:
         if self._conn is None:
             self._conn = open_chat_db(self._db_path)
         if self._state is None:
-            self._state = read_inbound_state(self._state_path)
+            self._state = read_inbound_state(self._state_path())
+
+        # Step 1 — drain pending outbound marks into the floor map.
+        floors = drain_outbound_marks(self._conn, path=self._pending_path())
+        state_changed = False
+        for chat_id, new_floor in floors.items():
+            current = self._state["outbound_rowids"].get(chat_id, 0)
+            if new_floor > current:
+                self._state["outbound_rowids"][chat_id] = new_floor
+                state_changed = True
+
+        # Step 2 — read new inbound, skipping clu's own rows below the floor.
         last_rowid = self._state["last_inbound_rowid"]
+        floor = self._state["outbound_rowids"].get(self._self_chat_id, 0)
         new_last = poll_once(
             self._conn, last_rowid,
             self_chat_id=self._self_chat_id,
+            outbound_floor=floor,
             entries_fn=self._registry_loader,
         )
         if new_last != last_rowid:
             self._state["last_inbound_rowid"] = new_last
-            write_inbound_state(self._state_path, self._state)
+            state_changed = True
+        if state_changed:
+            write_inbound_state(self._state_path(), self._state)
         return []

@@ -17,13 +17,16 @@ DEFAULT_CHAT_ID = "+15551234567"  # operator's self-chat handle for fixtures
 def _make_chat_db(path: Path, rows: list[tuple]) -> None:
     """Build a chat.db-shaped fixture.
 
-    rows: (rowid, is_from_me, text) — uses DEFAULT_CHAT_ID for the chat scope,
-          OR (rowid, is_from_me, text, chat_identifier) for explicit scoping.
+    Each row is one of:
+      (rowid, is_from_me, text) — DEFAULT_CHAT_ID, date=0.
+      (rowid, is_from_me, text, chat_identifier) — explicit chat, date=0.
+      (rowid, is_from_me, text, chat_identifier, date_ns) — explicit chat
+        and Apple-epoch nanosecond timestamp for drain-mark tests.
     """
     conn = sqlite3.connect(str(path))
     conn.execute(
         "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, "
-        "is_from_me INTEGER, text TEXT)"
+        "is_from_me INTEGER, text TEXT, date INTEGER DEFAULT 0)"
     )
     conn.execute(
         "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT)"
@@ -34,11 +37,14 @@ def _make_chat_db(path: Path, rows: list[tuple]) -> None:
     )
     chat_rowids: dict[str, int] = {}
     for row in rows:
+        chat_id = DEFAULT_CHAT_ID
+        date_ns = 0
         if len(row) == 3:
             rowid, is_from_me, text = row
-            chat_id = DEFAULT_CHAT_ID
-        else:
+        elif len(row) == 4:
             rowid, is_from_me, text, chat_id = row
+        else:
+            rowid, is_from_me, text, chat_id, date_ns = row
         if chat_id not in chat_rowids:
             chat_rowids[chat_id] = len(chat_rowids) + 1
             conn.execute(
@@ -46,8 +52,9 @@ def _make_chat_db(path: Path, rows: list[tuple]) -> None:
                 (chat_rowids[chat_id], chat_id),
             )
         conn.execute(
-            "INSERT INTO message (ROWID, is_from_me, text) VALUES (?, ?, ?)",
-            (rowid, is_from_me, text),
+            "INSERT INTO message (ROWID, is_from_me, text, date) "
+            "VALUES (?, ?, ?, ?)",
+            (rowid, is_from_me, text, date_ns),
         )
         conn.execute(
             "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
@@ -501,6 +508,150 @@ class InboundStateTestCase(unittest.TestCase):
             {"schema_version": 999, "last_inbound_rowid": 50}
         ))
         self.assertEqual(self._read()["last_inbound_rowid"], 0)
+
+
+class OutboundPendingTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.db_path = self.tmp / "chat.db"
+        self.pending_path = self.tmp / "outbound_pending.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_append_then_drain_resolves_floor(self) -> None:
+        sent_at = 1_000_000_000.0
+        date_ns = notify_inbound.unix_to_chatdb_ns(sent_at + 1)
+        _make_chat_db(self.db_path, [
+            (7, 1, "BLOCKED: pick framework", DEFAULT_CHAT_ID, date_ns),
+        ])
+        notify_inbound.append_outbound_mark(
+            DEFAULT_CHAT_ID, sent_at, path=self.pending_path,
+        )
+        conn = notify_inbound.open_chat_db(self.db_path)
+        floors = notify_inbound.drain_outbound_marks(
+            conn, path=self.pending_path, now=sent_at + 5,
+        )
+        self.assertEqual(floors, {DEFAULT_CHAT_ID: 7})
+        # Mark should be drained.
+        remaining = json.loads(self.pending_path.read_text())["marks"]
+        self.assertEqual(remaining, [])
+
+    def test_drain_no_visible_row_keeps_young_mark(self) -> None:
+        # osascript fired but chat.db hasn't surfaced our row yet.
+        sent_at = 1_000_000_000.0
+        _make_chat_db(self.db_path, [])  # no rows yet
+        notify_inbound.append_outbound_mark(
+            DEFAULT_CHAT_ID, sent_at, path=self.pending_path,
+        )
+        conn = notify_inbound.open_chat_db(self.db_path)
+        floors = notify_inbound.drain_outbound_marks(
+            conn, path=self.pending_path, now=sent_at + 5,
+        )
+        self.assertEqual(floors, {})
+        remaining = json.loads(self.pending_path.read_text())["marks"]
+        self.assertEqual(len(remaining), 1)
+
+    def test_drain_stale_mark_dropped(self) -> None:
+        # Silently-failed osascript: no row ever appears and the mark
+        # ages past the sanity timeout. Drop it.
+        sent_at = 1_000_000_000.0
+        _make_chat_db(self.db_path, [])
+        notify_inbound.append_outbound_mark(
+            DEFAULT_CHAT_ID, sent_at, path=self.pending_path,
+        )
+        conn = notify_inbound.open_chat_db(self.db_path)
+        notify_inbound.drain_outbound_marks(
+            conn, path=self.pending_path,
+            now=sent_at + notify_inbound.OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS + 1,
+        )
+        remaining = json.loads(self.pending_path.read_text())["marks"]
+        self.assertEqual(remaining, [])
+
+    def test_drain_missing_file_returns_empty(self) -> None:
+        _make_chat_db(self.db_path, [])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        floors = notify_inbound.drain_outbound_marks(
+            conn, path=self.pending_path, now=0,
+        )
+        self.assertEqual(floors, {})
+
+
+class PollOnceFloorTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.db_path = self.tmp / "chat.db"
+        self.dispatched: list[tuple[Path, str, int]] = []
+        self.ticks: list[tuple[Path, str]] = []
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _shell_answer(self, sp: Path, bid: str, ai: int) -> None:
+        self.dispatched.append((sp, bid, ai))
+
+    def _tick(self, project_root: Path, plan_slug: str) -> None:
+        self.ticks.append((project_root, plan_slug))
+
+    def _mock_locator(self, blockers):
+        from end_of_line.notify_base import route_reply
+        from end_of_line.state_locator import LocatorResult
+
+        def locator(entries, text):
+            match = route_reply(text, blockers)
+            if match is None:
+                return LocatorResult(variant="NOT_FOUND")
+            target, answer = match
+            sp = (
+                Path(target.project_root) / "plans" / ".orchestrator"
+                / f"{target.plan_slug}.state.json"
+            )
+            return LocatorResult(
+                variant="FOUND", state_path=sp, blocker_id=target.blocker_id,
+                answer_index=int(answer), project_root=Path(target.project_root),
+            )
+        return locator
+
+    def test_clu_own_row_skipped_when_below_floor(self) -> None:
+        # Row 5: clu's outbound (is_from_me=1, multi-line text). Floor=5.
+        # Row 7: operator's reply (is_from_me=1, "1"). Above floor → routes.
+        _make_chat_db(self.db_path, [
+            (5, 1, "BLOCKED:\n[0] FastAPI\n[1] Flask"),
+            (7, 1, "1"),
+        ])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
+        last = notify_inbound.poll_once(
+            conn, 0,
+            self_chat_id=DEFAULT_CHAT_ID,
+            outbound_floor=5,
+            shell_answer_fn=self._shell_answer,
+            tick_spawner=self._tick,
+            _locator_fn=self._mock_locator([target]),
+        )
+        self.assertEqual(last, 7)
+        # Only the operator's reply dispatches; clu's row never reached the locator.
+        self.assertEqual(len(self.dispatched), 1)
+        self.assertEqual(self.dispatched[0][2], 1)
+
+    def test_floor_does_not_block_is_from_me_0(self) -> None:
+        # Defensive: floor only filters is_from_me=1; an is_from_me=0 row
+        # below the floor (hypothetical inbound from another sender that
+        # somehow shares the chat) still routes.
+        _make_chat_db(self.db_path, [(3, 0, "0")])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
+        notify_inbound.poll_once(
+            conn, 0,
+            self_chat_id=DEFAULT_CHAT_ID,
+            outbound_floor=10,
+            shell_answer_fn=self._shell_answer,
+            tick_spawner=self._tick,
+            _locator_fn=self._mock_locator([target]),
+        )
+        self.assertEqual(len(self.dispatched), 1)
 
 
 if __name__ == "__main__":

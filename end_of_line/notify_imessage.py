@@ -5,8 +5,10 @@ the body never touches the AppleScript source.
 """
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +16,8 @@ from ._xdg_guard import assert_xdg_safe
 
 if TYPE_CHECKING:
     from .config import ChannelSpec
+
+log = logging.getLogger(__name__)
 
 # osascript-friendly AppleScript: argv carries the handle + body so we
 # don't have to escape user-controlled text into the script source.
@@ -87,4 +91,12 @@ class IMessageNotifier:
         blocker_id: str | None = None,
     ) -> str | None:
         _osascript_send(self.to, body)
+        # Local import keeps the outbound module from depending on the
+        # inbound module at import time — the dependency is only
+        # exercised when an iMessage actually fires.
+        from .notify_imessage_inbound import append_outbound_mark
+        try:
+            append_outbound_mark(self.to, time.time())
+        except Exception as exc:
+            log.warning("imessage: failed to record outbound mark: %s", exc)
         return None
