@@ -66,6 +66,31 @@ Ask only what you can't infer:
   TDD-able acceptance criteria. Single-phase plans are fine when the
   scope is small — clu still requires the Sessions index with one row.
 
+#### Phase granularity
+
+Each phase has ~100s of overhead (cron tick gap + cold-context ramp +
+subprocess startup) before any real work happens. Don't phase finer
+than the work justifies.
+
+Rules of thumb:
+
+- **Collapse one-function helpers into their first caller.** If the
+  helper is <50 LOC and only used by the next phase, it belongs in
+  that phase.
+- **A "meaningful commit" isn't a single function.** It's a
+  minimum-viable slice that's TDD-able and reviewable on its own —
+  a function plus its first caller usually qualifies.
+- **Target 2–4 phases for typical features.** 5+ is rare and usually a
+  sign of over-decomposition.
+- **Phase when there's a forcing function:** schema bumps, API surface
+  changes that other plans queue against, config fields workers need
+  to read in earlier phases.
+
+Receipt: auto-archive-on-merge (2026-05-18) was 3 phases; the first
+phase added a single ~15-line helper plus 5 tests and could have
+shipped inside the next phase's commit without losing TDD-ability.
+Each saved phase is ~100s of dead time off the plan's wall clock.
+
 ### Step 2: Pre-author research (optional, scale to size)
 
 For plans touching surfaces you haven't already read in the current
@@ -425,6 +450,14 @@ Smallest-first.
 | timeout | `auth-cleanup-timeout.md` | Session timeout config + 401-on-expire (#100) | 1h |
 | rotation | `auth-cleanup-rotation.md` | 24h token rotation + 5min grace (closes #100 #101) | 2h |
 ```
+
+Why two phases and not one combined commit? Each phase closes an
+independent GitHub issue with its own acceptance criteria and its own
+deployment risk (timeout misconfig vs. rotation race) — the forcing
+function for phasing is "reviewable + revertable on its own", which
+each issue satisfies. By contrast, a hypothetical helper `_clear_session(token)`
+used only by phase 1 would NOT warrant its own phase: it would collapse
+into the timeout phase's commit.
 
 Both sub-plan files (`plans/auth-cleanup-timeout.md` and
 `plans/auth-cleanup-rotation.md`) are drafted in memory alongside the
