@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -35,6 +36,33 @@ def validate_slug(slug: str, *, kind: str = "slug") -> None:
         raise InvalidSlug(
             f"invalid {kind} {slug!r}: must match {_SLUG_RE.pattern}"
         )
+
+
+def is_branch_merged_into(
+    project_root: Path,
+    branch: str,
+    base_ref: str = "origin/main",
+) -> bool:
+    """Return True iff `branch`'s HEAD is an ancestor of `base_ref`.
+
+    Wraps `git merge-base --is-ancestor`. Returns False (not exception)
+    when either ref doesn't exist, the git invocation times out, or any
+    other subprocess error occurs. No `git fetch` is performed.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(project_root), "merge-base",
+                "--is-ancestor", branch, base_ref,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
 
 SCHEMA_VERSION = 1
 
