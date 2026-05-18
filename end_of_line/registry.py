@@ -58,6 +58,11 @@ def entries(path: Path | None = None) -> list[PlanEntry]:
     return [PlanEntry(**row) for row in _load(path).get("plans", [])]
 
 
+def entries_for_project(project_root: Path, path: Path | None = None) -> list[PlanEntry]:
+    target = project_root.resolve()
+    return [e for e in entries(path) if Path(e.project_root).resolve() == target]
+
+
 def register(project_root: Path, plan_slug: str, *, path: Path | None = None) -> bool:
     """Add (project_root, plan_slug). Returns False if it was already present."""
     st.validate_slug(plan_slug, kind="plan slug")
