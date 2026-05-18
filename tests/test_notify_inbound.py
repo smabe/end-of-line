@@ -130,25 +130,54 @@ class PollOnceTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.db_path = self.tmp / "chat.db"
-        self.dispatched: list[tuple[OpenBlocker, str]] = []
+        self.dispatched: list[tuple[Path, str, int]] = []  # (state_path, blocker_id, answer_index)
         self.ticks: list[tuple[Path, str]] = []
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _dispatch(self, target: OpenBlocker, answer: str) -> None:
-        self.dispatched.append((target, answer))
+    def _shell_answer(self, state_path: Path, blocker_id: str, answer_index: int) -> None:
+        self.dispatched.append((state_path, blocker_id, answer_index))
 
     def _tick(self, project_root: Path, plan_slug: str) -> None:
         self.ticks.append((project_root, plan_slug))
 
-    def _poll(self, conn, last, *, blockers, **kw) -> int:
+    def _mock_locator(self, blockers):
+        """Build a locator_fn from pre-built OpenBlockers (avoids real state files)."""
+        from end_of_line.notify_base import route_reply
+        from end_of_line.state_locator import LocatorResult
+
+        def locator(entries, text):
+            match = route_reply(text, blockers)
+            if match is None:
+                return LocatorResult(variant="NOT_FOUND")
+            target, answer = match
+            state_path = (
+                Path(target.project_root) / "plans" / ".orchestrator"
+                / f"{target.plan_slug}.state.json"
+            )
+            return LocatorResult(
+                variant="FOUND",
+                state_path=state_path,
+                blocker_id=target.blocker_id,
+                answer_index=int(answer),
+                project_root=Path(target.project_root),
+            )
+        return locator
+
+    def _poll(self, conn, last, *, blockers, shell_answer_fn=None, **kw) -> int:
         kw.setdefault("tick_spawner", self._tick)
         return notify_inbound.poll_once(
             conn, last,
-            open_blockers_fn=lambda: blockers,
-            dispatcher=kw.pop("dispatcher", self._dispatch),
+            _locator_fn=kw.pop("_locator_fn", self._mock_locator(blockers)),
+            shell_answer_fn=shell_answer_fn or self._shell_answer,
             **kw,
+        )
+
+    def _state_path(self, target: OpenBlocker) -> Path:
+        return (
+            Path(target.project_root) / "plans" / ".orchestrator"
+            / f"{target.plan_slug}.state.json"
         )
 
     def test_dispatches_matched_inbound_only(self) -> None:
@@ -161,7 +190,7 @@ class PollOnceTestCase(unittest.TestCase):
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
         self.assertEqual(last, 12)
-        self.assertEqual(self.dispatched, [(target, "0")])
+        self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 0)])
 
     def test_advances_seen_on_no_match(self) -> None:
         # Otherwise a chatty stranger pinning the cursor would let an old
@@ -207,21 +236,21 @@ class PollOnceTestCase(unittest.TestCase):
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
         self._poll(conn, 0, blockers=[target])
-        self.assertEqual(self.dispatched, [(target, "0")])
+        self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 0)])
         self.assertEqual(self.ticks, [])
 
     def test_no_tick_when_dispatcher_raises(self) -> None:
-        # rc!=0 from `clu answer` → raise → no auto-tick (stale state guard).
+        # answer write failed → raise → no auto-tick (stale state guard).
         proj = self.tmp / "proj"
         proj.mkdir()
         _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "hey")])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
 
-        def boom(_t, _a):
+        def boom(sp, bid, ai):
             raise RuntimeError("clu answer failed")
 
-        last = self._poll(conn, 0, blockers=[target], dispatcher=boom)
+        last = self._poll(conn, 0, blockers=[target], shell_answer_fn=boom)
         self.assertEqual(last, 2)  # cursor still advances past the bad row
         self.assertEqual(self.ticks, [])
 

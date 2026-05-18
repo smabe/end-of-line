@@ -28,6 +28,7 @@ class LocatorResult:
     state_path: Path | None = None
     blocker_id: str | None = None
     answer_index: int | None = None
+    project_root: Path | None = None
     candidates: list[OpenBlocker] = field(default_factory=list)
 
 
@@ -44,24 +45,26 @@ def find_blocker_for_reply(
       NOT_FOUND — no open blocker matches the reply.
       STATE_UNREADABLE — (reserved for callers; this function never returns it).
     """
-    all_open: list[tuple[Path, OpenBlocker]] = []
+    all_open: list[tuple[Path, Path, OpenBlocker]] = []  # (project_root, state_path, blocker)
     for entry in entries:
         result = _load_open_blockers(entry)
         if result is None:
             continue
         state_path, blockers = result
+        project_root = Path(entry.project_root)
         for b in blockers:
-            all_open.append((state_path, b))
+            all_open.append((project_root, state_path, b))
 
-    resolved = route_reply(reply_text, [b for _, b in all_open])
+    resolved = route_reply(reply_text, [b for _, _, b in all_open])
     if resolved is not None:
         target = resolved.target
-        matched_path = next(sp for sp, b in all_open if b == target)
+        matched = next((pr, sp) for pr, sp, b in all_open if b == target)
         return LocatorResult(
             variant="FOUND",
-            state_path=matched_path,
+            state_path=matched[1],
             blocker_id=target.blocker_id,
             answer_index=int(resolved.answer),
+            project_root=matched[0],
         )
 
     # route_reply returned None — distinguish NOT_FOUND from AMBIGUOUS.
@@ -74,7 +77,7 @@ def find_blocker_for_reply(
         return LocatorResult(variant="NOT_FOUND")
     # Bare digit with no unique winner — check how many blockers are eligible.
     idx = int(digit)
-    eligible = [b for _, b in all_open if idx < b.options_count]
+    eligible = [b for _, _, b in all_open if idx < b.options_count]
     if not eligible:
         return LocatorResult(variant="NOT_FOUND")
     return LocatorResult(variant="AMBIGUOUS", candidates=eligible)

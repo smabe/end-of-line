@@ -49,20 +49,20 @@ class AnswerCwdDefaultTestCase(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def test_answer_without_project_uses_cwd(self) -> None:
-        """Regression guard for #43: omitting --project resolves to CWD."""
+        """Regression guard for #43: omitting --project still works (locator uses registry)."""
         old_cwd = Path.cwd()
         os.chdir(self.project)
         self.addCleanup(os.chdir, str(old_cwd))
-        rc, out, _ = self._run("--plan", "test-plan", "q-1", "yes")
+        rc, out, _ = self._run("--plan", "test-plan", "0")
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("Answered q-1: yes", out)
 
     def test_answer_with_explicit_project_still_works(self) -> None:
-        """Explicit --project still honored; CWD irrelevant when set."""
+        """Explicit --project accepted (backward compat); locator uses registry."""
         rc, out, _ = self._run(
             "--project", str(self.project),
             "--plan", "test-plan",
-            "q-1", "yes",
+            "0",
         )
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("Answered q-1: yes", out)

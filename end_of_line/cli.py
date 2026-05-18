@@ -34,7 +34,7 @@ from collections.abc import Iterator
 from enum import IntEnum
 from pathlib import Path
 
-from . import dispatch, fleet, monitor, notify, queue, registry, state as st, watch
+from . import dispatch, fleet, monitor, notify, queue, registry, state as st, state_locator, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
@@ -687,10 +687,16 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     p_answer = sub.add_parser("answer", help="Answer a pending blocker")
-    add_common(p_answer)
-    p_answer.add_argument("blocker_id")
     p_answer.add_argument(
-        "answer", help='Answer text or option index ("0", "1", …)',
+        "--project", type=Path, default=None,
+        help="Project root (ignored; kept for backward compat).",
+    )
+    p_answer.add_argument(
+        "--plan", default=None,
+        help="Plan slug to disambiguate a bare-digit reply. Optional.",
+    )
+    p_answer.add_argument(
+        "answer", help='Option index ("0", "1", …)',
     )
 
     p_spawn = sub.add_parser(
@@ -875,6 +881,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_watch(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
+    if args.cmd == "answer":
+        return cmd_answer(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -887,7 +895,6 @@ def main(argv: list[str] | None = None) -> int:
         "init": cmd_init,
         "tick": cmd_tick,
         "status": cmd_status,
-        "answer": cmd_answer,
         "spawn": cmd_spawn,
         "complete": cmd_complete,
         "force-complete": cmd_force_complete,
@@ -3229,12 +3236,20 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
     return ExitCode.OK
 
 
-def cmd_answer(args, cfg: ProjectConfig, state_path: Path) -> int:
-    with st.mutate(state_path) as data:
-        resolved = st.resolve_blocker_answer(data, args.blocker_id, args.answer)
-        st.answer_blocker(data, args.blocker_id, resolved)
-    print(f"Answered {args.blocker_id}: {resolved}")
-    return 0
+def cmd_answer(args) -> int:
+    reply_text = args.answer if args.plan is None else f"{args.plan} {args.answer}"
+    result = state_locator.find_blocker_for_reply(registry.entries(), reply_text)
+    if result.variant == "AMBIGUOUS":
+        for cand in result.candidates:
+            print(f"  {cand.plan_slug}: {cand.blocker_id}", file=sys.stderr)
+        return _die(ExitCode.GENERIC, "ambiguous reply — pass --plan to disambiguate")
+    if result.variant != "FOUND":
+        return _die(ExitCode.UNKNOWN_TASK, result.variant.lower())
+    with st.mutate(result.state_path) as data:
+        resolved = st.resolve_blocker_answer(data, result.blocker_id, str(result.answer_index))
+        st.answer_blocker(data, result.blocker_id, resolved)
+    print(f"Answered {result.blocker_id}: {resolved}")
+    return ExitCode.OK
 
 
 @_translate_claim_mismatch

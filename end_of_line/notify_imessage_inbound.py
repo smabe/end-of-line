@@ -9,9 +9,10 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+import logging
 from typing import Callable, Iterable
 
-from . import registry, state as st
+from . import registry, state as st, state_locator
 from .config import load_project_config
 from .notify_base import OpenBlocker, Reply, route_reply
 
@@ -23,6 +24,9 @@ POLL_BATCH_LIMIT = 500
 Dispatcher = Callable[[OpenBlocker, str], None]
 OpenBlockersFn = Callable[[], list[OpenBlocker]]
 TickSpawner = Callable[[Path, str], None]
+ShellAnswerFn = Callable[[Path, str, int], None]
+
+log = logging.getLogger(__name__)
 
 
 def open_blockers_for_host(
@@ -88,13 +92,26 @@ def _spawn_tick(project_root: Path, plan_slug: str) -> None:
     )
 
 
+def _shell_clu_answer(state_path: Path, blocker_id: str, answer_index: int) -> None:
+    """Directly write the blocker answer into the state file.
+
+    Replaces the old subprocess-based _cli_dispatch for the iMessage path;
+    avoids the overhead of spawning a new process when the locator has already
+    resolved state_path and answer_index.
+    """
+    with st.mutate(state_path) as data:
+        resolved = st.resolve_blocker_answer(data, blocker_id, str(answer_index))
+        st.answer_blocker(data, blocker_id, resolved)
+
+
 def poll_once(
     conn: sqlite3.Connection,
     last_rowid: int,
     *,
-    open_blockers_fn: OpenBlockersFn,
-    dispatcher: Dispatcher = _cli_dispatch,
+    entries_fn: Callable[[], list[registry.PlanEntry]] = registry.entries,
+    shell_answer_fn: ShellAnswerFn = _shell_clu_answer,
     tick_spawner: TickSpawner = _spawn_tick,
+    _locator_fn=None,  # (list[PlanEntry], str) -> LocatorResult; None = use state_locator
 ) -> int:
     """Scan chat.db for inbound rows after `last_rowid`. Returns new high-water.
 
@@ -113,25 +130,28 @@ def poll_once(
     ).fetchall()
     if not rows:
         return last_rowid
-    # Open-blocker set can't change mid-poll (the poller holds no claim),
-    # so resolve it once instead of per-row.
-    blockers = open_blockers_fn()
+    entries = entries_fn()
+    _find = _locator_fn or state_locator.find_blocker_for_reply
     for _rowid, text in rows:
-        match = route_reply(text, blockers)
-        if match is None:
+        result = _find(entries, text)
+        if result.variant != "FOUND":
+            log.info("imessage inbound: dropping %r — %s", text, result.variant)
             continue
-        target, answer = match
         try:
-            dispatcher(target, answer)
+            shell_answer_fn(result.state_path, result.blocker_id, result.answer_index)
         except Exception as exc:
-            # `clu answer` failed — don't auto-tick on stale state. The cursor
+            # answer write failed — don't auto-tick on stale state; cursor
             # still advances so a wedged reply can't re-fire forever.
             print(f"notify_inbound: dispatch failed: {exc}", file=sys.stderr)
             continue
-        if not _auto_tick_enabled(target.project_root):
+        if result.project_root and not _auto_tick_enabled(result.project_root):
             continue
+        plan_slug = (
+            result.state_path.name.removesuffix(".state.json")
+            if result.state_path else ""
+        )
         try:
-            tick_spawner(target.project_root, target.plan_slug)
+            tick_spawner(result.project_root, plan_slug)
         except Exception as exc:
             # Auto-tick is a latency optimization, not a correctness boundary;
             # cron will pick up the answered blocker on the next firing.
@@ -195,7 +215,7 @@ class IMessageInboundPoller:
             self._last_rowid = read_seen(DEFAULT_SEEN_PATH)
         new_last = poll_once(
             self._conn, self._last_rowid,
-            open_blockers_fn=lambda: open_blockers_for_host(self._registry_loader()),
+            entries_fn=self._registry_loader,
         )
         if new_last != self._last_rowid:
             write_seen(DEFAULT_SEEN_PATH, new_last)

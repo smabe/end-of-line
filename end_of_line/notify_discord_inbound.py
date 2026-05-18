@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from . import registry, state as st
+from . import registry, state as st, state_locator
 from .notify_base import InboundPoller, OpenBlocker, Reply, route_reply
 from .notify_imessage_inbound import _cli_dispatch, open_blockers_for_host
 
@@ -131,7 +131,21 @@ class DiscordInboundPoller:
             target = self._find_blocker_by_discord_message_id(ref_id)
             if target:
                 return Reply(target=target, answer=msg["content"].strip())
-        return route_reply(msg["content"], open_blockers=self._load_open_blockers())
+        # Text grammar fallback: use the shared locator.
+        result = state_locator.find_blocker_for_reply(
+            self._registry_loader(), msg["content"]
+        )
+        if result.variant != "FOUND":
+            return None
+        plan_slug = result.state_path.name.removesuffix(".state.json")
+        ob = OpenBlocker(
+            project_root=result.project_root,
+            plan_slug=plan_slug,
+            blocker_id=result.blocker_id,
+            options_count=1,
+            last_notified_at="",
+        )
+        return Reply(target=ob, answer=str(result.answer_index))
 
     def _find_blocker_by_discord_message_id(self, discord_message_id: str) -> OpenBlocker | None:
         for entry in self._registry_loader():
