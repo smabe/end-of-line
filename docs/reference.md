@@ -323,9 +323,13 @@ on the live claim (healthy) or releases the claim with a
 
 ### `notify.py`
 
-Outbound iMessage adapter — invokes `osascript` from Python. Stateless;
-quiet-hours gating is a pure function of `(NotifySpec, datetime)`.
-Renderers produce the strings; `notify()` decides whether to send.
+Notification dispatcher. Owns kind constants, quiet-hours gating, the
+per-channel registry (iMessage / Discord / clu-watch-only), and the
+`render_*` body builders. Stateless; quiet-hours gating is a pure
+function of `(NotifySpec, datetime)`. The actual transport is
+delegated to per-backend modules (`notify_imessage.py`,
+`notify_discord.py`); `notify()` decides whether to send and which
+channels to fan out to.
 
 **Key types and functions**
 
@@ -338,11 +342,15 @@ Renderers produce the strings; `notify()` decides whether to send.
 - `QUIET_HOURS_BYPASS_KINDS` — frozenset of kinds that ignore quiet
   hours. Currently `{KIND_HALTED, KIND_QUEUE_REPAIR_FAILED,
   KIND_QUEUE_CORRUPT}` — the unrecoverable-without-operator set.
+- `_NOTIFIER_REGISTRY` — `kind_name → Notifier-class` map. Backends
+  register here by appearing in the module-level dict; new transports
+  add one line. `set_global_suppress(True)` short-circuits the entire
+  dispatch path (the `--no-notify` global CLI flag).
 - `notify(spec, kind, body, *, now=None, sender=None, plan_slug=None, project_root=None, inbox_writer=None)` —
-  gate + send + optionally drop an inbox event. Returns `True` if the
-  iMessage was sent (the inbox write happens independently of the
-  quiet-hours gate, and only when `plan_slug` + `project_root` are
-  both supplied). `sender` and `inbox_writer` are injectable for tests.
+  gate + fan out + optionally drop an inbox event. Returns `True` if
+  any enabled channel sent. The inbox write happens independently of
+  the quiet-hours gate, and only when `plan_slug` + `project_root` are
+  both supplied. `sender` and `inbox_writer` are injectable for tests.
 - `in_quiet_window(spec, now)` — public quiet-hours predicate, used by
   the supervisor's SLA-deferral branch as well as `notify()` itself.
 - `is_quiet_hours(now, start, end)` — wrap-aware time-window check;
@@ -359,34 +367,71 @@ Renderers produce the strings; `notify()` decides whether to send.
   `render_queue_repair_failed(reason, backup_path)`,
   `render_systemic_failure(plan_slug, phase, signature)`,
   `render_stuck_blocker(plan_slug, blocker_id, phase, question, options, age_min)`,
-  `render_stalled_claim(plan_slug, phase, age_min)` —
-  kind-specific bodies.
+  `render_stalled_claim(plan_slug, phase, age_min)`,
+  `render_worktree_missing(plan_slug, worktree_path)`,
+  `render_worktree_conflict(...)` —
+  kind-specific bodies. Render-only; no I/O.
 
 **Invariants and gotchas**
 
-- `osascript` is invoked via `subprocess.Popen` with
-  `start_new_session=True` and stdout DEVNULL'd. A hung Messages.app
-  must not deadlock cron. Stderr is appended to
-  `imessage_log_path()` (default `~/.config/clu/imessage.log`) so
-  AppleScript runtime errors are debuggable — previously DEVNULL'd, all
-  failures vanished silently (#49).
-- Argv-passing: the AppleScript reads handle + body from `argv`, never
-  string-interpolated into the script source. Don't refactor this
-  to inline — it's the injection guard.
 - Quiet hours use local time. Don't switch to UTC to "match"
   `state.py`; quiet hours are user-facing wall-clock semantics.
-- A failed `osascript` returns `False` and logs to stderr; never raises.
-  A broken Messages.app can't take down the supervisor.
+- `notify()` swallows `(subprocess.SubprocessError, OSError)` from
+  individual backends and logs to stderr — a broken Messages.app or
+  Discord outage can't take down the supervisor. Per-backend silent
+  failures (e.g. osascript returning non-zero) are the backend's
+  responsibility to surface (see `notify_imessage.py` § "Invariants").
 - Adding a new kind: declare the constant, add a `render_*` function,
   and decide whether it goes in `QUIET_HOURS_BYPASS_KINDS` and
   `supervisor.ACTION_NOTIFY_KIND`. Those two membership tests are the
   full integration surface.
+- Adding a new transport: implement `Notifier`-shaped class with
+  `kind_name`, `from_spec(channel)`, and `send(kind, body, *, plan_slug, blocker_id)`;
+  add it to `_NOTIFIER_REGISTRY`.
 
 **See also**
 
 - `operations.md` for the notification model in user terms (kinds,
   quiet hours, reply grammar).
+- `notify_imessage.py` and `notify_discord.py` for the per-backend
+  transport details.
 - `notify_inbound.py` for the symmetric inbound path.
+
+### `notify_imessage.py`
+
+Outbound iMessage transport. Spawns `osascript` to drive Messages.app;
+argv carries the handle + body so user-controlled text never touches
+the AppleScript source.
+
+**Key types and functions**
+
+- `IMessageNotifier` — Notifier-shaped class registered in
+  `notify._NOTIFIER_REGISTRY` under `kind_name = "imessage"`.
+  `from_spec(channel)` reads `channel.params["to"]`.
+- `_osascript_send(to, body)` — the fire-and-forget Popen call.
+  stdout=DEVNULL; stderr appended to `imessage_log_path()` so
+  AppleScript runtime errors land in a tail-able file.
+- `imessage_log_path()` — resolves to
+  `$XDG_CONFIG_HOME/clu/imessage.log` (default
+  `~/.config/clu/imessage.log`), XDG-safety-guarded.
+
+**Invariants and gotchas**
+
+- `osascript` is invoked via `subprocess.Popen` with
+  `start_new_session=True` and stdout DEVNULL'd — a hung Messages.app
+  must not deadlock cron. Stderr is captured to a log file
+  (`imessage_log_path()`); pre-#49 it was DEVNULL'd, so all AppleScript
+  failures (Automation permission denials, buddy lookup, etc.) vanished
+  silently. Never re-introduce `stderr=DEVNULL` here.
+- Don't add `Popen.wait()` or `Popen.communicate()` to the happy path —
+  fire-and-forget Popen semantics are load-bearing for cron-tick
+  latency. If you need exit-code detection, poll on a short timeout
+  AFTER the dispatch (so the success path stays zero-latency).
+- Argv-passing: the AppleScript reads handle + body from `argv`, never
+  string-interpolated into the script source. Don't refactor to
+  inline — it's the injection guard.
+- The log file's parent dir is created lazily on each send. First
+  dispatch on a fresh host doesn't need any pre-init.
 
 ### `notify_inbound.py`
 
