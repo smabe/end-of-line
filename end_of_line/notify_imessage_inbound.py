@@ -164,6 +164,7 @@ def _shell_clu_answer(state_path: Path, blocker_id: str, answer_index: int) -> N
 # of lossy + U+FFFD: routing garbage is worse than silently skipping a row.
 _ATTR_BODY_START = b"\x01\x2b"
 _ATTR_BODY_MAX_SIZE = 65536
+_NS_ATTACHMENT_CHAR = "￼"  # NSAttachmentCharacter — stickers / inline images
 
 
 def _decode_attributed_body(blob: bytes | None) -> str | None:
@@ -231,6 +232,13 @@ def poll_once(
     skipped (matches send-side `append_outbound_mark` resolved by
     `drain_outbound_marks`).
 
+    Modern macOS stores message bodies as NSArchiver typedstream blobs in
+    `attributedBody` and leaves `text` NULL. We accept either column and
+    decode the blob via `_decode_attributed_body` when text is missing.
+    Tapbacks (`associated_message_type != 0`) are filtered at the SQL
+    layer — they have decodable bodies but they're rendered placeholders,
+    not operator input.
+
     Always advances the high-water past every row we read, matched or
     not — otherwise a chatty stranger could keep the cursor stuck on an
     old digit-shaped message and resurrect it once a future blocker opens.
@@ -238,10 +246,12 @@ def poll_once(
     # LIMIT caps first-tick blowup (e.g. seen_rowid=0 against a chat.db with
     # a year of history); next tick advances the cursor and picks up the rest.
     rows = conn.execute(
-        "SELECT m.ROWID, m.text, m.is_from_me FROM message m "
+        "SELECT m.ROWID, m.text, m.attributedBody, m.is_from_me FROM message m "
         "JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
         "JOIN chat c ON c.ROWID = cmj.chat_id "
-        "WHERE m.ROWID > ? AND m.text IS NOT NULL "
+        "WHERE m.ROWID > ? "
+        "AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL) "
+        "AND m.associated_message_type = 0 "
         "AND c.chat_identifier = ? "
         "ORDER BY m.ROWID ASC LIMIT ?",
         (last_rowid, self_chat_id, POLL_BATCH_LIMIT),
@@ -250,12 +260,23 @@ def poll_once(
         return last_rowid
     entries = entries_fn()
     _find = _locator_fn or state_locator.find_blocker_for_reply
-    for rowid, text, is_from_me in rows:
+    for rowid, text, attributed_body, is_from_me in rows:
         if is_from_me == 1 and rowid <= outbound_floor:
             continue
-        result = _find(entries, text)
+        if text is not None:
+            body = text
+        else:
+            decoded = _decode_attributed_body(attributed_body)
+            if decoded is None:
+                continue
+            # Strip attachment placeholders — attachment-only rows decode
+            # to just these and aren't operator input.
+            body = decoded.replace(_NS_ATTACHMENT_CHAR, "")
+        if not body:
+            continue
+        result = _find(entries, body)
         if result.variant != "FOUND":
-            log.info("imessage inbound: dropping %r — %s", text, result.variant)
+            log.info("imessage inbound: dropping %r — %s", body, result.variant)
             continue
         try:
             shell_answer_fn(result.state_path, result.blocker_id, result.answer_index)

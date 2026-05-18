@@ -15,19 +15,25 @@ from tests import isolate_registry
 DEFAULT_CHAT_ID = "+15551234567"  # operator's self-chat handle for fixtures
 
 
-def _make_chat_db(path: Path, rows: list[tuple]) -> None:
+def _make_chat_db(path: Path, rows: list) -> None:
     """Build a chat.db-shaped fixture.
 
-    Each row is one of:
+    Each row is either a tuple (positional, legacy):
       (rowid, is_from_me, text) — DEFAULT_CHAT_ID, date=0.
       (rowid, is_from_me, text, chat_identifier) — explicit chat, date=0.
       (rowid, is_from_me, text, chat_identifier, date_ns) — explicit chat
         and Apple-epoch nanosecond timestamp for drain-mark tests.
+    Or a dict (keyword, for attributedBody / tapback cases):
+      {"rowid": N, "is_from_me": 0|1, "text": str|None,
+       "chat_id": str (optional), "date_ns": int (optional),
+       "attributed_body": bytes|None (optional),
+       "assoc_type": int (optional, default 0)}
     """
     conn = sqlite3.connect(str(path))
     conn.execute(
         "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, "
-        "is_from_me INTEGER, text TEXT, date INTEGER DEFAULT 0)"
+        "is_from_me INTEGER, text TEXT, date INTEGER DEFAULT 0, "
+        "attributedBody BLOB, associated_message_type INTEGER DEFAULT 0)"
     )
     conn.execute(
         "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT)"
@@ -40,7 +46,17 @@ def _make_chat_db(path: Path, rows: list[tuple]) -> None:
     for row in rows:
         chat_id = DEFAULT_CHAT_ID
         date_ns = 0
-        if len(row) == 3:
+        attributed_body: bytes | None = None
+        assoc_type = 0
+        if isinstance(row, dict):
+            rowid = row["rowid"]
+            is_from_me = row["is_from_me"]
+            text = row.get("text")
+            chat_id = row.get("chat_id", DEFAULT_CHAT_ID)
+            date_ns = row.get("date_ns", 0)
+            attributed_body = row.get("attributed_body")
+            assoc_type = row.get("assoc_type", 0)
+        elif len(row) == 3:
             rowid, is_from_me, text = row
         elif len(row) == 4:
             rowid, is_from_me, text, chat_id = row
@@ -53,9 +69,10 @@ def _make_chat_db(path: Path, rows: list[tuple]) -> None:
                 (chat_rowids[chat_id], chat_id),
             )
         conn.execute(
-            "INSERT INTO message (ROWID, is_from_me, text, date) "
-            "VALUES (?, ?, ?, ?)",
-            (rowid, is_from_me, text, date_ns),
+            "INSERT INTO message (ROWID, is_from_me, text, date, "
+            "attributedBody, associated_message_type) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (rowid, is_from_me, text, date_ns, attributed_body, assoc_type),
         )
         conn.execute(
             "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
@@ -360,6 +377,67 @@ class PollOnceTestCase(unittest.TestCase):
         last = self._poll(conn, 0, blockers=[target], tick_spawner=angry_tick)
         self.assertEqual(last, 2)
         self.assertEqual(len(self.dispatched), 2)  # both rows still dispatched
+
+    def test_attributed_body_routes_when_text_null(self) -> None:
+        # The shipped #45 regression: modern macOS rows have text=NULL and
+        # body in attributedBody. poll_once must decode and route them.
+        _make_chat_db(self.db_path, [
+            {"rowid": 1, "is_from_me": 1, "text": None,
+             "attributed_body": _make_attributed_body("0")},
+        ])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
+        last = self._poll(conn, 0, blockers=[target])
+        self.assertEqual(last, 1)
+        self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 0)])
+
+    def test_text_wins_when_both_populated(self) -> None:
+        # Older rows (pre-macOS-10.13) populate `text`; some carry both. If
+        # text is set, prefer it over decoding — fast path, no parse risk.
+        _make_chat_db(self.db_path, [
+            {"rowid": 1, "is_from_me": 1, "text": "0",
+             "attributed_body": _make_attributed_body("999")},
+        ])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
+        last = self._poll(conn, 0, blockers=[target])
+        self.assertEqual(last, 1)
+        # Dispatched with answer_index=0 (from text "0"), not 999 (the blob).
+        self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 0)])
+
+    def test_attachment_only_body_skipped(self) -> None:
+        # iMessage stickers / inline images encode as U+FFFC and nothing else.
+        # poll_once strips U+FFFC, sees empty body, skips the row — cursor
+        # still advances so the row can't re-fire on a future blocker.
+        _make_chat_db(self.db_path, [
+            {"rowid": 5, "is_from_me": 1, "text": None,
+             "attributed_body": _make_attributed_body("￼")},
+        ])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
+        last = self._poll(conn, 0, blockers=[target])
+        self.assertEqual(last, 5)
+        self.assertEqual(self.dispatched, [])
+
+    def test_tapback_filtered_at_sql_layer(self) -> None:
+        # Reactions ("Liked", "Loved", etc.) have associated_message_type
+        # 2000-3999 and a decodable attributedBody, but they're rendered
+        # placeholders, not operator input. SQL filters them before decode.
+        _make_chat_db(self.db_path, [
+            {"rowid": 1, "is_from_me": 1, "text": None,
+             "attributed_body": _make_attributed_body("0"),
+             "assoc_type": 2000},  # "Liked"
+            {"rowid": 2, "is_from_me": 1, "text": None,
+             "attributed_body": _make_attributed_body("1"),
+             "assoc_type": 0},  # real reply
+        ])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", options=2, root="/p")
+        last = self._poll(conn, 0, blockers=[target])
+        self.assertEqual(last, 2)
+        # Only the real reply (rowid=2, "1") dispatched; the tapback never
+        # entered the result set.
+        self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 1)])
 
 
 def _make_resolver_db(path: Path, chats: list[dict]) -> None:
@@ -686,6 +764,31 @@ class PollOnceFloorTestCase(unittest.TestCase):
             _locator_fn=self._mock_locator([target]),
         )
         self.assertEqual(len(self.dispatched), 1)
+
+    def test_attributed_body_below_floor_skipped(self) -> None:
+        # Floor short-circuit MUST run before decode — otherwise every
+        # clu-sent attributedBody row burns CPU through the decoder.
+        # Row 5: clu's own outbound (is_from_me=1, body via attributedBody).
+        # Row 7: operator's reply, also is_from_me=1, above floor → routes.
+        _make_chat_db(self.db_path, [
+            {"rowid": 5, "is_from_me": 1, "text": None,
+             "attributed_body": _make_attributed_body("BLOCKED:\n[0] FastAPI\n[1] Flask")},
+            {"rowid": 7, "is_from_me": 1, "text": None,
+             "attributed_body": _make_attributed_body("1")},
+        ])
+        conn = notify_inbound.open_chat_db(self.db_path)
+        target = _ob("plan-a", blocker_id="q-1", root="/p")
+        last = notify_inbound.poll_once(
+            conn, 0,
+            self_chat_id=DEFAULT_CHAT_ID,
+            outbound_floor=5,
+            shell_answer_fn=self._shell_answer,
+            tick_spawner=self._tick,
+            _locator_fn=self._mock_locator([target]),
+        )
+        self.assertEqual(last, 7)
+        self.assertEqual(len(self.dispatched), 1)
+        self.assertEqual(self.dispatched[0][2], 1)
 
 
 class ImessageChannelFromRegistryTestCase(unittest.TestCase):
