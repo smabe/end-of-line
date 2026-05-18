@@ -71,6 +71,7 @@ class ProjectConfig:
     dispatch: DispatchSpec = field(default_factory=DispatchSpec)
     notify: NotifySpec = field(default_factory=NotifySpec)
     test_command: str | None = None
+    auto_archive: bool = True
 
     def queue_path(self) -> Path:
         """Per-project queue file. Lives in the same `.orchestrator/` dir as
@@ -114,6 +115,15 @@ def _validate_channel(raw: dict) -> ChannelSpec:
     return ChannelSpec(kind=kind, kinds=kinds, enabled=enabled, params=params)
 
 
+def _validate_auto_archive(raw: dict) -> bool:
+    value = raw.get("auto_archive", True)
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"auto_archive: must be a boolean, got {type(value).__name__!r}"
+        )
+    return value
+
+
 def load_project_config(project_root: Path) -> ProjectConfig:
     project_root = project_root.resolve()
     cfg_path = project_root / CONFIG_FILENAME
@@ -148,4 +158,5 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             inbound_auto_tick=bool(notify_raw.get("inbound_auto_tick", True)),
         ),
         test_command=raw.get("test_command") or None,
+        auto_archive=_validate_auto_archive(raw),
     )

@@ -156,8 +156,10 @@ See `plans/auto-archive-on-merge.md`. Summary:
    - Stage: `end_of_line/config.py`, `docs/architecture.md`,
      `docs/contract.md`, `docs/operations.md`, `tests/test_config.py`,
      `tests/test_auto_archive_rule.py`.
-   - `clu complete --plan auto-archive-on-merge --phase
-     config-opt-out-docs --token <T>`.
+   - `clu complete --plan auto-archive-on-merge --phase config-docs
+     --token <T>`. **NOTE:** phase id is `config-docs`
+     (filename-derived), NOT `config-opt-out-docs` — the master
+     Sessions column label is just display.
 
 ## Failure modes to watch
 

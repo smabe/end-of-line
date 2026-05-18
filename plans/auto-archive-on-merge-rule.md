@@ -178,8 +178,10 @@ See `plans/auto-archive-on-merge.md`. Summary:
    - Stage: `end_of_line/cli.py`, `end_of_line/cross_plan_rules.py`,
      `end_of_line/notify.py`, `docs/operations.md`,
      `tests/test_auto_archive_rule.py`.
-   - `clu complete --plan auto-archive-on-merge --phase
-     auto-archive-rule --token <T>`.
+   - `clu complete --plan auto-archive-on-merge --phase rule
+     --token <T>`. **NOTE:** phase id is `rule` (filename-derived),
+     NOT `auto-archive-rule` — the master Sessions column label
+     is just display.
 
 ## Failure modes to watch
 

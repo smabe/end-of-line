@@ -374,6 +374,26 @@ operator (on demand):
   clu integrate --project P [--batch B | --branches a,b]
 ```
 
+## Auto-archive on merge
+
+`auto_archive_rule` is the final priority in the cross-plan rule chain
+(`cross_plan_rules._RULES`). Each cron tick, for every plan with
+`status == STATUS_DONE` and a live `worktree` record, the rule checks
+whether the worktree's branch is an ancestor of `origin/main` via
+`state.is_branch_merged_into`. On hit, it invokes
+`_perform_archive(cfg, slug, unregister=True)` and emits
+`KIND_PLAN_AUTO_ARCHIVED`. First-eligible-wins in registry order; one
+fire per tick per project per the ADR-0002 invariant (one tick = one
+action).
+
+The branch-merged check uses `git merge-base --is-ancestor` against
+`origin/main` (not local `main`) — the operator must have pushed the
+merge before the rule fires. No `git fetch` is run; freshness is the
+caller's responsibility. Plans without a worktree record, or whose
+branch is not yet an ancestor of `origin/main`, are skipped silently.
+
+Disabled per-project via `.orchestrator.json:auto_archive: false`.
+
 ## Auto-repair worker
 
 When the queue advancement step's `queue.load(queue_path)` raises

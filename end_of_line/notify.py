@@ -56,6 +56,7 @@ KIND_QUEUE_CORRUPT = "queue_corrupt"
 KIND_STALLED_CLAIM = "stalled_claim"
 KIND_GATE_CLEAN = "gate_clean"
 KIND_GATE_DIRTY = "gate_dirty"
+KIND_PLAN_AUTO_ARCHIVED = "plan_auto_archived"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
     KIND_HALTED,
@@ -222,6 +223,10 @@ def render_gate_dirty(batch_id: str, outcome: str, follow_up_path: str) -> str:
         f"Batch {batch_id} dry-merge DIRTY ({outcome}). "
         f"Follow-up: {follow_up_path}"
     )
+
+
+def render_plan_auto_archived(slug: str, branch: str) -> str:
+    return f"Auto-archived {slug} (branch {branch} merged to origin/main)"
 
 
 def render_worktree_conflict(

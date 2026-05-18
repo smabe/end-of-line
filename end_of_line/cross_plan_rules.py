@@ -416,3 +416,48 @@ def dry_merge_gate_rule(
 
 
 register_rule(dry_merge_gate_rule)
+
+
+def auto_archive_rule(
+    project_root: Path, plans: list[ProjectPlan],
+) -> RuleResult | None:
+    """Archive the first STATUS_DONE plan whose worktree branch is merged into origin/main.
+
+    Fires at most once per tick (first-eligible-wins). Skips when
+    `cfg.auto_archive` is False (forward-compat for phase config-opt-out-docs).
+    """
+    from end_of_line.cli import _perform_archive  # noqa: PLC0415
+
+    cfg = load_project_config(project_root)
+    if not getattr(cfg, "auto_archive", True):
+        return None
+
+    for p in plans:
+        if p.state.get("status") != st.STATUS_DONE:
+            continue
+        wt = st.get_worktree(p.state)
+        if not wt:
+            continue
+        branch = wt["branch"]
+        if not st.is_branch_merged_into(project_root, branch):
+            continue
+        try:
+            _perform_archive(cfg, p.slug, unregister=True)
+        except Exception as exc:
+            log.warning(
+                "auto_archive_rule: %s archive failed — %s",
+                p.slug, exc,
+            )
+            continue
+        return RuleResult(
+            events_per_plan={},
+            rule_name="auto_archive",
+            notifies=[(
+                notify.KIND_PLAN_AUTO_ARCHIVED,
+                notify.render_plan_auto_archived(p.slug, branch),
+            )],
+        )
+    return None
+
+
+register_rule(auto_archive_rule)
