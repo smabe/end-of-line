@@ -12,6 +12,7 @@ is never touched.
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -334,13 +335,10 @@ class WorkerModelTipTestCase(_BaseHintsCase):
     """
 
     def _write_config(self, command: str) -> None:
-        cfg_path = self.project / ".orchestrator.json"
-        cfg_path.write_text(
-            '{"plan_dir": "plans", '
-            '"dispatch": {"kind": "shell", "command": '
-            f'{command!r}'
-            '}}'
-        )
+        (self.project / ".orchestrator.json").write_text(json.dumps({
+            "plan_dir": "plans",
+            "dispatch": {"kind": "shell", "command": command},
+        }))
 
     def test_init_unpinned_prints_settings_line(self) -> None:
         rc, out = self._init()
