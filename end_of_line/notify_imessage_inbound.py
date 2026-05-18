@@ -10,11 +10,11 @@ import subprocess
 import sys
 from pathlib import Path
 import logging
-from typing import Callable, Iterable
+from typing import Callable
 
 from . import registry, state as st, state_locator
 from .config import load_project_config
-from .notify_base import OpenBlocker, Reply, route_reply
+from .notify_base import OpenBlocker, Reply
 
 DEFAULT_CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 DEFAULT_SEEN_PATH = Path.home() / ".clu" / "seen_msg_rowid"
@@ -27,38 +27,6 @@ TickSpawner = Callable[[Path, str], None]
 ShellAnswerFn = Callable[[Path, str, int], None]
 
 log = logging.getLogger(__name__)
-
-
-def open_blockers_for_host(
-    entries: Iterable[registry.PlanEntry],
-) -> list[OpenBlocker]:
-    """Walk registry → state files → first open blocker per plan.
-
-    Tolerant of missing state files and unreadable JSON: a stale registry
-    entry must not be able to take the poller down.
-    """
-    out: list[OpenBlocker] = []
-    for row in entries:
-        data = registry.load_entry_state(row)
-        if data is None:
-            continue
-        open_qs = st.open_blockers(data)
-        if not open_qs:
-            continue
-        first = open_qs[0]
-        last_notified = ""
-        for evt in reversed(data["events"]):
-            if evt.get("type") == st.EVENT_PHASE_BLOCKED:
-                last_notified = evt.get("ts", "")
-                break
-        out.append(OpenBlocker(
-            project_root=Path(row.project_root),
-            plan_slug=row.plan_slug,
-            blocker_id=first["id"],
-            options_count=len(first.get("options", [])),
-            last_notified_at=last_notified,
-        ))
-    return out
 
 
 def _cli_dispatch(target: OpenBlocker, answer: str) -> None:

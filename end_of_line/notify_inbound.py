@@ -34,7 +34,6 @@ from .notify_imessage_inbound import (  # noqa: F401
     _cli_dispatch,
     _shell_clu_answer,
     _spawn_tick,
-    open_blockers_for_host,
     open_chat_db,
     poll_once,
     read_seen,

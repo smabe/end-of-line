@@ -3,7 +3,8 @@
 Polls the operator's DM channel for replies, correlates them to open
 blockers via two paths:
   1. Discord Reply-UI: message_reference.message_id → notify_metadata lookup.
-  2. Text grammar fallback: shared route_reply() for bare-digit / slug-prefixed.
+  2. Text grammar fallback: state_locator.find_blocker_for_reply for
+     bare-digit / slug-prefixed grammar.
 
 Mirrors notify_imessage_inbound.py shape; runs as a standalone daemon via
 __main__ or a LaunchAgent / systemd unit.
@@ -19,8 +20,8 @@ from pathlib import Path
 from typing import Callable
 
 from . import registry, state as st, state_locator
-from .notify_base import InboundPoller, OpenBlocker, Reply, route_reply
-from .notify_imessage_inbound import _cli_dispatch, open_blockers_for_host
+from .notify_base import OpenBlocker, Reply
+from .notify_imessage_inbound import _cli_dispatch
 
 _API_BASE = "https://discord.com/api/v10"
 _USER_AGENT = "clu/1.0 (https://github.com/smabe/end-of-line)"
@@ -163,9 +164,6 @@ class DiscordInboundPoller:
                         last_notified_at="",
                     )
         return None
-
-    def _load_open_blockers(self) -> list[OpenBlocker]:
-        return open_blockers_for_host(self._registry_loader())
 
     # ------------------------------------------------------------------
     # Cursor persistence
