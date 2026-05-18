@@ -324,5 +324,57 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
         self.assertEqual(text, original + CANONICAL_SECTION)
 
 
+class WorkerModelTipTestCase(_BaseHintsCase):
+    """`clu init` / operator `clu queue add` surface the worker model.
+
+    Default (no `.orchestrator.json` → empty `dispatch.command`) prints
+    the "resolves via settings" line. A config with `--model X` in
+    dispatch.command prints the pinned name. Worker callback path
+    (`--token`) skips both — covered by routing, not asserted here.
+    """
+
+    def _write_config(self, command: str) -> None:
+        cfg_path = self.project / ".orchestrator.json"
+        cfg_path.write_text(
+            '{"plan_dir": "plans", '
+            '"dispatch": {"kind": "shell", "command": '
+            f'{command!r}'
+            '}}'
+        )
+
+    def test_init_unpinned_prints_settings_line(self) -> None:
+        rc, out = self._init()
+        self.assertEqual(rc, 0)
+        self.assertIn("worker model: resolves via Claude Code settings", out)
+        self.assertIn("no --model in dispatch.command", out)
+
+    def test_init_pinned_prints_model_name(self) -> None:
+        self._write_config(
+            "claude --print --model claude-opus-4-7 '/clu-phase {plan_slug}'"
+        )
+        rc, out = self._init()
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "worker model: claude-opus-4-7 "
+            "(pinned via --model in dispatch.command)",
+            out,
+        )
+
+    def test_queue_add_pinned_prints_model_name(self) -> None:
+        self._write_config(
+            "claude --print --model claude-sonnet-4-6 '/clu-phase'"
+        )
+        rc, _ = self._init()
+        self.assertEqual(rc, 0)
+        _write_plan(self.project, "next-plan")
+        rc, out = self._queue_add("next-plan")
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "worker model: claude-sonnet-4-6 "
+            "(pinned via --model in dispatch.command)",
+            out,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

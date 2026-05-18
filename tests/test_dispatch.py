@@ -13,7 +13,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import ProjectConfig, DispatchSpec
-from end_of_line.dispatch import dispatch_for_tick
+from end_of_line.dispatch import dispatch_for_tick, resolved_model
 from end_of_line.supervisor import TickResult
 from tests import CluTestCase
 
@@ -263,6 +263,36 @@ class DispatchTestCase(CluTestCase):
         self.assertIsNotNone(claim)
         self.assertIn("pid", claim)
         self.assertIn("log_path", claim)
+
+
+class ResolvedModelTestCase(unittest.TestCase):
+    """Unit tests for `dispatch.resolved_model` — pure parser, no I/O."""
+
+    def test_pinned_with_space(self) -> None:
+        cmd = "claude --print --model claude-opus-4-7 '/clu-phase {plan_slug}'"
+        self.assertEqual(resolved_model(cmd), "claude-opus-4-7")
+
+    def test_pinned_with_equals(self) -> None:
+        cmd = "claude --print --model=claude-opus-4-7 '/clu-phase'"
+        self.assertEqual(resolved_model(cmd), "claude-opus-4-7")
+
+    def test_pinned_with_quoted_value(self) -> None:
+        cmd = 'claude --print --model "claude-opus-4-7" /clu-phase'
+        self.assertEqual(resolved_model(cmd), "claude-opus-4-7")
+
+    def test_no_model_flag(self) -> None:
+        cmd = "claude --print '/clu-phase {plan_slug}'"
+        self.assertIsNone(resolved_model(cmd))
+
+    def test_dangling_model_flag(self) -> None:
+        # `--model` at end of args with no value → treat as absent rather
+        # than reach off the end of the token list.
+        self.assertIsNone(resolved_model("claude --print --model"))
+
+    def test_unbalanced_quotes(self) -> None:
+        # shlex.split raises on unterminated quote — treat as absent
+        # rather than crash the CLI on init/queue-add.
+        self.assertIsNone(resolved_model("claude --print 'oops"))
 
 
 if __name__ == "__main__":

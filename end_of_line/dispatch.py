@@ -77,6 +77,32 @@ _AUTH_FAILURE_RE = re.compile(
 _MISSING_BINARY_RE = re.compile(r"command not found", re.IGNORECASE)
 
 
+def resolved_model(cmd_tmpl: str) -> str | None:
+    """Return the model pinned via `--model X` in the dispatch command
+    template, or None if no `--model` is present.
+
+    Used by `clu init` / `clu queue add` to surface which Claude model
+    will fire per-phase before the operator commits to a queue position.
+    We never shell out to `claude --print --help` or read settings.json —
+    clu stays stdlib-only and side-effect-free. The "likely Sonnet" hint
+    lives in docs, not in clu's output.
+
+    Malformed templates (unbalanced quotes) → None; the caller treats
+    that the same as "no --model present" — accurate enough since a
+    template clu can't parse is one the worker can't run either.
+    """
+    try:
+        tokens = shlex.split(cmd_tmpl)
+    except ValueError:
+        return None
+    for i, tok in enumerate(tokens):
+        if tok == "--model" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith("--model="):
+            return tok[len("--model="):]
+    return None
+
+
 def build_worker_env(cfg: ProjectConfig) -> dict[str, str] | None:
     """Return the env dict to pass to subprocess.Popen, or None to inherit.
 

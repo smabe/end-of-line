@@ -56,6 +56,23 @@ def _maybe_print_monitor_tip() -> None:
     print(_MONITOR_TIP, end="")
 
 
+def _print_worker_model(cfg: ProjectConfig) -> None:
+    """Print which Claude model the worker will use on each phase.
+
+    Operator-facing only — called from `cmd_init` and the operator path
+    of `cmd_queue_add`. Worker-driven enqueue (`--token`) skips this:
+    cron stdout is log noise, and the worker already knows its model.
+    """
+    model = dispatch.resolved_model(cfg.dispatch.command)
+    if model:
+        print(f"worker model: {model} (pinned via --model in dispatch.command)")
+    else:
+        print(
+            "worker model: resolves via Claude Code settings "
+            "(no --model in dispatch.command)"
+        )
+
+
 def _maybe_print_watch_tip(
     *, scope: str, slug: str | None = None, quiet: bool = False,
 ) -> None:
@@ -1326,6 +1343,7 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     # without a separate setup step.
     registry.register(cfg.project_root, args.plan)
     print(f"Initialized {state_path}")
+    _print_worker_model(cfg)
     _maybe_print_worktree_conflict_hint(
         cfg.project_root, args.plan, worktree_record is not None,
     )
@@ -2139,6 +2157,7 @@ def cmd_queue_add(args) -> int:
         print(f"queued at position {pos}")
     if len(slugs) > 1:
         print(f"queued {len(slugs)} plans")
+    _print_worker_model(cfg)
     _maybe_print_monitor_tip()
     _maybe_print_watch_tip(scope="all", quiet=getattr(args, "quiet", False))
     return ExitCode.OK
