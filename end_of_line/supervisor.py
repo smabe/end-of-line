@@ -18,15 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import inbox, notify, state as st
+from . import inbox, notify, state as st, state_blocker
 from .config import ProjectConfig
 from .plan_parser import parse_sessions_index
-
-# Stuck-blocker re-ping cadence. Mirrors the operations.md SLA — first
-# escalation at 30 min, repeated every 30 min until the blocker is
-# answered + consumed.
-_REPING_INTERVAL_MIN = 30
-
 
 def _local_now() -> _dt.datetime:
     """Wall-clock local time. Indirection exists so tests can pin the hour."""
@@ -115,57 +109,39 @@ def _emit_stuck_blocker_repings(
     """Re-ping any blocker open ≥30min since asked (or last reping)."""
     now = st._now_utc()
     project_root = str(config.project_root.resolve())
-    for b in data["blockers"]:
-        if b.get("consumed") or b.get("answer") is not None:
-            continue
-        try:
-            created = st.parse_iso(b["asked_at"])
-        except (KeyError, ValueError):
-            continue
-        last_pinged_dt = None
-        if b.get("last_repinged_at"):
-            try:
-                last_pinged_dt = st.parse_iso(b["last_repinged_at"])
-            except ValueError:
-                last_pinged_dt = None
-        age_seconds = (now - created).total_seconds()
-        if age_seconds < _REPING_INTERVAL_MIN * 60:
-            continue
-        if last_pinged_dt is not None:
-            if (now - last_pinged_dt).total_seconds() < _REPING_INTERVAL_MIN * 60:
+    for blocker_id, kind, body in state_blocker.stuck_blocker_repings(data, now):
+        for b in data["blockers"]:
+            if b["id"] != blocker_id:
                 continue
-        age_min = int(age_seconds // 60)
-        b["last_repinged_at"] = st.utcnow()
-        st.append_event(
-            data, st.EVENT_STUCK_BLOCKER_REPINGED,
-            blocker_id=b["id"], phase=b["phase_id"], age_min=age_min,
-        )
-        side_notifies.append((
-            notify.KIND_STUCK_BLOCKER,
-            notify.render_stuck_blocker(
-                data["plan_slug"], b["id"], b["phase_id"],
-                b["question"], b["options"], age_min,
-            ),
-        ))
-        try:
-            inbox.write_event(
-                type="stuck_blocker",
-                plan_slug=data["plan_slug"],
-                project_root=project_root,
-                summary=(
-                    f"Blocker {b['id']} on phase {b['phase_id']} "
-                    f"open {age_min}min"
-                ),
-                details={
-                    "blocker_id": b["id"],
-                    "phase_id": b["phase_id"],
-                    "question": b["question"],
-                    "options": list(b["options"]),
-                },
+            b["last_repinged_at"] = st.utcnow()
+            try:
+                age_min = int((now - st.parse_iso(b["asked_at"])).total_seconds() // 60)
+            except (KeyError, ValueError):
+                age_min = 0
+            st.append_event(
+                data, st.EVENT_STUCK_BLOCKER_REPINGED,
+                blocker_id=b["id"], phase=b["phase_id"], age_min=age_min,
             )
-        except OSError:
-            # Inbox write is best-effort — never let it kill a tick.
-            pass
+            side_notifies.append((kind, body))
+            try:
+                inbox.write_event(
+                    type="stuck_blocker",
+                    plan_slug=data["plan_slug"],
+                    project_root=project_root,
+                    summary=(
+                        f"Blocker {b['id']} on phase {b['phase_id']} "
+                        f"open {age_min}min"
+                    ),
+                    details={
+                        "blocker_id": b["id"],
+                        "phase_id": b["phase_id"],
+                        "question": b["question"],
+                        "options": list(b["options"]),
+                    },
+                )
+            except OSError:
+                pass
+            break
 
 
 def _emit_stalled_claim_notify(
@@ -284,13 +260,17 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                     ))
 
         # Newly-answered blocker → mark consumed (worker sees on next dispatch)
-        for b in data["blockers"]:
-            if b["answer"] is not None and not b.get("consumed"):
-                b["consumed"] = True
-                if data["status"] == st.STATUS_PAUSED:
-                    data["status"] = st.STATUS_RUNNING
-                st.append_event(data, st.EVENT_BLOCKER_CONSUMED, blocker_id=b["id"])
-                return _attach(TickResult("blocker_resumed", f"blocker={b['id']}"))
+        events, target_status = state_blocker.process_answered_blockers(data)
+        if events:
+            for ev_type, blocker_id in events:
+                for b in data["blockers"]:
+                    if b["id"] == blocker_id:
+                        b["consumed"] = True
+                        break
+                st.append_event(data, ev_type, blocker_id=blocker_id)
+            if target_status:
+                data["status"] = target_status
+            return _attach(TickResult("blocker_resumed", f"blocker={events[0][1]}"))
 
         if data["status"] in st.TERMINAL_STATUSES:
             return _attach(TickResult("idle", f"plan status={data['status']}"))

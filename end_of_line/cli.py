@@ -34,7 +34,7 @@ from collections.abc import Iterator
 from enum import IntEnum
 from pathlib import Path
 
-from . import dispatch, fleet, monitor, notify, queue, registry, state as st, watch
+from . import dispatch, fleet, monitor, notify, queue, registry, state as st, state_blocker, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
@@ -3484,7 +3484,7 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
         )
     notify.notify(
         cfg.notify, notify.KIND_BLOCKER,
-        notify.render_blocker(
+        state_blocker.render_blocker(
             args.plan, blocker_id, args.phase, args.question, args.options,
         ),
         plan_slug=args.plan,
