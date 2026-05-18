@@ -65,6 +65,39 @@ def _make_chat_db(path: Path, rows: list[tuple]) -> None:
     conn.close()
 
 
+def _encode_typedstream_length(n: int) -> bytes:
+    """Signed-byte length encoding used in Apple typedstream.
+
+    Tiers: head 0x00-0x80 literal · 0x81 + u16-LE · 0x82 + u32-LE · 0x83 + u64-LE.
+    """
+    if n <= 0x80:
+        return bytes([n])
+    if n < (1 << 16):
+        return b"\x81" + n.to_bytes(2, "little")
+    if n < (1 << 32):
+        return b"\x82" + n.to_bytes(4, "little")
+    return b"\x83" + n.to_bytes(8, "little")
+
+
+def _make_attributed_body(text: str) -> bytes:
+    """Emit a minimal NSAttributedString typedstream blob carrying `text`.
+
+    Layout mirrors what chat.db produces — class chain bytes are present so
+    fixtures resemble real blobs when eyeballed, even though the decoder
+    only scans for HEADER + START_PATTERN + length + UTF-8 + END_PATTERN.
+    Class filler avoids `b"\\x01\\x2b"` (the START_PATTERN) by construction.
+    """
+    HEADER = b"\x04\x0bstreamtyped\x81\xe8\x03"
+    CLASS_FILLER = (
+        b"\x84\x84\x1aNSMutableAttributedString\x00\x00\x00\x00"
+        b"\x84\x84\x12NSAttributedString\x00\x00\x00\x00"
+        b"\x84\x84\x08NSObject\x00\x00\x00\x00"
+    )
+    START = b"\x01\x2b"
+    utf8 = text.encode("utf-8")
+    return HEADER + CLASS_FILLER + START + _encode_typedstream_length(len(utf8)) + utf8 + b"\x86\x84"
+
+
 def _ob(slug: str, *, blocker_id: str = "q-1", options: int = 2,
         root: str | Path = "/p", ts: str = "") -> OpenBlocker:
     """Factory keeps tests readable as OpenBlocker grows fields."""
@@ -705,6 +738,63 @@ class ImessageChannelFromRegistryTestCase(unittest.TestCase):
         project = self._make_project("p", None)
         registry.register(project, "p")
         self.assertIsNone(notify_inbound.imessage_channel_from_registry())
+
+
+class DecodeAttributedBodyTests(unittest.TestCase):
+    """Unit tests for `_decode_attributed_body` — byte-level format parsing.
+
+    The decoder is the load-bearing piece that lets `poll_once` see real
+    typed-from-phone replies on modern macOS, where chat.db stores message
+    bodies as NSArchiver typedstream blobs in `attributedBody` and leaves
+    `text` NULL. These tests pin the four format-corner-cases that a naive
+    scan-and-read decoder gets wrong.
+    """
+
+    def test_ascii_body_decodes(self) -> None:
+        blob = _make_attributed_body("hello")
+        self.assertEqual(notify_inbound._decode_attributed_body(blob), "hello")
+
+    def test_emoji_multibyte_utf8_decodes(self) -> None:
+        # Length is in BYTES, not codepoints — "héllo 👋" is 11 UTF-8 bytes.
+        text = "héllo 👋"
+        blob = _make_attributed_body(text)
+        self.assertEqual(notify_inbound._decode_attributed_body(blob), text)
+
+    def test_129_byte_boundary_decodes(self) -> None:
+        # Canary for the u16-LE sentinel path. A naive `length = head_byte`
+        # reads 0x81 as literal 129 and slides into the sentinel bytes,
+        # silently corrupting every body ≥ 129 chars.
+        text = "a" * 129
+        blob = _make_attributed_body(text)
+        # Sanity-check the fixture actually exercises the sentinel path.
+        self.assertIn(b"\x01\x2b\x81\x81\x00", blob)
+        self.assertEqual(notify_inbound._decode_attributed_body(blob), text)
+
+    def test_truncated_length_returns_none(self) -> None:
+        # Header + START_PATTERN + 0x81 sentinel but only one of the two
+        # u16-LE length bytes present. Decoder must return None, not raise.
+        blob = b"\x04\x0bstreamtyped\x81\xe8\x03\x01\x2b\x81\x05"
+        self.assertIsNone(notify_inbound._decode_attributed_body(blob))
+
+    def test_missing_start_pattern_returns_none(self) -> None:
+        # All header, no payload marker — nothing to decode.
+        blob = b"\x04\x0bstreamtyped\x81\xe8\x03"
+        self.assertIsNone(notify_inbound._decode_attributed_body(blob))
+
+    def test_empty_blob_returns_none(self) -> None:
+        self.assertIsNone(notify_inbound._decode_attributed_body(b""))
+        self.assertIsNone(notify_inbound._decode_attributed_body(None))
+
+    def test_invalid_utf8_returns_none(self) -> None:
+        # START_PATTERN, length 3, then bytes that aren't valid UTF-8.
+        blob = b"\x04\x0bstreamtyped\x81\xe8\x03\x01\x2b\x03\xff\xfe\xfd"
+        self.assertIsNone(notify_inbound._decode_attributed_body(blob))
+
+    def test_attachment_replacement_char_preserved(self) -> None:
+        # Decoder returns raw bytes including U+FFFC; `poll_once` is the
+        # layer that strips and empty-checks. Single-responsibility split.
+        blob = _make_attributed_body("￼")
+        self.assertEqual(notify_inbound._decode_attributed_body(blob), "￼")
 
 
 if __name__ == "__main__":

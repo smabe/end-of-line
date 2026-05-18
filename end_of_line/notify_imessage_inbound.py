@@ -154,6 +154,62 @@ def _shell_clu_answer(state_path: Path, blocker_id: str, answer_index: int) -> N
         st.answer_blocker(data, blocker_id, resolved)
 
 
+# Apple NSAttributedString typedstream decoder. chat.db stores message
+# bodies as NSArchiver typedstream blobs in `attributedBody` and leaves the
+# plain `text` column NULL on modern macOS — we need this to read replies.
+# Format references:
+#   https://chrissardegna.com/blog/reverse-engineering-apples-typedstream-format/
+#   ReagentX/imessage-exporter `imessage-database/src/util/streamtyped.rs`
+# We diverge from the Rust parser by using strict UTF-8 + return-None instead
+# of lossy + U+FFFD: routing garbage is worse than silently skipping a row.
+_ATTR_BODY_START = b"\x01\x2b"
+_ATTR_BODY_MAX_SIZE = 65536
+
+
+def _decode_attributed_body(blob: bytes | None) -> str | None:
+    """Extract the leading NSString UTF-8 payload from an NSAttributedString
+    typedstream blob. Returns the raw decoded string (including any `U+FFFC`
+    NSAttachmentCharacter chars — callers strip + empty-check). Returns None
+    on missing pattern, truncated length, oversized blob, or invalid UTF-8;
+    never raises.
+
+    Length encoding (head byte after START_PATTERN):
+      0x00–0x80 → literal length
+      0x81      → next 2 bytes are u16-LE length
+    Wider sentinels (0x82 = u32-LE, 0x83 = u64-LE) exist in the format but
+    can never fire inside our 64KB-capped blob — they fall through to None.
+
+    Assumes the user-text NSString is the FIRST occurrence of START_PATTERN
+    in the blob — true for chat.db message bodies, would NOT generalize to
+    edited-message history where class back-references can shift positions.
+    """
+    if not blob or len(blob) > _ATTR_BODY_MAX_SIZE:
+        return None
+    idx = blob.find(_ATTR_BODY_START)
+    if idx < 0:
+        return None
+    cur = idx + len(_ATTR_BODY_START)
+    if cur >= len(blob):
+        return None
+    head = blob[cur]
+    cur += 1
+    if head <= 0x80:
+        length = head
+    elif head == 0x81:
+        if cur + 2 > len(blob):
+            return None
+        length = int.from_bytes(blob[cur:cur + 2], "little")
+        cur += 2
+    else:
+        return None
+    if cur + length > len(blob):
+        return None
+    try:
+        return blob[cur:cur + length].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def poll_once(
     conn: sqlite3.Connection,
     last_rowid: int,

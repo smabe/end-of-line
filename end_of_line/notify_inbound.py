@@ -37,6 +37,7 @@ from .notify_imessage_inbound import (  # noqa: F401
     TickSpawner,
     _auto_tick_enabled,
     _cli_dispatch,
+    _decode_attributed_body,
     _resolve_self_chat_id,
     _shell_clu_answer,
     _spawn_tick,
