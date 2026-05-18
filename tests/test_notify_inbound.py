@@ -15,17 +15,13 @@ from tests import isolate_registry
 DEFAULT_CHAT_ID = "+15551234567"  # operator's self-chat handle for fixtures
 
 
-def _make_chat_db(path: Path, rows: list) -> None:
+def _make_chat_db(path: Path, rows: list[dict]) -> None:
     """Build a chat.db-shaped fixture.
 
-    Each row is either a tuple (positional, legacy):
-      (rowid, is_from_me, text) — DEFAULT_CHAT_ID, date=0.
-      (rowid, is_from_me, text, chat_identifier) — explicit chat, date=0.
-      (rowid, is_from_me, text, chat_identifier, date_ns) — explicit chat
-        and Apple-epoch nanosecond timestamp for drain-mark tests.
-    Or a dict (keyword, for attributedBody / tapback cases):
+    Each row is a dict:
       {"rowid": N, "is_from_me": 0|1, "text": str|None,
-       "chat_id": str (optional), "date_ns": int (optional),
+       "chat_id": str (optional, default DEFAULT_CHAT_ID),
+       "date_ns": int (optional, default 0 — Apple-epoch ns),
        "attributed_body": bytes|None (optional),
        "assoc_type": int (optional, default 0)}
     """
@@ -44,24 +40,13 @@ def _make_chat_db(path: Path, rows: list) -> None:
     )
     chat_rowids: dict[str, int] = {}
     for row in rows:
-        chat_id = DEFAULT_CHAT_ID
-        date_ns = 0
-        attributed_body: bytes | None = None
-        assoc_type = 0
-        if isinstance(row, dict):
-            rowid = row["rowid"]
-            is_from_me = row["is_from_me"]
-            text = row.get("text")
-            chat_id = row.get("chat_id", DEFAULT_CHAT_ID)
-            date_ns = row.get("date_ns", 0)
-            attributed_body = row.get("attributed_body")
-            assoc_type = row.get("assoc_type", 0)
-        elif len(row) == 3:
-            rowid, is_from_me, text = row
-        elif len(row) == 4:
-            rowid, is_from_me, text, chat_id = row
-        else:
-            rowid, is_from_me, text, chat_id, date_ns = row
+        rowid = row["rowid"]
+        is_from_me = row["is_from_me"]
+        text = row.get("text")
+        chat_id = row.get("chat_id", DEFAULT_CHAT_ID)
+        date_ns = row.get("date_ns", 0)
+        attributed_body = row.get("attributed_body")
+        assoc_type = row.get("assoc_type", 0)
         if chat_id not in chat_rowids:
             chat_rowids[chat_id] = len(chat_rowids) + 1
             conn.execute(
@@ -272,9 +257,9 @@ class PollOnceTestCase(unittest.TestCase):
 
     def test_dispatches_matched_inbound_only(self) -> None:
         _make_chat_db(self.db_path, [
-            (10, 0, "0"),
-            (11, 1, "ignore"),
-            (12, 0, "lol"),
+            {"rowid": 10, "is_from_me": 0, "text": "0"},
+            {"rowid": 11, "is_from_me": 1, "text": "ignore"},
+            {"rowid": 12, "is_from_me": 0, "text": "lol"},
         ])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
@@ -285,7 +270,7 @@ class PollOnceTestCase(unittest.TestCase):
     def test_self_chat_is_from_me_1_routes(self) -> None:
         # In self-chat the operator IS the sender, so the reply row has
         # is_from_me=1. The chat-scoped SQL must accept it.
-        _make_chat_db(self.db_path, [(1, 1, "0")])
+        _make_chat_db(self.db_path, [{"rowid": 1, "is_from_me": 1, "text": "0"}])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
@@ -293,7 +278,9 @@ class PollOnceTestCase(unittest.TestCase):
         self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 0)])
 
     def test_other_chat_dropped_by_scope(self) -> None:
-        _make_chat_db(self.db_path, [(1, 0, "0", "+15559999999")])
+        _make_chat_db(self.db_path, [
+            {"rowid": 1, "is_from_me": 0, "text": "0", "chat_id": "+15559999999"},
+        ])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
@@ -304,14 +291,17 @@ class PollOnceTestCase(unittest.TestCase):
     def test_advances_seen_on_no_match(self) -> None:
         # Otherwise a chatty stranger pinning the cursor would let an old
         # unrelated message re-trigger if a blocker later opened.
-        _make_chat_db(self.db_path, [(7, 0, "hey")])
+        _make_chat_db(self.db_path, [{"rowid": 7, "is_from_me": 0, "text": "hey"}])
         conn = notify_inbound.open_chat_db(self.db_path)
         last = self._poll(conn, 0, blockers=[])
         self.assertEqual(last, 7)
         self.assertEqual(self.dispatched, [])
 
     def test_skips_already_seen(self) -> None:
-        _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "0")])
+        _make_chat_db(self.db_path, [
+            {"rowid": 1, "is_from_me": 0, "text": "0"},
+            {"rowid": 2, "is_from_me": 0, "text": "0"},
+        ])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 1, blockers=[target])
@@ -319,7 +309,7 @@ class PollOnceTestCase(unittest.TestCase):
         self.assertEqual(len(self.dispatched), 1)
 
     def test_returns_last_rowid_when_no_new_rows(self) -> None:
-        _make_chat_db(self.db_path, [(5, 0, "0")])
+        _make_chat_db(self.db_path, [{"rowid": 5, "is_from_me": 0, "text": "0"}])
         conn = notify_inbound.open_chat_db(self.db_path)
         last = self._poll(conn, 5, blockers=[])
         self.assertEqual(last, 5)
@@ -328,7 +318,7 @@ class PollOnceTestCase(unittest.TestCase):
         # Project root is a fresh tmp dir → no .orchestrator.json → default True.
         proj = self.tmp / "proj"
         proj.mkdir()
-        _make_chat_db(self.db_path, [(1, 0, "0")])
+        _make_chat_db(self.db_path, [{"rowid": 1, "is_from_me": 0, "text": "0"}])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
         self._poll(conn, 0, blockers=[target])
@@ -341,7 +331,7 @@ class PollOnceTestCase(unittest.TestCase):
         (proj / ".orchestrator.json").write_text(json.dumps({
             "notify": {"inbound_auto_tick": False},
         }))
-        _make_chat_db(self.db_path, [(1, 0, "0")])
+        _make_chat_db(self.db_path, [{"rowid": 1, "is_from_me": 0, "text": "0"}])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
         self._poll(conn, 0, blockers=[target])
@@ -352,7 +342,10 @@ class PollOnceTestCase(unittest.TestCase):
         # answer write failed → raise → no auto-tick (stale state guard).
         proj = self.tmp / "proj"
         proj.mkdir()
-        _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "hey")])
+        _make_chat_db(self.db_path, [
+            {"rowid": 1, "is_from_me": 0, "text": "0"},
+            {"rowid": 2, "is_from_me": 0, "text": "hey"},
+        ])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
 
@@ -367,7 +360,10 @@ class PollOnceTestCase(unittest.TestCase):
         # Auto-tick is fire-and-forget; an OSError from Popen must be swallowed.
         proj = self.tmp / "proj"
         proj.mkdir()
-        _make_chat_db(self.db_path, [(1, 0, "0"), (2, 0, "0")])
+        _make_chat_db(self.db_path, [
+            {"rowid": 1, "is_from_me": 0, "text": "0"},
+            {"rowid": 2, "is_from_me": 0, "text": "0"},
+        ])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
 
@@ -636,7 +632,8 @@ class OutboundPendingTestCase(unittest.TestCase):
         sent_at = 1_000_000_000.0
         date_ns = notify_inbound.unix_to_chatdb_ns(sent_at + 1)
         _make_chat_db(self.db_path, [
-            (7, 1, "BLOCKED: pick framework", DEFAULT_CHAT_ID, date_ns),
+            {"rowid": 7, "is_from_me": 1, "text": "BLOCKED: pick framework",
+             "date_ns": date_ns},
         ])
         notify_inbound.append_outbound_mark(
             DEFAULT_CHAT_ID, sent_at, path=self.pending_path,
@@ -730,8 +727,8 @@ class PollOnceFloorTestCase(unittest.TestCase):
         # Row 5: clu's outbound (is_from_me=1, multi-line text). Floor=5.
         # Row 7: operator's reply (is_from_me=1, "1"). Above floor → routes.
         _make_chat_db(self.db_path, [
-            (5, 1, "BLOCKED:\n[0] FastAPI\n[1] Flask"),
-            (7, 1, "1"),
+            {"rowid": 5, "is_from_me": 1, "text": "BLOCKED:\n[0] FastAPI\n[1] Flask"},
+            {"rowid": 7, "is_from_me": 1, "text": "1"},
         ])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
@@ -752,7 +749,7 @@ class PollOnceFloorTestCase(unittest.TestCase):
         # Defensive: floor only filters is_from_me=1; an is_from_me=0 row
         # below the floor (hypothetical inbound from another sender that
         # somehow shares the chat) still routes.
-        _make_chat_db(self.db_path, [(3, 0, "0")])
+        _make_chat_db(self.db_path, [{"rowid": 3, "is_from_me": 0, "text": "0"}])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         notify_inbound.poll_once(
