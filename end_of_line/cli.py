@@ -30,11 +30,10 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
 from enum import IntEnum
 from pathlib import Path
 
-from . import dispatch, fleet, monitor, notify, queue, registry, state as st, watch
+from . import cross_plan_rules, dispatch, fleet, monitor, notify, queue, registry, state as st, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
@@ -1185,43 +1184,16 @@ def _is_plan_active(state: dict) -> bool:
     return state.get("status") == st.STATUS_RUNNING
 
 
-def _plans_for_project(
-    project_root: Path, cfg: ProjectConfig,
-) -> Iterator[tuple[str, dict, Path]]:
-    """Yield (slug, state, state_path) for every plan registered in project_root.
-
-    Skips entries whose state file is missing, unreadable, or version-
-    mismatched — same tolerance as the rest of the supervisor loop.
-    Centralized so multiple post-loop helpers (queue advance, worktree
-    conflict scan, init-time sibling check) share the same scan shape.
-    """
-    target = project_root.resolve()
-    for entry in registry.entries():
-        try:
-            if Path(entry.project_root).resolve() != target:
-                continue
-        except OSError:
-            continue
-        state_path = cfg.state_path(entry.plan_slug)
-        if not state_path.exists():
-            continue
-        try:
-            state = st.load(state_path)
-        except (OSError, ValueError, st.SchemaVersionMismatch):
-            continue
-        yield entry.plan_slug, state, state_path
-
-
 def _active_no_worktree_siblings(
     project_root: Path, exclude_slug: str | None = None,
 ) -> list[str]:
     """Slugs of plans in `project_root` that are active AND lack a worktree."""
     cfg = load_project_config(project_root)
     return [
-        slug for slug, state, _ in _plans_for_project(project_root, cfg)
-        if slug != exclude_slug
-        and not st.get_worktree(state)
-        and _is_plan_active(state)
+        p.slug for p in cross_plan_rules.load_plans_for_project(project_root, cfg)
+        if p.slug != exclude_slug
+        and not st.get_worktree(p.state)
+        and _is_plan_active(p.state)
     ]
 
 
@@ -1869,13 +1841,13 @@ def _print_worktree_health(cfg: ProjectConfig) -> None:
     project_root = cfg.project_root.resolve()
     print("\nWorktrees:")
     rows: list[tuple[str, str, str]] = []
-    for slug, state, _ in _plans_for_project(project_root, cfg):
-        wt = st.get_worktree(state)
+    for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
+        wt = st.get_worktree(p.state)
         if wt is None:
-            rows.append((slug, "(none)", "-"))
+            rows.append((p.slug, "(none)", "-"))
             continue
         ok = dispatch.worktree_alive(Path(wt["path"]))
-        rows.append((slug, wt["path"], "ok" if ok else "MISSING"))
+        rows.append((p.slug, wt["path"], "ok" if ok else "MISSING"))
     if not rows:
         print("  (no registered plans in this project)")
         return
@@ -2485,16 +2457,16 @@ def cmd_worktree_gc(args) -> int:
         )
 
     candidates: list[tuple[str, dict, bool]] = []  # (slug, worktree, archived)
-    for slug, state, _state_path in _plans_for_project(project_root, cfg):
-        wt = st.get_worktree(state)
+    for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
+        wt = st.get_worktree(p.state)
         if not wt:
             continue
-        if state.get("status") not in st.GC_ELIGIBLE_STATUSES:
+        if p.state.get("status") not in st.GC_ELIGIBLE_STATUSES:
             continue
-        master_present = cfg.master_plan_path(slug).exists()
+        master_present = cfg.master_plan_path(p.slug).exists()
         if not master_present and not args.include_archived:
             continue
-        candidates.append((slug, wt, not master_present))
+        candidates.append((p.slug, wt, not master_present))
 
     if not candidates:
         print("(no worktree-bearing done/halted plans)")
@@ -2616,8 +2588,6 @@ def cmd_tick_all(args) -> int:
     # worktree conflict scan), first-match-wins per ADR-0002.
     # Re-read registry.entries() — claim state mutated above is what the
     # busy gate needs to see.
-    from end_of_line import cross_plan_rules  # local: avoids circular at load time
-
     seen: dict[Path, None] = {}
     for row in registry.entries():
         try:
@@ -2638,171 +2608,6 @@ def cmd_tick_all(args) -> int:
                 file=sys.stderr,
             )
     return ExitCode.OK
-
-
-def _detect_worktree_conflicts_for_project(project_root: Path) -> None:
-    """Emit pair-warnings + maintain `in_conflict_with` for plans in project.
-
-    For each plan in the project: compute the set of OTHER plans that
-    are active + worktree-less + in this project (the "conflicting"
-    set). If it differs from the plan's persisted `in_conflict_with`,
-    update the field and — for each newly-conflicting pair where this
-    plan is the lexicographically-smaller slug — emit
-    `EVENT_WORKTREE_CONFLICT_WARNING` + a KIND_HALTED iMessage. The
-    canonical-pair rule guarantees one warning per (a, b) per onset,
-    not two.
-
-    Pair entries auto-clear when one side stops being active (done,
-    halted, paused, worktree-enabled) — both lists shrink on the next
-    tick that sees the transition.
-    """
-    cfg = load_project_config(project_root)
-    plans = list(_plans_for_project(project_root, cfg))
-
-    conflicting = {
-        slug for slug, state, _ in plans
-        if not st.get_worktree(state) and _is_plan_active(state)
-    }
-
-    new_pairs: list[tuple[str, str]] = []
-    for slug, state, state_path in plans:
-        target_set = (conflicting - {slug}) if slug in conflicting else set()
-        existing = set(state.get("in_conflict_with") or [])
-        if target_set == existing:
-            continue
-        with st.mutate(state_path) as data:
-            # JSON-serialized field; treat as set semantics, store sorted list.
-            data["in_conflict_with"] = sorted(target_set)
-            for other in sorted(target_set - existing):
-                if slug < other:
-                    # Canonical pair member emits the event; the
-                    # other-side plan only updates its `in_conflict_with`.
-                    st.append_event(
-                        data, st.EVENT_WORKTREE_CONFLICT_WARNING,
-                        other_slug=other,
-                    )
-                    new_pairs.append((slug, other))
-
-    for slug_a, slug_b in new_pairs:
-        notify.notify(
-            cfg.notify, notify.KIND_HALTED,
-            notify.render_worktree_conflict(project_root, slug_a, slug_b),
-        )
-
-
-def _advance_queue_for_project(project_root: Path) -> None:
-    """One queue-pop step for a single project. No-op when nothing to do.
-
-    Branches (first match wins):
-      - busy gate: any plan in project has current_claim → return
-      - queue empty / missing → return
-      - head registered with HALTED/HALTED_REPLAN/PAUSED → freeze (no pop)
-      - head registered with DONE/RUNNING → absorb (pop to history, no dispatch)
-      - head's plan file missing → abandon + KIND_QUEUE_SKIPPED ping
-      - normal pop: state-create → registry.register → queue.pop, all under
-        the queue lock; dispatch outside the locks via `_tick_one_plan`.
-    """
-    cfg = load_project_config(project_root)
-    queue_path = cfg.queue_path()
-    if not queue_path.exists():
-        return
-
-    # Busy gate (per-project): any live claim freezes the whole project.
-    for _slug, state, _path in _plans_for_project(project_root, cfg):
-        if state.get("current_claim"):
-            return
-
-    try:
-        queue_data = queue.load(queue_path)
-    except _QUEUE_LOAD_ERRORS as exc:
-        _handle_corrupt_queue(cfg, exc, queue_path)
-        return
-    if not queue_data["queue"]:
-        return
-
-    head = queue_data["queue"][0]
-    slug = head["slug"]
-    try:
-        st.validate_slug(slug, kind="plan slug")
-    except st.InvalidSlug as exc:
-        print(
-            f"queue head has invalid slug @ {project_root}: {exc}",
-            file=sys.stderr,
-        )
-        return
-
-    state_path = cfg.state_path(slug)
-    existing_status: str | None = None
-    if state_path.exists():
-        try:
-            existing_status = st.load(state_path).get("status")
-        except (OSError, ValueError, st.SchemaVersionMismatch):
-            existing_status = None
-
-    project_slugs = {
-        e.plan_slug for e in registry.entries()
-        if Path(e.project_root).resolve() == project_root
-    }
-    registered = slug in project_slugs
-
-    # Freeze + absorb both require the slug to already be in the registry —
-    # a state.json that exists but isn't registered is a crashed-mid-pop,
-    # handled by the normal-pop path (idempotent state-create + register).
-    if registered and existing_status in _FREEZE_STATUSES:
-        return
-
-    if registered and existing_status in {st.STATUS_DONE, st.STATUS_RUNNING}:
-        with queue.mutate(queue_path) as data:
-            if not data["queue"] or data["queue"][0]["slug"] != slug:
-                return
-            entry = data["queue"].pop(0)
-            data["history"].append({
-                **entry,
-                "ended_at": st.utcnow(),
-                "outcome": "absorbed",
-            })
-        return
-
-    plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
-    if not plan_file.exists():
-        with queue.mutate(queue_path) as data:
-            if not data["queue"] or data["queue"][0]["slug"] != slug:
-                return
-            entry = data["queue"].pop(0)
-            data["history"].append({
-                **entry,
-                "ended_at": st.utcnow(),
-                "outcome": "abandoned",
-            })
-        notify.notify(
-            cfg.notify, notify.KIND_QUEUE_SKIPPED,
-            notify.render_queue_skipped(slug, reason="plan file missing"),
-        )
-        return
-
-    # Normal pop sequence: state.create → registry.register → queue.pop,
-    # all under the queue lock so a crashed run can be replayed without
-    # losing the head. Dispatch fires outside the locks (matches the
-    # cmd_init pattern).
-    with queue.mutate(queue_path) as data:
-        if not data["queue"] or data["queue"][0]["slug"] != slug:
-            return
-        with st.locked(state_path):
-            if not state_path.exists():
-                fresh = st.empty_state(slug, cfg.plan_dir)
-                st.append_event(
-                    fresh, st.EVENT_QUEUE_POPPED,
-                    slug=slug,
-                    added_at=head.get("added_at"),
-                    added_by=head.get("added_by", "operator"),
-                    position=1,
-                )
-                st.save_atomic(state_path, fresh)
-        registry.register(cfg.project_root, slug)
-        data["queue"].pop(0)
-
-    result = _tick_one_plan(slug, cfg, state_path, dispatch=True)
-    print(f"tick (queue-pop) {slug} @ {cfg.project_root}: {result}")
 
 
 _REPAIR_MAX_ATTEMPTS = 3
