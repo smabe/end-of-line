@@ -9,12 +9,13 @@ from tempfile import TemporaryDirectory
 
 from end_of_line.config import (
     CONFIG_FILENAME,
+    ConfigError,
     DispatchSpec,
     load_project_config,
 )
 
 
-class LoadProjectConfigTests(unittest.TestCase):
+class _ConfigTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -22,6 +23,9 @@ class LoadProjectConfigTests(unittest.TestCase):
 
     def _write(self, raw: dict) -> None:
         (self.root / CONFIG_FILENAME).write_text(json.dumps(raw))
+
+
+class LoadProjectConfigTests(_ConfigTestBase):
 
     def test_missing_file_returns_defaults(self) -> None:
         cfg = load_project_config(self.root)
@@ -80,15 +84,7 @@ class LoadProjectConfigTests(unittest.TestCase):
         self.assertEqual(cfg.dispatch.path, "/usr/local/bin:/usr/bin")
 
 
-class TestCommandFieldTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
-
-    def _write(self, raw: dict) -> None:
-        (self.root / CONFIG_FILENAME).write_text(json.dumps(raw))
-
+class TestCommandFieldTests(_ConfigTestBase):
     def test_test_command_default_none_when_absent(self) -> None:
         cfg = load_project_config(self.root)
         self.assertIsNone(cfg.test_command)
@@ -102,6 +98,29 @@ class TestCommandFieldTests(unittest.TestCase):
         self._write({"test_command": None})
         cfg = load_project_config(self.root)
         self.assertIsNone(cfg.test_command)
+
+
+class AutoArchiveFieldTests(_ConfigTestBase):
+    def test_auto_archive_defaults_to_true_when_absent(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.auto_archive, True)
+
+    def test_auto_archive_false_in_orchestrator_json(self) -> None:
+        self._write({"auto_archive": False})
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.auto_archive, False)
+
+    def test_auto_archive_true_explicit(self) -> None:
+        self._write({"auto_archive": True})
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.auto_archive, True)
+
+    def test_auto_archive_non_bool_raises_config_error(self) -> None:
+        for bad_value in ("yes", 1, 0, "true", "false"):
+            with self.subTest(value=bad_value):
+                self._write({"auto_archive": bad_value})
+                with self.assertRaises(ConfigError):
+                    load_project_config(self.root)
 
 
 if __name__ == "__main__":

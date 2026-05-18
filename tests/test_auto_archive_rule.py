@@ -5,6 +5,7 @@ a STATUS_DONE plan's worktree branch has been merged into origin/main.
 """
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -115,15 +116,10 @@ class TestAutoArchiveRuleSkipped(_AutoArchiveRuleBase):
             result = run_rules(self.project, [p])
         self.assertIsNone(result)
 
-    def test_disabled_by_auto_archive_false_via_getattr(self) -> None:
+    def test_disabled_by_auto_archive_false_config_field(self) -> None:
         p = self._plan("alpha", st.STATUS_DONE)
-        fake_cfg = mock.MagicMock()
-        fake_cfg.auto_archive = False
+        (self.project / ".orchestrator.json").write_text(json.dumps({"auto_archive": False}))
         with (
-            mock.patch(
-                "end_of_line.cross_plan_rules.load_project_config",
-                return_value=fake_cfg,
-            ),
             mock.patch("end_of_line.state.is_branch_merged_into", return_value=True),
             mock.patch.object(_cli, "_perform_archive") as mock_archive,
         ):

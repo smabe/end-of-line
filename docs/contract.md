@@ -296,6 +296,7 @@ Optional fields alongside `dispatch` and `notify`:
 |---|---|---|---|
 | `plan_dir` | string | `"plans"` | Subdirectory under `project_root` that holds plan files and `.orchestrator/` |
 | `test_command` | string \| null | null | Shell command run inside the scratch worktree by `dry_merge.attempt_merge` and `clu integrate`. Absent or null → textual-merge-only mode (no suite run). Treated as `shell=True`; the operator owns trust. Example: `"python3 -m unittest discover -s tests"` |
+| `auto_archive` | bool | `true` | When `true`, clu automatically archives every `STATUS_DONE` plan whose worktree branch is an ancestor of `origin/main` on the next cron tick. Set `false` to require manual `clu archive` + `clu unregister`. Non-bool values (strings, integers) raise `ConfigError` at load time. |
 
 ## Notify config schema
 
@@ -351,6 +352,7 @@ The outbound router (`notify.py`) classifies every send by kind. Quiet hours (de
 | `KIND_STALLED_CLAIM` | Live claim's lease expired with plan status `running`; one-shot per claim | Gated |
 | `KIND_GATE_CLEAN` | Dry-merge gate ran; all batch branches textually/suite-clean | Gated |
 | `KIND_GATE_DIRTY` | Dry-merge gate ran; textual conflict or suite failure found | **Bypass** |
+| `KIND_PLAN_AUTO_ARCHIVED` | `auto_archive_rule` detected a merged branch and completed cleanup | Gated |
 
 Bypass set: `{KIND_HALTED, KIND_QUEUE_REPAIR_FAILED, KIND_QUEUE_CORRUPT}`. These are unrecoverable-without-operator states; deferring them past quiet hours would let the chain sit silently broken until morning.
 

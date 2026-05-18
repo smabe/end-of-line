@@ -446,13 +446,34 @@ registry entry.
 
 ### Auto-archive on merge
 
-When using per-plan worktrees, clu can automate the post-ship cleanup step.
-After you merge `clu/<slug>` to `main` and push (`git push origin main`), the
-next cron tick detects that the branch is an ancestor of `origin/main` and
-automatically runs the archive (worktree removed, branch removed, registry
-entry pruned). The operator receives a `KIND_PLAN_AUTO_ARCHIVED` notification
-confirming the cleanup. The full operator workflow and opt-out configuration
-(`auto_archive: false`) are documented in `docs/architecture.md`.
+When using per-plan worktrees, clu automates the post-ship cleanup step.
+After you merge `clu/<slug>` to `main` and push, the next cron tick detects
+that the branch is an ancestor of `origin/main` and automatically runs the
+full archive sequence: worktree removal, branch deletion, plan-file move to
+`plans/shipped/`, and registry entry pruned. The operator receives one
+`plan_auto_archived` notification per cleanup.
+
+**End-to-end flow:**
+
+1. Worker finishes; `clu complete` fires `plan_done`; plan reaches `STATUS_DONE`.
+2. (Multi-plan batches) `dry_merge_gate_rule` fires; clean result → proceed.
+3. Operator: `git merge --no-ff clu/<slug> && git push`.
+4. Next cron tick: `auto_archive_rule` detects merged branch, archives, emits
+   `plan_auto_archived` notification.
+
+No `clu archive` or `clu unregister` calls needed.
+
+**Opt-out** — add to `.orchestrator.json`:
+
+```json
+{
+  "auto_archive": false
+}
+```
+
+With `auto_archive: false`, operators must run `clu archive --plan <slug>` and
+`clu unregister --all-archived` manually, as before. Non-bool values (e.g.
+`"yes"`, `1`) raise `ConfigError` at startup.
 
 ### Cleanup with `clu worktree gc`
 
