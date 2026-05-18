@@ -140,6 +140,11 @@ EVENT_LEASE_EXTENDED = "lease_extended"
 # budget so the next dispatch doesn't count operator-driven aborts against it.
 # Fields: phase, operator (True).
 EVENT_ATTEMPTS_RESET = "attempts_reset"
+# Operator ran `clu force-complete` to mark a phase done when the worker died
+# after writing code but before calling `clu complete`. Paired with a
+# subsequent EVENT_PHASE_COMPLETED so the supervisor's plan_done detection
+# fires normally. Fields: phase, commits, reason, operator (True).
+EVENT_OPERATOR_FORCE_COMPLETE = "operator_force_complete"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"

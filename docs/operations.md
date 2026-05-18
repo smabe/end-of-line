@@ -965,6 +965,39 @@ Check, in order:
    stream — `clu status` shows it and `cat state.json | jq .events[-5:]`
    has the stderr capture.
 
+#### Manual force-complete after operator rescue
+
+When the worker wrote all the code + tests but died before calling
+`clu complete` (typically because the model exited mid-tool-call after
+the final `git commit`), the lease eventually expires and the queue
+shows the phase `stalled`. `clu retry` would re-dispatch a cold worker
+that doesn't know about the on-disk work; what you want is to commit
+the partial work yourself and mark the phase done.
+
+```bash
+git -C <project> add ... && git -C <project> commit -m "..."
+clu force-complete --project <project> --plan <slug> --phase <id> \
+    --commit <sha> --reason "worker died after writing files"
+```
+
+Behavior:
+
+- Releases any active claim on the phase (no token required — operator
+  override).
+- Validates commit SHAs against git (same path as `clu complete`).
+- Emits `EVENT_OPERATOR_FORCE_COMPLETE` (with `reason`) followed by
+  `EVENT_PHASE_COMPLETED` so the supervisor's plan_done detection
+  fires on the next `clu tick` exactly as if a real worker had called
+  `clu complete` — no special notification path.
+
+Refusal cases:
+
+- Phase already completed → use `clu status` to confirm; nothing to do.
+- Phase id not in the plan's `## Sessions index` → typo or wrong plan.
+- Phase has no `EVENT_PHASE_STARTED` and no active claim → suspicious
+  (phase never ran); pass `--really` if you're certain on-disk work
+  exists anyway.
+
 ### Worker log shows `<tool>: command not found`
 
 Symptom: per-worker log at

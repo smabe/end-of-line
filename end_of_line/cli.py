@@ -714,6 +714,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Commit SHA produced by this phase (repeatable, validated against git)",
     )
 
+    p_force_complete = sub.add_parser(
+        "force-complete",
+        help="Operator marks a phase complete after worker died with work on "
+             "disk. Releases any active claim without token validation; emits "
+             "EVENT_OPERATOR_FORCE_COMPLETE + EVENT_PHASE_COMPLETED so the "
+             "supervisor's plan_done detection fires normally next tick.",
+    )
+    add_common(p_force_complete)
+    p_force_complete.add_argument("--phase", required=True)
+    p_force_complete.add_argument(
+        "--commit", action="append", default=[], dest="commits",
+        help="Commit SHA the operator committed on the phase's behalf "
+             "(repeatable, validated against git)",
+    )
+    p_force_complete.add_argument(
+        "--reason", default="",
+        help="Optional explanation, recorded in the audit event.",
+    )
+    p_force_complete.add_argument(
+        "--really", action="store_true", default=False,
+        help="Bypass the never-started safety check (use only when sure the "
+             "phase has on-disk work despite no phase_started event).",
+    )
+
     p_task_done = sub.add_parser(
         "task-done", help="Mark a spawned task done (user or worker)",
     )
@@ -866,6 +890,7 @@ def main(argv: list[str] | None = None) -> int:
         "answer": cmd_answer,
         "spawn": cmd_spawn,
         "complete": cmd_complete,
+        "force-complete": cmd_force_complete,
         "block": cmd_block,
         "task-done": cmd_task_done,
         "heartbeat": cmd_heartbeat,
@@ -3304,6 +3329,70 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
             cfg, data, trigger="complete", require_all_phases_done=True,
         )
     print(f"Completed phase {args.phase}")
+    return ExitCode.OK
+
+
+def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """Operator-side recovery: mark a phase complete when the worker died
+    after writing code but before calling `clu complete` (#48).
+
+    Refuses on already-completed, unknown-phase, and never-started phases
+    (the last is overridable with `--really`). Releases any active claim
+    without token validation, then emits `EVENT_OPERATOR_FORCE_COMPLETE`
+    + `EVENT_PHASE_COMPLETED` so the supervisor's plan_done detection
+    fires normally on the next tick.
+    """
+    try:
+        st.validate_slug(args.phase, kind="phase id")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+    plan_path = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
+    try:
+        phases = parse_sessions_index(plan_path)
+    except (OSError, ValueError) as exc:
+        return _die(ExitCode.UNKNOWN_TASK, f"cannot read plan {plan_path}: {exc}")
+    known_ids = {p.id for p in phases}
+    if args.phase not in known_ids:
+        return _die(
+            ExitCode.UNKNOWN_TASK,
+            f"phase {args.phase!r} not in plan {args.plan!r} "
+            f"(known: {sorted(known_ids)})",
+        )
+    if args.commits:
+        if err := _verify_commit_shas(cfg.project_root, args.commits):
+            return _die(ExitCode.BAD_SHA, err)
+    with st.mutate(state_path) as data:
+        if args.phase in st.completed_phase_ids(data):
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"phase {args.phase!r} already completed — see `clu status`",
+            )
+        ever_started = st.latest_event(
+            data, st.EVENT_PHASE_STARTED, phase=args.phase,
+        ) is not None
+        claim = data.get("current_claim")
+        claim_on_phase = claim is not None and claim.get("phase_id") == args.phase
+        if not ever_started and not claim_on_phase and not args.really:
+            return _die(
+                ExitCode.STATUS_TRANSITION,
+                f"phase {args.phase!r} never started — pass `--really` to "
+                f"force-complete anyway",
+            )
+        if claim_on_phase:
+            st.release_claim(data)
+        st.append_event(
+            data, st.EVENT_OPERATOR_FORCE_COMPLETE,
+            phase=args.phase, commits=list(args.commits),
+            reason=args.reason, operator=True,
+        )
+        st.append_event(
+            data, st.EVENT_PHASE_COMPLETED,
+            phase=args.phase, commits=list(args.commits),
+        )
+        _maybe_cleanup_worktree(
+            cfg, data, trigger="force-complete", require_all_phases_done=True,
+        )
+    print(f"Force-completed phase {args.phase}")
     return ExitCode.OK
 
 

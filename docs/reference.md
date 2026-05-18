@@ -978,7 +978,16 @@ through this.
   live claim, all wear `@_translate_claim_mismatch`.
 - `_verify_commit_shas(project_root, shas)` — runs `git cat-file -e`
   per SHA; returns the first error or `None`. Called from
-  `cmd_complete`; any unknown SHA → `ExitCode.BAD_SHA`.
+  `cmd_complete` and `cmd_force_complete`; any unknown SHA →
+  `ExitCode.BAD_SHA`.
+- `cmd_force_complete` — operator recovery for stalled-with-work-on-disk
+  phases (#48). Validates phase id against `parse_sessions_index`,
+  refuses on already-completed (`STATUS_TRANSITION`), unknown phase
+  (`UNKNOWN_TASK`), and never-started phases without `--really`
+  (`STATUS_TRANSITION`). Releases any active claim without token
+  validation; emits `EVENT_OPERATOR_FORCE_COMPLETE` (audit) followed by
+  `EVENT_PHASE_COMPLETED` so the supervisor's plan_done detection fires
+  on the next tick via the existing path.
 - `_format_heartbeat(data, claim)`, `_humanize_age(seconds)` — display
   helpers for `clu status`.
 
