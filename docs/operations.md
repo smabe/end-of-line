@@ -1434,6 +1434,7 @@ and the next `phase_started` for the same phase starts fresh from zero.
 | `clu release-claim --project P --plan S [--force] [--reason ...] [--reset-attempts]` | Clear a stuck `current_claim`; `--reset-attempts` zeroes the attempt counter so the next dispatch starts fresh |
 | `clu extend-lease --project P --plan S MINUTES` | Add N minutes to the live claim's lease (operator-only) |
 | `clu archive --project P --plan S` | Clean up worktree + branch and move `plans/<slug>*.md` (master + sub-plans) to `plans/archive/<slug>/` via `git mv`. Idempotent — skips the file move if the plan files are already gone. |
+| `clu migrate-archive --project P [--dry-run]` | One-shot migration from the pre-#65 flat `plans/shipped/<file>.md` layout to the nested `plans/archive/<slug>/<file>.md` layout. Groups by longest-prefix master, `git mv`s each group, removes the empty `plans/shipped/` dir, and commits the renames. Idempotent (no-op when `plans/shipped/` is absent). |
 | `clu unregister --project P --plan S` | Drop a plan from the host registry (state file untouched) |
 | `clu unregister --all-archived [--dry-run]` | Prune every registry entry whose master plan file no longer exists. Use after archiving plans (e.g. `post-ship`). `--dry-run` previews. |
 | `clu queue add <slug>... [--front] [--project P]` | Append (or `--front` prepend) one or more plan slugs to the project's queue. Multi-arg is atomic — any validation failure rejects the whole batch |

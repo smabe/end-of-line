@@ -345,9 +345,15 @@ plan's sub-plans don't get visually separated from their master in
 alphabetical order.
 
 The pre-#65 layout was `plans/shipped/<filename>.md` (flat). All
-existing files were migrated to the nested layout in the same
-commit that landed the code change — no compatibility shim. If you
-see a `plans/shipped/` directory in a fork, migrate it.
+existing files in this repo were migrated to the nested layout in
+the same commit that landed the code change — no compatibility
+shim. Downstream projects (or forks) with a stale `plans/shipped/`
+directory can migrate in one shot with `clu migrate-archive
+--project P` (see `cmd_migrate_archive`). The command groups by
+longest-prefix master, `git mv`s each group into
+`plans/archive/<slug>/`, removes the empty `plans/shipped/`, and
+commits the renames. Idempotent — re-running on a project that
+has no `plans/shipped/` is a no-op.
 
 ## What NOT to do
 

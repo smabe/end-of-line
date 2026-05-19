@@ -1054,6 +1054,14 @@ through this.
   plans/archive/<slug>/` (master + sub-plans). Idempotent on the
   file-move step (skips if already gone). Surfaces `WORKTREE_SETUP_FAILED` if `git mv` fails
   with the file present.
+- `cmd_migrate_archive(args)` — one-shot migration from the pre-#65
+  flat `plans/shipped/<file>.md` layout to the nested
+  `plans/archive/<slug>/<file>.md` layout. Groups stems via
+  `_group_shipped_files_by_master` (longest-prefix-master rule), runs
+  one `git mv` per group into the target subdir, removes the empty
+  `plans/shipped/` directory, and commits the renames in a single
+  `chore: migrate-archive ...` commit. No-op when `plans/shipped/`
+  is absent. `--dry-run` prints the grouping without mutating.
 - `cmd_unregister_all_archived(args)` — batch prune of registry
   entries whose master plan file no longer exists. `--dry-run`
   previews. Emits a per-entry stderr warning when the orphan state

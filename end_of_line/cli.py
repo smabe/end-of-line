@@ -401,6 +401,23 @@ def main(argv: list[str] | None = None) -> int:
         "--plan", required=True, help="Plan slug.",
     )
 
+    p_migrate_archive = sub.add_parser(
+        "migrate-archive",
+        help="One-shot migration from the pre-#65 flat layout "
+             "(`plans/shipped/<file>.md`) to the nested layout "
+             "(`plans/archive/<slug>/<file>.md`). Groups by longest-"
+             "prefix master, `git mv`s each group, removes the empty "
+             "`plans/shipped/` directory, and commits the renames. "
+             "Idempotent (no-op when `plans/shipped/` is absent).",
+    )
+    p_migrate_archive.add_argument(
+        "--project", type=Path, required=True, help="Project root.",
+    )
+    p_migrate_archive.add_argument(
+        "--dry-run", action="store_true",
+        help="Preview the grouping without moving any files.",
+    )
+
     p_integrate = sub.add_parser(
         "integrate",
         help="Dry-merge a batch's branches in a scratch worktree and "
@@ -977,6 +994,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(args)
     if args.cmd == "archive":
         return cmd_archive(args)
+    if args.cmd == "migrate-archive":
+        return cmd_migrate_archive(args)
     if args.cmd == "blockers":
         return cmd_blockers(args)
     if args.cmd == "watch":
@@ -3817,6 +3836,105 @@ def cmd_archive(args) -> int:
             f"Archive {args.plan}: retained {before['path']} "
             f"(branch {before['branch']} ahead of origin).{move_note}",
         )
+    return ExitCode.OK
+
+
+def _group_shipped_files_by_master(stems: list[str]) -> dict[str, list[str]]:
+    """Group `plans/shipped/` stems into per-master-slug buckets.
+
+    A stem `M` is a master iff no other stem `P` satisfies
+    `M.startswith(P + "-")`. Each stem is assigned to its longest-prefix
+    master (which is unique by construction: if two masters both matched,
+    one would have to start with the other + "-", contradicting both
+    being masters). Every stem matches at minimum itself.
+    """
+    masters = [
+        s for s in stems
+        if not any(t != s and s.startswith(t + "-") for t in stems)
+    ]
+    groups: dict[str, list[str]] = {}
+    for s in stems:
+        candidates = [m for m in masters if s == m or s.startswith(m + "-")]
+        slug = max(candidates, key=len)
+        groups.setdefault(slug, []).append(f"{s}.md")
+    return groups
+
+
+def cmd_migrate_archive(args) -> int:
+    """One-shot migration from `plans/shipped/<file>.md` (pre-#65 flat)
+    to `plans/archive/<slug>/<file>.md` (nested per master slug).
+
+    No-op when `plans/shipped/` is absent. Removes the empty `plans/
+    shipped/` after a successful migration. Commits the renames so the
+    operator can review with `git show HEAD`.
+    """
+    cfg = load_project_config(args.project.resolve())
+    plan_dir = cfg.project_root / cfg.plan_dir
+    shipped_dir = plan_dir / "shipped"
+    if not shipped_dir.exists():
+        print("nothing to migrate: no plans/shipped/ directory")
+        return ExitCode.OK
+    stems = sorted(p.stem for p in shipped_dir.glob("*.md"))
+    if not stems:
+        if args.dry_run:
+            print("nothing to migrate: plans/shipped/ is empty (dry-run)")
+        else:
+            shipped_dir.rmdir()
+            print("nothing to migrate: removed empty plans/shipped/")
+        return ExitCode.OK
+    groups = _group_shipped_files_by_master(stems)
+    if args.dry_run:
+        print(
+            f"would migrate {len(stems)} file(s) into "
+            f"{len(groups)} slug subdir(s):",
+        )
+        for slug, files in sorted(groups.items()):
+            print(f"  plans/archive/{slug}/  ({len(files)} file(s))")
+        return ExitCode.OK
+    for slug, files in sorted(groups.items()):
+        dest = plan_dir / "archive" / slug
+        dest.mkdir(parents=True, exist_ok=True)
+        sources = [str(shipped_dir / f) for f in files]
+        try:
+            subprocess.run(
+                ["git", "mv", *sources, str(dest)],
+                check=True, capture_output=True, text=True,
+                cwd=str(cfg.project_root), timeout=30,
+            )
+        except subprocess.CalledProcessError as exc:
+            return _die(
+                ExitCode.GENERIC,
+                f"git mv failed for slug {slug!r}: "
+                f"{exc.stderr.strip() or str(exc)}",
+            )
+        except subprocess.TimeoutExpired:
+            return _die(ExitCode.GENERIC, f"git mv timed out for slug {slug!r}")
+    if shipped_dir.exists() and not any(shipped_dir.iterdir()):
+        shipped_dir.rmdir()
+    try:
+        subprocess.run(
+            ["git", "-C", str(cfg.project_root), "commit",
+             "-m", f"chore: migrate-archive {len(stems)} file(s) "
+             f"to plans/archive/<slug>/ layout"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        return _die(
+            ExitCode.GENERIC,
+            f"git commit failed after migration "
+            f"(renames are staged; commit manually): "
+            f"{exc.stderr.strip() or str(exc)}",
+        )
+    except subprocess.TimeoutExpired:
+        return _die(
+            ExitCode.GENERIC,
+            "git commit timed out after migration "
+            "(renames are staged; commit manually)",
+        )
+    print(
+        f"migrated {len(stems)} file(s) into {len(groups)} slug "
+        f"subdir(s) under plans/archive/",
+    )
     return ExitCode.OK
 
 
