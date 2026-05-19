@@ -1,5 +1,6 @@
 """Tests for watch.bootstrap_task_list — TASK_CREATE emission on startup."""
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -115,3 +116,51 @@ class BootstrapEmissionTest(unittest.TestCase):
         sink = io.StringIO()
         bootstrap_task_list([nonexistent], _make_cfg_loader(self.tmp), sink)
         self.assertEqual(sink.getvalue(), "")
+
+    def _state_path_with_claim(self, slug: str, phase_id: str, *,
+                                plan_status: str = "running") -> Path:
+        p = self.tmp / "plans" / ".orchestrator" / f"{slug}.state.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({
+            "plan_slug": slug,
+            "status": plan_status,
+            "current_claim": {"phase_id": phase_id},
+        }))
+        return p
+
+    def test_bootstrap_emits_task_update_when_phase_active(self):
+        slug = "my-plan"
+        state = self._state_path_with_claim(slug, "p1")
+        self._write_master(slug, ["p1", "p2"])
+        sink = io.StringIO()
+        bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
+        lines = sink.getvalue().splitlines()
+        updates = [l for l in lines if l.startswith("TASK_UPDATE")]
+        self.assertEqual(len(updates), 2)
+        self.assertIn(
+            'TASK_UPDATE task=my-plan status=in_progress msg="bootstrap: plan running"',
+            updates,
+        )
+        self.assertIn(
+            'TASK_UPDATE task=my-plan/p1 parent=my-plan status=in_progress msg="bootstrap: already active"',
+            updates,
+        )
+
+    def test_bootstrap_no_task_update_when_no_claim(self):
+        slug = "my-plan"
+        state = self._state_path(slug)  # writes "{}" — current_claim absent
+        self._write_master(slug, ["p1"])
+        sink = io.StringIO()
+        bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
+        updates = [l for l in sink.getvalue().splitlines() if l.startswith("TASK_UPDATE")]
+        self.assertEqual(updates, [])
+
+    def test_bootstrap_skips_task_update_when_status_not_running(self):
+        # current_claim present but plan is blocked/paused — out of scope per #62
+        slug = "my-plan"
+        state = self._state_path_with_claim(slug, "p1", plan_status="blocked")
+        self._write_master(slug, ["p1"])
+        sink = io.StringIO()
+        bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
+        updates = [l for l in sink.getvalue().splitlines() if l.startswith("TASK_UPDATE")]
+        self.assertEqual(updates, [])
