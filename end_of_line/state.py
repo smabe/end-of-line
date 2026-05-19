@@ -180,6 +180,10 @@ EVENT_VERIFY_STAMPED = "verify_stamped"
 # Worker ran `clu attest --simplify`; current HEAD stamped into
 # attestations.simplify on current_claim. Fields: phase, commit_sha.
 EVENT_SIMPLIFY_STAMPED = "simplify_stamped"
+# Operator passed --skip-verify / --skip-simplify on `clu complete` to bypass a
+# quality gate. Fields: phase, operator (True). One event per skip per complete.
+EVENT_OPERATOR_SKIP_VERIFY = "operator_skip_verify"
+EVENT_OPERATOR_SKIP_SIMPLIFY = "operator_skip_simplify"
 
 # Attestation kind constants — keys inside current_claim.attestations.
 ATTESTATION_VERIFY = "verify"

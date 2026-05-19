@@ -123,6 +123,7 @@ class WorktreeCleanupBase(unittest.TestCase):
             rc = main([
                 "complete", "--project", str(self.project), "--plan", slug,
                 "--phase", phase, "--token", token,
+                "--skip-verify", "--skip-simplify",
             ])
         return rc, err.getvalue()
 
