@@ -270,6 +270,33 @@ class SupervisorTestCase(CluTestCase):
         self.assertFalse(reaped["cmdline_mismatch"])
         self.assertEqual(reaped["pid"], 88888)
 
+    def test_lease_expired_emits_coolant_stop(self) -> None:
+        """The lease-expiry branch decrements coolant's counter — the
+        worker's CPU footprint dropped when the process died (or hung)
+        even though no callback fired.
+
+        Snapshot of phase_id + claimed_by must happen BEFORE the
+        `release_if_expired` call wipes `current_claim`. Verified by
+        asserting the emit's session_id matches the claim's
+        original `claimed_by`.
+        """
+        self._claim_and_expire(pid=77777)
+        data = self._read()
+        original_token = data["current_claim"]["claimed_by"]
+        reap_return = st.ReapResult(
+            signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False,
+        )
+        with mock.patch(
+            "end_of_line.state.reap_orphan_pid", return_value=reap_return,
+        ), mock.patch("end_of_line.supervisor.coolant.emit_stop") as emit:
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "lease_expired")
+        emit.assert_called_once()
+        kwargs = emit.call_args.kwargs
+        self.assertEqual(kwargs["session_id"], original_token)
+        self.assertEqual(kwargs["agent_id"], "clu-test-plan-a")
+        self.assertEqual(kwargs["agent_type"], "clu-worker")
+
 
 if __name__ == "__main__":
     unittest.main()

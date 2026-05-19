@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import inbox, notify, state as st, state_blocker
+from . import coolant, inbox, notify, state as st, state_blocker
 from .config import ProjectConfig
 from .plan_parser import parse_sessions_index
 
@@ -228,7 +228,16 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         if claim := data.get("current_claim"):
             pid = claim.get("pid")
             phase_id = claim["phase_id"]
+            claimed_by = claim.get("claimed_by")
             if st.release_if_expired(data):
+                if claimed_by and phase_id:
+                    coolant.emit_stop(
+                        session_id=claimed_by,
+                        agent_id=coolant.format_agent_id(
+                            data["plan_slug"], phase_id,
+                        ),
+                        agent_type=coolant.AGENT_TYPE,
+                    )
                 if pid:
                     reap = st.reap_orphan_pid(
                         pid,
