@@ -567,6 +567,14 @@ def get_worktree(data: dict) -> dict | None:
     return data.get("worktree")
 
 
+def claim_git_root(data: dict, cfg) -> Path:
+    """Return the git root for the active claim; respects worktree dispatch."""
+    wt = get_worktree(data)
+    if wt and wt.get("path"):
+        return Path(wt["path"])
+    return cfg.project_root
+
+
 def open_blockers(data: dict) -> list[dict]:
     """All blockers with `answer is None`, in order.
 
