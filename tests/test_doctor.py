@@ -219,5 +219,57 @@ class DoctorCommandTestCase(unittest.TestCase):
         self.assertIn("+15550000000", stdout)
 
 
+class DoctorEffortWarningTestCase(unittest.TestCase):
+    """Tests for the Effort-cell health scan added in lease-reliability/#58."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self._tmp.name)
+        isolate_registry(self, self.project)
+        (self.project / "plans").mkdir()
+        (self.project / ".orchestrator.json").write_text(
+            json.dumps({"dispatch": {"kind": "shell", "command": "echo"}})
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _init_plan(self, slug: str, effort: str) -> None:
+        plan_md = (
+            f"# {slug}\n\n## Sessions index\n\n"
+            "| Session | Plan file | Scope | Effort |\n"
+            "|---|---|---|---|\n"
+            f"| A | `{slug}-a.md` | thing | {effort} |\n"
+        )
+        (self.project / "plans" / f"{slug}.md").write_text(plan_md)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            main(["init", "--project", str(self.project), "--plan", slug])
+
+    def _run_doctor(self) -> tuple[int, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["doctor", "--project", str(self.project)])
+        return rc, out.getvalue()
+
+    def test_doctor_warns_on_malformed_effort(self) -> None:
+        self._init_plan("myplan", "abc")
+        rc, stdout = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn("[warn]", stdout)
+        self.assertIn("myplan:a", stdout)
+        self.assertIn("Effort=abc", stdout)
+
+    def test_doctor_silent_when_effort_clean(self) -> None:
+        self._init_plan("myplan", "1h")
+        _, stdout = self._run_doctor()
+        self.assertNotIn("[warn]", stdout)
+
+    def test_doctor_silent_when_effort_empty(self) -> None:
+        self._init_plan("myplan", "")
+        _, stdout = self._run_doctor()
+        self.assertNotIn("[warn]", stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

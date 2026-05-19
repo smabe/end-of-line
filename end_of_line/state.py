@@ -78,7 +78,7 @@ _ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _TOKEN_LEN = 16  # 64 bits, enough for token-auth use (red team L1).
 
 # Defaults — also embedded in empty_state(); changing here updates both.
-DEFAULT_LEASE_TTL_MIN = 30
+DEFAULT_LEASE_TTL_MIN = 60
 DEFAULT_SLA_HOURS = 24
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_SPAWNS_PER_PHASE = 10

@@ -274,6 +274,17 @@ posture in one place:
   An unbounded spawn loop is the easiest way for a misbehaving
   worker to burn LLM budget.
 
+## Lease scale (`lease_ttl_scale`)
+
+`cmd_init` computes per-phase lease TTLs from the Effort column in each
+plan's Sessions index, scaled by `lease_ttl_scale` (default `0.5` in
+`.orchestrator.json`). Default `0.5` means "trust Effort half-way" — a
+phase declared as `3h` gets a 90-minute lease, with the global default
+(`DEFAULT_LEASE_TTL_MIN`, currently 60 min) as the floor. Raise to `1.0`
+if you trust your Effort estimates; never go below the global default.
+Malformed or missing Effort cells fall back to the global default and
+surface in `clu doctor`.
+
 ## What NOT to do
 
 - **No SwiftUI / iOS code.** clu is pure Python. The `/review` skill

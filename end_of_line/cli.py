@@ -1958,6 +1958,7 @@ def cmd_doctor(args) -> int:
     print(f"  (source: {source})")
 
     _print_notify_health(cfg)
+    _print_effort_health(cfg)
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
@@ -2005,6 +2006,31 @@ def _print_notify_health(cfg: ProjectConfig) -> None:
             continue
         source = "override" if override else "auto-resolved"
         print(f"  iMessage[to={to}]: self_chat={resolved} ({source})")
+
+
+def _print_effort_health(cfg: ProjectConfig) -> None:
+    """Warn about phases with non-empty but unparseable Effort cells.
+
+    Empty Effort is fine (plan pre-dates the convention); only non-empty
+    cells that fail parse_effort_minutes are surfaced — those will fall
+    back to the global default and silently get a shorter lease than intended.
+    Plan-read failures are silently skipped — this is advisory, not hard.
+    """
+    project_root = cfg.project_root.resolve()
+    malformed: list[tuple[str, str, str]] = []
+    for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
+        plan_file = cfg.master_plan_path(p.slug)
+        try:
+            phases = parse_sessions_index(plan_file)
+        except Exception:
+            continue
+        for phase in phases:
+            if phase.effort.strip() and parse_effort_minutes(phase.effort) is None:
+                malformed.append((p.slug, phase.id, phase.effort))
+    if malformed:
+        print("\n[warn] Malformed Effort cells (lease will fall back to default):")
+        for plan_slug, phase_id, raw in malformed:
+            print(f"  {plan_slug}:{phase_id}  Effort={raw}")
 
 
 def _print_worktree_health(cfg: ProjectConfig) -> None:
