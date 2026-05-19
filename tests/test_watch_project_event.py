@@ -422,6 +422,25 @@ class EdgeCasesTest(unittest.TestCase):
                             "p")
         self.assertIsNotNone(out)
 
+    def test_orphan_reaped_filtered_default(self):
+        out = project_event(
+            _evt(st.EVENT_PHASE_ORPHAN_REAPED, phase="impl", pid=12345,
+                 signaled="SIGTERM", cmdline_mismatch=False),
+            "my-plan",
+        )
+        self.assertIsNone(out)
+
+    def test_orphan_reaped_shown_with_verbose(self):
+        out = project_event(
+            _evt(st.EVENT_PHASE_ORPHAN_REAPED, phase="impl", pid=12345,
+                 signaled="SIGTERM", cmdline_mismatch=False),
+            "my-plan", verbose=True,
+        )
+        self.assertIsNotNone(out)
+        self.assertIn("orphan reaped", out)
+        self.assertIn("pid=12345", out)
+        self.assertIn("signaled=SIGTERM", out)
+
 
 if __name__ == "__main__":
     unittest.main()

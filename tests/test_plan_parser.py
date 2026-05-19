@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from end_of_line import state as st
-from end_of_line.plan_parser import parse_sessions_index
+from end_of_line.plan_parser import parse_effort_minutes, parse_sessions_index
 
 
 WATCH_PLAN = """\
@@ -116,6 +116,40 @@ class TestSessionsIndex(unittest.TestCase):
         self.assertEqual(len(phases), 1)
         self.assertEqual(phases[0].id, "a")
         self.assertEqual(phases[0].plan_file, "foo-a.md")
+
+
+class TestParseEffortMinutes(unittest.TestCase):
+    def test_parse_hours_integer(self) -> None:
+        self.assertEqual(parse_effort_minutes("3h"), 180)
+
+    def test_parse_hours_decimal(self) -> None:
+        self.assertEqual(parse_effort_minutes("1.5h"), 90)
+
+    def test_parse_minutes(self) -> None:
+        self.assertEqual(parse_effort_minutes("30min"), 30)
+        self.assertEqual(parse_effort_minutes("90min"), 90)
+
+    def test_parse_hours_range_takes_upper(self) -> None:
+        self.assertEqual(parse_effort_minutes("2-3h"), 180)
+        self.assertEqual(parse_effort_minutes("1.5-2h"), 120)
+
+    def test_parse_case_insensitive(self) -> None:
+        self.assertEqual(parse_effort_minutes("1H"), 60)
+        self.assertEqual(parse_effort_minutes("45MIN"), 45)
+
+    def test_parse_whitespace_tolerant(self) -> None:
+        self.assertEqual(parse_effort_minutes(" 2h "), 120)
+        self.assertEqual(parse_effort_minutes("30 min"), 30)
+
+    def test_parse_malformed_returns_none(self) -> None:
+        self.assertIsNone(parse_effort_minutes(""))
+        self.assertIsNone(parse_effort_minutes("abc"))
+        self.assertIsNone(parse_effort_minutes("3"))
+        self.assertIsNone(parse_effort_minutes("3 hours"))
+        self.assertIsNone(parse_effort_minutes("-1h"))
+
+    def test_parse_none_input_returns_none(self) -> None:
+        self.assertIsNone(parse_effort_minutes(None))
 
 
 if __name__ == "__main__":

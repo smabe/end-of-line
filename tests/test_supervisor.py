@@ -218,6 +218,58 @@ class SupervisorTestCase(CluTestCase):
         self.assertEqual(second.action, "idle")
         self.assertIsNone(second.notify_body)
 
+    # --- orphan-reap on lease expiry ---
+
+    def _claim_and_expire(self, pid: int | None = None) -> None:
+        tick(self.state_path, self.cfg)  # claims "a"
+        with st.locked(self.state_path):
+            data = st.load(self.state_path)
+            data["current_claim"]["lease_expires"] = "2020-01-01T00:00:00Z"
+            if pid is not None:
+                data["current_claim"]["pid"] = pid
+            else:
+                data["current_claim"].pop("pid", None)
+            st.save_atomic(self.state_path, data)
+
+    def test_lease_expired_reaps_orphan_pid(self) -> None:
+        self._claim_and_expire(pid=99999)
+        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+            mock_reap.return_value = st.ReapResult(
+                signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False
+            )
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "lease_expired")
+        mock_reap.assert_called_once_with(
+            99999, cmdline_match="/clu-phase test-plan a"
+        )
+        event_types = [e["type"] for e in self._read()["events"]]
+        expired_idx = next(i for i, t in enumerate(event_types) if t == st.EVENT_LEASE_EXPIRED)
+        reaped_idx = next(i for i, t in enumerate(event_types) if t == st.EVENT_PHASE_ORPHAN_REAPED)
+        self.assertLess(expired_idx, reaped_idx)
+
+    def test_lease_expired_no_pid_skips_reap(self) -> None:
+        self._claim_and_expire(pid=None)
+        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "lease_expired")
+        mock_reap.assert_not_called()
+        events = self._read()["events"]
+        orphan_events = [e for e in events if e["type"] == st.EVENT_PHASE_ORPHAN_REAPED]
+        self.assertEqual(orphan_events, [])
+
+    def test_orphan_reaped_event_carries_signal(self) -> None:
+        self._claim_and_expire(pid=88888)
+        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+            mock_reap.return_value = st.ReapResult(
+                signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False
+            )
+            tick(self.state_path, self.cfg)
+        events = self._read()["events"]
+        reaped = next(e for e in events if e["type"] == st.EVENT_PHASE_ORPHAN_REAPED)
+        self.assertEqual(reaped["signaled"], "SIGTERM")
+        self.assertFalse(reaped["cmdline_mismatch"])
+        self.assertEqual(reaped["pid"], 88888)
+
 
 if __name__ == "__main__":
     unittest.main()

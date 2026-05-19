@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,6 +81,7 @@ class ProjectConfig:
     auto_archive: bool = True
     tick_on_action: bool = True
     quality: QualitySpec = field(default_factory=QualitySpec)
+    lease_ttl_scale: float = 0.5
 
     def queue_path(self) -> Path:
         """Per-project queue file. Lives in the same `.orchestrator/` dir as
@@ -154,6 +156,21 @@ def _validate_quality(raw: dict) -> QualitySpec:
     return QualitySpec(verify_command=vc, simplify_threshold=st_raw)
 
 
+def _validate_lease_ttl_scale(raw: dict) -> float:
+    val = raw.get("lease_ttl_scale", 0.5)
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return 0.5
+    if val < 0:
+        print(
+            f"warning: lease_ttl_scale={val!r} is negative; using default 0.5",
+            file=sys.stderr,
+        )
+        return 0.5
+    return val
+
+
 def _validate_auto_archive(raw: dict) -> bool:
     value = raw.get("auto_archive", True)
     if not isinstance(value, bool):
@@ -209,4 +226,5 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         auto_archive=_validate_auto_archive(raw),
         tick_on_action=_validate_tick_on_action(raw),
         quality=_validate_quality(raw),
+        lease_ttl_scale=_validate_lease_ttl_scale(raw),
     )

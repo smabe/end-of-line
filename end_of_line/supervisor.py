@@ -226,8 +226,21 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         _emit_stuck_blocker_repings(data, config, side_notifies)
 
         if claim := data.get("current_claim"):
+            pid = claim.get("pid")
+            phase_id = claim["phase_id"]
             if st.release_if_expired(data):
-                return _attach(TickResult("lease_expired", f"phase={claim['phase_id']}"))
+                if pid:
+                    reap = st.reap_orphan_pid(
+                        pid,
+                        cmdline_match=f"/clu-phase {data['plan_slug']} {phase_id}",
+                    )
+                    st.append_event(
+                        data, st.EVENT_PHASE_ORPHAN_REAPED,
+                        phase=phase_id, pid=pid,
+                        signaled=reap.signaled,
+                        cmdline_mismatch=reap.cmdline_mismatch,
+                    )
+                return _attach(TickResult("lease_expired", f"phase={phase_id}"))
 
         # Surface stalled claims once. Don't release the claim — the lease
         # owns retry; this event is just the signal the notification adapter
@@ -298,7 +311,6 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
 
         completed = st.completed_phase_ids(data)
         max_attempts = data["config"].get("max_attempts_per_phase", st.DEFAULT_MAX_ATTEMPTS)
-        ttl = data["config"].get("lease_ttl_minutes", st.DEFAULT_LEASE_TTL_MIN)
         for phase in phases:
             if phase.id in completed or st.phase_has_open_blocker(data, phase.id):
                 continue
@@ -319,6 +331,7 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         data["plan_slug"], phase.id, prior_attempts,
                     ),
                 ))
+            ttl = st.lease_ttl_for_phase(data, phase.id)
             token = st.claim_phase(data, phase.id, ttl)
             return _attach(TickResult(
                 "dispatch",

@@ -36,7 +36,7 @@ from pathlib import Path
 
 from . import cross_plan_rules, dispatch, dry_merge, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
-from .plan_parser import parse_sessions_index
+from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
 
@@ -1372,6 +1372,24 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
                 val = getattr(args, key, None)
                 if val is not None:
                     data["config"][key] = val
+            plan_path = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
+            try:
+                phases = parse_sessions_index(plan_path)
+            except FileNotFoundError:
+                phases = []
+            if phases:
+                global_default = data["config"]["lease_ttl_minutes"]
+                scale = cfg.lease_ttl_scale
+                phase_records = []
+                for phase in phases:
+                    record: dict = {"id": phase.id}
+                    effort_minutes = parse_effort_minutes(phase.effort)
+                    if effort_minutes is not None:
+                        record["lease_ttl_minutes"] = max(
+                            global_default, round(effort_minutes * scale)
+                        )
+                    phase_records.append(record)
+                data["phases"] = phase_records
             if worktree_record is not None:
                 data["worktree"] = worktree_record
             st.save_atomic(state_path, data)
@@ -1940,6 +1958,7 @@ def cmd_doctor(args) -> int:
     print(f"  (source: {source})")
 
     _print_notify_health(cfg)
+    _print_effort_health(cfg)
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
@@ -1987,6 +2006,31 @@ def _print_notify_health(cfg: ProjectConfig) -> None:
             continue
         source = "override" if override else "auto-resolved"
         print(f"  iMessage[to={to}]: self_chat={resolved} ({source})")
+
+
+def _print_effort_health(cfg: ProjectConfig) -> None:
+    """Warn about phases with non-empty but unparseable Effort cells.
+
+    Empty Effort is fine (plan pre-dates the convention); only non-empty
+    cells that fail parse_effort_minutes are surfaced — those will fall
+    back to the global default and silently get a shorter lease than intended.
+    Plan-read failures are silently skipped — this is advisory, not hard.
+    """
+    project_root = cfg.project_root.resolve()
+    malformed: list[tuple[str, str, str]] = []
+    for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
+        plan_file = cfg.master_plan_path(p.slug)
+        try:
+            phases = parse_sessions_index(plan_file)
+        except Exception:
+            continue
+        for phase in phases:
+            if phase.effort.strip() and parse_effort_minutes(phase.effort) is None:
+                malformed.append((p.slug, phase.id, phase.effort))
+    if malformed:
+        print("\n[warn] Malformed Effort cells (lease will fall back to default):")
+        for plan_slug, phase_id, raw in malformed:
+            print(f"  {plan_slug}:{phase_id}  Effort={raw}")
 
 
 def _print_worktree_health(cfg: ProjectConfig) -> None:

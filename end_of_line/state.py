@@ -12,10 +12,13 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -75,7 +78,7 @@ _ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _TOKEN_LEN = 16  # 64 bits, enough for token-auth use (red team L1).
 
 # Defaults — also embedded in empty_state(); changing here updates both.
-DEFAULT_LEASE_TTL_MIN = 30
+DEFAULT_LEASE_TTL_MIN = 60
 DEFAULT_SLA_HOURS = 24
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_SPAWNS_PER_PHASE = 10
@@ -184,6 +187,9 @@ EVENT_SIMPLIFY_STAMPED = "simplify_stamped"
 # quality gate. Fields: phase, operator (True). One event per skip per complete.
 EVENT_OPERATOR_SKIP_VERIFY = "operator_skip_verify"
 EVENT_OPERATOR_SKIP_SIMPLIFY = "operator_skip_simplify"
+# Supervisor reaped an orphaned worker process after lease expiry.
+# Fields: phase, pid, signaled ("SIGTERM" | "SIGTERM+SIGKILL"), cmdline_mismatch (bool).
+EVENT_PHASE_ORPHAN_REAPED = "phase_orphan_reaped"
 
 # Attestation kind constants — keys inside current_claim.attestations.
 ATTESTATION_VERIFY = "verify"
@@ -192,6 +198,55 @@ ATTESTATION_SIMPLIFY = "simplify"
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
 BLOCKER_REPLAN = "blocked_replan"
+
+# Signal strings stored in ReapResult.signaled — constants prevent silent typos.
+SIGNAL_TERM = "SIGTERM"
+SIGNAL_TERM_THEN_KILL = "SIGTERM+SIGKILL"
+
+
+@dataclass
+class ReapResult:
+    signaled: str | None
+    escalated_kill: bool
+    cmdline_mismatch: bool
+
+
+def reap_orphan_pid(pid: int, cmdline_match: str | None = None) -> ReapResult:
+    """Send SIGTERM to an orphaned worker PID, escalating to SIGKILL after 5s.
+
+    PID-reuse guard: when cmdline_match is given, the process cmdline is
+    checked via `ps` before signaling. On mismatch returns without killing.
+    Do NOT use os.waitpid — we never forked this PID; WNOHANG → ECHILD.
+    """
+    if cmdline_match is not None:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return ReapResult(None, False, False)
+        if cmdline_match not in result.stdout:
+            return ReapResult(None, False, True)
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return ReapResult(None, False, False)
+
+    for _ in range(20):
+        time.sleep(0.25)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return ReapResult(SIGNAL_TERM, False, False)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return ReapResult(SIGNAL_TERM_THEN_KILL, True, False)
 
 
 def _now_utc() -> _dt.datetime:
@@ -234,6 +289,7 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
             "max_queue_adds_per_phase": DEFAULT_MAX_QUEUE_ADDS_PER_PHASE,
             "stalled_heartbeat_minutes": DEFAULT_STALLED_HEARTBEAT_MIN,
         },
+        "phases": [],
         "events": [],
         "created_at": utcnow(),
         "batch_id": None,
@@ -333,6 +389,17 @@ def save_atomic(state_path: Path, data: dict) -> None:
 
 def append_event(data: dict, event_type: str, **fields: Any) -> None:
     data["events"].append({"ts": utcnow(), "type": event_type, **fields})
+
+
+def lease_ttl_for_phase(data: dict, phase_id: str) -> int:
+    """Return the effective lease TTL (minutes) for a phase.
+
+    Resolution order: per-phase override → global config → DEFAULT_LEASE_TTL_MIN.
+    """
+    for ph in data.get("phases", []):
+        if ph.get("id") == phase_id and "lease_ttl_minutes" in ph:
+            return int(ph["lease_ttl_minutes"])
+    return int(data.get("config", {}).get("lease_ttl_minutes", DEFAULT_LEASE_TTL_MIN))
 
 
 def release_if_expired(data: dict) -> bool:
