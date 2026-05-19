@@ -1334,6 +1334,30 @@ def _maybe_print_worktree_conflict_hint(
     )
 
 
+def _ensure_quality_stub(project_root: Path) -> bool:
+    """Augment `.orchestrator.json` with a `quality` block when missing.
+
+    Surfaces `quality.verify_required` so operators see the knob without
+    having to read clu's docs (#61 recommendation A). Idempotent — only
+    fires when:
+      - .orchestrator.json exists (we don't conjure config from nothing)
+      - the parse succeeds (don't clobber an operator's broken file)
+      - the `quality` key is absent (operator hasn't expressed intent yet)
+
+    Returns True iff the file was modified.
+    """
+    cfg_path = project_root / CONFIG_FILENAME
+    try:
+        raw: dict = json.loads(cfg_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    if "quality" in raw:
+        return False
+    raw["quality"] = {"verify_required": True}
+    cfg_path.write_text(json.dumps(raw, indent=2) + "\n")
+    return True
+
+
 def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     for attr, label in [
         ("lease_ttl_minutes", "--lease-ttl-minutes"),
@@ -1403,6 +1427,7 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     # Auto-register so fleet view / inbound routing can find the plan
     # without a separate setup step.
     registry.register(cfg.project_root, args.plan)
+    _ensure_quality_stub(cfg.project_root)
     print(f"Initialized {state_path}")
     _print_worker_model(cfg)
     _maybe_print_worktree_conflict_hint(
