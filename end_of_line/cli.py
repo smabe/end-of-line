@@ -3357,7 +3357,7 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
         }
         if args.reason:
             fields["reason"] = args.reason
-        st.release_claim(data)
+        st.release_claim_and_emit(data)
         st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
         if pid:
             reap = st.reap_orphan_pid(
@@ -3563,7 +3563,9 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                         )
 
     with st.mutate(state_path) as data:
-        st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
+        st.release_claim_and_emit(
+            data, expected_token=args.token, expected_phase=args.phase,
+        )
         st.append_event(
             data, st.EVENT_PHASE_COMPLETED,
             phase=args.phase, commits=list(args.commits),
@@ -3632,7 +3634,7 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 f"force-complete anyway",
             )
         if claim_on_phase:
-            st.release_claim(data)
+            st.release_claim_and_emit(data)
         st.append_event(
             data, st.EVENT_OPERATOR_FORCE_COMPLETE,
             phase=args.phase, commits=list(args.commits),
@@ -3949,7 +3951,9 @@ def cmd_heartbeat(args, cfg: ProjectConfig, state_path: Path) -> int:
 @_translate_claim_mismatch
 def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
-        st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
+        st.release_claim_and_emit(
+            data, expected_token=args.token, expected_phase=args.phase,
+        )
         blocker_id = st.add_blocker(
             data, args.phase, args.question, args.options,
             args.context, args.type,

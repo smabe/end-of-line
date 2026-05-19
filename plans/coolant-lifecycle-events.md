@@ -184,4 +184,4 @@ counter, the events log, and `gate.sh`'s parallel-mode formula see workers.
 
 ## Parking lot
 
-(empty at start)
+- **Test-fixture dedupe** (phase-4 simplify finding). `tests/test_coolant_callbacks.py`, `tests/test_release_claim.py`, `tests/test_force_complete.py`, `tests/test_complete_refusal.py` all replicate the same setUp (real git repo + init plan + claim), a per-file `PLAN_BODY` fixture, an `_argv()` helper, and a `_git()` shell-out. Reuse-specialist recommended a `GitProjectTestCase(CluTestCase)` base in `tests/__init__.py`. Out of scope for #54 — file a separate issue once #54 ships.
