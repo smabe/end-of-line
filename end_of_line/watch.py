@@ -39,6 +39,7 @@ _DEFAULT_VISIBLE: frozenset[str] = frozenset(filter(None, {
 _VERBOSE_ONLY: frozenset[str] = frozenset({
     st.EVENT_LEASE_EXPIRED,
     st.EVENT_LEASE_EXTENDED,
+    st.EVENT_PHASE_ORPHAN_REAPED,
     st.EVENT_CLAIM_FORCE_RELEASED,
     st.EVENT_ATTEMPTS_RESET,
     st.EVENT_STUCK_BLOCKER_REPINGED,
@@ -133,6 +134,10 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
     # Verbose-only
     st.EVENT_LEASE_EXPIRED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: lease expired"
+    ),
+    st.EVENT_PHASE_ORPHAN_REAPED: lambda slug, e: (
+        f"{_phase_prefix(slug, e)}: orphan reaped "
+        f"pid={e.get('pid', '?')} signaled={e.get('signaled', '?')}"
     ),
     st.EVENT_LEASE_EXTENDED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: lease extended by "

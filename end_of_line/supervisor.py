@@ -226,8 +226,21 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         _emit_stuck_blocker_repings(data, config, side_notifies)
 
         if claim := data.get("current_claim"):
+            pid = claim.get("pid")
+            phase_id = claim["phase_id"]
             if st.release_if_expired(data):
-                return _attach(TickResult("lease_expired", f"phase={claim['phase_id']}"))
+                if pid:
+                    reap = st.reap_orphan_pid(
+                        pid,
+                        cmdline_match=f"/clu-phase {data['plan_slug']} {phase_id}",
+                    )
+                    st.append_event(
+                        data, st.EVENT_PHASE_ORPHAN_REAPED,
+                        phase=phase_id, pid=pid,
+                        signaled=reap.signaled,
+                        cmdline_mismatch=reap.cmdline_mismatch,
+                    )
+                return _attach(TickResult("lease_expired", f"phase={phase_id}"))
 
         # Surface stalled claims once. Don't release the claim — the lease
         # owns retry; this event is just the signal the notification adapter
