@@ -27,6 +27,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -903,6 +904,18 @@ def main(argv: list[str] | None = None) -> int:
         choices=[st.BLOCKER_INPUT, st.BLOCKER_REPLAN],
     )
 
+    p_verify = sub.add_parser(
+        "verify",
+        help="Run the project verify command and stamp attestations.verify on success",
+    )
+    add_common(p_verify)
+    p_verify.add_argument(
+        "--phase", default="", help="Phase id (required when passing --token)",
+    )
+    p_verify.add_argument(
+        "--token", default="", help="Worker claim token (optional; operator omits)",
+    )
+
     args = parser.parse_args(argv)
     if getattr(args, "no_notify", False):
         notify.set_global_suppress(True)
@@ -971,6 +984,7 @@ def main(argv: list[str] | None = None) -> int:
         "release-claim": cmd_release_claim,
         "prior-blocker": cmd_prior_blocker,
         "logs": cmd_logs,
+        "verify": cmd_verify,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -3624,6 +3638,50 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
     )
     _spawn_post_action_tick(cfg)
     print(f"Blocked {blocker_id} on phase {args.phase}")
+    return ExitCode.OK
+
+
+@_translate_claim_mismatch
+def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """HEAD is captured before the command to prevent a mid-test commit from
+    slipping past the gate. Token validation runs before the subprocess so a
+    forged or stale token fails immediately rather than after a 600s test run.
+    """
+    cmd = cfg.resolved_verify_command()
+    if not cmd:
+        return _die(
+            ExitCode.GENERIC,
+            "no verify command configured "
+            "(set quality.verify_command or test_command in .orchestrator.json)",
+        )
+    if args.token:
+        st.assert_claim_match(st.load(state_path), args.token, args.phase)
+    head = _resolve_ref(cfg.project_root, "HEAD")
+    if not head:
+        return _die(ExitCode.GENERIC, "could not resolve HEAD SHA")
+    try:
+        result = subprocess.run(
+            shlex.split(cmd),
+            cwd=str(cfg.project_root),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return _die(ExitCode.GENERIC, f"verify timed out after 600s: {cmd}")
+    if result.returncode != 0:
+        tail = result.stderr.strip().splitlines()[-20:]
+        return _die(
+            ExitCode.GENERIC,
+            f"verify failed (rc={result.returncode}):\n" + "\n".join(tail),
+        )
+    with st.mutate(state_path) as data:
+        st.stamp_attestation(data, st.ATTESTATION_VERIFY, head)
+        st.append_event(
+            data, st.EVENT_VERIFY_STAMPED,
+            phase=args.phase, commit_sha=head,
+        )
+    print(f"verified at {head}")
     return ExitCode.OK
 
 

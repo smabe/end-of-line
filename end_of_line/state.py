@@ -173,6 +173,14 @@ EVENT_ATTEMPTS_RESET = "attempts_reset"
 # subsequent EVENT_PHASE_COMPLETED so the supervisor's plan_done detection
 # fires normally. Fields: phase, commits, reason, operator (True).
 EVENT_OPERATOR_FORCE_COMPLETE = "operator_force_complete"
+# Worker (or operator) ran `clu verify`; the configured verify command exited 0
+# and the result was stamped into attestations.verify on current_claim.
+# Fields: phase, commit_sha.
+EVENT_VERIFY_STAMPED = "verify_stamped"
+
+# Attestation kind constants — keys inside current_claim.attestations.
+ATTESTATION_VERIFY = "verify"
+ATTESTATION_SIMPLIFY = "simplify"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
