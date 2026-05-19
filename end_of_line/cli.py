@@ -3371,14 +3371,14 @@ def _verify_commit_shas(project_root: Path, shas: list[str]) -> str | None:
     return None
 
 
-def _compute_phase_diff(project_root: Path, base_sha: str) -> tuple[int, int]:
+def _compute_phase_diff(git_root: Path, base_sha: str) -> tuple[int, int]:
     """Return (files_changed, lines_changed) for diff base_sha..HEAD.
 
     Binary files emit '-' for line counts — treated as 0. Returns (0, 0) on
     any git error (no commits / empty diff / bad base ref).
     """
     result = subprocess.run(
-        ["git", "-C", str(project_root), "diff", "--numstat", f"{base_sha}..HEAD"],
+        ["git", "-C", str(git_root), "diff", "--numstat", f"{base_sha}..HEAD"],
         capture_output=True, text=True, timeout=10,
     )
     out = result.stdout.strip()
@@ -3429,7 +3429,8 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     claim = data_snap.get("current_claim") or {}
 
     if not args.skip_verify or not args.skip_simplify:
-        head_sha = _resolve_ref(cfg.project_root, "HEAD") or ""
+        git_root = st.claim_git_root(data_snap, cfg)
+        head_sha = _resolve_ref(git_root, "HEAD") or ""
 
         if not args.skip_verify:
             stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
@@ -3444,7 +3445,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         if not args.skip_simplify:
             base_sha = _claim_base_sha(claim, data_snap)
             if base_sha:
-                files_changed, lines_changed = _compute_phase_diff(cfg.project_root, base_sha)
+                files_changed, lines_changed = _compute_phase_diff(git_root, base_sha)
                 t_files, t_lines = cfg.simplify_threshold_or_default()
                 if files_changed > t_files or lines_changed > t_lines:
                     stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_SIMPLIFY)
@@ -3771,15 +3772,17 @@ def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
             "no verify command configured "
             "(set quality.verify_command or test_command in .orchestrator.json)",
         )
+    data_snap = st.load(state_path)
     if args.token:
-        st.assert_claim_match(st.load(state_path), args.token, args.phase)
-    head = _resolve_ref(cfg.project_root, "HEAD")
+        st.assert_claim_match(data_snap, args.token, args.phase)
+    git_root = st.claim_git_root(data_snap, cfg)
+    head = _resolve_ref(git_root, "HEAD")
     if not head:
         return _die(ExitCode.GENERIC, "could not resolve HEAD SHA")
     try:
         result = subprocess.run(
             shlex.split(cmd),
-            cwd=str(cfg.project_root),
+            cwd=str(git_root),
             capture_output=True,
             text=True,
             timeout=600,
@@ -3814,7 +3817,9 @@ def cmd_attest(args, cfg: ProjectConfig, state_path: Path) -> int:
             ExitCode.GENERIC,
             "clu attest: at least one attestation flag required (currently: --simplify)",
         )
-    head = _resolve_ref(cfg.project_root, "HEAD")
+    data_snap = st.load(state_path)
+    git_root = st.claim_git_root(data_snap, cfg)
+    head = _resolve_ref(git_root, "HEAD")
     if not head:
         return _die(ExitCode.GENERIC, "could not resolve HEAD SHA")
     with st.mutate(state_path) as data:

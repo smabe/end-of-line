@@ -14,7 +14,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import CONFIG_FILENAME
-from tests import isolate_registry
+from tests import isolate_registry, make_worktree
 
 
 PLAN_BODY = """\
@@ -178,6 +178,29 @@ class CmdAttestTestCase(unittest.TestCase):
             pass
         help_text = buf.getvalue()
         self.assertIn("--simplify", help_text)
+
+    # ---- worktree-mode --------------------------------------------------------
+
+    def test_attest_stamps_worktree_head_not_canonical(self) -> None:
+        """In worktree-mode dispatch, the stamp must record the worktree HEAD."""
+        wt_tmp, wt_path, wt_sha = make_worktree(self.project)
+        try:
+            self.assertNotEqual(wt_sha, self.head_sha)
+            with st.mutate(self.state_path) as data:
+                data["worktree"] = {
+                    "path": str(wt_path),
+                    "branch": "clu/p",
+                    "base_ref": self.head_sha,
+                }
+            token = self._claim()
+            rc = main(self._argv("--phase", "phase-a", "--token", token, "--simplify"))
+            self.assertEqual(rc, ExitCode.OK)
+            stamp = self._simplify_stamp()
+            self.assertIsNotNone(stamp)
+            self.assertEqual(stamp["commit_sha"], wt_sha,
+                             "stamp must use worktree HEAD, not canonical HEAD")
+        finally:
+            wt_tmp.cleanup()
 
 
 if __name__ == "__main__":

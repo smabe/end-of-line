@@ -234,6 +234,43 @@ class CompleteRefusalTestCase(unittest.TestCase):
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
         self.assertIn("simplify", err.lower())
 
+    # ---- worktree-mode --------------------------------------------------------
+
+    def test_complete_refuses_when_stamp_is_canonical_but_worktree_advanced(self) -> None:
+        """Stamps at canonical HEAD must not satisfy the gate when a worktree
+        has advanced beyond it. Pre-fix: both attest and complete resolved
+        canonical HEAD, so C==C passed — the bug. Post-fix: complete resolves
+        worktree HEAD (W1 != canonical C) and refuses.
+        """
+        wt_tmp = tempfile.TemporaryDirectory()
+        try:
+            wt_path = Path(wt_tmp.name) / "wt"
+            _git("worktree", "add", "-b", "clu/p", str(wt_path), cwd=self.project)
+            (wt_path / "data.txt").write_text("line 1\nline 2\n")
+            _git("add", "data.txt", cwd=wt_path)
+            _git("commit", "-m", "W1", cwd=wt_path)
+            wt_sha = _git("rev-parse", "HEAD", cwd=wt_path)
+            self.assertNotEqual(wt_sha, self.base_sha)
+            _write_config(self.project, quality={"simplify_threshold": {"files": 0, "lines": 0}})
+            with st.mutate(self.state_path) as data:
+                data["worktree"] = {
+                    "path": str(wt_path),
+                    "branch": "clu/p",
+                    "base_ref": self.base_sha,
+                }
+            token = self._claim()
+            # Simulate buggy old attest: stamps at canonical HEAD (self.base_sha),
+            # not the worktree HEAD. Fixed complete must catch this mismatch.
+            self._stamp_verify(self.base_sha)
+            self._stamp_simplify(self.base_sha)
+            rc, err = self._complete(token)
+            self.assertEqual(rc, ExitCode.STATUS_TRANSITION,
+                             "complete must refuse when stamps reference canonical HEAD "
+                             "but worktree has advanced")
+            self.assertTrue(self._claim_is_live(), "claim must stay live on refusal")
+        finally:
+            wt_tmp.cleanup()
+
     # ---- combined / edge cases -------------------------------------------------
 
     def test_complete_both_skip_flags_independent(self) -> None:

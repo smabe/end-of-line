@@ -78,6 +78,21 @@ def make_git_project(base: Path, *, subdir: str = "myrepo") -> Path:
     return project
 
 
+def make_worktree(
+    project: Path, *, branch: str = "clu/p",
+) -> tuple["tempfile.TemporaryDirectory[str]", Path, str]:
+    """Create a linked git worktree with one empty commit on a new branch.
+
+    Returns (wt_tmp, wt_path, wt_sha). Caller must call wt_tmp.cleanup().
+    """
+    wt_tmp = tempfile.TemporaryDirectory()
+    wt_path = Path(wt_tmp.name) / "wt"
+    git(project, "worktree", "add", "-b", branch, str(wt_path))
+    git(wt_path, "commit", "--allow-empty", "-m", "W")
+    wt_sha = git(wt_path, "rev-parse", "HEAD").stdout.strip()
+    return wt_tmp, wt_path, wt_sha
+
+
 def isolate_monitor_marker(testcase: unittest.TestCase, tmp_path: Path) -> None:
     """Point clu's monitor marker file at a per-test XDG dir.
 
