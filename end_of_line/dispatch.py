@@ -169,6 +169,11 @@ def dispatch_for_tick(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{result.phase_id}.{result.token}.log"
 
+    if result.worktree:
+        _maybe_write_attempt_context(
+            state_file, log_dir, plan_slug, result.phase_id, result.worktree,
+        )
+
     # Worktree-bearing plans run with cwd pointing at the worktree dir;
     # main-repo plans keep cwd at project_root. The `{project}` template
     # substitution always resolves to project_root regardless — that's the
@@ -317,6 +322,147 @@ def dispatch_repair_worker(
         except (OSError, subprocess.TimeoutExpired):
             pass
         return REPAIR_RC_TIMEOUT
+
+
+_PREV_ATTEMPT_TIMEOUT_SEC = 5
+
+# Map of EVENT_* type → human-readable phrase for the prior-attempt
+# block. Keep narrow — speculative reasons read as confident lies.
+_TERMINATION_REASONS = {
+    st.EVENT_LEASE_EXPIRED: "lease expired (worker didn't callback in time)",
+    st.EVENT_CLAIM_FORCE_RELEASED: "operator force-released the claim",
+    st.EVENT_PHASE_BLOCKED: "worker blocked on a question",
+    st.EVENT_DISPATCH_FAILED: "previous dispatch failed",
+    st.EVENT_SYSTEMIC_FAILURE: "systemic failure (rate-limit, auth, missing binary)",
+}
+
+
+def _run_git_safe(cwd: str, args: list[str]) -> str | None:
+    """Return stdout on rc=0; None on any failure (timeout, non-zero, missing git).
+
+    Used by the prior-attempt context block — degrading to None lets the
+    caller emit "unavailable" rather than fail dispatch outright when a
+    worktree is in a weird state.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True, text=True,
+            timeout=_PREV_ATTEMPT_TIMEOUT_SEC,
+        )
+        return result.stdout if result.returncode == 0 else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _last_termination_reason(state_data: dict, phase_id: str) -> str | None:
+    for evt in reversed(state_data.get("events", [])):
+        if evt.get("phase") != phase_id:
+            continue
+        reason = _TERMINATION_REASONS.get(evt.get("type"))
+        if reason:
+            return reason
+    return None
+
+
+def _prev_attempt_context(
+    worktree_path: str,
+    base_ref: str,
+    phase_id: str,
+    attempt: int,
+    termination_reason: str | None,
+) -> str:
+    """Build a markdown block describing prior-attempt worktree state.
+
+    Three git probes (status, diff stat, log against base). Each degrades
+    gracefully to an "unavailable" line on failure — dispatch must never
+    fail because a worktree probe timed out.
+    """
+    parts = [f"## Previous attempt state (attempt {attempt})"]
+    if termination_reason:
+        parts.append(f"Prior attempt ended: {termination_reason}")
+
+    status = _run_git_safe(worktree_path, ["status", "--short"])
+    if status is None:
+        parts.append("(git status unavailable)")
+    elif status.strip() == "":
+        parts.append("Worktree is clean — no uncommitted changes from prior attempts.")
+    else:
+        parts.append("### Uncommitted changes\n```\n" + status.rstrip() + "\n```")
+
+    diff_stat = _run_git_safe(worktree_path, ["diff", "--stat", "HEAD"])
+    if diff_stat and diff_stat.strip():
+        parts.append("### Diff stat\n```\n" + diff_stat.rstrip() + "\n```")
+
+    log = _run_git_safe(worktree_path, ["log", "--oneline", "HEAD", f"^{base_ref}"])
+    if log is None:
+        parts.append("(commit log unavailable)")
+    elif log.strip() == "":
+        parts.append("No commits landed by prior attempts.")
+    else:
+        parts.append("### Commits landed by prior attempts\n```\n" + log.rstrip() + "\n```")
+
+    parts.append(
+        f"You may keep, continue, or reset these edits — decide based on "
+        f"whether they align with the sub-plan. Reset is "
+        f"`git reset --hard {base_ref} && git clean -fd`. Otherwise inspect "
+        f"and continue."
+    )
+    return "\n\n".join(parts) + "\n"
+
+
+def _context_path(log_dir: Path, plan_slug: str, phase_id: str) -> Path:
+    return log_dir / f"attempt-context.{plan_slug}.{phase_id}.md"
+
+
+def _write_prev_attempt_context(
+    log_dir: Path,
+    plan_slug: str,
+    phase_id: str,
+    content: str,
+) -> Path:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = _context_path(log_dir, plan_slug, phase_id)
+    path.write_text(content)
+    return path
+
+
+def _delete_stale_attempt_context(
+    log_dir: Path,
+    plan_slug: str,
+    phase_id: str,
+) -> None:
+    path = _context_path(log_dir, plan_slug, phase_id)
+    if path.exists():
+        path.unlink()
+
+
+def _maybe_write_attempt_context(
+    state_file: Path,
+    log_dir: Path,
+    plan_slug: str,
+    phase_id: str,
+    worktree: dict,
+) -> None:
+    """Write or delete the prior-attempt context sidecar based on attempt count."""
+    try:
+        state_data = json.loads(state_file.read_text())
+    except _DISPATCH_FALLBACK_ERRORS:
+        return
+    claim = state_data.get("current_claim") or {}
+    attempts = int(claim.get("attempts", 1))
+    base_ref = worktree.get("base_ref")
+    if attempts <= 1 or not base_ref:
+        _delete_stale_attempt_context(log_dir, plan_slug, phase_id)
+        return
+    content = _prev_attempt_context(
+        worktree_path=worktree["path"],
+        base_ref=base_ref,
+        phase_id=phase_id,
+        attempt=attempts,
+        termination_reason=_last_termination_reason(state_data, phase_id),
+    )
+    _write_prev_attempt_context(log_dir, plan_slug, phase_id, content)
 
 
 def worktree_alive(path: Path) -> bool:
