@@ -115,13 +115,50 @@ If you see an answered blocker, that means: you asked a question previously, the
 
 7. **Call the callback and exit.** Output of the callback is logged. Exit code 0 from the callback means clu accepted it.
 
+## Pre-complete callbacks (mandatory)
+
+Before calling `clu complete`, you MUST attest that the project's
+quality mandates passed. clu refuses `complete` with
+`STATUS_TRANSITION` if either stamp is missing or stale (i.e. a
+commit landed after the stamp).
+
+**Always** — re-run verification, then stamp:
+```bash
+clu verify --project "$PROJECT_ROOT" --plan "$PLAN" \
+    --phase "$PHASE" --token "$TOKEN"
+```
+This runs `quality.verify_command` (or `test_command`) and stamps
+`attestations.verify` on rc=0. On rc!=0 the command fails — fix
+the breakage, commit, re-run `clu verify`.
+
+**If your diff exceeds threshold** (>1 file OR ~30 lines by
+default; per-project override in `.orchestrator.json:quality.simplify_threshold`)
+— run `/simplify`, then stamp:
+```bash
+clu attest --simplify --project "$PROJECT_ROOT" --plan "$PLAN" \
+    --phase "$PHASE" --token "$TOKEN"
+```
+clu cannot run `/simplify` itself — it's a Claude-side review
+skill. The attestation is your word that you ran it.
+
+**Stamps go stale.** Each stamp records the HEAD SHA at attest-time.
+If you commit AFTER stamping, the stamp is stale and `clu complete`
+refuses. Order: do the work, run /simplify, commit, run tests,
+`clu verify`, `clu attest --simplify`, `clu complete`. If you
+need to commit a fix after stamping, re-stamp.
+
+**Skip flags exist but are operator-owned.** `clu complete
+--skip-verify` and `--skip-simplify` bypass each gate but emit
+audit events. Workers should not use these — if you think a phase
+legitimately needs a skip, `clu block` with the situation instead.
+
 ## Quality mandates
 
 These mandates apply on every project that uses clu. The project's CLAUDE.md adds project-specific rules on top (naming, exit-code patterns, event constants, files to avoid); read it before your first commit.
 
 - **TDD when modifying logic.** Failing test first, then the minimal implementation that turns it green. Skip TDD only for pure refactor, config, docs, or content edits. The project's CLAUDE.md names the test framework.
 
-- **Review after non-trivial diffs.** If the diff spans more than one file or ~30 lines, run the project's review pass (`/simplify`, a project-local equivalent, or a deliberate self-review). Look specifically for rule-of-three extraction opportunities, dead code, and copy-paste from sibling phases.
+- **Review after non-trivial diffs.** If the diff spans more than one file or ~30 lines, run the project's review pass (`/simplify`, a project-local equivalent, or a deliberate self-review). Look specifically for rule-of-three extraction opportunities, dead code, and copy-paste from sibling phases. Stamp via `clu attest --simplify` after running /simplify, or complete will refuse.
 
 - **Structured commit messages.** Title (one line) / Why (motivation) / What's new (the surface) / Under the hood (the non-obvious choices) / Tests (count + what's covered) / `Co-Authored-By:` trailer naming the model you're running (e.g. `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`). Commit messages outlast the code — treat them as primary documentation.
 
@@ -133,7 +170,7 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Honor the project's CLAUDE.md.** It's the project-specific layer of these mandates: naming conventions, exit-code patterns, event constants, files to avoid. Read it before your first commit on a project, and re-read when you're unsure.
 
-- **Re-run verification right before complete.** The project's primary check — test suite, build, lint, whichever is authoritative — must pass at the moment you exit, not just at some point earlier in the phase. Run it from a fresh process before calling `clu complete` so you're verifying the post-edit state, not stale memory of an earlier run. Record the exact result (test count + delta, lint clean, build green) and put it in the completion summary. A wrong "tests passed" claim is the single fastest way to lose operator trust; a worker that consistently re-verifies and reports honestly is the foundation everything else builds on.
+- **Re-run verification right before complete.** The project's primary check — test suite, build, lint, whichever is authoritative — must pass at the moment you exit, not just at some point earlier in the phase. Run it from a fresh process before calling `clu complete` so you're verifying the post-edit state, not stale memory of an earlier run. Record the exact result (test count + delta, lint clean, build green) and put it in the completion summary. A wrong "tests passed" claim is the single fastest way to lose operator trust; a worker that consistently re-verifies and reports honestly is the foundation everything else builds on. `clu verify` does this for you AND stamps; running the test suite manually and skipping `clu verify` will still leave `complete` refused.
 
 - **The completion summary is load-bearing.** When you call `clu complete`, your final message to the operator is the only signal they have about what shipped. Mention what actually committed (SHA), the verification result from the mandate above (count + delta), and anything you tried that didn't work and the operator should know about (e.g. "couldn't run `gh issue close` because the binary wasn't on PATH; operator should close manually"). Silence on a failure mode reads as "everything went fine," which is worse than admitting a small thing didn't.
 

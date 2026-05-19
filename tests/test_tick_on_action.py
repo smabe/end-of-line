@@ -120,6 +120,7 @@ class SpawnInvocationTests(_TickOnActionBase):
             rc = main([
                 "complete", "--project", str(self.project), "--plan", "test-plan",
                 "--phase", "a", "--token", self.token, "--commit", self.sha,
+                "--skip-verify", "--skip-simplify",
             ])
         self.assertEqual(rc, 0)
         self._assert_helper_called_for_project(helper)

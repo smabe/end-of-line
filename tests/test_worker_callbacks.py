@@ -75,6 +75,7 @@ class WorkerCallbackTestCase(unittest.TestCase):
             "complete", "--project", str(self.project), "--plan", "test-plan",
             "--phase", "a", "--token", self.token,
             "--commit", self.sha,
+            "--skip-verify", "--skip-simplify",
         )
         self.assertEqual(rc, 0)
         data = st.load(self.state_path)

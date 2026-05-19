@@ -11,6 +11,7 @@ from end_of_line.config import (
     CONFIG_FILENAME,
     ConfigError,
     DispatchSpec,
+    QualitySpec,
     load_project_config,
 )
 
@@ -144,6 +145,66 @@ class TickOnActionFieldTests(_ConfigTestBase):
                 self._write({"tick_on_action": bad_value})
                 with self.assertRaises(ConfigError):
                     load_project_config(self.root)
+
+
+class QualityFieldTests(_ConfigTestBase):
+    def test_quality_block_default_when_absent(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertIsNone(cfg.quality.verify_command)
+        self.assertIsNone(cfg.quality.simplify_threshold)
+
+    def test_quality_verify_command_loaded(self) -> None:
+        self._write({"quality": {"verify_command": "make test"}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.quality.verify_command, "make test")
+
+    def test_quality_simplify_threshold_loaded(self) -> None:
+        self._write({"quality": {"simplify_threshold": {"files": 3, "lines": 50}}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.quality.simplify_threshold, {"files": 3, "lines": 50})
+
+    def test_resolved_verify_command_prefers_quality_block(self) -> None:
+        self._write({"test_command": "fallback-cmd", "quality": {"verify_command": "preferred-cmd"}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.resolved_verify_command(), "preferred-cmd")
+
+    def test_resolved_verify_command_falls_back_to_test_command(self) -> None:
+        self._write({"test_command": "make test"})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.resolved_verify_command(), "make test")
+
+    def test_resolved_verify_command_returns_none_when_neither_set(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertIsNone(cfg.resolved_verify_command())
+
+    def test_simplify_threshold_or_default_returns_default(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.simplify_threshold_or_default(), (1, 30))
+
+    def test_simplify_threshold_or_default_returns_override(self) -> None:
+        self._write({"quality": {"simplify_threshold": {"files": 3, "lines": 50}}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.simplify_threshold_or_default(), (3, 50))
+
+    def test_quality_verify_command_non_string_raises(self) -> None:
+        self._write({"quality": {"verify_command": 42}})
+        with self.assertRaises(ConfigError):
+            load_project_config(self.root)
+
+    def test_quality_simplify_threshold_non_dict_raises(self) -> None:
+        self._write({"quality": {"simplify_threshold": "fast"}})
+        with self.assertRaises(ConfigError):
+            load_project_config(self.root)
+
+    def test_quality_simplify_threshold_negative_files_raises(self) -> None:
+        self._write({"quality": {"simplify_threshold": {"files": -1, "lines": 10}}})
+        with self.assertRaises(ConfigError):
+            load_project_config(self.root)
+
+    def test_quality_simplify_threshold_missing_key_raises(self) -> None:
+        self._write({"quality": {"simplify_threshold": {"files": 1}}})
+        with self.assertRaises(ConfigError):
+            load_project_config(self.root)
 
 
 if __name__ == "__main__":

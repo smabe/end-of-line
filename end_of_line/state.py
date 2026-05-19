@@ -173,6 +173,21 @@ EVENT_ATTEMPTS_RESET = "attempts_reset"
 # subsequent EVENT_PHASE_COMPLETED so the supervisor's plan_done detection
 # fires normally. Fields: phase, commits, reason, operator (True).
 EVENT_OPERATOR_FORCE_COMPLETE = "operator_force_complete"
+# Worker (or operator) ran `clu verify`; the configured verify command exited 0
+# and the result was stamped into attestations.verify on current_claim.
+# Fields: phase, commit_sha.
+EVENT_VERIFY_STAMPED = "verify_stamped"
+# Worker ran `clu attest --simplify`; current HEAD stamped into
+# attestations.simplify on current_claim. Fields: phase, commit_sha.
+EVENT_SIMPLIFY_STAMPED = "simplify_stamped"
+# Operator passed --skip-verify / --skip-simplify on `clu complete` to bypass a
+# quality gate. Fields: phase, operator (True). One event per skip per complete.
+EVENT_OPERATOR_SKIP_VERIFY = "operator_skip_verify"
+EVENT_OPERATOR_SKIP_SIMPLIFY = "operator_skip_simplify"
+
+# Attestation kind constants — keys inside current_claim.attestations.
+ATTESTATION_VERIFY = "verify"
+ATTESTATION_SIMPLIFY = "simplify"
 
 # Blocker types
 BLOCKER_INPUT = "blocked_input"
@@ -454,6 +469,34 @@ def release_claim(
         )
     assert_claim_match(data, expected_token, expected_phase)
     data["current_claim"] = None
+
+
+def stamp_attestation(data: dict, kind: str, commit_sha: str) -> None:
+    """Stamp current_claim.attestations[kind] with HEAD SHA + now().
+
+    Lazy-inits the attestations map. Overwrites any prior stamp for the
+    same kind. Raises ValueError if no current_claim.
+    """
+    claim = data.get("current_claim")
+    if not claim:
+        raise ValueError("stamp_attestation: no current_claim")
+    claim.setdefault("attestations", {})
+    claim["attestations"][kind] = {
+        "at": utcnow(),
+        "commit_sha": commit_sha,
+    }
+
+
+def attestation_commit_sha(data: dict, kind: str) -> str | None:
+    """Return the commit_sha from current_claim.attestations[kind], or None.
+
+    Encapsulates the nested-dict drill so callers (the cmd_complete gate)
+    stay oblivious to the attestation map's shape.
+    """
+    claim = data.get("current_claim") or {}
+    attestations = claim.get("attestations") or {}
+    entry = attestations.get(kind)
+    return entry.get("commit_sha") if entry else None
 
 
 def add_blocker(

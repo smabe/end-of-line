@@ -1121,8 +1121,31 @@ through this.
   dirty. Does **not** mutate plan state and does **not** write follow-up
   plans (the cross-plan rule owns those).
 - Worker-side commands: `cmd_complete`, `cmd_block`, `cmd_spawn`,
-  `cmd_heartbeat`, `cmd_task_done`. All require `--token` matching the
-  live claim, all wear `@_translate_claim_mismatch`.
+  `cmd_heartbeat`, `cmd_task_done`, `cmd_verify`, `cmd_attest`. All
+  require `--token` matching the live claim (except `cmd_verify` in
+  operator mode), all wear `@_translate_claim_mismatch`.
+- `cmd_verify(args)` — runs `quality.verify_command` (falling back
+  to `test_command`) via `subprocess.run`. Captures HEAD SHA before
+  the command starts (so a mid-test commit can't slip a stale SHA
+  into the stamp). On rc=0 stamps `current_claim.attestations.verify`
+  and emits `EVENT_VERIFY_STAMPED`. On rc!=0 exits non-zero with
+  stderr tail; state file untouched so the operator can re-run.
+  `--token` validates against the live claim when present (worker
+  mode); operator omits it for manual re-verification or rescue.
+- `cmd_attest(args)` — worker self-attestation. `--simplify` stamps
+  `current_claim.attestations.simplify` with current HEAD and emits
+  `EVENT_SIMPLIFY_STAMPED`. Token required. No command execution —
+  clu cannot run `/simplify` (a Claude-side skill); the stamp is the
+  worker's word that it ran. Extensible: future `--lint`,
+  `--type-check` flavors stamp different keys on the same command.
+  At least one flag required (bare `clu attest` is an error).
+- `cmd_complete` gains `--skip-verify` and `--skip-simplify` flags.
+  Each bypass emits `EVENT_OPERATOR_SKIP_VERIFY` /
+  `EVENT_OPERATOR_SKIP_SIMPLIFY` as audit events; the phase still
+  completes. Operator-owned — workers should `clu block` rather than
+  skip. The quality gates evaluate in order: verify first (HEAD match
+  required), then simplify (cumulative diff from branch base vs
+  threshold).
 - `_verify_commit_shas(project_root, shas)` — runs `git cat-file -e`
   per SHA; returns the first error or `None`. Called from
   `cmd_complete` and `cmd_force_complete`; any unknown SHA →

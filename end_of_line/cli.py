@@ -27,6 +27,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -778,6 +779,14 @@ def main(argv: list[str] | None = None) -> int:
         "--commit", action="append", default=[], dest="commits",
         help="Commit SHA produced by this phase (repeatable, validated against git)",
     )
+    p_complete.add_argument(
+        "--skip-verify", action="store_true", default=False,
+        help="Bypass the verify attestation gate (emits audit event)",
+    )
+    p_complete.add_argument(
+        "--skip-simplify", action="store_true", default=False,
+        help="Bypass the simplify attestation gate (emits audit event)",
+    )
 
     p_force_complete = sub.add_parser(
         "force-complete",
@@ -903,6 +912,38 @@ def main(argv: list[str] | None = None) -> int:
         choices=[st.BLOCKER_INPUT, st.BLOCKER_REPLAN],
     )
 
+    p_verify = sub.add_parser(
+        "verify",
+        help="Run the project verify command and stamp attestations.verify on success",
+    )
+    add_common(p_verify)
+    p_verify.add_argument(
+        "--phase", default="", help="Phase id (required when passing --token)",
+    )
+    p_verify.add_argument(
+        "--token", default="", help="Worker claim token (optional; operator omits)",
+    )
+
+    p_attest = sub.add_parser(
+        "attest",
+        help=(
+            "Attest that a quality pass ran on the current claim. "
+            "Stamps current HEAD as the attested commit. "
+            "Use --simplify after running /simplify; additional flavors land here."
+        ),
+    )
+    add_common(p_attest)
+    p_attest.add_argument(
+        "--phase", required=True, help="Phase id (must match the live claim)",
+    )
+    p_attest.add_argument(
+        "--token", required=True, help="Worker claim token",
+    )
+    p_attest.add_argument(
+        "--simplify", action="store_true",
+        help="Attest that /simplify was run on this phase's diff",
+    )
+
     args = parser.parse_args(argv)
     if getattr(args, "no_notify", False):
         notify.set_global_suppress(True)
@@ -971,6 +1012,8 @@ def main(argv: list[str] | None = None) -> int:
         "release-claim": cmd_release_claim,
         "prior-blocker": cmd_prior_blocker,
         "logs": cmd_logs,
+        "verify": cmd_verify,
+        "attest": cmd_attest,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -3328,17 +3371,105 @@ def _verify_commit_shas(project_root: Path, shas: list[str]) -> str | None:
     return None
 
 
+def _compute_phase_diff(project_root: Path, base_sha: str) -> tuple[int, int]:
+    """Return (files_changed, lines_changed) for diff base_sha..HEAD.
+
+    Binary files emit '-' for line counts — treated as 0. Returns (0, 0) on
+    any git error (no commits / empty diff / bad base ref).
+    """
+    result = subprocess.run(
+        ["git", "-C", str(project_root), "diff", "--numstat", f"{base_sha}..HEAD"],
+        capture_output=True, text=True, timeout=10,
+    )
+    out = result.stdout.strip()
+    if result.returncode != 0 or not out:
+        return (0, 0)
+    files = 0
+    lines = 0
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        files += 1
+        try:
+            added = int(parts[0]) if parts[0] != "-" else 0
+            deleted = int(parts[1]) if parts[1] != "-" else 0
+            lines += added + deleted
+        except ValueError:
+            continue
+    return (files, lines)
+
+
+def _claim_base_sha(claim: dict, data: dict) -> str | None:
+    """Return the base SHA to diff against for this claim's phase.
+
+    Worktree-mode: base_ref recorded on plan init (start of the whole plan branch).
+    Non-worktree: head_sha_at_claim captured when claim was created.
+    Returns None if neither is available (legacy claims; simplify gate skipped).
+    """
+    wt = st.get_worktree(data)
+    if wt:
+        return wt.get("base_ref")
+    return claim.get("head_sha_at_claim")
+
+
 @_translate_claim_mismatch
 def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.commits:
         if err := _verify_commit_shas(cfg.project_root, args.commits):
             return _die(ExitCode.BAD_SHA, err)
+
+    # Token pre-check (read-only): fail fast before git diff or quality gate
+    # evaluation so a bad token always gets CLAIM_MISMATCH, not STATUS_TRANSITION.
+    data_snap = st.load(state_path)
+    st.assert_claim_match(data_snap, args.token, args.phase)
+
+    # Quality gates — evaluated before mutating state so a refusal leaves the
+    # claim live and the worker can stamp + retry without a re-claim.
+    claim = data_snap.get("current_claim") or {}
+
+    if not args.skip_verify or not args.skip_simplify:
+        head_sha = _resolve_ref(cfg.project_root, "HEAD") or ""
+
+        if not args.skip_verify:
+            stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
+            if stamped_at is None or stamped_at != head_sha:
+                return _die(
+                    ExitCode.STATUS_TRANSITION,
+                    f"verify gate: stamp missing or stale "
+                    f"(stamped at {stamped_at or 'never'}, HEAD is {head_sha}). "
+                    f"Run `clu verify` before complete, or pass --skip-verify.",
+                )
+
+        if not args.skip_simplify:
+            base_sha = _claim_base_sha(claim, data_snap)
+            if base_sha:
+                files_changed, lines_changed = _compute_phase_diff(cfg.project_root, base_sha)
+                t_files, t_lines = cfg.simplify_threshold_or_default()
+                if files_changed > t_files or lines_changed > t_lines:
+                    stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_SIMPLIFY)
+                    if stamped_at is None or stamped_at != head_sha:
+                        return _die(
+                            ExitCode.STATUS_TRANSITION,
+                            f"simplify gate: diff is {files_changed} files / "
+                            f"{lines_changed} lines (threshold: {t_files}/{t_lines}). "
+                            f"Stamp missing or stale "
+                            f"(stamped at {stamped_at or 'never'}, HEAD is {head_sha}). "
+                            f"Run `clu attest --simplify` before complete, or pass --skip-simplify.",
+                        )
+
     with st.mutate(state_path) as data:
         st.release_claim(data, expected_token=args.token, expected_phase=args.phase)
         st.append_event(
             data, st.EVENT_PHASE_COMPLETED,
             phase=args.phase, commits=list(args.commits),
         )
+        if args.skip_verify:
+            st.append_event(data, st.EVENT_OPERATOR_SKIP_VERIFY,
+                            phase=args.phase, operator=True)
+        if args.skip_simplify:
+            st.append_event(data, st.EVENT_OPERATOR_SKIP_SIMPLIFY,
+                            phase=args.phase, operator=True)
         _maybe_cleanup_worktree(
             cfg, data, trigger="complete", require_all_phases_done=True,
         )
@@ -3624,6 +3755,76 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
     )
     _spawn_post_action_tick(cfg)
     print(f"Blocked {blocker_id} on phase {args.phase}")
+    return ExitCode.OK
+
+
+@_translate_claim_mismatch
+def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """HEAD is captured before the command to prevent a mid-test commit from
+    slipping past the gate. Token validation runs before the subprocess so a
+    forged or stale token fails immediately rather than after a 600s test run.
+    """
+    cmd = cfg.resolved_verify_command()
+    if not cmd:
+        return _die(
+            ExitCode.GENERIC,
+            "no verify command configured "
+            "(set quality.verify_command or test_command in .orchestrator.json)",
+        )
+    if args.token:
+        st.assert_claim_match(st.load(state_path), args.token, args.phase)
+    head = _resolve_ref(cfg.project_root, "HEAD")
+    if not head:
+        return _die(ExitCode.GENERIC, "could not resolve HEAD SHA")
+    try:
+        result = subprocess.run(
+            shlex.split(cmd),
+            cwd=str(cfg.project_root),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return _die(ExitCode.GENERIC, f"verify timed out after 600s: {cmd}")
+    if result.returncode != 0:
+        tail = result.stderr.strip().splitlines()[-20:]
+        return _die(
+            ExitCode.GENERIC,
+            f"verify failed (rc={result.returncode}):\n" + "\n".join(tail),
+        )
+    with st.mutate(state_path) as data:
+        st.stamp_attestation(data, st.ATTESTATION_VERIFY, head)
+        st.append_event(
+            data, st.EVENT_VERIFY_STAMPED,
+            phase=args.phase, commit_sha=head,
+        )
+    print(f"verified at {head}")
+    return ExitCode.OK
+
+
+@_translate_claim_mismatch
+def cmd_attest(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """Pure self-attestation — stamps current HEAD into attestations[kind].
+
+    clu cannot invoke /simplify (a Claude-Code-side skill), so the worker's
+    word is the only signal. Token is required; no operator-side variant.
+    """
+    if not args.simplify:
+        return _die(
+            ExitCode.GENERIC,
+            "clu attest: at least one attestation flag required (currently: --simplify)",
+        )
+    head = _resolve_ref(cfg.project_root, "HEAD")
+    if not head:
+        return _die(ExitCode.GENERIC, "could not resolve HEAD SHA")
+    with st.mutate(state_path) as data:
+        st.assert_claim_match(data, args.token, args.phase)
+        st.stamp_attestation(data, st.ATTESTATION_SIMPLIFY, head)
+        st.append_event(
+            data, st.EVENT_SIMPLIFY_STAMPED,
+            phase=args.phase, commit_sha=head,
+        )
+    print(f"attested simplify at {head}")
     return ExitCode.OK
 
 
