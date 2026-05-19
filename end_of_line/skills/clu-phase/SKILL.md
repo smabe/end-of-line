@@ -100,20 +100,32 @@ If you see an answered blocker, that means: you asked a question previously, the
    ```
    If they differ, you are in a worktree. Git ops stay in `$WORKTREE_ROOT`; `clu --project` calls take `$PROJECT_ROOT`.
 
-2. **Check for resume**: inspect `$STATE` for an answered blocker on `$PHASE`. If found, factor the answer into your plan for this run.
+2. **Arm the heartbeat ticker.** Long phases that don't ping `clu heartbeat` look identical to hung workers — `clu status` reports `STALLED` and the supervisor's gap-fill notifications fire. Start a background loop that pings every 2 minutes, and trap EXIT to clean it up:
+   ```bash
+   ( while :; do
+       clu heartbeat --project "$PROJECT_ROOT" --plan "$PLAN" \
+           --phase "$PHASE" --token "$TOKEN" >/dev/null 2>&1
+       sleep 120
+     done ) &
+   HEARTBEAT_PID=$!
+   trap "kill $HEARTBEAT_PID 2>/dev/null" EXIT
+   ```
+   The 2-minute interval is well inside the default `stalled_heartbeat_minutes: 10` threshold and loose enough to not flood state.json writes. The EXIT trap is the contract — without it, the ticker survives the worker process and continues pinging a dead claim. Don't skip it.
 
-3. **Read the master plan** at `$WORKTREE_ROOT/plans/$PLAN.md` (the plan files live on your branch in the worktree — same content as `$PROJECT_ROOT/plans/`, but reading from your worktree keeps you anchored). Find the row in `## Sessions index` whose phase id matches `$PHASE` (the parser strips the master-stem prefix from the plan_file basename — see `end_of_line/plan_parser.py`). The row's "Plan file" cell points to the sub-plan markdown.
+3. **Check for resume**: inspect `$STATE` for an answered blocker on `$PHASE`. If found, factor the answer into your plan for this run.
 
-4. **Read the sub-plan** at `$WORKTREE_ROOT/plans/<plan_file>`. This is the scope. Do exactly what it says. Don't scope-creep.
+4. **Read the master plan** at `$WORKTREE_ROOT/plans/$PLAN.md` (the plan files live on your branch in the worktree — same content as `$PROJECT_ROOT/plans/`, but reading from your worktree keeps you anchored). Find the row in `## Sessions index` whose phase id matches `$PHASE` (the parser strips the master-stem prefix from the plan_file basename — see `end_of_line/plan_parser.py`). The row's "Plan file" cell points to the sub-plan markdown.
 
-5. **Do the work.** Use the editing/test/commit tools you have. Follow the project's CLAUDE.md (TDD, /simplify after non-trivial work, structured commit messages, etc.). When you commit, capture the SHA — `git rev-parse HEAD` after each `git commit`. **Before every `git commit`, verify the branch:** `git rev-parse --abbrev-ref HEAD` should print `clu/$PLAN` (NOT `main`). If it prints `main`, you've drifted out of the worktree — `cd "$WORKTREE_ROOT"` and re-stage before committing.
+5. **Read the sub-plan** at `$WORKTREE_ROOT/plans/<plan_file>`. This is the scope. Do exactly what it says. Don't scope-creep.
 
-6. **Decide the exit path**:
+6. **Do the work.** Use the editing/test/commit tools you have. Follow the project's CLAUDE.md (TDD, /simplify after non-trivial work, structured commit messages, etc.). When you commit, capture the SHA — `git rev-parse HEAD` after each `git commit`. **Before every `git commit`, verify the branch:** `git rev-parse --abbrev-ref HEAD` should print `clu/$PLAN` (NOT `main`). If it prints `main`, you've drifted out of the worktree — `cd "$WORKTREE_ROOT"` and re-stage before committing.
+
+7. **Decide the exit path**:
    - Work is done and tests are green → `clu complete --commit <each SHA>`
    - Need a decision from the user → `clu block` with a focused question + 2-4 options
    - Hit a wall you can't resolve (corrupt state, missing dependency, contradictory requirements) → `clu block` with a question that surfaces the wall
 
-7. **Call the callback and exit.** Output of the callback is logged. Exit code 0 from the callback means clu accepted it.
+8. **Call the callback and exit.** Output of the callback is logged. Exit code 0 from the callback means clu accepted it. The EXIT trap from step 2 kills the heartbeat ticker automatically.
 
 ## Pre-complete callbacks (mandatory)
 
@@ -188,7 +200,7 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Long phases**: the lease is 30 min by default. If your work takes longer, checkpoint by calling `clu block` with a question like "continue?" + options `["yes", "stop here"]`. The user replies, you resume on the next dispatch with their answer in hand. This is normal — phases are meant to be tick-sized, not session-sized.
 
-- **Heartbeats are optional in v1**: the stalled-detection threshold is 10 min of no heartbeat. If your phase is short (<10 min wall-clock), skip heartbeats. If you're doing long work, `clu heartbeat --plan $PLAN --phase $PHASE --token $TOKEN` every few minutes keeps the supervisor from flagging you stalled.
+- **Skipping the heartbeat ticker**: step 2 arms a background `clu heartbeat` loop for every phase. Don't skip it even for short phases — `clu status` mis-reports `STALLED` the moment the phase exceeds `stalled_heartbeat_minutes` (default 10) without a heartbeat, and the supervisor's gap-fill notification fires. The 2-min ticker is cheap; the EXIT trap cleans it up automatically.
 
 ## Example invocations
 
