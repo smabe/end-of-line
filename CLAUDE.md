@@ -73,7 +73,7 @@ For the *why* behind each, see
 | [`docs/_outline.md`](docs/_outline.md) | Structural contract for the docs library |
 | [`docs/history/`](docs/history/) | Frozen pre-Day-1 brainstorms |
 
-## Status (as of 2026-05-17)
+## Status (as of 2026-05-19)
 
 The substrate is mature: per-plan **worktrees** (#24), multi-channel
 **notifications** (iMessage / Discord / clu-watch-only per #11), the
@@ -90,9 +90,23 @@ introspection (`clu watch [--task-list]`, `clu doctor`,
 in [`docs/architecture.md`](docs/architecture.md); module API map in
 [`docs/reference.md`](docs/reference.md).
 
-**Recent ships (2026-05-15 → 2026-05-17), newest first** — for
+**Recent ships (2026-05-15 → 2026-05-19), newest first** — for
 per-ship detail and commit ranges, follow the linked memory entries:
 
+- **#56 — gate-worktree-head** (`ca5e4c0`, merged `1c8011c`).
+  Worktree-aware HEAD resolution in `cmd_verify` / `cmd_attest` /
+  `cmd_complete` / `_compute_phase_diff`. Fixes the canonical-vs-
+  canonical no-op gate from #55: `state.claim_git_root(data, cfg)`
+  helper resolves to the worktree path when active, so stamps record
+  the worker's actual HEAD instead of canonical-main. Tests 1037 →
+  1040.
+- **#55 — attestation-gate** (`aee9ffb → 8b54321`, merged `a4c6352`,
+  supersedes #10). Programmatic enforcement of `/simplify` + verify
+  mandates: `current_claim.attestations` slot, `clu verify` runs
+  the project's test command + stamps, `clu attest --simplify` is
+  worker self-attestation, `cmd_complete` refuses with
+  `STATUS_TRANSITION` when stamps are missing or stale (diff
+  threshold defaults `{files:1, lines:30}`). Tests 986 → 1037.
 - **#48 + #49 — force-complete + osascript-stderr** (`7f07392`,
   `ca26a64`). Operator-rescue followups from notify-multi-channel.
   `clu force-complete --plan P --phase X --commit SHA` for
@@ -121,19 +135,8 @@ per-ship detail and commit ranges, follow the linked memory entries:
 
 **Open candidates** — pick from the backlog or propose new work:
 
-- **#10 — clu verify + complete-refusal on stale stamp** (programmatic
-  enforcement of mandate #9). Spec locked. Trigger: ≥2 worker
-  summaries observed lying about test results.
-- **#41 — clu watch --task-list batch-bootstrap.** Coalesce the
-  initial TASK_CREATE burst into a single emission so the Claude
-  TaskCreate UI binds atomically. Tightening on a just-shipped
-  subsystem.
-- **#45 — Inbound iMessage `is_from_me=0` blocks self-chat replies.**
-  Unlabeled; needs grilling. Possibly a one-liner in
-  `notify_inbound.py`.
-- **#4 — Replan worker callback.** `STATUS_HALTED_REPLAN` exists but
-  nothing sets it. Worker callback or operator command? Underspecified,
-  needs design discussion.
+- **#54 — Emit coolant lifecycle events on worker dispatch and reap.**
+  Observability surface for the supervisor/worker handshake.
 - **Multi-plan inbound routing.** Day 2.4 deferred last-pinged routing
   for ambiguous bare-digit replies. Not yet filed.
 
