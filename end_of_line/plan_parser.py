@@ -13,6 +13,9 @@ from pathlib import Path
 
 from . import state as st
 
+_EFFORT_SINGLE_RE = re.compile(r"^(\d+(?:\.\d+)?)(h|min)$", re.IGNORECASE)
+_EFFORT_RANGE_RE = re.compile(r"^\d+(?:\.\d+)?-(\d+(?:\.\d+)?)(h|min)$", re.IGNORECASE)
+
 _SESSIONS_HEADER_RE = re.compile(
     r"^##\s+Sessions?\s+index\s*$", re.MULTILINE | re.IGNORECASE
 )
@@ -85,6 +88,19 @@ def parse_sessions_index(plan_path: Path) -> list[Phase]:
                 effort=effort,
             ))
     return phases
+
+
+def parse_effort_minutes(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    s = raw.strip().replace(" ", "")
+    m = _EFFORT_RANGE_RE.match(s) or _EFFORT_SINGLE_RE.match(s)
+    if not m:
+        return None
+    value = float(m.group(1))
+    unit = m.group(2).lower()
+    minutes = value * 60 if unit == "h" else value
+    return round(minutes)
 
 
 def _split_row(row: str) -> list[str]:
