@@ -65,6 +65,12 @@ class NotifySpec:
 
 
 @dataclass
+class QualitySpec:
+    verify_command: str | None = None
+    simplify_threshold: dict | None = None  # {"files": int, "lines": int}
+
+
+@dataclass
 class ProjectConfig:
     project_root: Path
     plan_dir: str = "plans"
@@ -73,6 +79,7 @@ class ProjectConfig:
     test_command: str | None = None
     auto_archive: bool = True
     tick_on_action: bool = True
+    quality: QualitySpec = field(default_factory=QualitySpec)
 
     def queue_path(self) -> Path:
         """Per-project queue file. Lives in the same `.orchestrator/` dir as
@@ -101,6 +108,15 @@ class ProjectConfig:
             raise st.InvalidSlug(f"state_path escapes orchestrator dir: {resolved}") from exc
         return path
 
+    def resolved_verify_command(self) -> str | None:
+        return self.quality.verify_command or self.test_command
+
+    def simplify_threshold_or_default(self) -> tuple[int, int]:
+        t = self.quality.simplify_threshold
+        if t is None:
+            return (1, 30)
+        return (int(t.get("files", 1)), int(t.get("lines", 30)))
+
 
 def _validate_channel(raw: dict) -> ChannelSpec:
     kind = raw.get("kind")
@@ -114,6 +130,28 @@ def _validate_channel(raw: dict) -> ChannelSpec:
     enabled = bool(raw.get("enabled", True))
     params = {k: v for k, v in raw.items() if k not in {"kind", "kinds", "enabled"}}
     return ChannelSpec(kind=kind, kinds=kinds, enabled=enabled, params=params)
+
+
+def _validate_quality(raw: dict) -> QualitySpec:
+    q = raw.get("quality") or {}
+    vc = q.get("verify_command")
+    if vc is not None and not isinstance(vc, str):
+        raise ConfigError(
+            f"quality.verify_command: must be string, got {type(vc).__name__!r}"
+        )
+    st_raw = q.get("simplify_threshold")
+    if st_raw is not None:
+        if not isinstance(st_raw, dict):
+            raise ConfigError(
+                "quality.simplify_threshold: must be object with files+lines"
+            )
+        for key in ("files", "lines"):
+            v = st_raw.get(key)
+            if not isinstance(v, int) or v < 0:
+                raise ConfigError(
+                    f"quality.simplify_threshold.{key}: must be non-negative int"
+                )
+    return QualitySpec(verify_command=vc, simplify_threshold=st_raw)
 
 
 def _validate_auto_archive(raw: dict) -> bool:
@@ -170,4 +208,5 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         test_command=raw.get("test_command") or None,
         auto_archive=_validate_auto_archive(raw),
         tick_on_action=_validate_tick_on_action(raw),
+        quality=_validate_quality(raw),
     )

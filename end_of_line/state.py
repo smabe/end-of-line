@@ -456,6 +456,22 @@ def release_claim(
     data["current_claim"] = None
 
 
+def stamp_attestation(data: dict, kind: str, commit_sha: str) -> None:
+    """Stamp current_claim.attestations[kind] with HEAD SHA + now().
+
+    Lazy-inits the attestations map. Overwrites any prior stamp for the
+    same kind. Raises ValueError if no current_claim.
+    """
+    claim = data.get("current_claim")
+    if not claim:
+        raise ValueError("stamp_attestation: no current_claim")
+    claim.setdefault("attestations", {})
+    claim["attestations"][kind] = {
+        "at": utcnow(),
+        "commit_sha": commit_sha,
+    }
+
+
 def add_blocker(
     data: dict,
     phase_id: str,
