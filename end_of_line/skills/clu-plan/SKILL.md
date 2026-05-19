@@ -391,10 +391,12 @@ after step 1. Don't run `clu init` without explicit operator intent.
   Otherwise the worker worktree branches off a HEAD that doesn't have
   the plan files. (Real friction documented in commit `0d8e6d0` —
   cost a worktree round-trip to fix mid-pipeline.)
-- **Per-project queue: cron pops one head per tick.** Multiple plans
-  with worktrees can run concurrently (each on its own branch).
-  The queue's at-most-one-pop-per-tick rule means three queued plans
-  drain over three cron ticks, not all-at-once.
+- **Per-project queue is concurrent, not sequential.** Cron pops one
+  head per tick (~30s), but a popped plan dispatches on its own
+  worktree and runs alongside any prior plans still in flight. Three
+  queued plans = three concurrent workers ~60s apart, NOT one-after-
+  another. See "Sequential queue execution requires waiting" below
+  before queueing plans that touch overlapping files.
 - **For ALGORITHMIC plans** (signals: cites a paper, uses a constraint
   solver, implements physics/integrator/control loop), include the
   inner-loop-specialist research from `/plan`'s step 7.5 BEFORE
@@ -402,6 +404,44 @@ after step 1. Don't run `clu init` without explicit operator intent.
   inside the inner loop / what fails without surrounding solver
   structure / minimum executable test / load-bearing details absent
   from API docs) carry over verbatim.
+
+### Sequential queue execution requires waiting
+
+`clu queue add` schedules a plan to dispatch on the next cron tick —
+typically ~30s later. If a prior plan is still running on a different
+worktree, both run **concurrently**. This is safe in isolation but
+fails when both plans touch the same file:
+
+- Plan A modifies `foo.py` on branch `clu/plan-a`.
+- Plan B (queued before A finished) modifies `foo.py` on branch
+  `clu/plan-b`, branched off pre-A-merge main.
+- When A merges first, B's diff still doesn't include A's changes →
+  merge conflict at integration time, or worse, silent semantic drift
+  (the `cmd_answer` argparse incident, merge SHA `1816c0f`).
+
+The dry-merge gate (#50) catches conflicts before B lands but doesn't
+recover the wasted worker time. Best to serialize at queue time when
+overlap is foreseeable.
+
+**If you want sequential execution** (B starts off post-A-merge main):
+
+1. Author + commit + push plan files for both A and B.
+2. `clu init` only A; let it ship and auto-archive on merge to main.
+3. After A's archive commit lands, `clu init` B off post-merge main.
+4. (Optional) `clu queue add` B at step 3 if you want supervisor
+   dispatch instead of running it immediately.
+
+**If you want concurrent execution** (default `clu queue add` of both):
+
+- Verify both masters' `## Files touched` sections are disjoint —
+  including indirect touches like shared helpers, schema fields, and
+  config keys.
+- If they overlap, fall back to the serial flow above.
+
+The 2026-05-19 `watch.py` incident (#62 salvage) is the canonical
+failure: two plans queued back-to-back, both modified
+`end_of_line/watch.py`, second worker had to be paused and its work
+salvaged into a one-phase recovery plan.
 
 ## Worked example
 
