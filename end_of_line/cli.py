@@ -36,7 +36,7 @@ from pathlib import Path
 
 from . import cross_plan_rules, dispatch, dry_merge, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
-from .plan_parser import parse_sessions_index
+from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
 
@@ -1372,6 +1372,24 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
                 val = getattr(args, key, None)
                 if val is not None:
                     data["config"][key] = val
+            plan_path = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
+            try:
+                phases = parse_sessions_index(plan_path)
+            except FileNotFoundError:
+                phases = []
+            if phases:
+                global_default = data["config"]["lease_ttl_minutes"]
+                scale = cfg.lease_ttl_scale
+                phase_records = []
+                for phase in phases:
+                    record: dict = {"id": phase.id}
+                    effort_minutes = parse_effort_minutes(phase.effort)
+                    if effort_minutes is not None:
+                        record["lease_ttl_minutes"] = max(
+                            global_default, round(effort_minutes * scale)
+                        )
+                    phase_records.append(record)
+                data["phases"] = phase_records
             if worktree_record is not None:
                 data["worktree"] = worktree_record
             st.save_atomic(state_path, data)

@@ -289,6 +289,7 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
             "max_queue_adds_per_phase": DEFAULT_MAX_QUEUE_ADDS_PER_PHASE,
             "stalled_heartbeat_minutes": DEFAULT_STALLED_HEARTBEAT_MIN,
         },
+        "phases": [],
         "events": [],
         "created_at": utcnow(),
         "batch_id": None,
@@ -388,6 +389,17 @@ def save_atomic(state_path: Path, data: dict) -> None:
 
 def append_event(data: dict, event_type: str, **fields: Any) -> None:
     data["events"].append({"ts": utcnow(), "type": event_type, **fields})
+
+
+def lease_ttl_for_phase(data: dict, phase_id: str) -> int:
+    """Return the effective lease TTL (minutes) for a phase.
+
+    Resolution order: per-phase override → global config → DEFAULT_LEASE_TTL_MIN.
+    """
+    for ph in data.get("phases", []):
+        if ph.get("id") == phase_id and "lease_ttl_minutes" in ph:
+            return int(ph["lease_ttl_minutes"])
+    return int(data.get("config", {}).get("lease_ttl_minutes", DEFAULT_LEASE_TTL_MIN))
 
 
 def release_if_expired(data: dict) -> bool:

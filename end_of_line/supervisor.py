@@ -311,7 +311,6 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
 
         completed = st.completed_phase_ids(data)
         max_attempts = data["config"].get("max_attempts_per_phase", st.DEFAULT_MAX_ATTEMPTS)
-        ttl = data["config"].get("lease_ttl_minutes", st.DEFAULT_LEASE_TTL_MIN)
         for phase in phases:
             if phase.id in completed or st.phase_has_open_blocker(data, phase.id):
                 continue
@@ -332,6 +331,7 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         data["plan_slug"], phase.id, prior_attempts,
                     ),
                 ))
+            ttl = st.lease_ttl_for_phase(data, phase.id)
             token = st.claim_phase(data, phase.id, ttl)
             return _attach(TickResult(
                 "dispatch",
