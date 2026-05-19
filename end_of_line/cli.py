@@ -3484,11 +3484,14 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     # claim live and the worker can stamp + retry without a re-claim.
     claim = data_snap.get("current_claim") or {}
 
-    if not args.skip_verify or not args.skip_simplify:
+    verify_gate_active = not args.skip_verify and cfg.quality.verify_required
+    simplify_gate_active = not args.skip_simplify
+
+    if verify_gate_active or simplify_gate_active:
         git_root = st.claim_git_root(data_snap, cfg)
         head_sha = _resolve_ref(git_root, "HEAD") or ""
 
-        if not args.skip_verify:
+        if verify_gate_active:
             stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
             if stamped_at is None or stamped_at != head_sha:
                 return _die(
@@ -3498,7 +3501,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                     f"Run `clu verify` before complete, or pass --skip-verify.",
                 )
 
-        if not args.skip_simplify:
+        if simplify_gate_active:
             base_sha = _claim_base_sha(claim, data_snap)
             if base_sha:
                 files_changed, lines_changed = _compute_phase_diff(git_root, base_sha)
@@ -3527,6 +3530,9 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         if args.skip_simplify:
             st.append_event(data, st.EVENT_OPERATOR_SKIP_SIMPLIFY,
                             phase=args.phase, operator=True)
+        if not cfg.quality.verify_required:
+            st.append_event(data, st.EVENT_VERIFY_POLICY_SKIPPED,
+                            phase=args.phase)
         _maybe_cleanup_worktree(
             cfg, data, trigger="complete", require_all_phases_done=True,
         )

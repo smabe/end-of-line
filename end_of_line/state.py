@@ -191,6 +191,12 @@ EVENT_OPERATOR_SKIP_SIMPLIFY = "operator_skip_simplify"
 # Fields: phase, pid, signaled ("SIGTERM" | "SIGTERM+SIGKILL"), cmdline_mismatch (bool).
 EVENT_PHASE_ORPHAN_REAPED = "phase_orphan_reaped"
 
+# Per-project verify opt-out (quality.verify_required: false). Fires on
+# every cmd_complete under the opt-out so the audit trail records the
+# bypass — distinct from EVENT_OPERATOR_SKIP_VERIFY which records the
+# per-invocation --skip-verify flag. (#61)
+EVENT_VERIFY_POLICY_SKIPPED = "verify_policy_skipped"
+
 # Attestation kind constants — keys inside current_claim.attestations.
 ATTESTATION_VERIFY = "verify"
 ATTESTATION_SIMPLIFY = "simplify"

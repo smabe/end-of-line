@@ -69,6 +69,12 @@ class NotifySpec:
 class QualitySpec:
     verify_command: str | None = None
     simplify_threshold: dict | None = None  # {"files": int, "lines": int}
+    # Opt-out for projects whose authoritative test runner is an MCP tool
+    # (or anything else `clu verify` can't reasonably re-run from a shell).
+    # When False, cmd_complete skips the verify-attestation refusal AND
+    # emits EVENT_VERIFY_POLICY_SKIPPED so the audit trail records the
+    # bypass. The simplify gate is unaffected. (#61)
+    verify_required: bool = True
 
 
 @dataclass
@@ -153,7 +159,16 @@ def _validate_quality(raw: dict) -> QualitySpec:
                 raise ConfigError(
                     f"quality.simplify_threshold.{key}: must be non-negative int"
                 )
-    return QualitySpec(verify_command=vc, simplify_threshold=st_raw)
+    vr_raw = q.get("verify_required", True)
+    if not isinstance(vr_raw, bool):
+        raise ConfigError(
+            f"quality.verify_required: must be bool, got {type(vr_raw).__name__!r}"
+        )
+    return QualitySpec(
+        verify_command=vc,
+        simplify_threshold=st_raw,
+        verify_required=vr_raw,
+    )
 
 
 def _validate_lease_ttl_scale(raw: dict) -> float:
