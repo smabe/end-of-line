@@ -23,7 +23,17 @@ class CluTestCase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp_path = Path(tmp.name)
         isolate_registry(self, self.tmp_path)
-        patcher = mock.patch.dict(os.environ, {"CLU_TEST_MODE": "1"})
+        patcher = mock.patch.dict(os.environ, {
+            "CLU_TEST_MODE": "1",
+            # Empty CLU_COOLANT_SCRIPT_DIR + redirected COOLANT_* keep tests
+            # off any real coolant install on the dev machine. Tests that
+            # exercise coolant resolution override these explicitly.
+            "CLU_COOLANT_SCRIPT_DIR": "",
+            "COOLANT_COUNTER": str(self.tmp_path / "coolant.count"),
+            "COOLANT_EVENTS": str(self.tmp_path / "coolant.events.jsonl"),
+            "COOLANT_LOG": str(self.tmp_path / "coolant.log"),
+            "COOLANT_LOCKFILE": str(self.tmp_path / "coolant.lock"),
+        })
         patcher.start()
         self.addCleanup(patcher.stop)
 
