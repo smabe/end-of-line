@@ -26,7 +26,14 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     "lease_expires": "ISO8601",
     "started_at": "ISO8601",
     "last_heartbeat_at": "ISO8601",
-    "attempts": 1
+    "attempts": 1,
+    // Optional, lazy-init. Absent until the worker stamps via `clu verify`
+    // or `clu attest`. Each entry: {"at": ISO8601_Z, "commit_sha": str}.
+    // Stamp is "stale" if commit_sha != current HEAD.
+    "attestations": {
+      "verify":   {"at": "ISO8601", "commit_sha": "<40-char SHA>"},
+      "simplify": {"at": "ISO8601", "commit_sha": "<40-char SHA>"}
+    }
   },
 
   "blockers": [
@@ -112,7 +119,11 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     {"ts": "ISO8601", "type": "worktree_missing", "phase": "...", "token": "...", "worktree_path": "..."},
     {"ts": "ISO8601", "type": "worktree_conflict_warning", "other_slug": "..."},
     {"ts": "ISO8601", "type": "lease_extended", "phase": "...", "extended_by_minutes": 15, "new_expires": "...", "operator": true},
-    {"ts": "ISO8601", "type": "attempts_reset", "phase": "...", "operator": true}
+    {"ts": "ISO8601", "type": "attempts_reset",         "phase": "...", "operator": true},
+    {"ts": "ISO8601", "type": "verify_stamped",         "phase": "...", "commit_sha": "..."},
+    {"ts": "ISO8601", "type": "simplify_stamped",       "phase": "...", "commit_sha": "..."},
+    {"ts": "ISO8601", "type": "operator_skip_verify",   "phase": "..."},
+    {"ts": "ISO8601", "type": "operator_skip_simplify", "phase": "..."}
   ]
 }
 ```
@@ -137,6 +148,13 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 
 - `lease_extended` — emitted by `clu extend-lease` (operator-only; no `--token` required). Fields: `phase` (current phase id), `extended_by_minutes` (the argument passed), `new_expires` (ISO-8601 UTC string of the new expiry), `operator: true`. Semantics: `new_expires = max(now, current_lease_expires) + timedelta(minutes=N)`, so extending an already-expired (stalled) claim anchors from `now`, never backwards.
 - `attempts_reset` — emitted alongside `claim_force_released` when `clu release-claim --reset-attempts` is passed. Fields: `phase`, `operator: true`. Resets the attempt floor so the next dispatch starts fresh. `attempts_for_phase()` counts `phase_started` events after the most-recent of EITHER `retry_requested` OR `attempts_reset` — both act as floor markers; most-recent wins.
+
+### Quality-attestation event semantics
+
+- `verify_stamped` — emitted by `clu verify` on rc=0. Fields: `phase`, `commit_sha` (the HEAD SHA captured before the command ran). Stamps `current_claim.attestations.verify`.
+- `simplify_stamped` — emitted by `clu attest --simplify`. Fields: `phase`, `commit_sha` (current HEAD at attest time). Stamps `current_claim.attestations.simplify`.
+- `operator_skip_verify` — emitted by `clu complete --skip-verify`. Audit event; phase still completes. Fields: `phase`.
+- `operator_skip_simplify` — emitted by `clu complete --skip-simplify`. Audit event; phase still completes. Fields: `phase`.
 
 ### Worker-enqueue event semantics
 
@@ -297,6 +315,17 @@ Optional fields alongside `dispatch` and `notify`:
 | `plan_dir` | string | `"plans"` | Subdirectory under `project_root` that holds plan files and `.orchestrator/` |
 | `test_command` | string \| null | null | Shell command run inside the scratch worktree by `dry_merge.attempt_merge` and `clu integrate`. Absent or null → textual-merge-only mode (no suite run). Treated as `shell=True`; the operator owns trust. Example: `"python3 -m unittest discover -s tests"` |
 | `auto_archive` | bool | `true` | When `true`, clu automatically archives every `STATUS_DONE` plan whose worktree branch is an ancestor of `origin/main` on the next cron tick. Set `false` to require manual `clu archive` + `clu unregister`. Non-bool values (strings, integers) raise `ConfigError` at load time. |
+
+### `quality` (optional)
+
+Controls the quality gates enforced by `clu complete`. Absent block = defaults apply.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `verify_command` | string \| null | null | Command run by `clu verify`. Falls back to top-level `test_command` if absent or null. Single-string + `shlex.split`; wrap multi-step verify in a script. |
+| `simplify_threshold` | object \| null | `{files: 1, lines: 30}` | Threshold for the simplify gate. Format: `{files: int, lines: int}` — exceeding EITHER triggers the gate. Set both to 0 to gate every phase. Null restores the default. |
+
+The verify gate always fires (unless `--skip-verify`). The simplify gate fires only when the cumulative phase diff (from branch base to current HEAD) exceeds the threshold.
 
 ## Notify config schema
 
