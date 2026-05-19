@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import notify, state as st
+from . import coolant, notify, state as st
 from .config import ProjectConfig
 from .supervisor import TickResult
 
@@ -262,6 +262,11 @@ def dispatch_for_tick(
         return False
 
     _stamp_pid(state_file, result, proc.pid, log_path)
+    coolant.emit_start(
+        session_id=result.token or "",
+        agent_id=coolant.format_agent_id(plan_slug, result.phase_id),
+        agent_type=coolant.AGENT_TYPE,
+    )
     print(
         f"dispatch: spawned `{cmd}` pid={proc.pid} log={log_path}",
         file=sys.stderr,

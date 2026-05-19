@@ -34,6 +34,16 @@ _SCRIPT_START = "agent-start.sh"
 _SCRIPT_STOP = "agent-stop.sh"
 _SUBPROCESS_TIMEOUT = 2
 
+# Coolant's `agent_type` field is opaque — we tag everything clu spawns
+# with the same value so coolant can distinguish clu workers from
+# operator-Task subagents in its event stream if it ever wants to.
+AGENT_TYPE = "clu-worker"
+
+
+def format_agent_id(plan_slug: str, phase_id: str) -> str:
+    """Compose the coolant `agent_id` for a clu worker phase."""
+    return f"clu-{plan_slug}-{phase_id}"
+
 
 def emit_start(*, session_id: str, agent_id: str, agent_type: str) -> None:
     """Emit a SubagentStart-equivalent event to coolant. Never raises."""

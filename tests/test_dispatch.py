@@ -264,6 +264,47 @@ class DispatchTestCase(CluTestCase):
         self.assertIn("pid", claim)
         self.assertIn("log_path", claim)
 
+    def test_healthy_spawn_emits_coolant_start(self) -> None:
+        """A worker that survives the fast-fail window emits agent-start."""
+        from unittest import mock
+
+        cfg = self._cfg("sleep 3")
+        with mock.patch("end_of_line.dispatch.coolant.emit_start") as emit:
+            ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertTrue(ok)
+        emit.assert_called_once()
+        kwargs = emit.call_args.kwargs
+        self.assertEqual(kwargs["session_id"], self.token)
+        self.assertEqual(kwargs["agent_id"], "clu-t-a")
+        self.assertEqual(kwargs["agent_type"], "clu-worker")
+
+    def test_fast_fail_does_not_emit_coolant_start(self) -> None:
+        """Workers that exit non-zero within the fast-fail window never had
+        their CPU footprint matter to coolant — don't push a phantom +1 onto
+        the counter that the failure-release path can't roll back."""
+        from unittest import mock
+
+        cfg = self._cfg("exit 42")
+        with mock.patch("end_of_line.dispatch.coolant.emit_start") as emit:
+            ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertFalse(ok)
+        emit.assert_not_called()
+
+    def test_popen_failure_does_not_emit_coolant_start(self) -> None:
+        from unittest import mock
+
+        cfg = self._cfg("true")
+        with mock.patch(
+            "end_of_line.dispatch.subprocess.Popen",
+            side_effect=FileNotFoundError(2, "no such file"),
+        ):
+            with mock.patch("end_of_line.dispatch.coolant.emit_start") as emit:
+                ok = dispatch_for_tick(
+                    self._result(), cfg, "t", self.state_path,
+                )
+        self.assertFalse(ok)
+        emit.assert_not_called()
+
 
 class ResolvedModelTestCase(unittest.TestCase):
     """Unit tests for `dispatch.resolved_model` — pure parser, no I/O."""
