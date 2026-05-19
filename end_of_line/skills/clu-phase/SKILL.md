@@ -143,7 +143,7 @@ quality mandates passed. clu refuses `complete` with
 `STATUS_TRANSITION` if either stamp is missing or stale (i.e. a
 commit landed after the stamp).
 
-**Always** — re-run verification, then stamp:
+**Almost always** — re-run verification, then stamp:
 ```bash
 clu verify --project "$PROJECT_ROOT" --plan "$PLAN" \
     --phase "$PHASE" --token "$TOKEN"
@@ -151,6 +151,19 @@ clu verify --project "$PROJECT_ROOT" --plan "$PLAN" \
 This runs `quality.verify_command` (or `test_command`) and stamps
 `attestations.verify` on rc=0. On rc!=0 the command fails — fix
 the breakage, commit, re-run `clu verify`.
+
+**Exception — projects that opted out.** If
+`.orchestrator.json` has `"quality": {"verify_required": false}`,
+skip the `clu verify` step entirely. `cmd_complete` won't refuse
+on a missing verify stamp under this policy, and `clu` records an
+audit event (`verify_policy_skipped`) so the bypass is logged.
+The in-session test run (which you already did before committing,
+per the project's TDD mandate) plus the commit message's "Tests:"
+line are the audit trail. This opt-out is intended for projects
+whose authoritative test runner is an MCP tool (e.g. Xcode
+`test_sim`) or anything else clu can't reasonably re-run from a
+shell — see `docs/conventions.md` for the policy rationale. The
+simplify mandate is unaffected.
 
 **If your diff exceeds threshold** (>1 file OR ~30 lines by
 default; per-project override in `.orchestrator.json:quality.simplify_threshold`)

@@ -285,6 +285,50 @@ if you trust your Effort estimates; never go below the global default.
 Malformed or missing Effort cells fall back to the global default and
 surface in `clu doctor`.
 
+## Verify-required opt-out (`quality.verify_required`)
+
+The `#55` attestation gate requires every `clu complete` to be preceded
+by a fresh `clu verify` stamp. For projects whose authoritative test
+runner is a shell command (`pytest`, `npm test`, `cargo test`,
+`xcodebuild test-without-building`), this is straightforward —
+`clu verify` re-runs the command and stamps on rc=0.
+
+For projects whose authoritative test runner is an **MCP tool** —
+HealthDash on `mcp__XcodeBuildMCP__test_sim`, similar — `clu verify`
+can't reasonably re-run those tests from a shell. Set `quality.
+verify_required: false` in `.orchestrator.json` to opt out:
+
+```json
+{
+  "quality": {
+    "verify_required": false
+  }
+}
+```
+
+Under opt-out, `cmd_complete` skips the verify-attestation refusal and
+records `EVENT_VERIFY_POLICY_SKIPPED` per phase. The simplify mandate
+is unaffected (still refuses on diffs exceeding threshold without a
+simplify stamp).
+
+**When this is appropriate:**
+- The project's authoritative test runner is an MCP tool, or has
+  side effects (e.g. simulator clones, GPU state) that re-running
+  outside the worker session would pollute.
+- The worker's in-session test run + commit message ("Tests: N/N
+  green") is the audit trail.
+
+**When this is NOT appropriate:**
+- The project has a clean shell test command and you're just in a
+  hurry. The opt-out is for technical impossibility, not impatience.
+- You don't trust workers to run tests honestly. The opt-out trusts
+  the worker by design.
+
+`cmd_init` auto-augments `.orchestrator.json` to surface
+`quality.verify_required: true` on first run, so the knob is
+discoverable without reading docs. Flip to `false` when the project
+actually needs it.
+
 ## What NOT to do
 
 - **No SwiftUI / iOS code.** clu is pure Python. The `/review` skill
