@@ -118,14 +118,23 @@ If you see an answered blocker, that means: you asked a question previously, the
 
 5. **Read the sub-plan** at `$WORKTREE_ROOT/plans/<plan_file>`. This is the scope. Do exactly what it says. Don't scope-creep.
 
-6. **Do the work.** Use the editing/test/commit tools you have. Follow the project's CLAUDE.md (TDD, /simplify after non-trivial work, structured commit messages, etc.). When you commit, capture the SHA — `git rev-parse HEAD` after each `git commit`. **Before every `git commit`, verify the branch:** `git rev-parse --abbrev-ref HEAD` should print `clu/$PLAN` (NOT `main`). If it prints `main`, you've drifted out of the worktree — `cd "$WORKTREE_ROOT"` and re-stage before committing.
+6. **Check for previous-attempt context.** When `$PHASE` is on attempt > 1, the dispatcher writes a sidecar describing what the prior attempt left in the worktree:
+   ```bash
+   CTX="$(dirname "$STATE")/logs/attempt-context.$PLAN.$PHASE.md"
+   if [ -f "$CTX" ]; then
+       cat "$CTX"
+   fi
+   ```
+   The block names the attempt number, the termination reason for the prior attempt (lease expired / operator force-released / blocked / etc.), uncommitted changes (`git status --short`), the diff stat against HEAD, and any commits already landed by prior attempts. **Read it before doing any work.** It tells you whether prior progress is on disk waiting to be continued, or whether the worktree drifted and needs a reset. Reset is `git -C "$WORKTREE_ROOT" reset --hard <base_ref> && git -C "$WORKTREE_ROOT" clean -fd` — only if the prior edits don't align with the sub-plan. Otherwise inspect and continue from where the prior attempt left off. If the file doesn't exist, this is attempt 1 — proceed from scratch.
 
-7. **Decide the exit path**:
+7. **Do the work.** Use the editing/test/commit tools you have. Follow the project's CLAUDE.md (TDD, /simplify after non-trivial work, structured commit messages, etc.). When you commit, capture the SHA — `git rev-parse HEAD` after each `git commit`. **Before every `git commit`, verify the branch:** `git rev-parse --abbrev-ref HEAD` should print `clu/$PLAN` (NOT `main`). If it prints `main`, you've drifted out of the worktree — `cd "$WORKTREE_ROOT"` and re-stage before committing.
+
+8. **Decide the exit path**:
    - Work is done and tests are green → `clu complete --commit <each SHA>`
    - Need a decision from the user → `clu block` with a focused question + 2-4 options
    - Hit a wall you can't resolve (corrupt state, missing dependency, contradictory requirements) → `clu block` with a question that surfaces the wall
 
-8. **Call the callback and exit.** Output of the callback is logged. Exit code 0 from the callback means clu accepted it. The EXIT trap from step 2 kills the heartbeat ticker automatically.
+9. **Call the callback and exit.** Output of the callback is logged. Exit code 0 from the callback means clu accepted it. The EXIT trap from step 2 kills the heartbeat ticker automatically.
 
 ## Pre-complete callbacks (mandatory)
 
