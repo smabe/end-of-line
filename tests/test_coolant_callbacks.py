@@ -9,72 +9,17 @@ exactly once with the expected agent_id / session_id.
 from __future__ import annotations
 
 import io
-import json
-import subprocess
-import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
 from unittest.mock import patch
 
-from end_of_line import coolant, state as st
+from end_of_line import coolant
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import GitProjectTestCase
 
 
-PLAN_BODY = """\
-# Test plan
-
-## Sessions index
-
-| Session | Plan file | Scope | Effort |
-|---|---|---|---|
-| a | `test-plan-a.md` | thing | 1h |
-"""
-
-
-def _git(*args: str, cwd: Path) -> str:
-    return subprocess.run(
-        ["git", "-C", str(cwd), *args],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-
-class CoolantCallbacksTestCase(unittest.TestCase):
+class CoolantCallbacksTestCase(GitProjectTestCase):
     """Shared fixture: a real git repo + initialized plan, ready to claim."""
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.project = Path(self._tmp.name)
-        isolate_registry(self, self.project)
-        (self.project / "plans").mkdir()
-        (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        subprocess.run(["git", "init", "-q"], cwd=self.project, check=True)
-        _git("config", "user.email", "t@t", cwd=self.project)
-        _git("config", "user.name", "t", cwd=self.project)
-        _git("commit", "--allow-empty", "-m", "base", cwd=self.project)
-        self.sha = _git("rev-parse", "HEAD", cwd=self.project)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
-        self.assertEqual(
-            main(["init", "--project", str(self.project), "--plan", "test-plan"]), 0,
-        )
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def _claim(self, phase: str = "a") -> str:
-        with st.mutate(self.state_path) as data:
-            return st.claim_phase(data, phase, lease_minutes=30)
-
-    def _argv(self, cmd: str, *extra: str) -> list[str]:
-        return [
-            cmd,
-            "--project", str(self.project),
-            "--plan", "test-plan",
-            *extra,
-        ]
 
     def _expect_one_stop_call(self, emit, *, token: str, phase: str = "a") -> None:
         emit.assert_called_once()

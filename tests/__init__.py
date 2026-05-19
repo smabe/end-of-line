@@ -1,12 +1,33 @@
 """Shared test helpers."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from end_of_line import state as st
+from end_of_line.cli import main as cli_main
+
+
+def plan_body(*sessions: str) -> str:
+    """Build a PLAN_BODY markdown string with the given session ids."""
+    rows = "\n".join(
+        f"| {s} | `test-plan-{s.lower()}.md` | thing | 1h |" for s in sessions
+    )
+    return (
+        "# Test plan\n\n"
+        "## Sessions index\n\n"
+        "| Session | Plan file | Scope | Effort |\n"
+        "|---|---|---|---|\n"
+        f"{rows}\n"
+    )
+
+
+DEFAULT_PLAN_BODY = plan_body("a", "b")
 
 
 class CluTestCase(unittest.TestCase):
@@ -101,6 +122,50 @@ def make_worktree(
     git(wt_path, "commit", "--allow-empty", "-m", "W")
     wt_sha = git(wt_path, "rev-parse", "HEAD").stdout.strip()
     return wt_tmp, wt_path, wt_sha
+
+
+class GitProjectTestCase(CluTestCase):
+    """Per-test temp project + initialized clu plan, ready to claim.
+
+    Set `NEEDS_GIT = False` to skip the `make_git_project` shell-out for
+    tests that inject state directly. Override `PLAN_BODY` at the class
+    level for a non-default session id.
+
+    After setUp: `self.project`, `self.sha` (empty if no git),
+    `self.state_path`, plus `_argv`, `_claim`, `_read` helpers.
+    """
+
+    PLAN_BODY: str = DEFAULT_PLAN_BODY
+    NEEDS_GIT: bool = True
+
+    def setUp(self) -> None:
+        super().setUp()
+        if self.NEEDS_GIT:
+            self.project = make_git_project(self.tmp_path)
+            self.sha = git(self.project, "rev-parse", "HEAD").stdout.strip()
+        else:
+            self.project = self.tmp_path / "myrepo"
+            self.project.mkdir()
+            (self.project / "plans").mkdir()
+            self.sha = ""
+        (self.project / "plans" / "test-plan.md").write_text(self.PLAN_BODY)
+        self.state_path = (
+            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
+        )
+        rc = cli_main(["init", "--project", str(self.project), "--plan", "test-plan"])
+        self.assertEqual(rc, 0)
+
+    def _argv(self, cmd: str, *extra: str) -> list[str]:
+        return [
+            cmd, "--project", str(self.project), "--plan", "test-plan", *extra,
+        ]
+
+    def _claim(self, phase: str = "a") -> str:
+        with st.mutate(self.state_path) as data:
+            return st.claim_phase(data, phase, lease_minutes=30)
+
+    def _read(self) -> dict:
+        return json.loads(self.state_path.read_text())
 
 
 def isolate_monitor_marker(testcase: unittest.TestCase, tmp_path: Path) -> None:

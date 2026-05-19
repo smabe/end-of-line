@@ -20,18 +20,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import CONFIG_FILENAME
-from tests import isolate_registry
-
-
-PLAN_BODY = """\
-# Test plan
-
-## Sessions index
-
-| Session | Plan file | Scope | Effort |
-|---|---|---|---|
-| phase-a | `test-plan-phase-a.md` | thing | 1h |
-"""
+from tests import GitProjectTestCase, plan_body
 
 
 def _write_config(project: Path, *, quality: dict | None = None) -> None:
@@ -48,35 +37,19 @@ def _git(*args: str, cwd: Path) -> str:
     ).stdout.strip()
 
 
-class CompleteRefusalTestCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.project = Path(self._tmp.name)
-        isolate_registry(self, self.project)
-        (self.project / "plans").mkdir()
-        (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        _write_config(self.project)
-        subprocess.run(["git", "init", "-q"], cwd=self.project, check=True)
-        _git("config", "user.email", "t@t", cwd=self.project)
-        _git("config", "user.name", "t", cwd=self.project)
-        _git("commit", "--allow-empty", "-m", "base", cwd=self.project)
-        self.base_sha = _git("rev-parse", "HEAD", cwd=self.project)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
-        self.assertEqual(
-            main(["init", "--project", str(self.project), "--plan", "test-plan"]), 0,
-        )
+class CompleteRefusalTestCase(GitProjectTestCase):
+    PLAN_BODY = plan_body("phase-a")
 
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
+    def setUp(self) -> None:
+        super().setUp()
+        _write_config(self.project)
 
     # ---- helpers ---------------------------------------------------------------
 
     def _claim(self, phase: str = "phase-a") -> str:
         with st.mutate(self.state_path) as data:
             token = st.claim_phase(data, phase, lease_minutes=30)
-            data["current_claim"]["head_sha_at_claim"] = self.base_sha
+            data["current_claim"]["head_sha_at_claim"] = self.sha
             return token
 
     def _head(self) -> str:
@@ -90,30 +63,22 @@ class CompleteRefusalTestCase(unittest.TestCase):
         _git("commit", "-m", f"add {filename}", cwd=self.project)
         return self._head()
 
-    def _stamp_verify(self, sha: str | None = None) -> None:
-        sha = sha or self._head()
+    def _stamp(self, kind: str, sha: str | None = None) -> None:
         with st.mutate(self.state_path) as data:
-            st.stamp_attestation(data, st.ATTESTATION_VERIFY, sha)
+            st.stamp_attestation(data, kind, sha or self._head())
+
+    def _stamp_verify(self, sha: str | None = None) -> None:
+        self._stamp(st.ATTESTATION_VERIFY, sha)
 
     def _stamp_simplify(self, sha: str | None = None) -> None:
-        sha = sha or self._head()
-        with st.mutate(self.state_path) as data:
-            st.stamp_attestation(data, st.ATTESTATION_SIMPLIFY, sha)
-
-    def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        self._stamp(st.ATTESTATION_SIMPLIFY, sha)
 
     def _complete(self, token: str, *extra: str) -> tuple[int, str]:
         buf = io.StringIO()
         with redirect_stderr(buf):
-            rc = main([
-                "complete",
-                "--project", str(self.project),
-                "--plan", "test-plan",
-                "--phase", "phase-a",
-                "--token", token,
-                *extra,
-            ])
+            rc = main(self._argv(
+                "complete", "--phase", "phase-a", "--token", token, *extra,
+            ))
         return rc, buf.getvalue()
 
     def _claim_is_live(self) -> bool:
@@ -250,19 +215,19 @@ class CompleteRefusalTestCase(unittest.TestCase):
             _git("add", "data.txt", cwd=wt_path)
             _git("commit", "-m", "W1", cwd=wt_path)
             wt_sha = _git("rev-parse", "HEAD", cwd=wt_path)
-            self.assertNotEqual(wt_sha, self.base_sha)
+            self.assertNotEqual(wt_sha, self.sha)
             _write_config(self.project, quality={"simplify_threshold": {"files": 0, "lines": 0}})
             with st.mutate(self.state_path) as data:
                 data["worktree"] = {
                     "path": str(wt_path),
                     "branch": "clu/p",
-                    "base_ref": self.base_sha,
+                    "base_ref": self.sha,
                 }
             token = self._claim()
-            # Simulate buggy old attest: stamps at canonical HEAD (self.base_sha),
+            # Simulate buggy old attest: stamps at canonical HEAD (self.sha),
             # not the worktree HEAD. Fixed complete must catch this mismatch.
-            self._stamp_verify(self.base_sha)
-            self._stamp_simplify(self.base_sha)
+            self._stamp_verify(self.sha)
+            self._stamp_simplify(self.sha)
             rc, err = self._complete(token)
             self.assertEqual(rc, ExitCode.STATUS_TRANSITION,
                              "complete must refuse when stamps reference canonical HEAD "

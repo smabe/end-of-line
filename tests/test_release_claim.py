@@ -13,26 +13,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import io
-import json
-import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
-
-
-PLAN_BODY = """\
-# Test plan
-
-## Sessions index
-
-| Session | Plan file | Scope | Effort |
-|---|---|---|---|
-| A | `test-plan-a.md` | thing | 1h |
-"""
+from tests import GitProjectTestCase, plan_body
 
 
 def _stamp_claim(
@@ -63,40 +49,15 @@ def _stamp_claim(
     data["current_claim"] = claim
 
 
-class ReleaseClaimTestCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.project = Path(self._tmp.name)
-        isolate_registry(self, self.project)
-        (self.project / "plans").mkdir()
-        (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
-        self.assertEqual(
-            main(["init", "--project", str(self.project), "--plan", "test-plan"]),
-            0,
-        )
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+class ReleaseClaimTestCase(GitProjectTestCase):
+    PLAN_BODY = plan_body("A")
+    NEEDS_GIT = False  # tests inject claims via _stamp_claim; no git ops needed
 
     def _write(self, mut) -> None:
         with st.locked(self.state_path):
             data = st.load(self.state_path)
             mut(data)
             st.save_atomic(self.state_path, data)
-
-    def _argv(self, *extra: str) -> list[str]:
-        return [
-            "release-claim",
-            "--project", str(self.project),
-            "--plan", "test-plan",
-            *extra,
-        ]
 
     def _force_release_events(self) -> list[dict]:
         return [
@@ -111,7 +72,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
             d["status"] = st.STATUS_PAUSED
             _stamp_claim(d, heartbeat_age_seconds=10)
         self._write(setup)
-        rc = main(self._argv())
+        rc = main(self._argv("release-claim"))
         self.assertEqual(rc, 0)
         self.assertIsNone(self._read()["current_claim"])
 
@@ -120,7 +81,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
             d["status"] = st.STATUS_PAUSED
             _stamp_claim(d, phase="A", token="session-abc", heartbeat_age_seconds=10)
         self._write(setup)
-        rc = main(self._argv())
+        rc = main(self._argv("release-claim"))
         self.assertEqual(rc, 0)
         evts = self._force_release_events()
         self.assertEqual(len(evts), 1)
@@ -134,7 +95,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
             d["status"] = st.STATUS_PAUSED
             _stamp_claim(d, heartbeat_age_seconds=10)
         self._write(setup)
-        main(self._argv())
+        main(self._argv("release-claim"))
         self.assertEqual(self._read()["status"], st.STATUS_PAUSED)
 
     # ---- running-plan with STALE heartbeat (allowed) --------------------------
@@ -142,14 +103,14 @@ class ReleaseClaimTestCase(unittest.TestCase):
     def test_stale_heartbeat_release_clears_claim(self) -> None:
         # default stalled_heartbeat_minutes is 10; 15 min is decisively stale.
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=15 * 60))
-        rc = main(self._argv())
+        rc = main(self._argv("release-claim"))
         self.assertEqual(rc, 0)
         self.assertIsNone(self._read()["current_claim"])
         self.assertEqual(len(self._force_release_events()), 1)
 
     def test_stale_heartbeat_release_is_not_forced(self) -> None:
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=15 * 60))
-        main(self._argv())
+        main(self._argv("release-claim"))
         evts = self._force_release_events()
         self.assertFalse(evts[0]["forced"])
 
@@ -159,7 +120,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=30))
         buf = io.StringIO()
         with redirect_stderr(buf):
-            rc = main(self._argv())
+            rc = main(self._argv("release-claim"))
         self.assertNotEqual(rc, 0)
         # No mutation: claim still there, no event.
         self.assertIsNotNone(self._read()["current_claim"])
@@ -169,20 +130,20 @@ class ReleaseClaimTestCase(unittest.TestCase):
     def test_fresh_heartbeat_refused_exit_code(self) -> None:
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=30))
         with redirect_stderr(io.StringIO()):
-            rc = main(self._argv())
+            rc = main(self._argv("release-claim"))
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
 
     # ---- --force overrides fresh heartbeat ------------------------------------
 
     def test_force_release_on_fresh_heartbeat_clears_claim(self) -> None:
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=30))
-        rc = main(self._argv("--force"))
+        rc = main(self._argv("release-claim", "--force"))
         self.assertEqual(rc, 0)
         self.assertIsNone(self._read()["current_claim"])
 
     def test_force_release_event_carries_forced_flag(self) -> None:
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=30))
-        main(self._argv("--force"))
+        main(self._argv("release-claim", "--force"))
         evts = self._force_release_events()
         self.assertEqual(len(evts), 1)
         self.assertTrue(evts[0]["forced"])
@@ -192,13 +153,13 @@ class ReleaseClaimTestCase(unittest.TestCase):
     def test_no_claim_noop_exits_zero(self) -> None:
         buf = io.StringIO()
         with redirect_stderr(buf):
-            rc = main(self._argv())
+            rc = main(self._argv("release-claim"))
         self.assertEqual(rc, 0)
         self.assertIn("no claim", buf.getvalue())
 
     def test_no_claim_noop_does_not_append_event(self) -> None:
         with redirect_stderr(io.StringIO()):
-            main(self._argv())
+            main(self._argv("release-claim"))
         # Audit trail must not grow a no-op entry.
         self.assertEqual(self._force_release_events(), [])
 
@@ -206,7 +167,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
 
     def test_reason_recorded_in_event(self) -> None:
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=15 * 60))
-        rc = main(self._argv("--reason", "worker OOM'd"))
+        rc = main(self._argv("release-claim", "--reason", "worker OOM'd"))
         self.assertEqual(rc, 0)
         evts = self._force_release_events()
         self.assertEqual(evts[0]["reason"], "worker OOM'd")
@@ -215,7 +176,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
         # When the operator declines to explain, the event simply has no
         # `reason` key — better than a placeholder that pretends to be content.
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=15 * 60))
-        main(self._argv())
+        main(self._argv("release-claim"))
         evt = self._force_release_events()[0]
         self.assertNotIn("reason", evt)
 
@@ -228,15 +189,11 @@ class ReleaseClaimTestCase(unittest.TestCase):
         self._write(lambda d: _stamp_claim(
             d, phase="A", token="session-abc", heartbeat_age_seconds=30,
         ))
-        self.assertEqual(main(self._argv("--force")), 0)
+        self.assertEqual(main(self._argv("release-claim", "--force")), 0)
         with redirect_stderr(io.StringIO()):
-            rc = main([
-                "complete",
-                "--project", str(self.project),
-                "--plan", "test-plan",
-                "--token", "session-abc",
-                "--phase", "A",
-            ])
+            rc = main(self._argv(
+                "complete", "--token", "session-abc", "--phase", "A",
+            ))
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
 
     # ---- --reset-attempts flag -------------------------------------------------
@@ -246,7 +203,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
         self._write(lambda d: _stamp_claim(d, phase="A", heartbeat_age_seconds=30))
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = main(self._argv("--force", "--reset-attempts"))
+            rc = main(self._argv("release-claim", "--force", "--reset-attempts"))
         self.assertEqual(rc, 0)
         events = self._read()["events"]
         reset_evts = [e for e in events if e["type"] == st.EVENT_ATTEMPTS_RESET]
@@ -284,7 +241,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
         # Regression guard: bare release-claim must not emit EVENT_ATTEMPTS_RESET.
         # Use --force to ensure the release proceeds regardless of heartbeat age.
         self._write(lambda d: _stamp_claim(d, phase="A", heartbeat_age_seconds=30))
-        main(self._argv("--force"))
+        main(self._argv("release-claim", "--force"))
         events = self._read()["events"]
         reset_evts = [e for e in events if e["type"] == st.EVENT_ATTEMPTS_RESET]
         self.assertEqual(reset_evts, [])
@@ -306,7 +263,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
             signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False,
         )
         with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result) as mock:
-            rc = main(self._argv("--force"))
+            rc = main(self._argv("release-claim", "--force"))
         self.assertEqual(rc, 0)
         mock.assert_called_once()
         args, kwargs = mock.call_args
@@ -317,7 +274,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
         from unittest.mock import patch
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=30))
         with patch("end_of_line.state.reap_orphan_pid") as mock:
-            rc = main(self._argv("--force"))
+            rc = main(self._argv("release-claim", "--force"))
         self.assertEqual(rc, 0)
         mock.assert_not_called()
         self.assertEqual(self._orphan_reaped_events(), [])
@@ -331,7 +288,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
             signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False,
         )
         with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
-            main(self._argv("--force"))
+            main(self._argv("release-claim", "--force"))
         events = self._read()["events"]
         types = [e["type"] for e in events]
         force_idx = types.index(st.EVENT_CLAIM_FORCE_RELEASED)
@@ -347,7 +304,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
             signaled="SIGTERM+SIGKILL", escalated_kill=True, cmdline_mismatch=False,
         )
         with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
-            main(self._argv("--force"))
+            main(self._argv("release-claim", "--force"))
         evt = self._orphan_reaped_events()[0]
         self.assertEqual(evt["signaled"], "SIGTERM+SIGKILL")
         self.assertEqual(evt["pid"], 99999)
@@ -363,7 +320,7 @@ class ReleaseClaimTestCase(unittest.TestCase):
             signaled=None, escalated_kill=False, cmdline_mismatch=True,
         )
         with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
-            main(self._argv("--force"))
+            main(self._argv("release-claim", "--force"))
         evt = self._orphan_reaped_events()[0]
         self.assertTrue(evt["cmdline_mismatch"])
         self.assertIsNone(evt["signaled"])
