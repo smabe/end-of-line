@@ -3306,6 +3306,7 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
             )
         phase = claim["phase_id"]
         token = claim.get("claimed_by")
+        pid = claim.get("pid")
         fields = {
             "phase": phase, "token": token, "forced": bool(args.force),
             "released_by_operator": True,
@@ -3314,6 +3315,17 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
             fields["reason"] = args.reason
         st.release_claim(data)
         st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
+        if pid:
+            reap = st.reap_orphan_pid(
+                pid,
+                cmdline_match=f"/clu-phase {data['plan_slug']} {phase}",
+            )
+            st.append_event(
+                data, st.EVENT_PHASE_ORPHAN_REAPED,
+                phase=phase, pid=pid,
+                signaled=reap.signaled,
+                cmdline_mismatch=reap.cmdline_mismatch,
+            )
         if args.reset_attempts:
             st.append_event(data, st.EVENT_ATTEMPTS_RESET, phase=phase, operator=True)
     suffix = " Attempts reset." if args.reset_attempts else ""

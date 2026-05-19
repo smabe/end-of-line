@@ -42,6 +42,7 @@ def _stamp_claim(
     token: str = "session-abc",
     heartbeat_age_seconds: float = 0,
     lease_minutes_remaining: int = 30,
+    pid: int | None = None,
 ) -> None:
     """Inject a current_claim with a controllable heartbeat age."""
     now = _dt.datetime.now(_dt.timezone.utc)
@@ -49,7 +50,7 @@ def _stamp_claim(
     started = (now - _dt.timedelta(seconds=heartbeat_age_seconds)).strftime(fmt)
     heartbeat = (now - _dt.timedelta(seconds=heartbeat_age_seconds)).strftime(fmt)
     expires = (now + _dt.timedelta(minutes=lease_minutes_remaining)).strftime(fmt)
-    data["current_claim"] = {
+    claim: dict = {
         "phase_id": phase,
         "claimed_by": token,
         "lease_expires": expires,
@@ -57,6 +58,9 @@ def _stamp_claim(
         "last_heartbeat_at": heartbeat,
         "attempts": 1,
     }
+    if pid is not None:
+        claim["pid"] = pid
+    data["current_claim"] = claim
 
 
 class ReleaseClaimTestCase(unittest.TestCase):
@@ -284,6 +288,85 @@ class ReleaseClaimTestCase(unittest.TestCase):
         events = self._read()["events"]
         reset_evts = [e for e in events if e["type"] == st.EVENT_ATTEMPTS_RESET]
         self.assertEqual(reset_evts, [])
+
+    # ---- orphan reap on release (closes #63) ----------------------------------
+
+    def _orphan_reaped_events(self) -> list[dict]:
+        return [
+            e for e in self._read()["events"]
+            if e["type"] == st.EVENT_PHASE_ORPHAN_REAPED
+        ]
+
+    def test_release_claim_reaps_pid_when_present(self) -> None:
+        from unittest.mock import patch
+        self._write(lambda d: _stamp_claim(
+            d, phase="A", heartbeat_age_seconds=30, pid=99999,
+        ))
+        fake_result = st.ReapResult(
+            signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False,
+        )
+        with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result) as mock:
+            rc = main(self._argv("--force"))
+        self.assertEqual(rc, 0)
+        mock.assert_called_once()
+        args, kwargs = mock.call_args
+        self.assertEqual(args[0], 99999)
+        self.assertEqual(kwargs["cmdline_match"], "/clu-phase test-plan A")
+
+    def test_release_claim_no_pid_skips_reap(self) -> None:
+        from unittest.mock import patch
+        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=30))
+        with patch("end_of_line.state.reap_orphan_pid") as mock:
+            rc = main(self._argv("--force"))
+        self.assertEqual(rc, 0)
+        mock.assert_not_called()
+        self.assertEqual(self._orphan_reaped_events(), [])
+
+    def test_release_claim_event_ordering(self) -> None:
+        from unittest.mock import patch
+        self._write(lambda d: _stamp_claim(
+            d, heartbeat_age_seconds=30, pid=99999,
+        ))
+        fake_result = st.ReapResult(
+            signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False,
+        )
+        with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
+            main(self._argv("--force"))
+        events = self._read()["events"]
+        types = [e["type"] for e in events]
+        force_idx = types.index(st.EVENT_CLAIM_FORCE_RELEASED)
+        reap_idx = types.index(st.EVENT_PHASE_ORPHAN_REAPED)
+        self.assertLess(force_idx, reap_idx)
+
+    def test_release_claim_records_signaled_in_event(self) -> None:
+        from unittest.mock import patch
+        self._write(lambda d: _stamp_claim(
+            d, phase="A", heartbeat_age_seconds=30, pid=99999,
+        ))
+        fake_result = st.ReapResult(
+            signaled="SIGTERM+SIGKILL", escalated_kill=True, cmdline_mismatch=False,
+        )
+        with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
+            main(self._argv("--force"))
+        evt = self._orphan_reaped_events()[0]
+        self.assertEqual(evt["signaled"], "SIGTERM+SIGKILL")
+        self.assertEqual(evt["pid"], 99999)
+        self.assertEqual(evt["phase"], "A")
+        self.assertFalse(evt["cmdline_mismatch"])
+
+    def test_release_claim_cmdline_mismatch_recorded(self) -> None:
+        from unittest.mock import patch
+        self._write(lambda d: _stamp_claim(
+            d, heartbeat_age_seconds=30, pid=99999,
+        ))
+        fake_result = st.ReapResult(
+            signaled=None, escalated_kill=False, cmdline_mismatch=True,
+        )
+        with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
+            main(self._argv("--force"))
+        evt = self._orphan_reaped_events()[0]
+        self.assertTrue(evt["cmdline_mismatch"])
+        self.assertIsNone(evt["signaled"])
 
 
 if __name__ == "__main__":
