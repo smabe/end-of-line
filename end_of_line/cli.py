@@ -3413,12 +3413,6 @@ def _claim_base_sha(claim: dict, data: dict) -> str | None:
     return claim.get("head_sha_at_claim")
 
 
-def _attestation_stamped_sha(attestations: dict, kind: str) -> str | None:
-    """Return the commit_sha from attestations[kind], or None if not present."""
-    att = attestations.get(kind)
-    return att.get("commit_sha") if att else None
-
-
 @_translate_claim_mismatch
 def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.commits:
@@ -3433,13 +3427,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     # Quality gates — evaluated before mutating state so a refusal leaves the
     # claim live and the worker can stamp + retry without a re-claim.
     claim = data_snap.get("current_claim") or {}
-    attestations = claim.get("attestations") or {}
 
     if not args.skip_verify or not args.skip_simplify:
         head_sha = _resolve_ref(cfg.project_root, "HEAD") or ""
 
         if not args.skip_verify:
-            stamped_at = _attestation_stamped_sha(attestations, st.ATTESTATION_VERIFY)
+            stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
             if stamped_at is None or stamped_at != head_sha:
                 return _die(
                     ExitCode.STATUS_TRANSITION,
@@ -3454,7 +3447,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 files_changed, lines_changed = _compute_phase_diff(cfg.project_root, base_sha)
                 t_files, t_lines = cfg.simplify_threshold_or_default()
                 if files_changed > t_files or lines_changed > t_lines:
-                    stamped_at = _attestation_stamped_sha(attestations, st.ATTESTATION_SIMPLIFY)
+                    stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_SIMPLIFY)
                     if stamped_at is None or stamped_at != head_sha:
                         return _die(
                             ExitCode.STATUS_TRANSITION,

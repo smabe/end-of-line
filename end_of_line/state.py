@@ -487,6 +487,18 @@ def stamp_attestation(data: dict, kind: str, commit_sha: str) -> None:
     }
 
 
+def attestation_commit_sha(data: dict, kind: str) -> str | None:
+    """Return the commit_sha from current_claim.attestations[kind], or None.
+
+    Encapsulates the nested-dict drill so callers (the cmd_complete gate)
+    stay oblivious to the attestation map's shape.
+    """
+    claim = data.get("current_claim") or {}
+    attestations = claim.get("attestations") or {}
+    entry = attestations.get(kind)
+    return entry.get("commit_sha") if entry else None
+
+
 def add_blocker(
     data: dict,
     phase_id: str,
