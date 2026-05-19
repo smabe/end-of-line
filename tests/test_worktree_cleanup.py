@@ -288,15 +288,17 @@ class CmdArchivePlanMoveTests(WorktreeCleanupBase):
         rc, _, _ = self._archive("alpha")
         self.assertEqual(rc, 0)
         self.assertFalse((self.project / "plans" / "alpha.md").exists())
-        self.assertTrue((self.project / "plans" / "shipped" / "alpha.md").exists())
+        self.assertTrue(
+            (self.project / "plans" / "archive" / "alpha" / "alpha.md").exists()
+        )
 
-    def test_creates_shipped_dir_if_missing(self) -> None:
+    def test_creates_archive_dir_if_missing(self) -> None:
         self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
         self._set_status("alpha", st.STATUS_DONE)
-        self.assertFalse((self.project / "plans" / "shipped").exists())
+        self.assertFalse((self.project / "plans" / "archive" / "alpha").exists())
         rc, _, _ = self._archive("alpha")
         self.assertEqual(rc, 0)
-        self.assertTrue((self.project / "plans" / "shipped").is_dir())
+        self.assertTrue((self.project / "plans" / "archive" / "alpha").is_dir())
 
     def test_idempotent_on_missing_plan_file(self) -> None:
         # File already moved/deleted from plans/ → skip silently, exit 0.
@@ -326,7 +328,7 @@ class CmdArchivePlanMoveTests(WorktreeCleanupBase):
         self._set_status("alpha", st.STATUS_DONE)
         rc, stdout, _ = self._archive("alpha")
         self.assertEqual(rc, 0)
-        self.assertIn("shipped", stdout.lower())
+        self.assertIn("archive", stdout.lower())
 
 
 if __name__ == "__main__":

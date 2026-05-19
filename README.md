@@ -205,7 +205,7 @@ Workers can also chain a follow-up plan into the project queue mid-phase via `cl
 | `clu extend-lease --project P --plan S MINUTES` | Add N minutes to the live claim's lease without touching the worker. Anchors from `max(now, current_expires)` so it's safe to call on an already-expired claim |
 | `clu task-done <task_id>` | Mark a spawned follow-up done |
 | `clu blockers list \| show` | Read-only inspection: `list` shows every open blocker for a plan (id, phase, question, numbered options); `show <id>` prints the full payload plus related events |
-| `clu archive --project P --plan S` | Post-ship cleanup: removes the clu-managed worktree + branch (when reachable from origin) AND `git mv plans/<slug>.md plans/shipped/<slug>.md`. Idempotent on the file-move step |
+| `clu archive --project P --plan S` | Post-ship cleanup: removes the clu-managed worktree + branch (when reachable from origin) AND `git mv plans/<slug>*.md plans/archive/<slug>/`. Idempotent on the file-move step |
 | `clu install-skill [--force] [--dry-run] [--only <name>] [--list]` | (Re-)install the 5 bundled skills (`/clu-phase` + `/plan` + `/clu-plan` + `/brainstorm` + `/clu-monitor`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it); `--list` enumerates bundled skills and exits |
 | `clu install-hook` / `clu uninstall-hook` | Register or remove the `UserPromptSubmit` hook in `~/.claude/settings.json` that surfaces clu's inbox events into the active Claude session. `/clu-monitor` is the user-facing wrapper |
 | `clu doctor --project P` | Smoke-test what a worker subprocess sees (PATH + resolved binary locations). No state writes |

@@ -85,7 +85,8 @@ covers the operator lease lifecycle (`extend-lease`, `release-claim
 (#17), worktree GC (`clu worktree gc/attach/reattach`), and
 introspection (`clu watch [--task-list]`, `clu doctor`,
 `clu blockers`). Plan files in `plans/`; shipped plans archived to
-`plans/archive/<slug>/` (master + sub-plans), state at
+`plans/archive/<slug>/<filename>.md` (master + sub-plans grouped per
+slug), state at
 `<plan_dir>/.orchestrator/<slug>.state.json`. Architecture canonical
 in [`docs/architecture.md`](docs/architecture.md); module API map in
 [`docs/reference.md`](docs/reference.md).

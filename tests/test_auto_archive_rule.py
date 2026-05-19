@@ -154,9 +154,11 @@ class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
         spy.assert_called_once()
         _, call_kwargs = spy.call_args
         self.assertTrue(call_kwargs.get("unregister"))
-        # Plan file moved to shipped/
+        # Plan file moved to archive/<slug>/
         self.assertFalse((self.project / "plans" / "alpha.md").exists())
-        self.assertTrue((self.project / "plans" / "shipped" / "alpha.md").exists())
+        self.assertTrue(
+            (self.project / "plans" / "archive" / "alpha" / "alpha.md").exists()
+        )
         # Registry entry pruned
         entries = registry.entries_for_project(self.project)
         self.assertFalse(any(e.plan_slug == "alpha" for e in entries))
@@ -200,15 +202,15 @@ class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
             result = run_rules(self.project, [p])
 
         self.assertIsNotNone(result)
-        # All three files in shipped/, none in plans/ root
+        # All three files in archive/alpha/, none in plans/ root
         for name in ("alpha.md", "alpha-schema.md", "alpha-engine.md"):
             self.assertFalse(
                 (self.project / "plans" / name).exists(),
                 f"expected plans/{name} moved out of root",
             )
             self.assertTrue(
-                (self.project / "plans" / "shipped" / name).exists(),
-                f"expected plans/shipped/{name} present",
+                (self.project / "plans" / "archive" / "alpha" / name).exists(),
+                f"expected plans/archive/alpha/{name} present",
             )
 
     def test_fires_commits_archive_moves(self) -> None:
@@ -250,7 +252,9 @@ class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
         self.assertIsNotNone(result)
         # Only alpha (first in list) archived
         self.assertFalse((self.project / "plans" / "alpha.md").exists())
-        self.assertTrue((self.project / "plans" / "shipped" / "alpha.md").exists())
+        self.assertTrue(
+            (self.project / "plans" / "archive" / "alpha" / "alpha.md").exists()
+        )
         self.assertTrue((self.project / "plans" / "beta.md").exists())
         # alpha registry entry pruned, beta still present
         slugs = {e.plan_slug for e in registry.entries_for_project(self.project)}

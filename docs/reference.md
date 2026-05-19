@@ -1050,9 +1050,9 @@ through this.
   where none exists, `reattach` materializes an existing record.
 - `cmd_archive(args)` — post-ship cleanup: removes the clu-managed
   worktree + branch (when fully reachable from origin; warns and
-  retains when ahead) AND `git mv plans/<slug>.md
-  plans/shipped/<slug>.md`. Idempotent on the file-move step (skips
-  if already gone). Surfaces `WORKTREE_SETUP_FAILED` if `git mv` fails
+  retains when ahead) AND `git mv plans/<slug>*.md
+  plans/archive/<slug>/` (master + sub-plans). Idempotent on the
+  file-move step (skips if already gone). Surfaces `WORKTREE_SETUP_FAILED` if `git mv` fails
   with the file present.
 - `cmd_unregister_all_archived(args)` — batch prune of registry
   entries whose master plan file no longer exists. `--dry-run`

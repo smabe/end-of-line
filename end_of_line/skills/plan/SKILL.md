@@ -133,13 +133,13 @@ The skill has three modes, auto-detected from context:
 
 1. **Read the plan file** at `plans/<slug>.md`.
 2. **Summarize the state** to the user: goal, done criteria, what's in the parking lot, how much is done vs remaining.
-3. **Ask what the user wants**: continue working it, update the plan, or ship it (archive to `plans/shipped/`).
+3. **Ask what the user wants**: continue working it, update the plan, or ship it (archive to `plans/archive/<slug>/`).
 
 ### Mode 3: Ship a finished plan (`/plan ship <slug>` or user says "ship the plan")
 
 1. **Verify done criteria are actually met.** Read the plan file and walk through each done criterion — ask the user to confirm any ambiguous ones. If criteria aren't met, refuse and say what's still outstanding.
-2. **Create `plans/shipped/`** if it doesn't exist.
-3. **Move** `plans/<slug>.md` → `plans/shipped/<slug>.md` using `git mv` if the file is tracked, plain `mv` otherwise.
+2. **Create `plans/archive/<slug>/`** if it doesn't exist.
+3. **Move** `plans/<slug>*.md` (master + any sub-plans) → `plans/archive/<slug>/` using `git mv` if the files are tracked, plain `mv` otherwise.
 4. **Confirm to the user** with the new path and a one-line summary of what shipped.
 
 ---
@@ -242,7 +242,7 @@ If none of the stop conditions apply, the next phase starts automatically.
 - **One active plan per conversation.** If the user wants to work on two things, they get two plans, and we tackle them sequentially.
 - **The template is the source of truth** — don't add or remove sections in the Plan Template above without also updating the Scope Check and Phase Completion Cycle rules, since they reference the section names.
 - **Be ruthless about non-goals.** If you're unsure whether to list something as a non-goal, list it. Easier to remove than to add mid-work.
-- **Archive, don't delete.** Shipped plans move to `plans/shipped/` — they're a record of what got done, not garbage to collect.
+- **Archive, don't delete.** Shipped plans move to `plans/archive/<slug>/` — they're a record of what got done, not garbage to collect.
 - **New file mirrors existing file? Refactor first by default.** When the plan adds a new file the description says "mirrors" / "like" / "similar to" / "same family as" an existing one — OR a sibling file with the same suffix already exists in the target directory — the reuse-specialist agent is mandatory and its Phase-0-refactor recommendation is presumed correct unless the user explicitly overrides. The refactor becomes phase 0 of the plan; the new feature is phase 1+. Copy-and-defer requires an explicit user decision in the second-approval step, recorded in the Parking lot in writing — not a passive default that quietly leaves duplication for `/simplify` to surface after the duplicate ships.
 - **Algorithmic plans: land the research load-test at the earliest practical phase, not "whenever it's convenient."** The minimum executable test that would catch a naive implementation (research's question 3) is the falsifiable claim that proves the research is grounded. The default placement is phase 1's first commit, *before* the rest of phase 1 — the test runs against the simplest possible implementation and gates further work. If the test genuinely cannot be run until phase 2 (e.g. it needs integration plumbing that doesn't exist yet, or the LLM pipeline only behaves under realistic load), that's allowed, but the plan must explicitly call out the gap and the test still becomes the *first thing* in phase 2, not buried mid-phase. If the test fails when it lands, the research was incomplete — return to step 7.5 with the specific failure mode as a sharper question, don't paper over it with tuning. This catches "research was insufficient" at phase 1-2 instead of phase 3+.
 - **Perf/bug plans: run the Diagnosis falsifiable test BEFORE drafting "Files to touch."** A plan whose goal is to change something that's already running (perf regression, bug fix, "stop X from doing Y", "make Z cheaper") needs ground truth on what's actually causing the symptom before we scope a fix. The Diagnosis section's hypothesis + falsifiable test exists for this. If the test confirms the hypothesis, scope normally. If it disproves the hypothesis, the rest of the plan is built on sand — don't write the file list, return to research with the negative result as the sharper question. Files-read alone doesn't ground the diagnosis; "I commented out X and the symptom didn't change" does. Two failed disable-experiments back-to-back means the hypothesis space is wrong — switch to /diagnose, don't keep guessing.

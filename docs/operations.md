@@ -495,9 +495,10 @@ two things in one command:
 
 1. **Worktree cleanup** — removes the clu-managed worktree + branch if the
    branch is fully reachable from origin; retains with a warning when ahead.
-2. **Plan-file move** — `git mv plans/<slug>.md plans/shipped/<slug>.md`
-   (staging the rename; commit separately). Creates `plans/shipped/` if it
-   doesn't exist. Skips silently when the plan file is already gone (e.g.
+2. **Plan-file move** — `git mv plans/<slug>*.md plans/archive/<slug>/`
+   (staging the master + every sub-plan rename; commit separately).
+   Creates `plans/archive/<slug>/` if it doesn't exist. Skips silently
+   when no plan files remain (e.g.
    manually moved in a prior run). Surfaces as `WORKTREE_SETUP_FAILED` if
    the file exists but `git mv` fails (e.g. not tracked, conflicts).
 
@@ -510,7 +511,7 @@ When using per-plan worktrees, clu automates the post-ship cleanup step.
 After you merge `clu/<slug>` to `main` and push, the next cron tick detects
 that the branch is an ancestor of `origin/main` and automatically runs the
 full archive sequence: worktree removal, branch deletion, plan-file move to
-`plans/shipped/`, and registry entry pruned. The operator receives one
+`plans/archive/<slug>/`, and registry entry pruned. The operator receives one
 `plan_auto_archived` notification per cleanup.
 
 **End-to-end flow:**
@@ -1432,7 +1433,7 @@ and the next `phase_started` for the same phase starts fresh from zero.
 | `clu retry --project P --plan S [--phase X]` | Clear max-attempts on a halted phase |
 | `clu release-claim --project P --plan S [--force] [--reason ...] [--reset-attempts]` | Clear a stuck `current_claim`; `--reset-attempts` zeroes the attempt counter so the next dispatch starts fresh |
 | `clu extend-lease --project P --plan S MINUTES` | Add N minutes to the live claim's lease (operator-only) |
-| `clu archive --project P --plan S` | Clean up worktree + branch and move `plans/<slug>.md` to `plans/shipped/<slug>.md` via `git mv`. Idempotent — skips the file move if the plan file is already gone. |
+| `clu archive --project P --plan S` | Clean up worktree + branch and move `plans/<slug>*.md` (master + sub-plans) to `plans/archive/<slug>/` via `git mv`. Idempotent — skips the file move if the plan files are already gone. |
 | `clu unregister --project P --plan S` | Drop a plan from the host registry (state file untouched) |
 | `clu unregister --all-archived [--dry-run]` | Prune every registry entry whose master plan file no longer exists. Use after archiving plans (e.g. `post-ship`). `--dry-run` previews. |
 | `clu queue add <slug>... [--front] [--project P]` | Append (or `--front` prepend) one or more plan slugs to the project's queue. Multi-arg is atomic — any validation failure rejects the whole batch |

@@ -329,6 +329,26 @@ simplify stamp).
 discoverable without reading docs. Flip to `false` when the project
 actually needs it.
 
+## Plan archive layout (`plans/archive/<slug>/`)
+
+Shipped plans live at `plans/archive/<slug>/<filename>.md` — one
+directory per master plan, holding both the master and every
+sub-plan file. `_perform_archive` writes here; `cmd_archive` (manual)
+and `auto_archive_rule` (auto-on-merge) both use the same path. The
+`/plan` skill's "ship" mode also writes here when the operator runs
+it manually.
+
+Why nested-by-slug: a flat archive directory becomes unbrowsable
+once the corpus passes ~50 files. Grouping by master slug keeps
+"show me everything from plan X" navigable with `ls`, and means a
+plan's sub-plans don't get visually separated from their master in
+alphabetical order.
+
+The pre-#65 layout was `plans/shipped/<filename>.md` (flat). All
+existing files were migrated to the nested layout in the same
+commit that landed the code change — no compatibility shim. If you
+see a `plans/shipped/` directory in a fork, migrate it.
+
 ## What NOT to do
 
 - **No SwiftUI / iOS code.** clu is pure Python. The `/review` skill

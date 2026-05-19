@@ -3715,10 +3715,11 @@ def _perform_archive(
 ) -> tuple[dict | None, dict | None, bool]:
     """Shared archive engine. Returns (before, after, plan_moved).
 
-    Cleans up the worktree, moves the plan file to plans/shipped/, and
-    optionally prunes the registry entry. Raises CalledProcessError or
-    TimeoutExpired on git mv failure (state is still saved; caller decides
-    how to surface the error). Does not check STATUS_RUNNING.
+    Cleans up the worktree, moves the plan file to
+    ``plans/archive/<slug>/``, and optionally prunes the registry entry.
+    Raises CalledProcessError or TimeoutExpired on git mv failure (state
+    is still saved; caller decides how to surface the error). Does not
+    check STATUS_RUNNING.
     """
     state_path = cfg.state_path(plan)
     plan_moved = False
@@ -3736,11 +3737,11 @@ def _perform_archive(
             sources.append(plan_md)
         sources.extend(sorted(plan_dir.glob(f"{plan}-*.md")))
         if sources:
-            shipped_dir = plan_dir / "shipped"
-            shipped_dir.mkdir(parents=True, exist_ok=True)
+            archive_dir = plan_dir / "archive" / plan
+            archive_dir.mkdir(parents=True, exist_ok=True)
             try:
                 subprocess.run(
-                    ["git", "mv", *[str(s) for s in sources], str(shipped_dir)],
+                    ["git", "mv", *[str(s) for s in sources], str(archive_dir)],
                     check=True,
                     capture_output=True,
                     text=True,
@@ -3801,7 +3802,9 @@ def cmd_archive(args) -> int:
     except subprocess.TimeoutExpired:
         plan_md = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
         return _die(ExitCode.GENERIC, f"git mv timed out for {plan_md}")
-    move_note = " Plan file moved to shipped/." if plan_moved else ""
+    move_note = (
+        f" Plan file moved to archive/{args.plan}/." if plan_moved else ""
+    )
     if before is None:
         print(f"Archive {args.plan}: no worktree to clean.{move_note}")
     elif after is None:
