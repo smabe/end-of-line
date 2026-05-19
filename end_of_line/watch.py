@@ -298,13 +298,17 @@ def bootstrap_task_list(
     cfg_loader: Callable[[Path], Any],
     sink: TextIO,
 ) -> None:
-    """Emit TASK_CREATE task=<slug>[/<phase>] status=pending lines, one per plan+phase."""
+    """Emit TASK_CREATE per plan+phase; if current_claim is running, also emit TASK_UPDATE to reconcile."""
     for state_path in state_paths:
         if not state_path.exists():
             continue
         slug = _slug_for_path(state_path)
         if not slug:
             continue
+        try:
+            data: dict = json.loads(state_path.read_text())
+        except Exception:
+            data = {}
         cfg = cfg_loader(state_path)
         plan_path = cfg.project_root / cfg.plan_dir / f"{slug}.md"
         if not plan_path.exists():
@@ -314,6 +318,16 @@ def bootstrap_task_list(
         for phase in parse_sessions_index(plan_path):
             print(_task_line("TASK_CREATE", f"{slug}/{phase.id}",
                              parent=slug, status="pending"),
+                  file=sink, flush=True)
+        claim = data.get("current_claim")
+        if claim and data.get("status") == "running":
+            phase_id = claim["phase_id"]
+            print(_task_line("TASK_UPDATE", slug, status="in_progress",
+                             msg="bootstrap: plan running"),
+                  file=sink, flush=True)
+            print(_task_line("TASK_UPDATE", f"{slug}/{phase_id}",
+                             parent=slug, status="in_progress",
+                             msg="bootstrap: already active"),
                   file=sink, flush=True)
 
 

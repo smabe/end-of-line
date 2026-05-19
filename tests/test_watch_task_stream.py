@@ -19,14 +19,15 @@ def _evt(type_: str, **fields) -> dict:
 
 
 def _make_state(path: Path, slug: str, *, status: str = "running",
-                events: list | None = None) -> None:
+                events: list | None = None,
+                current_claim: dict | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "schema_version": st.SCHEMA_VERSION,
         "plan_slug": slug,
         "plan_dir": "plans",
         "status": status,
-        "current_claim": None,
+        "current_claim": current_claim,
         "blockers": [],
         "spawned_tasks": [],
         "config": {
@@ -201,3 +202,29 @@ class TaskListStreamTest(CluTestCase):
                 sink=sink, poll_interval=0, max_ticks=0,
                 cfg_loader=_cfg_loader(project),
             )
+
+    def test_bootstrap_ordering_when_phase_active(self) -> None:
+        """TASK_CREATE batch → TASK_UPDATE plan → TASK_UPDATE phase → [snapshot]."""
+        project = self.tmp_path / "ordering-project"
+        state_path = project / "plans" / ".orchestrator" / "ord-plan.state.json"
+        _make_state(state_path, "ord-plan",
+                    current_claim={"phase_id": "phase-a"})
+        _write_master(project, "ord-plan", ["phase-a", "phase-b"])
+        sink = io.StringIO()
+        stream_loop(
+            [state_path],
+            task_list_mode=True,
+            sink=sink, poll_interval=0, max_ticks=0,
+            cfg_loader=_cfg_loader(project),
+        )
+        lines = sink.getvalue().splitlines()
+        create_plan = next(i for i, l in enumerate(lines)
+                           if "TASK_CREATE" in l and "task=ord-plan " in l)
+        update_plan = next(i for i, l in enumerate(lines)
+                           if "TASK_UPDATE" in l and "task=ord-plan " in l)
+        update_phase = next(i for i, l in enumerate(lines)
+                            if "TASK_UPDATE" in l and "task=ord-plan/phase-a" in l)
+        snapshot = next(i for i, l in enumerate(lines) if "[snapshot]" in l)
+        self.assertLess(create_plan, update_plan)
+        self.assertLess(update_plan, update_phase)
+        self.assertLess(update_phase, snapshot)
