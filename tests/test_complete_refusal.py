@@ -19,15 +19,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from end_of_line.config import CONFIG_FILENAME
-from tests import GitProjectTestCase, plan_body
-
-
-def _write_config(project: Path, *, quality: dict | None = None) -> None:
-    cfg: dict = {"dispatch": {"command": "echo hi"}}
-    if quality:
-        cfg["quality"] = quality
-    (project / CONFIG_FILENAME).write_text(json.dumps(cfg))
+from tests import GitProjectTestCase, plan_body, write_config
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -42,7 +34,7 @@ class CompleteRefusalTestCase(GitProjectTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        _write_config(self.project)
+        write_config(self.project)
 
     # ---- helpers ---------------------------------------------------------------
 
@@ -181,7 +173,7 @@ class CompleteRefusalTestCase(GitProjectTestCase):
     def test_complete_honors_simplify_threshold_override(self) -> None:
         # Custom threshold {files: 5, lines: 100}: 3 files × 30 lines = 90 total.
         # Above default (1 file / 30 lines), below override (5 files / 100 lines) → pass.
-        _write_config(self.project, quality={"simplify_threshold": {"files": 5, "lines": 100}})
+        write_config(self.project, quality={"simplify_threshold": {"files": 5, "lines": 100}})
         token = self._claim()
         for i in range(3):
             self._make_commit(f"f{i}.txt", lines=30)
@@ -191,7 +183,7 @@ class CompleteRefusalTestCase(GitProjectTestCase):
 
     def test_complete_gate_everything_threshold(self) -> None:
         # {files: 0, lines: 0}: any diff triggers simplify gate.
-        _write_config(self.project, quality={"simplify_threshold": {"files": 0, "lines": 0}})
+        write_config(self.project, quality={"simplify_threshold": {"files": 0, "lines": 0}})
         token = self._claim()
         self._make_commit("tiny.txt", lines=1)
         self._stamp_verify()
@@ -216,7 +208,7 @@ class CompleteRefusalTestCase(GitProjectTestCase):
             _git("commit", "-m", "W1", cwd=wt_path)
             wt_sha = _git("rev-parse", "HEAD", cwd=wt_path)
             self.assertNotEqual(wt_sha, self.sha)
-            _write_config(self.project, quality={"simplify_threshold": {"files": 0, "lines": 0}})
+            write_config(self.project, quality={"simplify_threshold": {"files": 0, "lines": 0}})
             with st.mutate(self.state_path) as data:
                 data["worktree"] = {
                     "path": str(wt_path),

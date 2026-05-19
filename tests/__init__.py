@@ -11,6 +11,7 @@ from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.cli import main as cli_main
+from end_of_line.config import CONFIG_FILENAME
 
 
 def plan_body(*sessions: str) -> str:
@@ -28,6 +29,23 @@ def plan_body(*sessions: str) -> str:
 
 
 DEFAULT_PLAN_BODY = plan_body("a", "b")
+
+
+def write_config(
+    project: Path,
+    *,
+    test_command: str | None = None,
+    quality: dict | None = None,
+) -> None:
+    """Write `.orchestrator.json` with `dispatch.command='echo hi'` and optional
+    `test_command` / `quality` blocks. Used by tests that exercise cli paths
+    needing a parsed config."""
+    cfg: dict = {"dispatch": {"command": "echo hi"}}
+    if test_command is not None:
+        cfg["test_command"] = test_command
+    if quality:
+        cfg["quality"] = quality
+    (project / CONFIG_FILENAME).write_text(json.dumps(cfg))
 
 
 class CluTestCase(unittest.TestCase):
