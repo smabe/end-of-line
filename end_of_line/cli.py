@@ -916,6 +916,26 @@ def main(argv: list[str] | None = None) -> int:
         "--token", default="", help="Worker claim token (optional; operator omits)",
     )
 
+    p_attest = sub.add_parser(
+        "attest",
+        help=(
+            "Attest that a quality pass ran on the current claim. "
+            "Stamps current HEAD as the attested commit. "
+            "Use --simplify after running /simplify; additional flavors land here."
+        ),
+    )
+    add_common(p_attest)
+    p_attest.add_argument(
+        "--phase", required=True, help="Phase id (must match the live claim)",
+    )
+    p_attest.add_argument(
+        "--token", required=True, help="Worker claim token",
+    )
+    p_attest.add_argument(
+        "--simplify", action="store_true",
+        help="Attest that /simplify was run on this phase's diff",
+    )
+
     args = parser.parse_args(argv)
     if getattr(args, "no_notify", False):
         notify.set_global_suppress(True)
@@ -985,6 +1005,7 @@ def main(argv: list[str] | None = None) -> int:
         "prior-blocker": cmd_prior_blocker,
         "logs": cmd_logs,
         "verify": cmd_verify,
+        "attest": cmd_attest,
     }
     return dispatchers[args.cmd](args, cfg, state_path)
 
@@ -3682,6 +3703,32 @@ def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
             phase=args.phase, commit_sha=head,
         )
     print(f"verified at {head}")
+    return ExitCode.OK
+
+
+@_translate_claim_mismatch
+def cmd_attest(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """Pure self-attestation — stamps current HEAD into attestations[kind].
+
+    clu cannot invoke /simplify (a Claude-Code-side skill), so the worker's
+    word is the only signal. Token is required; no operator-side variant.
+    """
+    if not args.simplify:
+        return _die(
+            ExitCode.GENERIC,
+            "clu attest: at least one attestation flag required (currently: --simplify)",
+        )
+    head = _resolve_ref(cfg.project_root, "HEAD")
+    if not head:
+        return _die(ExitCode.GENERIC, "could not resolve HEAD SHA")
+    with st.mutate(state_path) as data:
+        st.assert_claim_match(data, args.token, args.phase)
+        st.stamp_attestation(data, st.ATTESTATION_SIMPLIFY, head)
+        st.append_event(
+            data, st.EVENT_SIMPLIFY_STAMPED,
+            phase=args.phase, commit_sha=head,
+        )
+    print(f"attested simplify at {head}")
     return ExitCode.OK
 
 

@@ -177,6 +177,9 @@ EVENT_OPERATOR_FORCE_COMPLETE = "operator_force_complete"
 # and the result was stamped into attestations.verify on current_claim.
 # Fields: phase, commit_sha.
 EVENT_VERIFY_STAMPED = "verify_stamped"
+# Worker ran `clu attest --simplify`; current HEAD stamped into
+# attestations.simplify on current_claim. Fields: phase, commit_sha.
+EVENT_SIMPLIFY_STAMPED = "simplify_stamped"
 
 # Attestation kind constants — keys inside current_claim.attestations.
 ATTESTATION_VERIFY = "verify"
