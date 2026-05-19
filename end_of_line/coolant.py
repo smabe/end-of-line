@@ -45,19 +45,27 @@ def format_agent_id(plan_slug: str, phase_id: str) -> str:
     return f"clu-{plan_slug}-{phase_id}"
 
 
-def emit_start(*, session_id: str, agent_id: str, agent_type: str) -> None:
+def emit_start(
+    *, session_id: str, agent_id: str, agent_type: str,
+    script_override: str | None = None,
+) -> None:
     """Emit a SubagentStart-equivalent event to coolant. Never raises."""
     _emit(
         script_name=_SCRIPT_START,
         session_id=session_id, agent_id=agent_id, agent_type=agent_type,
+        script_override=script_override,
     )
 
 
-def emit_stop(*, session_id: str, agent_id: str, agent_type: str) -> None:
+def emit_stop(
+    *, session_id: str, agent_id: str, agent_type: str,
+    script_override: str | None = None,
+) -> None:
     """Emit a SubagentStop-equivalent event to coolant. Never raises."""
     _emit(
         script_name=_SCRIPT_STOP,
         session_id=session_id, agent_id=agent_id, agent_type=agent_type,
+        script_override=script_override,
     )
 
 
@@ -77,12 +85,13 @@ def resolve_script_dir(override: str | None = None) -> Path | None:
 
 def _emit(
     *, script_name: str, session_id: str, agent_id: str, agent_type: str,
+    script_override: str | None = None,
 ) -> None:
     if not session_id or not agent_id:
         # Empty fields would silently pollute coolant's JSONL events log;
         # short-circuit rather than emit a degraded record.
         return
-    script_dir = resolve_script_dir()
+    script_dir = resolve_script_dir(override=script_override)
     if script_dir is None:
         return
     payload = json.dumps({

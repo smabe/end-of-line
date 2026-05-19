@@ -141,6 +141,27 @@ class TestReleaseClaimAndEmit(TempStateMixin, unittest.TestCase):
         emit.assert_not_called()
         self.assertIsNone(data["current_claim"])
 
+    def test_coolant_disabled_skips_emit_but_still_releases(self) -> None:
+        data = st.empty_state("foo", "plans")
+        st.claim_phase(data, "phase-a", lease_minutes=30)
+        with patch("end_of_line.state.coolant.emit_stop") as emit:
+            st.release_claim_and_emit(data, coolant_enabled=False)
+        # Release happened regardless of coolant config.
+        self.assertIsNone(data["current_claim"])
+        emit.assert_not_called()
+
+    def test_coolant_script_override_passed_through(self) -> None:
+        data = st.empty_state("foo", "plans")
+        st.claim_phase(data, "phase-a", lease_minutes=30)
+        with patch("end_of_line.state.coolant.emit_stop") as emit:
+            st.release_claim_and_emit(
+                data, coolant_script_override="/opt/coolant/scripts",
+            )
+        emit.assert_called_once()
+        self.assertEqual(
+            emit.call_args.kwargs["script_override"], "/opt/coolant/scripts",
+        )
+
 
 class TestBlockers(TempStateMixin, unittest.TestCase):
     def test_add_and_answer(self) -> None:

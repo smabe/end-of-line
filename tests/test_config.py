@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from end_of_line.config import (
     CONFIG_FILENAME,
     ConfigError,
+    CoolantSpec,
     DispatchSpec,
     QualitySpec,
     load_project_config,
@@ -203,6 +204,40 @@ class QualityFieldTests(_ConfigTestBase):
 
     def test_quality_simplify_threshold_missing_key_raises(self) -> None:
         self._write({"quality": {"simplify_threshold": {"files": 1}}})
+        with self.assertRaises(ConfigError):
+            load_project_config(self.root)
+
+
+class CoolantFieldTests(_ConfigTestBase):
+    def test_coolant_defaults_when_absent(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.coolant, CoolantSpec())
+        self.assertIs(cfg.coolant.enabled, True)
+        self.assertIsNone(cfg.coolant.script_dir)
+
+    def test_coolant_enabled_false(self) -> None:
+        self._write({"coolant": {"enabled": False}})
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.coolant.enabled, False)
+
+    def test_coolant_script_dir_override(self) -> None:
+        self._write({"coolant": {"script_dir": "/opt/coolant/scripts"}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.coolant.script_dir, "/opt/coolant/scripts")
+
+    def test_coolant_empty_block_uses_defaults(self) -> None:
+        self._write({"coolant": {}})
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.coolant.enabled, True)
+        self.assertIsNone(cfg.coolant.script_dir)
+
+    def test_coolant_enabled_non_bool_raises(self) -> None:
+        self._write({"coolant": {"enabled": "yes"}})
+        with self.assertRaises(ConfigError):
+            load_project_config(self.root)
+
+    def test_coolant_script_dir_non_string_raises(self) -> None:
+        self._write({"coolant": {"script_dir": 42}})
         with self.assertRaises(ConfigError):
             load_project_config(self.root)
 

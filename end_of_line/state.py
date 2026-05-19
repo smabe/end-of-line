@@ -550,6 +550,8 @@ def release_claim_and_emit(
     data: dict,
     expected_token: str | None = None,
     expected_phase: str | None = None,
+    coolant_enabled: bool = True,
+    coolant_script_override: str | None = None,
 ) -> None:
     """Release current_claim AND fire coolant.emit_stop for the released claim.
 
@@ -557,6 +559,10 @@ def release_claim_and_emit(
     so coolant gets stable values even though release wipes the claim.
     If `release_claim` raises ClaimMismatch the snapshot is discarded — the
     worker still owns the claim, so decrementing coolant would lie about it.
+
+    `coolant_enabled=False` skips the emit (release still happens). Callers
+    typically pass `cfg.coolant.enabled` so the per-project opt-out works
+    end-to-end.
     """
     claim = data.get("current_claim")
     snapshot_phase = claim.get("phase_id") if claim else None
@@ -564,12 +570,15 @@ def release_claim_and_emit(
     release_claim(
         data, expected_token=expected_token, expected_phase=expected_phase,
     )
+    if not coolant_enabled:
+        return
     if not snapshot_phase or not snapshot_token:
         return
     coolant.emit_stop(
         session_id=snapshot_token,
         agent_id=coolant.format_agent_id(data["plan_slug"], snapshot_phase),
         agent_type=coolant.AGENT_TYPE,
+        script_override=coolant_script_override,
     )
 
 

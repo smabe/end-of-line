@@ -34,7 +34,7 @@ import time
 from enum import IntEnum
 from pathlib import Path
 
-from . import cross_plan_rules, dispatch, dry_merge, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, watch
+from . import coolant, cross_plan_rules, dispatch, dry_merge, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
@@ -2002,6 +2002,7 @@ def cmd_doctor(args) -> int:
     print(f"  (source: {source})")
 
     _print_notify_health(cfg)
+    _print_coolant_health(cfg)
     _print_effort_health(cfg)
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
@@ -2050,6 +2051,35 @@ def _print_notify_health(cfg: ProjectConfig) -> None:
             continue
         source = "override" if override else "auto-resolved"
         print(f"  iMessage[to={to}]: self_chat={resolved} ({source})")
+
+
+def _print_coolant_health(cfg: ProjectConfig) -> None:
+    """Report whether coolant lifecycle emits will fire from this project.
+
+    Auto-discover looks up `~/.claude/plugins/cache/.../coolant/*/scripts/`;
+    a `coolant.script_dir` in `.orchestrator.json` overrides. Reports the
+    config + the resolved path so the operator can see in one place
+    whether worker dispatches will hit coolant's counter.
+    """
+    print("\nCoolant:")
+    if not cfg.coolant.enabled:
+        print("  disabled via .orchestrator.json coolant.enabled=false")
+        return
+    resolved = coolant.resolve_script_dir(cfg.coolant.script_dir)
+    if resolved is None:
+        if cfg.coolant.script_dir:
+            print(
+                f"  script_dir override {cfg.coolant.script_dir!r} does not "
+                f"resolve — emits will no-op"
+            )
+        else:
+            print(
+                "  coolant scripts not found — install via "
+                "`claude plugin install coolant@todd-w-shaffer`"
+            )
+        return
+    source = "override" if cfg.coolant.script_dir else "auto-discovered"
+    print(f"  scripts at {resolved} ({source})")
 
 
 def _print_effort_health(cfg: ProjectConfig) -> None:
@@ -3357,7 +3387,7 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
         }
         if args.reason:
             fields["reason"] = args.reason
-        st.release_claim_and_emit(data)
+        st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
         st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
         if pid:
             reap = st.reap_orphan_pid(
@@ -3565,6 +3595,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         st.release_claim_and_emit(
             data, expected_token=args.token, expected_phase=args.phase,
+            **cfg.coolant.release_kwargs(),
         )
         st.append_event(
             data, st.EVENT_PHASE_COMPLETED,
@@ -3634,7 +3665,7 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 f"force-complete anyway",
             )
         if claim_on_phase:
-            st.release_claim_and_emit(data)
+            st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
         st.append_event(
             data, st.EVENT_OPERATOR_FORCE_COMPLETE,
             phase=args.phase, commits=list(args.commits),
@@ -3953,6 +3984,7 @@ def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         st.release_claim_and_emit(
             data, expected_token=args.token, expected_phase=args.phase,
+            **cfg.coolant.release_kwargs(),
         )
         blocker_id = st.add_blocker(
             data, args.phase, args.question, args.options,

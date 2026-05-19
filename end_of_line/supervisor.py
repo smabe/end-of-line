@@ -230,13 +230,14 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             phase_id = claim["phase_id"]
             claimed_by = claim.get("claimed_by")
             if st.release_if_expired(data):
-                if claimed_by and phase_id:
+                if claimed_by and phase_id and config.coolant.enabled:
                     coolant.emit_stop(
                         session_id=claimed_by,
                         agent_id=coolant.format_agent_id(
                             data["plan_slug"], phase_id,
                         ),
                         agent_type=coolant.AGENT_TYPE,
+                        script_override=config.coolant.script_dir,
                     )
                 if pid:
                     reap = st.reap_orphan_pid(

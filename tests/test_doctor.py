@@ -65,8 +65,12 @@ class DoctorCommandTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _write_cfg(self, **dispatch_fields) -> None:
-        payload = {"dispatch": {"kind": "shell", "command": "echo", **dispatch_fields}}
+    def _write_cfg(self, extra: dict | None = None, **dispatch_fields) -> None:
+        payload: dict = {
+            "dispatch": {"kind": "shell", "command": "echo", **dispatch_fields},
+        }
+        if extra:
+            payload.update(extra)
         (self.project / ".orchestrator.json").write_text(json.dumps(payload))
 
     def _run_doctor(self, project: Path | None = None) -> tuple[int, str, str]:
@@ -181,6 +185,44 @@ class DoctorCommandTestCase(unittest.TestCase):
         self._run_doctor()
         after = state_path.stat().st_mtime_ns
         self.assertEqual(before, after)
+
+    # ---- coolant section ------------------------------------------------------
+
+    def test_doctor_reports_coolant_disabled(self) -> None:
+        self._write_cfg(extra={"coolant": {"enabled": False}})
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn("Coolant:", stdout)
+        self.assertIn("disabled", stdout)
+
+    def test_doctor_reports_coolant_script_dir_override(self) -> None:
+        scripts = self.project / "fake-coolant-scripts"
+        scripts.mkdir()
+        self._write_cfg(extra={"coolant": {"script_dir": str(scripts)}})
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn(str(scripts), stdout)
+        self.assertIn("override", stdout)
+
+    def test_doctor_reports_coolant_override_missing(self) -> None:
+        bogus = self.project / "no-such-dir"
+        self._write_cfg(extra={"coolant": {"script_dir": str(bogus)}})
+        # `_marketplace_glob` may resolve to a real install on the dev
+        # machine; mock it so the override-misses branch is exercised
+        # cleanly.
+        from unittest import mock
+        with mock.patch("end_of_line.coolant._marketplace_glob", return_value=None):
+            rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn("does not resolve", stdout)
+
+    def test_doctor_reports_coolant_not_installed(self) -> None:
+        self._write_cfg(extra={"coolant": {}})
+        from unittest import mock
+        with mock.patch("end_of_line.coolant._marketplace_glob", return_value=None):
+            rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn("coolant scripts not found", stdout)
 
     def _write_cfg_with_notify(self, channels: list[dict]) -> None:
         payload = {

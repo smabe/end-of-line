@@ -117,6 +117,8 @@ Other config fields:
 
 The dispatch command above launches Claude with the `/clu-phase` skill. Run `clu install-skill` to drop it into `~/.claude/skills/clu-phase/SKILL.md`, or write your own equivalent — anything that honors the worker callback contract (always call `clu complete` or `clu block` before exiting) will work.
 
+**Coolant integration (optional).** If the [coolant](https://github.com/todd-w-shaffer/coolant) plugin is installed, clu auto-discovers its scripts under `~/.claude/plugins/cache/.../coolant/<version>/scripts/` and emits agent-start/agent-stop events on every worker dispatch + claim release. This makes clu workers visible to coolant's parallel-mode gating math (`gate.sh` caps `go test` / `vitest` etc. against active agent count). Override the discover path with `coolant.script_dir` in `.orchestrator.json`, or set `coolant.enabled: false` to opt out per-project. `clu doctor` reports the resolved state.
+
 ## Bootstrap a plan
 
 Write a master plan with a `## Sessions index` table (this is the `/clu-plan` skill's convention):

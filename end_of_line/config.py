@@ -66,6 +66,32 @@ class NotifySpec:
 
 
 @dataclass
+class CoolantSpec:
+    """Coolant integration settings (closes #54).
+
+    Coolant is a Claude Code plugin that throttles parallel-agent thermal
+    load. When enabled (default), clu emits lifecycle events on worker
+    dispatch + every claim release so coolant's counter + gate.sh's
+    parallel-mode formula see clu workers. `script_dir` overrides
+    auto-discovery of `~/.claude/plugins/cache/.../scripts/`.
+    """
+    enabled: bool = True
+    script_dir: str | None = None
+
+    def release_kwargs(self) -> dict:
+        """Map to the kwargs that `state.release_claim_and_emit` accepts.
+
+        Centralized so the 4 cli.py callback handlers don't each have to
+        spell out `coolant_enabled=cfg.coolant.enabled,
+        coolant_script_override=cfg.coolant.script_dir`.
+        """
+        return {
+            "coolant_enabled": self.enabled,
+            "coolant_script_override": self.script_dir,
+        }
+
+
+@dataclass
 class QualitySpec:
     verify_command: str | None = None
     simplify_threshold: dict | None = None  # {"files": int, "lines": int}
@@ -87,6 +113,7 @@ class ProjectConfig:
     auto_archive: bool = True
     tick_on_action: bool = True
     quality: QualitySpec = field(default_factory=QualitySpec)
+    coolant: CoolantSpec = field(default_factory=CoolantSpec)
     lease_ttl_scale: float = 0.5
 
     def queue_path(self) -> Path:
@@ -171,6 +198,22 @@ def _validate_quality(raw: dict) -> QualitySpec:
     )
 
 
+def _validate_coolant(raw: dict) -> CoolantSpec:
+    block = raw.get("coolant") or {}
+    enabled = block.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError(
+            f"coolant.enabled: must be bool, got {type(enabled).__name__!r}"
+        )
+    script_dir = block.get("script_dir")
+    if script_dir is not None and not isinstance(script_dir, str):
+        raise ConfigError(
+            f"coolant.script_dir: must be string or null, "
+            f"got {type(script_dir).__name__!r}"
+        )
+    return CoolantSpec(enabled=enabled, script_dir=script_dir)
+
+
 def _validate_lease_ttl_scale(raw: dict) -> float:
     val = raw.get("lease_ttl_scale", 0.5)
     try:
@@ -241,5 +284,6 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         auto_archive=_validate_auto_archive(raw),
         tick_on_action=_validate_tick_on_action(raw),
         quality=_validate_quality(raw),
+        coolant=_validate_coolant(raw),
         lease_ttl_scale=_validate_lease_ttl_scale(raw),
     )
