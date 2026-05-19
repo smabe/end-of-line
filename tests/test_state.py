@@ -81,6 +81,67 @@ class TestClaim(TempStateMixin, unittest.TestCase):
         self.assertIn("lease_expired", types)
 
 
+class TestReleaseClaimAndEmit(TempStateMixin, unittest.TestCase):
+    """The wrapper that delegates to release_claim and fires coolant.emit_stop.
+
+    Snapshots phase_id + claimed_by BEFORE the release so the emit has
+    stable fields to hand to coolant.
+    """
+
+    def test_emits_with_snapshot_fields_on_clean_release(self) -> None:
+        data = st.empty_state("foo", "plans")
+        token = st.claim_phase(data, "phase-a", lease_minutes=30)
+        with patch("end_of_line.state.coolant.emit_stop") as emit:
+            st.release_claim_and_emit(
+                data,
+                expected_token=token, expected_phase="phase-a",
+            )
+        self.assertIsNone(data["current_claim"])
+        emit.assert_called_once()
+        kwargs = emit.call_args.kwargs
+        self.assertEqual(kwargs["session_id"], token)
+        self.assertEqual(kwargs["agent_id"], "clu-foo-phase-a")
+        self.assertEqual(kwargs["agent_type"], "clu-worker")
+
+    def test_unconditional_release_still_emits(self) -> None:
+        data = st.empty_state("foo", "plans")
+        st.claim_phase(data, "phase-a", lease_minutes=30)
+        with patch("end_of_line.state.coolant.emit_stop") as emit:
+            st.release_claim_and_emit(data)
+        self.assertIsNone(data["current_claim"])
+        emit.assert_called_once()
+
+    def test_no_claim_no_emit(self) -> None:
+        data = st.empty_state("foo", "plans")
+        with patch("end_of_line.state.coolant.emit_stop") as emit:
+            st.release_claim_and_emit(data)
+        emit.assert_not_called()
+
+    def test_claim_mismatch_does_not_emit(self) -> None:
+        data = st.empty_state("foo", "plans")
+        st.claim_phase(data, "phase-a", lease_minutes=30)
+        with patch("end_of_line.state.coolant.emit_stop") as emit:
+            with self.assertRaises(st.ClaimMismatch):
+                st.release_claim_and_emit(
+                    data,
+                    expected_token="wrong-token", expected_phase="phase-a",
+                )
+        # Release was rejected; the claim still belongs to the right token.
+        # Decrementing coolant here would lie about the worker's status.
+        emit.assert_not_called()
+        self.assertIsNotNone(data["current_claim"])
+
+    def test_malformed_claim_skips_emit(self) -> None:
+        """A claim missing phase_id or claimed_by is unsalvageable for coolant —
+        prefer a silent skip over polluting the events log with empty fields."""
+        data = st.empty_state("foo", "plans")
+        data["current_claim"] = {"phase_id": "", "claimed_by": "tok"}
+        with patch("end_of_line.state.coolant.emit_stop") as emit:
+            st.release_claim_and_emit(data)
+        emit.assert_not_called()
+        self.assertIsNone(data["current_claim"])
+
+
 class TestBlockers(TempStateMixin, unittest.TestCase):
     def test_add_and_answer(self) -> None:
         data = st.empty_state("foo", "plans")

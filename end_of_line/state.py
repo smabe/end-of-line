@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from . import coolant
+
 # Fragment (no anchors) so other modules can compose it into larger patterns
 # without redefining the character class — drift here is a security invariant
 # (path traversal + unmatched inbound replies).
@@ -542,6 +544,33 @@ def release_claim(
         )
     assert_claim_match(data, expected_token, expected_phase)
     data["current_claim"] = None
+
+
+def release_claim_and_emit(
+    data: dict,
+    expected_token: str | None = None,
+    expected_phase: str | None = None,
+) -> None:
+    """Release current_claim AND fire coolant.emit_stop for the released claim.
+
+    Snapshots `phase_id` + `claimed_by` BEFORE delegating to `release_claim`,
+    so coolant gets stable values even though release wipes the claim.
+    If `release_claim` raises ClaimMismatch the snapshot is discarded — the
+    worker still owns the claim, so decrementing coolant would lie about it.
+    """
+    claim = data.get("current_claim")
+    snapshot_phase = claim.get("phase_id") if claim else None
+    snapshot_token = claim.get("claimed_by") if claim else None
+    release_claim(
+        data, expected_token=expected_token, expected_phase=expected_phase,
+    )
+    if not snapshot_phase or not snapshot_token:
+        return
+    coolant.emit_stop(
+        session_id=snapshot_token,
+        agent_id=coolant.format_agent_id(data["plan_slug"], snapshot_phase),
+        agent_type=coolant.AGENT_TYPE,
+    )
 
 
 def stamp_attestation(data: dict, kind: str, commit_sha: str) -> None:
