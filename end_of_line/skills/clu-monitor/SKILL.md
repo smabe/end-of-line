@@ -106,6 +106,17 @@ writes — quiet hours gate them, but inbox writes happen
 unconditionally because the inbox is for the operator's *next* turn,
 not for waking them.
 
+### Stuck-tool events (#67)
+
+When the supervisor detects a worker whose Bash tool has been running
+with near-zero CPU for several minutes, it emits a `tool_stuck` inbox
+event and the hook appends an investigate-then-recommend instruction
+block to the surfaced context. The primary session is expected to walk
+the worker's process tree, propose a kill plan to the operator, and
+**wait for explicit approval** before running anything destructive
+(`kill`, `clu release-claim`, `clu force-complete`). This honors the
+operator-approval checkpoint in user-level CLAUDE.md.
+
 ## Live in-session feed (`clu watch`)
 
 The inbox hook is the *AFK* channel — it batches events into the next

@@ -47,6 +47,28 @@ INSTRUCTION = (
     "the user which plan they mean — don't guess.\n"
 )
 
+# Investigate-then-recommend contract appended when any tool_stuck event
+# appears in the surfaced set. The primary session should diagnose
+# autonomously but never auto-intervene — destructive recovery requires
+# explicit operator approval per the operator-approval checkpoint.
+TOOL_STUCK_INSTRUCTION = (
+    "\n## Stuck-tool events\n\n"
+    "One or more clu workers have a Bash tool that's been running with "
+    "near-zero CPU for several minutes (TOOL_STUCK events above). "
+    "Investigate autonomously: walk the worker's process tree via "
+    "`ps -p <worker_pid>` then `pgrep -P <worker_pid>` to find the "
+    "wedged subprocess, and synthesize a kill recommendation naming the "
+    "specific PIDs. Surface the recommendation proactively so the operator "
+    "sees it without asking. **Do NOT run `kill`, `clu release-claim`, "
+    "or `clu force-complete` until the operator explicitly approves** — "
+    "the operator-approval checkpoint in user-level CLAUDE.md mandates "
+    "this for any destructive intervention.\n"
+)
+
+
+def _has_tool_stuck(events: Iterable[dict]) -> bool:
+    return any(e.get("type") == "tool_stuck" for e in events)
+
 
 def _log_path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME")
@@ -146,14 +168,18 @@ def main() -> int:
         blockers = open_blockers_with_details(entries, project_root)
         blockers_section = _build_blockers_section(blockers)
 
-        if events_context and blockers_section:
-            context = events_context + "\n\n" + blockers_section
-        elif events_context:
-            context = events_context
-        elif blockers_section:
-            context = blockers_section
-        else:
+        # Append the investigate-then-recommend contract once if any
+        # tool_stuck event made it into the surfaced set (events is the
+        # full inbox; the cap in _build_context never drops a tool_stuck
+        # event because they're rare).
+        tool_stuck_section = (
+            TOOL_STUCK_INSTRUCTION if _has_tool_stuck(events) else ""
+        )
+
+        parts = [s for s in (events_context, blockers_section, tool_stuck_section) if s]
+        if not parts:
             return 0
+        context = "\n\n".join(parts)
 
         payload = {
             "hookSpecificOutput": {
