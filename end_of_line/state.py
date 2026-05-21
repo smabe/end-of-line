@@ -192,6 +192,13 @@ EVENT_OPERATOR_SKIP_SIMPLIFY = "operator_skip_simplify"
 # Supervisor reaped an orphaned worker process after lease expiry.
 # Fields: phase, pid, signaled ("SIGTERM" | "SIGTERM+SIGKILL"), cmdline_mismatch (bool).
 EVENT_PHASE_ORPHAN_REAPED = "phase_orphan_reaped"
+# Supervisor's process-tree walker detected a long-lived, low-CPU descendant
+# of the worker pid — i.e. a Bash tool wedged on something (canonical case:
+# xcodebuild hanging on simulator HK auth). Detection only, no auto-kill.
+# Fields: plan, phase, worker_pid, descendant_pid, command (first 200 chars),
+# elapsed_seconds, cpu_seconds. Deduped per descendant_pid via
+# current_claim.stuck_tool_emitted_at — at most one emit per (claim, leaf).
+EVENT_TOOL_STUCK = "tool_stuck"
 
 # Per-project verify opt-out (quality.verify_required: false). Fires on
 # every cmd_complete under the opt-out so the audit trail records the
@@ -608,6 +615,21 @@ def attestation_commit_sha(data: dict, kind: str) -> str | None:
     attestations = claim.get("attestations") or {}
     entry = attestations.get(kind)
     return entry.get("commit_sha") if entry else None
+
+
+def mark_tool_stuck_emitted(claim: dict, descendant_pid: int, at: str) -> None:
+    """Record that EVENT_TOOL_STUCK fired for this descendant_pid on this claim.
+
+    Used by the supervisor to dedupe: detect_stuck_tools fires on every tick,
+    but a wedged xcodebuild should only emit one event per (claim, leaf).
+    Keys are stringified pids because JSON object keys must be strings.
+    """
+    claim.setdefault("stuck_tool_emitted_at", {})[str(descendant_pid)] = at
+
+
+def tool_stuck_already_emitted(claim: dict, descendant_pid: int) -> bool:
+    """True if EVENT_TOOL_STUCK already fired for this descendant_pid."""
+    return str(descendant_pid) in (claim.get("stuck_tool_emitted_at") or {})
 
 
 def add_blocker(
