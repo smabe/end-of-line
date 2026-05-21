@@ -100,10 +100,15 @@ debugging session that asks "why didn't this tick advance?" reduces to
 1. **Stale lease release.** If `current_claim.lease_expires` is in the
    past, drop the claim and write `lease_expired`. The phase's attempts
    counter ticks up next time it's dispatched.
-2. **Stalled heartbeat.** If a live claim hasn't heartbeat within
-   `stalled_heartbeat_minutes` (default 10), emit `phase_stalled` once
-   and stamp `stalled_notified=True` on the claim. The claim stays —
-   the lease still owns retry. This is just the notification trigger.
+2. **Stalled heartbeat.** If a live claim hasn't heartbeat within the
+   threshold returned by `state.stalled_threshold_for_phase` —
+   explicit `config.stalled_heartbeat_minutes` if set, else
+   `max(15, lease_ttl_for_phase // 2)` — emit `phase_stalled` once and
+   stamp `stalled_notified=True` on the claim. The claim stays — the
+   lease still owns retry. This is just the notification trigger.
+   Deriving from lease TTL prevents false alarms when workers in deep
+   tool-use chains skip heartbeats while still inside their lease
+   window (60-min default → 30-min threshold).
 3. **Blocker SLA escalation.** If an open blocker is older than
    `blocked_question_sla_hours` (default 24), pause the plan and emit
    `blocker_sla_exceeded`. **Skipped during quiet hours** so an

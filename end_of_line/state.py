@@ -85,7 +85,11 @@ DEFAULT_SLA_HOURS = 24
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_SPAWNS_PER_PHASE = 10
 DEFAULT_MAX_QUEUE_ADDS_PER_PHASE = 3
-DEFAULT_STALLED_HEARTBEAT_MIN = 10
+# Floor for the derived stalled-heartbeat threshold (minutes). Short
+# Effort-scaled leases (#58) divided by 2 can fall below the old 10-min
+# ballpark; the floor keeps the threshold sensible without re-introducing
+# the false-alarm cadence operators saw on long tool-use chains.
+STALLED_HEARTBEAT_MIN_FLOOR = 15
 
 # Plan status (`data["status"]`)
 STATUS_RUNNING = "running"
@@ -302,7 +306,6 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
             "max_attempts_per_phase": DEFAULT_MAX_ATTEMPTS,
             "max_spawns_per_phase": DEFAULT_MAX_SPAWNS_PER_PHASE,
             "max_queue_adds_per_phase": DEFAULT_MAX_QUEUE_ADDS_PER_PHASE,
-            "stalled_heartbeat_minutes": DEFAULT_STALLED_HEARTBEAT_MIN,
         },
         "phases": [],
         "events": [],
@@ -415,6 +418,35 @@ def lease_ttl_for_phase(data: dict, phase_id: str) -> int:
         if ph.get("id") == phase_id and "lease_ttl_minutes" in ph:
             return int(ph["lease_ttl_minutes"])
     return int(data.get("config", {}).get("lease_ttl_minutes", DEFAULT_LEASE_TTL_MIN))
+
+
+def stalled_threshold_for_phase(data: dict, phase_id: str) -> int:
+    """Heartbeat threshold (minutes) before a claim is flagged stalled.
+
+    Explicit `config.stalled_heartbeat_minutes` wins. Otherwise derive as
+    `max(STALLED_HEARTBEAT_MIN_FLOOR, lease_ttl_for_phase // 2)` so
+    Effort-scaled leases (#58) don't false-alarm on deep tool-use chains
+    that legitimately skip heartbeats until a top-level decision.
+    """
+    explicit = data.get("config", {}).get("stalled_heartbeat_minutes")
+    if explicit is not None:
+        return int(explicit)
+    return max(STALLED_HEARTBEAT_MIN_FLOOR, lease_ttl_for_phase(data, phase_id) // 2)
+
+
+def claim_is_stalled(
+    data: dict, claim: dict, now: _dt.datetime | None = None,
+) -> bool:
+    """`is_claim_stalled` paired with `stalled_threshold_for_phase`.
+
+    The supervisor's stalled-detection path doesn't use this wrapper — it
+    needs the raw `age` in seconds for the event payload and notify body.
+    All other callers (`fleet.summarize_plan`, the CLI status / heartbeat
+    / release-claim helpers) just need the boolean.
+    """
+    return is_claim_stalled(
+        claim, stalled_threshold_for_phase(data, claim["phase_id"]), now=now,
+    )
 
 
 def release_if_expired(data: dict) -> bool:

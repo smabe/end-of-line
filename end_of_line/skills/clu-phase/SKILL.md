@@ -110,7 +110,7 @@ If you see an answered blocker, that means: you asked a question previously, the
    HEARTBEAT_PID=$!
    trap "kill $HEARTBEAT_PID 2>/dev/null" EXIT
    ```
-   The 2-minute interval is well inside the default `stalled_heartbeat_minutes: 10` threshold and loose enough to not flood state.json writes. The EXIT trap is the contract — without it, the ticker survives the worker process and continues pinging a dead claim. Don't skip it.
+   The 2-minute interval is well inside the heartbeat threshold (derived from lease TTL: `max(15, lease_ttl//2)`, so 30 min at the default 60-min lease) and loose enough to not flood state.json writes. The EXIT trap is the contract — without it, the ticker survives the worker process and continues pinging a dead claim. Don't skip it.
 
 3. **Check for resume**: inspect `$STATE` for an answered blocker on `$PHASE`. If found, factor the answer into your plan for this run.
 
@@ -220,9 +220,9 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Failing SHA validation**: `clu complete --commit <sha>` runs `git cat-file -e <sha>` against the project repo. If the SHA doesn't exist (typo, didn't actually commit), exit code 3 (`BAD_SHA`) and the phase doesn't release. Always pass SHAs that are actually in the repo.
 
-- **Long phases**: the lease is 30 min by default. If your work takes longer, checkpoint by calling `clu block` with a question like "continue?" + options `["yes", "stop here"]`. The user replies, you resume on the next dispatch with their answer in hand. This is normal — phases are meant to be tick-sized, not session-sized.
+- **Long phases**: the lease is 60 min by default. If your work takes longer, checkpoint by calling `clu block` with a question like "continue?" + options `["yes", "stop here"]`. The user replies, you resume on the next dispatch with their answer in hand. This is normal — phases are meant to be tick-sized, not session-sized.
 
-- **Skipping the heartbeat ticker**: step 2 arms a background `clu heartbeat` loop for every phase. Don't skip it even for short phases — `clu status` mis-reports `STALLED` the moment the phase exceeds `stalled_heartbeat_minutes` (default 10) without a heartbeat, and the supervisor's gap-fill notification fires. The 2-min ticker is cheap; the EXIT trap cleans it up automatically.
+- **Skipping the heartbeat ticker**: step 2 arms a background `clu heartbeat` loop for every phase. Don't skip it even for short phases — `clu status` mis-reports `STALLED` the moment the phase exceeds the heartbeat threshold (`max(15, lease_ttl//2)`, ~30 min by default) without a heartbeat, and the supervisor's gap-fill notification fires. The 2-min ticker is cheap; the EXIT trap cleans it up automatically.
 
 ## Example invocations
 

@@ -91,6 +91,53 @@ class HeartbeatStateTestCase(unittest.TestCase):
         self.assertTrue(st.is_claim_stalled(claim, threshold_minutes=10, now=now))
 
 
+class StalledThresholdResolutionTestCase(unittest.TestCase):
+    """`stalled_threshold_for_phase` derives the per-claim threshold."""
+
+    def test_derives_from_default_lease_ttl(self) -> None:
+        data = st.empty_state("p", "plans")
+        # Default lease TTL is 60 min → max(15, 60//2) = 30.
+        self.assertEqual(st.stalled_threshold_for_phase(data, "a"), 30)
+
+    def test_explicit_config_override_wins(self) -> None:
+        data = st.empty_state("p", "plans")
+        data["config"]["stalled_heartbeat_minutes"] = 5
+        self.assertEqual(st.stalled_threshold_for_phase(data, "a"), 5)
+
+    def test_floor_applies_to_short_leases(self) -> None:
+        data = st.empty_state("p", "plans")
+        data["config"]["lease_ttl_minutes"] = 20  # 20//2 = 10 < floor
+        self.assertEqual(
+            st.stalled_threshold_for_phase(data, "a"),
+            st.STALLED_HEARTBEAT_MIN_FLOOR,
+        )
+
+    def test_per_phase_lease_override_propagates(self) -> None:
+        data = st.empty_state("p", "plans")
+        data["phases"] = [{"id": "long", "lease_ttl_minutes": 120}]
+        self.assertEqual(st.stalled_threshold_for_phase(data, "long"), 60)
+        # Other phases fall back to global config (60 min default → 30).
+        self.assertEqual(st.stalled_threshold_for_phase(data, "other"), 30)
+
+    def test_empty_state_does_not_seed_stalled_heartbeat_minutes(self) -> None:
+        data = st.empty_state("p", "plans")
+        self.assertNotIn("stalled_heartbeat_minutes", data["config"])
+
+    def test_claim_is_stalled_wraps_resolution_and_check(self) -> None:
+        now = _dt.datetime(2026, 5, 11, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        data = st.empty_state("p", "plans")  # default 60-min lease → 30-min threshold
+        fresh = {
+            "phase_id": "a", "claimed_by": "session-aaaa1111bbbb2222",
+            "lease_expires": "2099-01-01T00:00:00Z",
+            "started_at": "2026-05-11T00:00:00Z",
+            "last_heartbeat_at": "2026-05-11T11:45:00Z",  # 15 min ago
+            "attempts": 1,
+        }
+        self.assertFalse(st.claim_is_stalled(data, fresh, now=now))
+        stale = dict(fresh, last_heartbeat_at="2026-05-11T11:25:00Z")  # 35 min ago
+        self.assertTrue(st.claim_is_stalled(data, stale, now=now))
+
+
 class HeartbeatCliTestCase(CluTestCase):
     """End-to-end CLI invocation."""
 
@@ -151,7 +198,8 @@ class StalledSupervisorTestCase(CluTestCase):
 
     def test_stalled_emitted_once_per_claim(self) -> None:
         tick(self.state_path, self.cfg)  # claims a
-        _backdate_claim(self.state_path, minutes=15)
+        # Default lease 60min → derived threshold 30min; backdate past that.
+        _backdate_claim(self.state_path, minutes=35)
 
         first = tick(self.state_path, self.cfg)
         self.assertEqual(first.action, "stalled")
@@ -184,7 +232,7 @@ class StalledSupervisorTestCase(CluTestCase):
     def test_stalled_does_not_release_claim(self) -> None:
         """The lease expiry is the source of truth for retry; stalled is a signal."""
         tick(self.state_path, self.cfg)
-        _backdate_claim(self.state_path, minutes=15)
+        _backdate_claim(self.state_path, minutes=35)
         tick(self.state_path, self.cfg)
         self.assertIsNotNone(self._read()["current_claim"])
 

@@ -101,15 +101,16 @@ class ReleaseClaimTestCase(GitProjectTestCase):
     # ---- running-plan with STALE heartbeat (allowed) --------------------------
 
     def test_stale_heartbeat_release_clears_claim(self) -> None:
-        # default stalled_heartbeat_minutes is 10; 15 min is decisively stale.
-        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=15 * 60))
+        # Threshold derives from lease TTL: max(15, lease_ttl//2).
+        # Default 60-min lease → 30-min threshold; 35 min is decisively stale.
+        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=35 * 60))
         rc = main(self._argv("release-claim"))
         self.assertEqual(rc, 0)
         self.assertIsNone(self._read()["current_claim"])
         self.assertEqual(len(self._force_release_events()), 1)
 
     def test_stale_heartbeat_release_is_not_forced(self) -> None:
-        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=15 * 60))
+        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=35 * 60))
         main(self._argv("release-claim"))
         evts = self._force_release_events()
         self.assertFalse(evts[0]["forced"])
@@ -166,7 +167,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
     # ---- --reason persists in the event payload -------------------------------
 
     def test_reason_recorded_in_event(self) -> None:
-        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=15 * 60))
+        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=35 * 60))
         rc = main(self._argv("release-claim", "--reason", "worker OOM'd"))
         self.assertEqual(rc, 0)
         evts = self._force_release_events()
@@ -175,7 +176,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
     def test_no_reason_omits_reason_field(self) -> None:
         # When the operator declines to explain, the event simply has no
         # `reason` key — better than a placeholder that pretends to be content.
-        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=15 * 60))
+        self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=35 * 60))
         main(self._argv("release-claim"))
         evt = self._force_release_events()[0]
         self.assertNotIn("reason", evt)

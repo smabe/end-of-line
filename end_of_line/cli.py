@@ -365,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument(
         "--stalled-heartbeat-minutes", type=int, default=None,
         dest="stalled_heartbeat_minutes",
-        help="Override stall threshold (minutes). Default: 10.",
+        help="Override stall threshold (minutes). Default: derived from lease TTL (max(15, lease_ttl//2)).",
     )
     p_init.add_argument(
         "--max-attempts-per-phase", type=int, default=None,
@@ -2419,10 +2419,7 @@ _FREEZE_STATUSES = frozenset({
 def _project_state_status(state: dict) -> str:
     """Project a loaded state.json into the one-word STATUS column label."""
     claim = state.get("current_claim")
-    threshold = state.get("config", {}).get(
-        "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
-    )
-    if claim and st.is_claim_stalled(claim, threshold):
+    if claim and st.claim_is_stalled(state, claim):
         return st.STATUS_STALLED
     return state["status"]
 
@@ -3299,10 +3296,7 @@ def _format_heartbeat(data: dict, claim: dict) -> str:
     age = st.heartbeat_age_seconds(claim)
     if age is None:
         return "Heartbeat: unknown"
-    threshold = data["config"].get(
-        "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
-    )
-    label = "STALLED" if st.is_claim_stalled(claim, threshold) else "Heartbeat:"
+    label = "STALLED" if st.claim_is_stalled(data, claim) else "Heartbeat:"
     return f"{label} {_humanize_age(age)} ago"
 
 
@@ -3409,11 +3403,8 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
         if claim is None:
             print(f"no claim to release on {args.plan}", file=sys.stderr)
             return ExitCode.OK
-        threshold = data["config"].get(
-            "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
-        )
         running = data["status"] == st.STATUS_RUNNING
-        fresh = not st.is_claim_stalled(claim, threshold)
+        fresh = not st.claim_is_stalled(data, claim)
         if running and fresh and not args.force:
             return _die(
                 ExitCode.STATUS_TRANSITION,

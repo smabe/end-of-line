@@ -30,10 +30,7 @@ def summarize_plan(entry: registry.PlanEntry) -> PlanSummary | None:
         return None
 
     claim = data.get("current_claim")
-    threshold = data["config"].get(
-        "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
-    )
-    if claim and st.is_claim_stalled(claim, threshold):
+    if claim and st.claim_is_stalled(data, claim):
         status = st.STATUS_STALLED
     else:
         status = data["status"]

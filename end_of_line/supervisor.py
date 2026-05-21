@@ -208,9 +208,7 @@ def _detect_stalled(data: dict) -> TickResult | None:
     # _detect_lease_expired. (#27)
     if claim.get("last_heartbeat_at") == claim.get("started_at"):
         return None
-    threshold = data["config"].get(
-        "stalled_heartbeat_minutes", st.DEFAULT_STALLED_HEARTBEAT_MIN,
-    )
+    threshold = st.stalled_threshold_for_phase(data, claim["phase_id"])
     age = st.heartbeat_age_seconds(claim) or 0.0
     if age < threshold * 60:
         return None
