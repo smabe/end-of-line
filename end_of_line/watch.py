@@ -31,6 +31,9 @@ _DEFAULT_VISIBLE: frozenset[str] = frozenset(filter(None, {
     st.EVENT_QUEUE_POPPED,
     st.EVENT_WORKTREE_MISSING,
     st.EVENT_WORKTREE_CONFLICT_WARNING,
+    # Stuck-tool detection (#67) — actionable, not verbose. The operator
+    # should see wedged subprocesses in the default stream.
+    getattr(st, "EVENT_TOOL_STUCK", None),
     # Queue v2 — present after queue-worker-callback merged
     getattr(st, "EVENT_QUEUE_APPENDED", None),
     getattr(st, "EVENT_QUEUE_REJECTED", None),
@@ -170,6 +173,17 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
         f"{slug}: worktree retained (branch ahead) — {e.get('path', '?')}"
     ),
 }
+
+# Stuck-tool formatter (#67) — splice in if the constant is defined so older
+# state files predating worker-watchdog don't trip up the dispatch table.
+_TOOL_STUCK = getattr(st, "EVENT_TOOL_STUCK", None)
+if _TOOL_STUCK:
+    _FORMATTERS[_TOOL_STUCK] = lambda slug, e: (
+        f"{_phase_prefix(slug, e)}: STUCK TOOL pid={e.get('descendant_pid', '?')} "
+        f"elapsed={e.get('elapsed_seconds', '?')}s "
+        f"cmd={_trunc(e.get('command'), 80)}"
+    )
+
 
 # Queue v2 formatters — splice in only when constants are defined
 _Q_APPENDED = getattr(st, "EVENT_QUEUE_APPENDED", None)

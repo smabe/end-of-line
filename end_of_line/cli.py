@@ -34,7 +34,7 @@ import time
 from enum import IntEnum
 from pathlib import Path
 
-from . import coolant, cross_plan_rules, dispatch, dry_merge, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, watch
+from . import coolant, cross_plan_rules, dispatch, dry_merge, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, supervisor, watch
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
@@ -2004,9 +2004,51 @@ def cmd_doctor(args) -> int:
     _print_notify_health(cfg)
     _print_coolant_health(cfg)
     _print_effort_health(cfg)
+    _print_stuck_tool_health(cfg)
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _print_stuck_tool_health(
+    cfg: ProjectConfig, *, ps_output: str | None = None,
+) -> None:
+    """Report any active claims with wedged descendants.
+
+    Quiet when there's nothing to flag — doctor noise across many plans
+    hurts signal-to-noise. ps_output is a test seam.
+    """
+    threshold = cfg.stuck_tool_threshold_seconds
+    if threshold == 0:
+        return
+    cpu_max = cfg.stuck_tool_cpu_threshold_seconds
+    project_root = cfg.project_root.resolve()
+    findings: list[tuple[str, str, int, "supervisor.Descendant"]] = []
+    for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
+        claim = p.state.get("current_claim") or {}
+        pid = claim.get("pid")
+        if not pid:
+            continue
+        phase = claim.get("phase_id", "?")
+        descendants = supervisor.walk_worker_tree(
+            pid, ps_output=ps_output,
+            ignore_patterns=supervisor.STUCK_TOOL_IGNORE_PATTERNS,
+        )
+        for d in descendants:
+            if d.elapsed_seconds < threshold:
+                continue
+            if d.cpu_seconds > cpu_max:
+                continue
+            findings.append((p.slug, phase, pid, d))
+    if not findings:
+        return
+    print("\nStuck tools:")
+    for slug, phase, worker_pid, d in findings:
+        cmd = d.command if len(d.command) <= 80 else d.command[:79] + "…"
+        print(
+            f"  {slug}/{phase}  worker={worker_pid}  pid={d.pid}  "
+            f"elapsed={d.elapsed_seconds}s  cpu={d.cpu_seconds}s  {cmd}"
+        )
 
 
 def _print_notify_health(cfg: ProjectConfig) -> None:

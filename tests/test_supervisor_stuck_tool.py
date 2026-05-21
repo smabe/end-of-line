@@ -341,6 +341,142 @@ class EmitStuckToolTestCase(CluTestCase):
         self.assertEqual(len(events), 1)
 
 
+# ---------------------------------------------------------------------------
+# P4 — surfaces: clu watch formatter + clu doctor health line
+# ---------------------------------------------------------------------------
+
+
+class WatchFormatterTestCase(unittest.TestCase):
+    def test_formatter_registered_for_tool_stuck(self) -> None:
+        from end_of_line import watch
+        self.assertIn(st.EVENT_TOOL_STUCK, watch._FORMATTERS)
+
+    def test_event_visible_by_default(self) -> None:
+        # Stuck-tool events are actionable; they belong in the default stream
+        # (not the verbose-only band like lease_expired).
+        from end_of_line import watch
+        self.assertIn(st.EVENT_TOOL_STUCK, watch._DEFAULT_VISIBLE)
+        self.assertNotIn(st.EVENT_TOOL_STUCK, watch._VERBOSE_ONLY)
+
+    def test_formatter_includes_phase_pid_elapsed(self) -> None:
+        from end_of_line import watch
+        fmt = watch._FORMATTERS[st.EVENT_TOOL_STUCK]
+        rendered = fmt("plan-x", {
+            "type": st.EVENT_TOOL_STUCK,
+            "phase": "ai-tools",
+            "worker_pid": 78233,
+            "descendant_pid": 81681,
+            "command": "/usr/bin/xcodebuild test -project HealthDash.xcodeproj",
+            "elapsed_seconds": 600,
+            "cpu_seconds": 0,
+        })
+        # The operator should be able to identify the wedged subprocess at a
+        # glance without expanding the JSON payload.
+        self.assertIn("plan-x/ai-tools", rendered)
+        self.assertIn("81681", rendered)
+        self.assertIn("600", rendered)
+        self.assertIn("xcodebuild", rendered)
+
+
+class DoctorStuckToolHealthTestCase(CluTestCase):
+    def _write_state_with_wedge(
+        self,
+        project: Path,
+        *,
+        slug: str = "plan-x",
+        worker_pid: int = 78233,
+    ) -> Path:
+        orch = project / "plans" / ".orchestrator"
+        orch.mkdir(parents=True, exist_ok=True)
+        state_path = orch / f"{slug}.state.json"
+        data = st.empty_state(slug, str(project / "plans"))
+        data["current_claim"] = {
+            "phase_id": "ai-tools",
+            "claimed_by": "session-abc",
+            "lease_expires": "2026-05-21T15:00:00Z",
+            "started_at": "2026-05-21T14:00:00Z",
+            "last_heartbeat_at": "2026-05-21T14:00:00Z",
+            "attempts": 1,
+            "pid": worker_pid,
+        }
+        st.save_atomic(state_path, data)
+        return state_path
+
+    def _register(self, project: Path, slug: str = "plan-x") -> None:
+        from end_of_line import registry
+        cfg_path = project / "plans" / f"{slug}.md"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(
+            "# x\n\n## Sessions index\n\n"
+            "| Session | Plan file | Scope | Effort |\n"
+            "|---|---|---|---|\n"
+            "| ai-tools | `x-ai.md` | thing | 30min |\n"
+        )
+        (project / ".orchestrator.json").write_text('{"plan_dir": "plans"}')
+        registry.register(project, slug)
+
+    def test_doctor_prints_stuck_tool_when_descendant_wedged(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+        from end_of_line.cli import _print_stuck_tool_health
+        from end_of_line.config import load_project_config
+
+        project = self.tmp_path / "proj"
+        project.mkdir()
+        self._register(project)
+        self._write_state_with_wedge(project)
+        cfg = load_project_config(project)
+        # Inject a ps_output instead of relying on a real wedged process —
+        # the helper must accept a test seam analogous to _emit_stuck_tool.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _print_stuck_tool_health(cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        out = buf.getvalue()
+        self.assertIn("Stuck tools", out)
+        self.assertIn("plan-x", out)
+        self.assertIn("ai-tools", out)
+        self.assertIn("81681", out)
+
+    def test_doctor_silent_when_no_wedges(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+        from end_of_line.cli import _print_stuck_tool_health
+        from end_of_line.config import load_project_config
+
+        project = self.tmp_path / "proj"
+        project.mkdir()
+        self._register(project)
+        self._write_state_with_wedge(project)
+        cfg = load_project_config(project)
+        # PS_BUSY_BUILD has high CPU — not stuck.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _print_stuck_tool_health(cfg, ps_output=PS_BUSY_BUILD)
+        # Stay quiet when there's nothing to report — doctor noise hurts
+        # signal-to-noise across many plans.
+        self.assertNotIn("Stuck tools", buf.getvalue())
+
+    def test_doctor_silent_when_no_active_claims(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+        from end_of_line.cli import _print_stuck_tool_health
+        from end_of_line.config import load_project_config
+
+        project = self.tmp_path / "proj"
+        project.mkdir()
+        self._register(project)
+        # Write state with no claim.
+        orch = project / "plans" / ".orchestrator"
+        orch.mkdir(parents=True, exist_ok=True)
+        data = st.empty_state("plan-x", str(project / "plans"))
+        st.save_atomic(orch / "plan-x.state.json", data)
+        cfg = load_project_config(project)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _print_stuck_tool_health(cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        self.assertNotIn("Stuck tools", buf.getvalue())
+
+
 class WalkWorkerTreeLiveSmokeTestCase(unittest.TestCase):
     """Verify the live `ps` call (no ps_output passed) returns something
     plausible — the harness's own process tree should always contain the
