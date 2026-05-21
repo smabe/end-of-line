@@ -560,5 +560,5 @@ operator can answer from anywhere with iMessage.
 - State schema, event types, worker callback contract → `contract.md`
 - macOS install, Full Disk Access, LaunchAgent plists, log locations →
   `operations.md`
-- TDD, `/simplify`, commit format, slug regex, token discipline →
+- TDD, `/code-review`, commit format, slug regex, token discipline →
   `conventions.md`

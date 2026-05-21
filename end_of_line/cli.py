@@ -10,7 +10,7 @@ Subcommands (worker-side, called by phase-runner sessions):
   complete  — mark current phase complete + record commits
   block     — record a blocker question + release claim
   answer    — answer a pending blocker (user-side)
-  spawn     — append a dynamic task (e.g. /simplify finding)
+  spawn     — append a dynamic task (e.g. /code-review finding)
   heartbeat — stamp last_heartbeat_at so the supervisor knows the worker
               is still alive (called every ~2 min by the worker)
 
@@ -946,7 +946,7 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Attest that a quality pass ran on the current claim. "
             "Stamps current HEAD as the attested commit. "
-            "Use --simplify after running /simplify; additional flavors land here."
+            "Use --simplify after running /code-review; additional flavors land here."
         ),
     )
     add_common(p_attest)
@@ -958,7 +958,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_attest.add_argument(
         "--simplify", action="store_true",
-        help="Attest that /simplify was run on this phase's diff",
+        help="Attest that /code-review was run on this phase's diff",
     )
 
     args = parser.parse_args(argv)
@@ -4086,7 +4086,7 @@ def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
 def cmd_attest(args, cfg: ProjectConfig, state_path: Path) -> int:
     """Pure self-attestation — stamps current HEAD into attestations[kind].
 
-    clu cannot invoke /simplify (a Claude-Code-side skill), so the worker's
+    clu cannot invoke /code-review (a Claude-Code-side skill), so the worker's
     word is the only signal. Token is required; no operator-side variant.
     """
     if not args.simplify:

@@ -161,7 +161,7 @@ conflicts across worktrees were the canonical failure (clu #50;
 ## Per-phase done checklist
 
 - TDD: failing tests first.
-- `/simplify` after if diff >1 file or ~30 lines.
+- `/code-review` after if diff >1 file or ~30 lines.
 - Full suite green: `python3 -m unittest discover -s tests` (or this
   project's primary check).
 - Structured commit format (Title / Why / What's new / Under the hood /
@@ -373,7 +373,7 @@ after step 1. Don't run `clu init` without explicit operator intent.
 - **Phase IDs and plan slugs must match `^[a-z0-9][a-z0-9_-]{0,63}$`.**
   `st.validate_slug` enforces this. Sub-plan filenames derive phase
   IDs by stripping `<plan-slug>-` from the basename.
-- **Each phase = one commit, one `/simplify`, one suite-green run, one
+- **Each phase = one commit, one `/code-review`, one suite-green run, one
   `clu complete`.** Don't batch phases. The cadence is the contract.
 - **Operator-approval mandate (user CLAUDE.md) applies.** Novel plan
   files require `ship` from the operator before they land on disk.
@@ -477,7 +477,7 @@ Smallest-first.
 
 ## Per-phase done checklist
 - TDD: failing tests first.
-- `/simplify` after if diff >1 file or ~30 lines.
+- `/code-review` after if diff >1 file or ~30 lines.
 - Full suite green.
 - Structured commit format.
 - Stage explicit paths.

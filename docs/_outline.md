@@ -64,7 +64,7 @@ duplicate.
 | System diagram, tick lifecycle, dataflow, who-spawns-whom | `architecture.md` |
 | Per-module public surface, key functions, invariants | `reference.md` |
 | macOS install, FDA, LaunchAgent plists, log paths, troubleshooting | `operations.md` |
-| TDD, `/simplify` discipline, structured commit format, slug regex, event-type constants, `--token` discipline, `_die` / `ExitCode` usage | `conventions.md` |
+| TDD, `/code-review` discipline, structured commit format, slug regex, event-type constants, `--token` discipline, `_die` / `ExitCode` usage | `conventions.md` |
 | Public-facing pitch, quickstart, repo map, naming | `README.md` (already rewritten) |
 | Project-private status block, "read these before changing anything", sister-project pointer | `CLAUDE.md` (phase 6 rewrites) |
 
@@ -99,7 +99,7 @@ Listed here so phase 2–6 workers can self-check before calling
 - **operations.md**: install, FDA, both LaunchAgent plists, log
   locations, `clu status` / `clu` fleet view as diagnostic tools,
   iMessage notification model + reply grammar.
-- **conventions.md**: TDD with AAA + factory helpers, `/simplify`
+- **conventions.md**: TDD with AAA + factory helpers, `/code-review`
   trigger, structured commit format, slug regex, event-type constants,
   `--token` discipline, `ExitCode` / `_die`, `tests.isolate_registry`
   requirement.

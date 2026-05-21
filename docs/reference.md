@@ -1143,7 +1143,7 @@ through this.
 - `cmd_attest(args)` — worker self-attestation. `--simplify` stamps
   `current_claim.attestations.simplify` with current HEAD and emits
   `EVENT_SIMPLIFY_STAMPED`. Token required. No command execution —
-  clu cannot run `/simplify` (a Claude-side skill); the stamp is the
+  clu cannot run `/code-review` (a Claude-side skill); the stamp is the
   worker's word that it ran. Extensible: future `--lint`,
   `--type-check` flavors stamp different keys on the same command.
   At least one flag required (bare `clu attest` is an error).

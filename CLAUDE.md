@@ -35,7 +35,7 @@ For the *why* behind each, see
 
 - **TDD before logic changes.** AAA, factory helpers, full suite
   before commit.
-- **`/simplify` after non-trivial work** — diffs >1 file or ~30 lines.
+- **`/code-review` after non-trivial work** — diffs >1 file or ~30 lines.
 - **Structured commit format**: Title / Why / What's new / Under the
   hood / Tests / `Co-Authored-By:` trailer.
 - **`ExitCode` IntEnum, never bare ints.** Use `_die(ExitCode.X, msg)`.
@@ -102,7 +102,7 @@ per-ship detail and commit ranges, follow the linked memory entries:
   the worker's actual HEAD instead of canonical-main. Tests 1037 →
   1040.
 - **#55 — attestation-gate** (`aee9ffb → 8b54321`, merged `a4c6352`,
-  supersedes #10). Programmatic enforcement of `/simplify` + verify
+  supersedes #10). Programmatic enforcement of `/code-review` + verify
   mandates: `current_claim.attestations` slot, `clu verify` runs
   the project's test command + stamps, `clu attest --simplify` is
   worker self-attestation, `cmd_complete` refuses with

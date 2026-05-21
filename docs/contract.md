@@ -447,7 +447,7 @@ A worker is a fresh process that runs ONE phase. It must:
    ```bash
    clu complete --project P --plan S --phase X --commit <sha> [...]
    ```
-4. **On a /simplify finding the worker chooses NOT to fix in this phase**, before completing:
+4. **On a /code-review finding the worker chooses NOT to fix in this phase**, before completing:
    ```bash
    clu spawn --project P --plan S --source simplify --phase X --title "..." --description "..."
    ```
@@ -483,6 +483,6 @@ A worker is a fresh process that runs ONE phase. It must:
 ## What End of Line is NOT
 
 - Not a /plan replacement. It calls /plan; it doesn't reinvent it.
-- Not a code reviewer. Workers run `/review` and `/simplify` themselves per project rules.
+- Not a code reviewer. Workers run `/review` and `/code-review` themselves per project rules.
 - Not a parallel scheduler. v0.1 dispatches sequentially (`max_concurrent_phases: 1`). Fan-out across plans is fine (run multiple cron lines).
 - Not a CI replacement. Test runs happen in the worker session, not the supervisor.

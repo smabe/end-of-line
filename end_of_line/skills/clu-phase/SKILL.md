@@ -127,7 +127,7 @@ If you see an answered blocker, that means: you asked a question previously, the
    ```
    The block names the attempt number, the termination reason for the prior attempt (lease expired / operator force-released / blocked / etc.), uncommitted changes (`git status --short`), the diff stat against HEAD, and any commits already landed by prior attempts. **Read it before doing any work.** It tells you whether prior progress is on disk waiting to be continued, or whether the worktree drifted and needs a reset. Reset is `git -C "$WORKTREE_ROOT" reset --hard <base_ref> && git -C "$WORKTREE_ROOT" clean -fd` — only if the prior edits don't align with the sub-plan. Otherwise inspect and continue from where the prior attempt left off. If the file doesn't exist, this is attempt 1 — proceed from scratch.
 
-7. **Do the work.** Use the editing/test/commit tools you have. Follow the project's CLAUDE.md (TDD, /simplify after non-trivial work, structured commit messages, etc.). When you commit, capture the SHA — `git rev-parse HEAD` after each `git commit`. **Before every `git commit`, verify the branch:** `git rev-parse --abbrev-ref HEAD` should print `clu/$PLAN` (NOT `main`). If it prints `main`, you've drifted out of the worktree — `cd "$WORKTREE_ROOT"` and re-stage before committing.
+7. **Do the work.** Use the editing/test/commit tools you have. Follow the project's CLAUDE.md (TDD, /code-review after non-trivial work, structured commit messages, etc.). When you commit, capture the SHA — `git rev-parse HEAD` after each `git commit`. **Before every `git commit`, verify the branch:** `git rev-parse --abbrev-ref HEAD` should print `clu/$PLAN` (NOT `main`). If it prints `main`, you've drifted out of the worktree — `cd "$WORKTREE_ROOT"` and re-stage before committing.
 
 8. **Decide the exit path**:
    - Work is done and tests are green → `clu complete --commit <each SHA>`
@@ -167,17 +167,17 @@ simplify mandate is unaffected.
 
 **If your diff exceeds threshold** (>1 file OR ~30 lines by
 default; per-project override in `.orchestrator.json:quality.simplify_threshold`)
-— run `/simplify`, then stamp:
+— run `/code-review`, then stamp:
 ```bash
 clu attest --simplify --project "$PROJECT_ROOT" --plan "$PLAN" \
     --phase "$PHASE" --token "$TOKEN"
 ```
-clu cannot run `/simplify` itself — it's a Claude-side review
+clu cannot run `/code-review` itself — it's a Claude-side review
 skill. The attestation is your word that you ran it.
 
 **Stamps go stale.** Each stamp records the HEAD SHA at attest-time.
 If you commit AFTER stamping, the stamp is stale and `clu complete`
-refuses. Order: do the work, run /simplify, commit, run tests,
+refuses. Order: do the work, run /code-review, commit, run tests,
 `clu verify`, `clu attest --simplify`, `clu complete`. If you
 need to commit a fix after stamping, re-stamp.
 
@@ -192,7 +192,7 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **TDD when modifying logic.** Failing test first, then the minimal implementation that turns it green. Skip TDD only for pure refactor, config, docs, or content edits. The project's CLAUDE.md names the test framework.
 
-- **Review after non-trivial diffs.** If the diff spans more than one file or ~30 lines, run the project's review pass (`/simplify`, a project-local equivalent, or a deliberate self-review). Look specifically for rule-of-three extraction opportunities, dead code, and copy-paste from sibling phases. Stamp via `clu attest --simplify` after running /simplify, or complete will refuse.
+- **Review after non-trivial diffs.** If the diff spans more than one file or ~30 lines, run the project's review pass (`/code-review`, a project-local equivalent, or a deliberate self-review). Look specifically for rule-of-three extraction opportunities, dead code, and copy-paste from sibling phases. Stamp via `clu attest --simplify` after running /code-review, or complete will refuse.
 
 - **Structured commit messages.** Title (one line) / Why (motivation) / What's new (the surface) / Under the hood (the non-obvious choices) / Tests (count + what's covered) / `Co-Authored-By:` trailer naming the model you're running (e.g. `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`). Commit messages outlast the code — treat them as primary documentation.
 

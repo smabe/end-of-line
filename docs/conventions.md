@@ -39,9 +39,9 @@ projection — `completed_phase_ids` is the obvious example, since it
 reads the event log and a typo'd event type compiles fine but
 silently drops phases.
 
-## `/simplify` after non-trivial work
+## `/code-review` after non-trivial work
 
-Once a change is green, run `/simplify` before committing anything
+Once a change is green, run `/code-review` before committing anything
 bigger than a typo or a rename. The skill reviews the diff for reuse,
 quality, and efficiency, and either fixes the issues in place or
 flags them. The Day-1 pass through the security commits collapsed nine
@@ -49,7 +49,7 @@ near-identical error sites into the `_die(ExitCode.X, msg)` helper,
 cut suite runtime roughly in half by removing redundant fixture
 churn, and surfaced two genuine bugs in passing. The rule of thumb:
 if the diff touched more than one file or added more than ~30 lines,
-`/simplify` pays its own rent. It's the loop that keeps the codebase
+`/code-review` pays its own rent. It's the loop that keeps the codebase
 from drifting toward "every command does the same dance in slightly
 different ways."
 
@@ -392,6 +392,6 @@ equally in both modes. The worker contract layered on top —
 block --question ... --option ...` before exit, no silent process
 death — is documented in [`contract.md`](contract.md) and the
 `/clu-phase` skill itself. The rules in *this* doc don't change
-based on who's at the keyboard. A worker that skips `/simplify`,
+based on who's at the keyboard. A worker that skips `/code-review`,
 writes a raw event-type string, or `git add -A`s its branch is just
 as wrong as an operator who does the same. Follow them either way.
