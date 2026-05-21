@@ -14,9 +14,10 @@ Action priority (first match wins):
 from __future__ import annotations
 
 import datetime as _dt
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Sequence
 
 from . import coolant, inbox, notify, state as st, state_blocker
 from .config import ProjectConfig
@@ -25,6 +26,133 @@ from .plan_parser import parse_sessions_index
 def _local_now() -> _dt.datetime:
     """Wall-clock local time. Indirection exists so tests can pin the hour."""
     return _dt.datetime.now()
+
+
+# ---------------------------------------------------------------------------
+# Stuck-tool detection — process-tree walker (worker-watchdog P2).
+#
+# The supervisor walks a worker pid's process tree to find descendants that
+# have been alive a long time with low CPU usage — the signal for a wedged
+# tool call (canonical: xcodebuild hanging on simulator HK auth). This is
+# the pure walker; the threshold + emit logic lives in detect_stuck_tools.
+# ---------------------------------------------------------------------------
+
+# Command substrings that mark known long-lived, low-CPU processes we should
+# NOT flag as stuck. Substring (not prefix) match — needed for the
+# Claude Code background-task polling shell, whose `while kill -0` marker
+# sits inside an `eval` string rather than at the start of the command.
+STUCK_TOOL_IGNORE_PATTERNS: tuple[str, ...] = (
+    "github-mcp-server",
+    "xcodebuildmcp",
+    "while kill -0",  # Claude Code background-task wait shells
+)
+
+
+@dataclass(frozen=True)
+class Descendant:
+    pid: int
+    parent_pid: int
+    elapsed_seconds: int
+    cpu_seconds: int
+    command: str
+
+
+def _parse_duration(raw: str) -> int:
+    """Parse a `ps` duration to integer seconds, truncating fractions.
+
+    Handles both etime ([[dd-]hh:]mm:ss) and CPU time ([hh:]mm:ss[.cc]).
+    Returns 0 for empty input or the literal "-" that ps emits for
+    unmeasurable fields.
+    """
+    s = raw.strip()
+    if not s or s == "-":
+        return 0
+    days = 0
+    if "-" in s:
+        days_str, s = s.split("-", 1)
+        try:
+            days = int(days_str)
+        except ValueError:
+            return 0
+    if "." in s:
+        s = s.split(".", 1)[0]
+    parts = s.split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return 0
+    while len(nums) < 3:
+        nums.insert(0, 0)
+    h, m, sec = nums[-3], nums[-2], nums[-1]
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def _parse_ps_output(raw: str) -> list[Descendant]:
+    """Parse `ps -eo pid,ppid,etime,time,command` output. Skips header line."""
+    out: list[Descendant] = []
+    lines = raw.strip().split("\n")
+    # Skip the header line if present — detected by first char not being a digit.
+    start = 0 if lines[0].lstrip()[:1].isdigit() else 1
+    for line in lines[start:]:
+        parts = line.strip().split(None, 4)
+        if len(parts) < 5:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        elapsed = _parse_duration(parts[2])
+        cpu = _parse_duration(parts[3])
+        out.append(Descendant(pid, ppid, elapsed, cpu, parts[4]))
+    return out
+
+
+def walk_worker_tree(
+    root_pid: int,
+    *,
+    ps_output: str | None = None,
+    ignore_patterns: Sequence[str] = (),
+) -> list[Descendant]:
+    """Return descendants of root_pid in BFS order, excluding root itself.
+
+    Shells out to `ps -eo pid,ppid,etime,time,command` unless ps_output is
+    provided (tests pass a fixture string). Ignored descendants are dropped
+    from the result, but their subtrees are still walked — a quiet MCP
+    server might in principle have a wedged child we'd want to see.
+    """
+    if ps_output is None:
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid,ppid,etime,time,command"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return []
+        if result.returncode != 0:
+            return []
+        ps_output = result.stdout
+
+    procs = _parse_ps_output(ps_output)
+    by_ppid: dict[int, list[Descendant]] = {}
+    for p in procs:
+        by_ppid.setdefault(p.parent_pid, []).append(p)
+
+    out: list[Descendant] = []
+    seen: set[int] = {root_pid}
+    queue: list[int] = [root_pid]
+    while queue:
+        current = queue.pop(0)
+        for child in by_ppid.get(current, []):
+            if child.pid in seen:
+                continue
+            seen.add(child.pid)
+            queue.append(child.pid)
+            if any(pat in child.command for pat in ignore_patterns):
+                continue
+            out.append(child)
+    return out
+
 
 Action = Literal[
     "dispatch", "idle", "lease_expired", "escalate",
