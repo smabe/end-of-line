@@ -115,6 +115,12 @@ class ProjectConfig:
     quality: QualitySpec = field(default_factory=QualitySpec)
     coolant: CoolantSpec = field(default_factory=CoolantSpec)
     lease_ttl_scale: float = 0.5
+    # Stuck-tool detection thresholds. A worker descendant alive longer than
+    # `stuck_tool_threshold_seconds` with cumulative CPU time below
+    # `stuck_tool_cpu_threshold_seconds` is flagged as wedged. Setting
+    # threshold to 0 disables detection.
+    stuck_tool_threshold_seconds: int = 300
+    stuck_tool_cpu_threshold_seconds: int = 5
 
     def queue_path(self) -> Path:
         """Per-project queue file. Lives in the same `.orchestrator/` dir as
@@ -247,6 +253,15 @@ def _validate_tick_on_action(raw: dict) -> bool:
     return value
 
 
+def _validate_stuck_tool_threshold(raw: dict, key: str, default: int) -> int:
+    value = raw.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ConfigError(
+            f"{key}: must be non-negative int, got {value!r}"
+        )
+    return value
+
+
 def load_project_config(project_root: Path) -> ProjectConfig:
     project_root = project_root.resolve()
     cfg_path = project_root / CONFIG_FILENAME
@@ -286,4 +301,10 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         quality=_validate_quality(raw),
         coolant=_validate_coolant(raw),
         lease_ttl_scale=_validate_lease_ttl_scale(raw),
+        stuck_tool_threshold_seconds=_validate_stuck_tool_threshold(
+            raw, "stuck_tool_threshold_seconds", 300,
+        ),
+        stuck_tool_cpu_threshold_seconds=_validate_stuck_tool_threshold(
+            raw, "stuck_tool_cpu_threshold_seconds", 5,
+        ),
     )

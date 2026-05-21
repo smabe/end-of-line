@@ -328,6 +328,76 @@ def _emit_stalled_claim_notify(
         pass
 
 
+def _emit_stuck_tool(
+    data: dict, config: ProjectConfig,
+    *,
+    ps_output: str | None = None,
+) -> None:
+    """Detect long-lived low-CPU descendants of the worker pid and emit
+    EVENT_TOOL_STUCK + inbox event once per (claim, descendant_pid).
+
+    Detection only — no auto-kill. Best-effort observability: if the ps
+    walk fails or the claim has no pid, we silently skip. `ps_output` is
+    a test seam; production callers leave it None to shell out.
+    """
+    threshold = config.stuck_tool_threshold_seconds
+    if threshold == 0:
+        return
+    claim = data.get("current_claim")
+    if not claim:
+        return
+    pid = claim.get("pid")
+    if not pid:
+        return
+
+    cpu_max = config.stuck_tool_cpu_threshold_seconds
+    descendants = walk_worker_tree(
+        pid, ps_output=ps_output,
+        ignore_patterns=STUCK_TOOL_IGNORE_PATTERNS,
+    )
+    plan_slug = data["plan_slug"]
+    phase_id = claim["phase_id"]
+    project_root = str(config.project_root.resolve())
+
+    for d in descendants:
+        if d.elapsed_seconds < threshold:
+            continue
+        if d.cpu_seconds > cpu_max:
+            continue
+        if st.tool_stuck_already_emitted(claim, d.pid):
+            continue
+        st.mark_tool_stuck_emitted(claim, d.pid, st.utcnow())
+        command_excerpt = d.command[:200]
+        st.append_event(
+            data, st.EVENT_TOOL_STUCK,
+            plan=plan_slug, phase=phase_id,
+            worker_pid=pid, descendant_pid=d.pid,
+            command=command_excerpt,
+            elapsed_seconds=d.elapsed_seconds,
+            cpu_seconds=d.cpu_seconds,
+        )
+        try:
+            inbox.write_event(
+                type="tool_stuck",
+                plan_slug=plan_slug,
+                project_root=project_root,
+                summary=(
+                    f"Worker on {plan_slug}/{phase_id} stuck in subprocess "
+                    f"for {d.elapsed_seconds}s ({command_excerpt[:60]})"
+                ),
+                details={
+                    "phase_id": phase_id,
+                    "worker_pid": pid,
+                    "descendant_pid": d.pid,
+                    "command": command_excerpt,
+                    "elapsed_seconds": d.elapsed_seconds,
+                    "cpu_seconds": d.cpu_seconds,
+                },
+            )
+        except OSError:
+            pass
+
+
 def tick(state_path: Path, config: ProjectConfig) -> TickResult:
     if not state_path.exists():
         return TickResult("idle", f"no state at {state_path}")
@@ -352,6 +422,7 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         # data + side_notifies in place; neither preempts the chain below.
         _emit_stalled_claim_notify(data, config, side_notifies)
         _emit_stuck_blocker_repings(data, config, side_notifies)
+        _emit_stuck_tool(data, config)
 
         if claim := data.get("current_claim"):
             pid = claim.get("pid")

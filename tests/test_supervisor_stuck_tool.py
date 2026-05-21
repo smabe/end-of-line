@@ -1,20 +1,26 @@
-"""Process-tree walker for stuck-tool detection (worker-watchdog P2).
+"""Process-tree walker + stuck-tool emit logic (worker-watchdog P2–P3).
 
 The supervisor walks a worker pid's process tree via `ps` to find descendants
 that have been alive long enough with low enough CPU usage to be considered
-wedged. P2 is the pure walker — tick wiring lands in P3.
+wedged. P2 is the pure walker; P3 is the threshold + dedup + emit logic
+wired into the supervisor tick.
 """
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
+from end_of_line import inbox, state as st
+from end_of_line.config import ProjectConfig
 from end_of_line.supervisor import (
     Descendant,
     STUCK_TOOL_IGNORE_PATTERNS,
+    _emit_stuck_tool,
     _parse_duration,
     _parse_ps_output,
     walk_worker_tree,
 )
+from tests import CluTestCase
 
 
 class ParseDurationTestCase(unittest.TestCase):
@@ -177,6 +183,162 @@ class StuckToolIgnorePatternsTestCase(unittest.TestCase):
         self.assertTrue(
             any("while kill -0" in p for p in STUCK_TOOL_IGNORE_PATTERNS)
         )
+
+
+# ---------------------------------------------------------------------------
+# P3 — config + _emit_stuck_tool helper tests
+# ---------------------------------------------------------------------------
+
+
+class StuckToolConfigDefaultsTestCase(unittest.TestCase):
+    def test_default_threshold_seconds(self) -> None:
+        cfg = ProjectConfig(project_root=Path("/tmp"))
+        self.assertEqual(cfg.stuck_tool_threshold_seconds, 300)
+
+    def test_default_cpu_threshold_seconds(self) -> None:
+        cfg = ProjectConfig(project_root=Path("/tmp"))
+        self.assertEqual(cfg.stuck_tool_cpu_threshold_seconds, 5)
+
+
+# A minimal wedged-xcodebuild scenario: worker pid 78233 has one descendant
+# (81681) that's been alive 600s with only 0.5s CPU — clearly wedged.
+PS_WEDGED_XCODEBUILD = """\
+  PID  PPID    ELAPSED        TIME COMMAND
+78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools
+81681 78233   10:00        0:00.50 /usr/bin/xcodebuild test -project HealthDash.xcodeproj
+"""
+
+PS_FRESH_BUILD = """\
+  PID  PPID    ELAPSED        TIME COMMAND
+78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools
+81681 78233   00:30        0:25.00 /usr/bin/xcodebuild test -project HealthDash.xcodeproj
+"""
+
+PS_BUSY_BUILD = """\
+  PID  PPID    ELAPSED        TIME COMMAND
+78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools
+81681 78233   10:00        8:00.00 /usr/bin/xcodebuild test -project HealthDash.xcodeproj
+"""
+
+
+def _empty_data_with_claim(worker_pid: int | None = 78233) -> dict:
+    data = st.empty_state("plan-x", "/tmp/plan-x")
+    data["current_claim"] = {
+        "phase_id": "ai-tools",
+        "claimed_by": "session-abc",
+        "lease_expires": "2026-05-21T15:00:00Z",
+        "started_at": "2026-05-21T14:00:00Z",
+        "last_heartbeat_at": "2026-05-21T14:00:00Z",
+        "attempts": 1,
+    }
+    if worker_pid is not None:
+        data["current_claim"]["pid"] = worker_pid
+    return data
+
+
+def _config_with_thresholds(threshold: int = 300, cpu_max: int = 5) -> ProjectConfig:
+    return ProjectConfig(
+        project_root=Path("/tmp/plan-x"),
+        stuck_tool_threshold_seconds=threshold,
+        stuck_tool_cpu_threshold_seconds=cpu_max,
+    )
+
+
+class EmitStuckToolTestCase(CluTestCase):
+    def test_emits_event_when_descendant_wedged(self) -> None:
+        data = _empty_data_with_claim()
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assertEqual(ev["worker_pid"], 78233)
+        self.assertEqual(ev["descendant_pid"], 81681)
+        self.assertIn("xcodebuild", ev["command"])
+        self.assertGreaterEqual(ev["elapsed_seconds"], 600)
+        self.assertLessEqual(ev["cpu_seconds"], 5)
+
+    def test_dedup_does_not_re_emit_same_descendant(self) -> None:
+        data = _empty_data_with_claim()
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(len(events), 1)
+
+    def test_no_emit_when_descendant_below_elapsed_threshold(self) -> None:
+        data = _empty_data_with_claim()
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_FRESH_BUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(events, [])
+
+    def test_no_emit_when_descendant_busy(self) -> None:
+        # 10 min alive but 8 min CPU — clearly doing work, not wedged.
+        data = _empty_data_with_claim()
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_BUSY_BUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(events, [])
+
+    def test_no_emit_when_no_claim(self) -> None:
+        data = st.empty_state("plan-x", "/tmp/plan-x")
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(events, [])
+
+    def test_no_emit_when_claim_has_no_pid(self) -> None:
+        data = _empty_data_with_claim(worker_pid=None)
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(events, [])
+
+    def test_threshold_zero_disables_detection(self) -> None:
+        data = _empty_data_with_claim()
+        cfg = _config_with_thresholds(threshold=0)
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(events, [])
+
+    def test_ignore_patterns_applied(self) -> None:
+        # github-mcp-server should be filtered even if it meets thresholds.
+        raw = (
+            "  PID  PPID    ELAPSED        TIME COMMAND\n"
+            "78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools\n"
+            "78277 78233   10:00        0:00.50 /opt/homebrew/bin/github-mcp-server stdio\n"
+        )
+        data = _empty_data_with_claim()
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=raw)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(events, [])
+
+    def test_writes_inbox_event(self) -> None:
+        # The inbox event is what session-start surfaces via inbox-hook.
+        data = _empty_data_with_claim()
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        # Find any tool_stuck event file in the test's isolated inbox.
+        events = inbox.read_unprocessed()
+        tool_stuck = [e for e in events if e["type"] == "tool_stuck"]
+        self.assertEqual(len(tool_stuck), 1)
+        details = tool_stuck[0]["details"]
+        self.assertEqual(details["worker_pid"], 78233)
+        self.assertEqual(details["descendant_pid"], 81681)
+        self.assertIn("xcodebuild", details["command"])
+
+    def test_dedup_survives_intermediate_event(self) -> None:
+        # If the dedup map isn't cleared by some other event in between,
+        # repeated detection on the same descendant stays one-shot.
+        data = _empty_data_with_claim()
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        st.append_event(data, st.EVENT_PHASE_STARTED, phase="X")
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(len(events), 1)
 
 
 class WalkWorkerTreeLiveSmokeTestCase(unittest.TestCase):
