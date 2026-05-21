@@ -134,3 +134,17 @@ zero token output; diagnosis required five surfaces — state.json, `ps` worker,
    crafted `xcodebuild` that sleeps); confirm `clu doctor` shows it, watch
    emits `tool_stuck`, inbox-hook surfaces it at next session start (and
    Monitor if shipped). Document the verified flow in `docs/operations.md`.
+
+## Ship summary (2026-05-21)
+
+- **P1–P5 shipped** — closes #67 (detection end-to-end) and the inbox-hook
+  half of #68 (delivery via the session-start instruction block). Tests
+  1169 → 1225.
+- **P6 deferred to #69** — Claude Code Monitor lifecycle is undocumented;
+  the empirical experiment ships as research before any code commits to
+  Monitor behavior.
+- **P7 deferred to #70** — long-running operator-dashboard Monitor,
+  contingent on #69's findings.
+- **P8 left for the operator** — hands-on verification on HealthData
+  rather than a synthetic in-clu wedge. The inbox-hook path is live and
+  ready to exercise.
