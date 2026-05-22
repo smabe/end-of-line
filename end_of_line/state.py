@@ -314,18 +314,50 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
     }
 
 
+class LockTimeout(RuntimeError):
+    """`locked(..., timeout_seconds=...)` couldn't acquire within budget.
+
+    Used by callers like the `clu activity` PreToolUse hook that prefer
+    dropping the write over freezing the worker's Bash call. The state
+    path lives on `.path` (also `str(exc)` / `args[0]`) so callers can
+    log which file timed out.
+    """
+
+    def __init__(self, path: Path | str) -> None:
+        super().__init__(str(path))
+        self.path = Path(path) if not isinstance(path, Path) else path
+
+
 @contextmanager
-def locked(state_path: Path) -> Iterator[None]:
+def locked(
+    state_path: Path, *, timeout_seconds: float | None = None,
+) -> Iterator[None]:
     """Serialize read-modify-write across processes via a sibling lock file.
 
     O_NOFOLLOW refuses to open if the lockfile path is a symlink — defeats
     a pre-seeded symlink attack that would otherwise truncate the target.
+
+    `timeout_seconds=None` (default) blocks indefinitely. A positive value
+    polls with `LOCK_NB`; raises `LockTimeout` if the budget elapses. Used
+    by hot-path hook callbacks that must not hang the worker.
     """
     state_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = state_path.with_name(state_path.name + ".lock")
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if timeout_seconds is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            import time as _time
+            deadline = _time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if _time.monotonic() >= deadline:
+                        raise LockTimeout(state_path)
+                    _time.sleep(0.05)
         try:
             yield
         finally:
@@ -662,6 +694,29 @@ def mark_tool_stuck_emitted(claim: dict, descendant_pid: int, at: str) -> None:
 def tool_stuck_already_emitted(claim: dict, descendant_pid: int) -> bool:
     """True if EVENT_TOOL_STUCK already fired for this descendant_pid."""
     return str(descendant_pid) in (claim.get("stuck_tool_emitted_at") or {})
+
+
+def mark_active_tool_start(claim: dict, at: str) -> None:
+    """Stamp `active_tool_started_at` — the start of the current Bash tool call.
+
+    Called from `clu activity --start-bash`, which is wired as Claude Code's
+    PreToolUse hook for the Bash tool. Stuck-tool detection uses this window
+    to scope which descendants are candidates: anything alive longer than
+    (now - active_tool_started_at) pre-dates the call and is session infra,
+    not stuck inside the active tool. Overwrites freely — every Bash call
+    just slides the window forward.
+    """
+    claim["active_tool_started_at"] = at
+
+
+def clear_active_tool(claim: dict) -> None:
+    """Clear `active_tool_started_at` — Bash tool call finished cleanly.
+
+    Called from `clu activity --end-bash` (PostToolUse). Idempotent so a
+    stale Post (e.g. worker crashed mid-call, next worker fires Post with
+    no matching Start) doesn't raise.
+    """
+    claim.pop("active_tool_started_at", None)
 
 
 def add_blocker(

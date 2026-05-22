@@ -14,13 +14,12 @@ from end_of_line import inbox, state as st
 from end_of_line.config import ProjectConfig
 from end_of_line.supervisor import (
     Descendant,
-    STUCK_TOOL_IGNORE_PATTERNS,
     _emit_stuck_tool,
     _parse_duration,
     _parse_ps_output,
     walk_worker_tree,
 )
-from tests import CluTestCase
+from tests import CluTestCase, utcnow_minus
 
 
 class ParseDurationTestCase(unittest.TestCase):
@@ -120,69 +119,11 @@ class WalkWorkerTreeTestCase(unittest.TestCase):
         desc = walk_worker_tree(99999, ps_output=PS_SAMPLE_WEDGED)
         self.assertEqual(desc, [])
 
-    def test_ignore_pattern_excludes_matching_command(self) -> None:
-        # github-mcp-server is a known long-lived quiet process; filter it.
-        desc = walk_worker_tree(
-            78233,
-            ps_output=PS_SAMPLE_WEDGED,
-            ignore_patterns=("github-mcp-server",),
-        )
-        pids = [d.pid for d in desc]
-        self.assertNotIn(78277, pids)
-        # The xcodebuild subtree (81679/81681/81718) is still present.
-        self.assertIn(81681, pids)
-
-    def test_ignore_pattern_continues_walking_subtree(self) -> None:
-        # If an ignored process has children, the children are still walked.
-        # We don't include the ignored proc itself, but its subtree shows up.
-        raw = PS_SAMPLE_HEADER + "\n" + "\n".join([
-            "78233     1   12:28        0:30.50 claude --print",
-            "11111 78233   05:00        0:00.10 npm exec xcodebuildmcp@latest",
-            "11112 11111   05:00        0:00.05 node /opt/homebrew/bin/xcodebuildmcp",
-            "22222 78233   05:00        0:00.05 /usr/bin/xcodebuild test",
-        ])
-        desc = walk_worker_tree(
-            78233, ps_output=raw, ignore_patterns=("xcodebuildmcp",),
-        )
-        pids = [d.pid for d in desc]
-        self.assertNotIn(11111, pids)  # ignored — matches "xcodebuildmcp"
-        self.assertNotIn(11112, pids)  # also ignored — also matches
-        self.assertIn(22222, pids)  # xcodebuild itself stays
-
-    def test_polling_shell_pattern_ignored(self) -> None:
-        # Claude Code's background-task wait shell: while kill -0 ... sleep loop.
-        raw = PS_SAMPLE_HEADER + "\n" + "\n".join([
-            "78233     1   12:28        0:30.50 claude --print",
-            "92165 78233   01:13        0:00.05 /bin/zsh -c eval 'while kill -0 $(pgrep -f xcodebuild) 2>/dev/null; do sleep 5; done'",
-        ])
-        desc = walk_worker_tree(
-            78233, ps_output=raw, ignore_patterns=STUCK_TOOL_IGNORE_PATTERNS,
-        )
-        self.assertEqual(desc, [])
-
-    def test_default_no_ignore_patterns(self) -> None:
-        # Calling without ignore_patterns returns the full tree (caller's
-        # decision whether to apply filters).
+    def test_walks_full_tree(self) -> None:
+        # The walker is pure — no filtering. The active-tool window in
+        # _emit_stuck_tool is now responsible for what counts as a candidate.
         desc = walk_worker_tree(78233, ps_output=PS_SAMPLE_WEDGED)
         self.assertEqual(len(desc), 4)
-
-
-class StuckToolIgnorePatternsTestCase(unittest.TestCase):
-    def test_covers_github_mcp_server(self) -> None:
-        self.assertTrue(
-            any("github-mcp-server" in p for p in STUCK_TOOL_IGNORE_PATTERNS)
-        )
-
-    def test_covers_xcodebuildmcp(self) -> None:
-        self.assertTrue(
-            any("xcodebuildmcp" in p for p in STUCK_TOOL_IGNORE_PATTERNS)
-        )
-
-    def test_covers_polling_shell(self) -> None:
-        # The `while kill -0 ... sleep` pattern Claude Code's bg-task uses.
-        self.assertTrue(
-            any("while kill -0" in p for p in STUCK_TOOL_IGNORE_PATTERNS)
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +163,10 @@ PS_BUSY_BUILD = """\
 
 
 def _empty_data_with_claim(worker_pid: int | None = 78233) -> dict:
+    # Seed `active_tool_started_at` ~12 min ago by default so existing
+    # tests' 10-min PS fixtures (PS_WEDGED_XCODEBUILD, PS_BUSY_BUILD)
+    # land inside the active window. Tests that need a tighter or absent
+    # window override or pop the field explicitly.
     data = st.empty_state("plan-x", "/tmp/plan-x")
     data["current_claim"] = {
         "phase_id": "ai-tools",
@@ -230,6 +175,7 @@ def _empty_data_with_claim(worker_pid: int | None = 78233) -> dict:
         "started_at": "2026-05-21T14:00:00Z",
         "last_heartbeat_at": "2026-05-21T14:00:00Z",
         "attempts": 1,
+        "active_tool_started_at": utcnow_minus(720),
     }
     if worker_pid is not None:
         data["current_claim"]["pid"] = worker_pid
@@ -302,19 +248,6 @@ class EmitStuckToolTestCase(CluTestCase):
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(events, [])
 
-    def test_ignore_patterns_applied(self) -> None:
-        # github-mcp-server should be filtered even if it meets thresholds.
-        raw = (
-            "  PID  PPID    ELAPSED        TIME COMMAND\n"
-            "78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools\n"
-            "78277 78233   10:00        0:00.50 /opt/homebrew/bin/github-mcp-server stdio\n"
-        )
-        data = _empty_data_with_claim()
-        cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=raw)
-        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
-        self.assertEqual(events, [])
-
     def test_writes_inbox_event(self) -> None:
         # The inbox event is what session-start surfaces via inbox-hook.
         data = _empty_data_with_claim()
@@ -339,6 +272,79 @@ class EmitStuckToolTestCase(CluTestCase):
         _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(len(events), 1)
+
+
+# Reproduces the 2026-05-22 false-positive run on simplify-batch-6:
+# Claude Code spawned MCP servers at session start. With elapsed > 8 min and
+# CPU = 0, the old detector flagged each one. The active-tool window must
+# filter them: MCPs are older than the current Bash call, so they're session
+# infra, not stuck inside it.
+PS_IDLE_MCP_SERVERS = """\
+  PID  PPID    ELAPSED        TIME COMMAND
+78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools
+79750 78233   12:00        0:00.10 bun run --cwd /Users/smabe/.claude/plugins/cache/claude-plugins-official/imessage/0.1.0 --shell=bun --silent start
+79755 78233   12:00        0:00.10 npm exec stitch-mcp
+79760 78233   11:55        0:00.20 node /opt/homebrew/bin/stitch-mcp
+79765 79750   11:50        0:00.05 /Users/smabe/.bun/bin/bun server.ts
+"""
+
+
+class EmitStuckToolActiveMarkerTestCase(CluTestCase):
+    """The active-tool marker scopes detection to descendants spawned
+    during the current Bash tool call. Idle MCP servers spawned at
+    session start are older than every active window and excluded for
+    free — no pattern matching needed."""
+
+    def test_no_emit_without_active_marker(self) -> None:
+        # Without `active_tool_started_at`, the detector can't know which
+        # descendants belong to an active tool call. Returns early.
+        data = _empty_data_with_claim()
+        # Explicitly strip the marker the fixture seeds.
+        data["current_claim"].pop("active_tool_started_at", None)
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(events, [])
+
+    def test_no_emit_for_idle_mcps_outside_active_window(self) -> None:
+        # User's overnight repro: Bash call just started (active window = 30s
+        # ago), MCPs spawned at session start (elapsed ≈ 720s). All MCPs are
+        # ~690s older than the window → filtered, zero events.
+        data = _empty_data_with_claim()
+        data["current_claim"]["active_tool_started_at"] = utcnow_minus(30)
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_IDLE_MCP_SERVERS)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(events, [])
+
+    def test_emits_for_wedge_inside_active_window(self) -> None:
+        # Active Bash call running for ~10 min (active window = 600s old).
+        # The wedged xcodebuild is 600s old too (spawned at the start of
+        # the active call) → eligible. Past elapsed threshold, low CPU → fires.
+        data = _empty_data_with_claim()
+        data["current_claim"]["active_tool_started_at"] = utcnow_minus(605)
+        cfg = _config_with_thresholds()
+        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(len(events), 1)
+        self.assertIn("xcodebuild", events[0]["command"])
+
+    def test_mcps_and_wedge_together(self) -> None:
+        # Realistic mixed scene: session-old MCPs (filtered) + a fresh
+        # xcodebuild wedge (emitted). One event.
+        data = _empty_data_with_claim()
+        data["current_claim"]["active_tool_started_at"] = utcnow_minus(605)
+        cfg = _config_with_thresholds()
+        raw = PS_SAMPLE_HEADER + "\n" + "\n".join([
+            "78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools",
+            "79750 78233   12:00        0:00.10 bun run --cwd /Users/smabe/.claude/plugins/cache/claude-plugins-official/imessage start",
+            "79755 78233   11:50        0:00.10 npm exec stitch-mcp",
+            "81681 78233   10:00        0:00.50 /usr/bin/xcodebuild test -project HealthDash.xcodeproj",
+        ])
+        _emit_stuck_tool(data, cfg, ps_output=raw)
+        events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["descendant_pid"], 81681)
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +404,7 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
             "last_heartbeat_at": "2026-05-21T14:00:00Z",
             "attempts": 1,
             "pid": worker_pid,
+            "active_tool_started_at": utcnow_minus(720),
         }
         st.save_atomic(state_path, data)
         return state_path

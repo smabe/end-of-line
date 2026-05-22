@@ -1,6 +1,7 @@
 """Shared test helpers."""
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import subprocess
@@ -12,6 +13,17 @@ from unittest import mock
 from end_of_line import state as st
 from end_of_line.cli import main as cli_main
 from end_of_line.config import CONFIG_FILENAME
+
+
+def utcnow_minus(seconds: int) -> str:
+    """ISO8601 stamp N seconds before `datetime.now(UTC)`.
+
+    Used to seed `current_claim.active_tool_started_at` and other
+    "N seconds ago" timestamps in tests without freezing the clock.
+    """
+    return (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def plan_body(*sessions: str) -> str:

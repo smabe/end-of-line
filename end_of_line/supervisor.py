@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal
 
 from . import coolant, inbox, notify, state as st, state_blocker
 from .config import ProjectConfig
@@ -37,15 +38,13 @@ def _local_now() -> _dt.datetime:
 # the pure walker; the threshold + emit logic lives in detect_stuck_tools.
 # ---------------------------------------------------------------------------
 
-# Command substrings that mark known long-lived, low-CPU processes we should
-# NOT flag as stuck. Substring (not prefix) match — needed for the
-# Claude Code background-task polling shell, whose `while kill -0` marker
-# sits inside an `eval` string rather than at the start of the command.
-STUCK_TOOL_IGNORE_PATTERNS: tuple[str, ...] = (
-    "github-mcp-server",
-    "xcodebuildmcp",
-    "while kill -0",  # Claude Code background-task wait shells
-)
+# Drift tolerance (seconds) for `descendant.elapsed_seconds <= active_age + DRIFT`.
+# Absorbs (a) ps's 1-second elapsed-time resolution and (b) wallclock skew
+# between the worker process stamping `active_tool_started_at` and the
+# supervisor process computing `now - active_tool_started_at`. Five seconds
+# is generous for the same-host case clu targets; bump if NTP is loose or
+# if we ever run worker + supervisor on different machines.
+STUCK_TOOL_DRIFT_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -112,14 +111,12 @@ def walk_worker_tree(
     root_pid: int,
     *,
     ps_output: str | None = None,
-    ignore_patterns: Sequence[str] = (),
 ) -> list[Descendant]:
     """Return descendants of root_pid in BFS order, excluding root itself.
 
     Shells out to `ps -eo pid,ppid,etime,time,command` unless ps_output is
-    provided (tests pass a fixture string). Ignored descendants are dropped
-    from the result, but their subtrees are still walked — a quiet MCP
-    server might in principle have a wedged child we'd want to see.
+    provided (tests pass a fixture string). The active-tool window in
+    `_emit_stuck_tool` does the filtering; this walker is pure.
     """
     if ps_output is None:
         try:
@@ -148,8 +145,6 @@ def walk_worker_tree(
                 continue
             seen.add(child.pid)
             queue.append(child.pid)
-            if any(pat in child.command for pat in ignore_patterns):
-                continue
             out.append(child)
     return out
 
@@ -347,17 +342,40 @@ def _emit_stuck_tool(
     pid = claim.get("pid")
     if not pid:
         return
+    active_at = claim.get("active_tool_started_at")
+    if not active_at:
+        # No active Bash tool call → nothing to be stuck in. Workers
+        # without the PreToolUse/PostToolUse hooks installed silently
+        # produce zero events; lease expiry is the safety net.
+        return
+    try:
+        active_age_s = (st._now_utc() - st.parse_iso(active_at)).total_seconds()
+    except ValueError:
+        # Corrupt marker — worker stamped non-ISO via clu activity. The only
+        # way this lands is a bug in our writer or a hand-edited state.json;
+        # either way the operator should know. Log once-per-tick to stderr
+        # rather than appending an event every tick (which would flood the
+        # log until the operator fixes the value).
+        print(
+            f"clu supervisor: ignoring corrupt active_tool_started_at "
+            f"{active_at!r} on plan={data['plan_slug']} "
+            f"phase={claim['phase_id']}",
+            file=sys.stderr,
+        )
+        return
 
     cpu_max = config.stuck_tool_cpu_threshold_seconds
-    descendants = walk_worker_tree(
-        pid, ps_output=ps_output,
-        ignore_patterns=STUCK_TOOL_IGNORE_PATTERNS,
-    )
+    descendants = walk_worker_tree(pid, ps_output=ps_output)
     plan_slug = data["plan_slug"]
     phase_id = claim["phase_id"]
     project_root = str(config.project_root.resolve())
 
     for d in descendants:
+        # Descendants older than the active window pre-date the current
+        # Bash call — session-level infra (MCP servers, polling shells).
+        # They were never candidates to be stuck "inside" the active tool.
+        if d.elapsed_seconds > active_age_s + STUCK_TOOL_DRIFT_SECONDS:
+            continue
         if d.elapsed_seconds < threshold:
             continue
         if d.cpu_seconds > cpu_max:

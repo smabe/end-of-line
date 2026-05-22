@@ -74,5 +74,53 @@ class StuckToolDedupTestCase(unittest.TestCase):
         self.assertIsNone(data["current_claim"])
 
 
+class ActiveToolMarkerTestCase(unittest.TestCase):
+    """`current_claim.active_tool_started_at` — the per-Bash-tool-call window
+    the supervisor uses to scope stuck-tool detection (#67 follow-up)."""
+
+    def _claim(self) -> dict:
+        return {
+            "phase_id": "A",
+            "claimed_by": "session-abc",
+            "lease_expires": "2026-05-21T15:00:00Z",
+            "started_at": "2026-05-21T14:00:00Z",
+            "last_heartbeat_at": "2026-05-21T14:00:00Z",
+            "attempts": 1,
+        }
+
+    def test_mark_active_tool_start_sets_field(self) -> None:
+        claim = self._claim()
+        st.mark_active_tool_start(claim, "2026-05-22T10:00:00Z")
+        self.assertEqual(claim["active_tool_started_at"], "2026-05-22T10:00:00Z")
+
+    def test_mark_overwrites_previous(self) -> None:
+        # PreToolUse fires before every Bash call; later calls just slide the
+        # window forward without erroring on a still-open prior window.
+        claim = self._claim()
+        st.mark_active_tool_start(claim, "2026-05-22T10:00:00Z")
+        st.mark_active_tool_start(claim, "2026-05-22T10:05:00Z")
+        self.assertEqual(claim["active_tool_started_at"], "2026-05-22T10:05:00Z")
+
+    def test_clear_active_tool_removes_field(self) -> None:
+        claim = self._claim()
+        st.mark_active_tool_start(claim, "2026-05-22T10:00:00Z")
+        st.clear_active_tool(claim)
+        self.assertNotIn("active_tool_started_at", claim)
+
+    def test_clear_is_idempotent(self) -> None:
+        # PostToolUse without a matching PreToolUse (worker crash, stale
+        # hook state) must not raise.
+        claim = self._claim()
+        st.clear_active_tool(claim)
+        self.assertNotIn("active_tool_started_at", claim)
+
+    def test_release_claim_clears_active_marker(self) -> None:
+        data = st.empty_state("plan-x", "/tmp/plan-x")
+        data["current_claim"] = self._claim()
+        st.mark_active_tool_start(data["current_claim"], "2026-05-22T10:00:00Z")
+        st.release_claim(data)
+        self.assertIsNone(data["current_claim"])
+
+
 if __name__ == "__main__":
     unittest.main()

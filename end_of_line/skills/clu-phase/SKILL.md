@@ -112,6 +112,12 @@ If you see an answered blocker, that means: you asked a question previously, the
    ```
    The 2-minute interval is well inside the heartbeat threshold (derived from lease TTL: `max(15, lease_ttl//2)`, so 30 min at the default 60-min lease) and loose enough to not flood state.json writes. The EXIT trap is the contract — without it, the ticker survives the worker process and continues pinging a dead claim. Don't skip it.
 
+2b. **Export the activity-hook environment.** The stuck-tool detector (`clu doctor`, supervisor gap-fill) scopes its process-tree walk to descendants spawned during the current Bash tool call. That window is stamped by a Claude Code PreToolUse/PostToolUse hook that calls `clu activity --start-bash` / `--end-bash`. The hook reads its context from env, so export the four vars here so they propagate to child processes (including Claude Code and its hooks):
+   ```bash
+   export CLU_PLAN="$PLAN" CLU_PHASE="$PHASE" CLU_TOKEN="$TOKEN" CLU_PROJECT="$PROJECT_ROOT"
+   ```
+   The hook itself is operator-installed (one-time, in `~/.claude/settings.json` or per-project `.claude/settings.json` — see "Activity hook (operator setup)" at the bottom of this SKILL). Workers without the hook installed produce zero `tool_stuck` events; lease expiry is the safety net.
+
 3. **Check for resume**: inspect `$STATE` for an answered blocker on `$PHASE`. If found, factor the answer into your plan for this run.
 
 4. **Read the master plan** at `$WORKTREE_ROOT/plans/$PLAN.md` (the plan files live on your branch in the worktree — same content as `$PROJECT_ROOT/plans/`, but reading from your worktree keeps you anchored). Find the row in `## Sessions index` whose phase id matches `$PHASE` (the parser strips the master-stem prefix from the plan_file basename — see `end_of_line/plan_parser.py`). The row's "Plan file" cell points to the sub-plan markdown.
@@ -224,6 +230,8 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Skipping the heartbeat ticker**: step 2 arms a background `clu heartbeat` loop for every phase. Don't skip it even for short phases — `clu status` mis-reports `STALLED` the moment the phase exceeds the heartbeat threshold (`max(15, lease_ttl//2)`, ~30 min by default) without a heartbeat, and the supervisor's gap-fill notification fires. The 2-min ticker is cheap; the EXIT trap cleans it up automatically.
 
+- **Forgetting the activity-hook env exports**: step 2b exports `CLU_PLAN` / `CLU_PHASE` / `CLU_TOKEN` / `CLU_PROJECT`. Without those, the Claude Code PreToolUse hook (if installed) reads empty strings and short-circuits → `tool_stuck` detection silently disables. The phase still works; you just lose the early-warning signal for wedged Bash subprocesses. `clu doctor` flags the missing marker.
+
 ## Example invocations
 
 End of a happy path that made one commit:
@@ -244,6 +252,62 @@ clu block --project /Users/me/projects/end-of-line \
     --option "Stay gated (deferred until 8am)" \
     --context "Day 2.9 gated them; 3am halts currently sit silent until morning."
 ```
+
+## Activity hook (operator setup)
+
+One-time install. The hook tells the supervisor when a Bash tool call is
+in flight, which lets `tool_stuck` detection scope its process-tree walk
+to subprocesses spawned during the active call — Claude Code's
+session-level MCP servers stop generating false positives.
+
+Add to `~/.claude/settings.json` (global, fires for every Claude Code
+session machine-wide) OR per-project `.claude/settings.json` (committed)
+OR `.claude/settings.local.json` (gitignored). Hooks merge across scopes
+— pick the scope that fits how you run clu.
+
+```jsonc
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{
+          "type": "command",
+          "command": "[ -n \"$CLU_TOKEN\" ] && clu activity --start-bash --project \"$CLU_PROJECT\" --plan \"$CLU_PLAN\" --phase \"$CLU_PHASE\" --token \"$CLU_TOKEN\" 2>/dev/null || true"
+        }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{
+          "type": "command",
+          "command": "[ -n \"$CLU_TOKEN\" ] && clu activity --end-bash --project \"$CLU_PROJECT\" --plan \"$CLU_PLAN\" --phase \"$CLU_PHASE\" --token \"$CLU_TOKEN\" 2>/dev/null || true"
+        }]
+      }
+    ]
+  }
+}
+```
+
+Three parts of the snippet are load-bearing:
+
+- **`[ -n "$CLU_TOKEN" ]` guard** — short-circuits the hook in non-clu
+  Claude Code sessions (no env vars exported → no-op). Without this
+  guard, every Bash call in every session tries to run `clu activity`
+  with empty arguments and clutters the log.
+- **Trailing `|| true`** — Claude Code treats hook exit 2 as
+  *blocking*; the tool call gets rejected. A bug or transient failure
+  inside `clu activity` exiting 2 would freeze every Bash call. `|| true`
+  forces exit 0 unconditionally. Do not "tidy up" by removing it.
+- **`2>/dev/null`** — silences hook stderr in the transcript when
+  `clu activity` errors (e.g. stale token after lease expiry); the
+  worker shouldn't see the noise.
+
+Subagent (Task tool) Bash invocations are NOT covered: Claude Code's
+subagent contexts don't inherit parent env, so `CLU_TOKEN` is unset
+inside subagent hooks → they short-circuit. Lease expiry remains the
+safety net for wedges inside subagents.
 
 ## When in doubt: block, don't bail
 

@@ -854,6 +854,26 @@ def main(argv: list[str] | None = None) -> int:
     p_heartbeat.add_argument("--token", required=True, help="Worker claim token")
     p_heartbeat.add_argument("--phase", required=True)
 
+    p_activity = sub.add_parser(
+        "activity",
+        help=(
+            "Worker stamps the active-tool window. Wired as Claude Code "
+            "PreToolUse / PostToolUse hooks; scopes stuck-tool detection."
+        ),
+    )
+    add_common(p_activity)
+    p_activity.add_argument("--token", required=True, help="Worker claim token")
+    p_activity.add_argument("--phase", required=True)
+    p_activity_group = p_activity.add_mutually_exclusive_group()
+    p_activity_group.add_argument(
+        "--start-bash", action="store_true",
+        help="PreToolUse(Bash): stamp active_tool_started_at = now",
+    )
+    p_activity_group.add_argument(
+        "--end-bash", action="store_true",
+        help="PostToolUse(Bash): clear active_tool_started_at",
+    )
+
     p_logs = sub.add_parser(
         "logs",
         help="Tail the active worker's log (or newest log in the dir if idle)",
@@ -1023,6 +1043,7 @@ def main(argv: list[str] | None = None) -> int:
         "block": cmd_block,
         "task-done": cmd_task_done,
         "heartbeat": cmd_heartbeat,
+        "activity": cmd_activity,
         "register": cmd_register,
         "pause": cmd_pause,
         "resume": cmd_resume,
@@ -2024,31 +2045,50 @@ def _print_stuck_tool_health(
     cpu_max = cfg.stuck_tool_cpu_threshold_seconds
     project_root = cfg.project_root.resolve()
     findings: list[tuple[str, str, int, "supervisor.Descendant"]] = []
+    no_marker_claims: list[tuple[str, str]] = []
     for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
         claim = p.state.get("current_claim") or {}
         pid = claim.get("pid")
         if not pid:
             continue
         phase = claim.get("phase_id", "?")
-        descendants = supervisor.walk_worker_tree(
-            pid, ps_output=ps_output,
-            ignore_patterns=supervisor.STUCK_TOOL_IGNORE_PATTERNS,
-        )
+        active_at = claim.get("active_tool_started_at")
+        if not active_at:
+            no_marker_claims.append((p.slug, phase))
+            continue
+        try:
+            active_age_s = (
+                st._now_utc() - st.parse_iso(active_at)
+            ).total_seconds()
+        except ValueError:
+            continue
+        descendants = supervisor.walk_worker_tree(pid, ps_output=ps_output)
         for d in descendants:
+            if d.elapsed_seconds > active_age_s + supervisor.STUCK_TOOL_DRIFT_SECONDS:
+                continue
             if d.elapsed_seconds < threshold:
                 continue
             if d.cpu_seconds > cpu_max:
                 continue
             findings.append((p.slug, phase, pid, d))
-    if not findings:
-        return
-    print("\nStuck tools:")
-    for slug, phase, worker_pid, d in findings:
-        cmd = d.command if len(d.command) <= 80 else d.command[:79] + "…"
+    if findings:
+        print("\nStuck tools:")
+        for slug, phase, worker_pid, d in findings:
+            cmd = d.command if len(d.command) <= 80 else d.command[:79] + "…"
+            print(
+                f"  {slug}/{phase}  worker={worker_pid}  pid={d.pid}  "
+                f"elapsed={d.elapsed_seconds}s  cpu={d.cpu_seconds}s  {cmd}"
+            )
+    if no_marker_claims:
         print(
-            f"  {slug}/{phase}  worker={worker_pid}  pid={d.pid}  "
-            f"elapsed={d.elapsed_seconds}s  cpu={d.cpu_seconds}s  {cmd}"
+            "\nActive claims without tool-activity hook installed "
+            "(stuck-tool detection disabled):"
         )
+        for slug, phase in no_marker_claims:
+            print(
+                f"  {slug}/{phase}  — install the PreToolUse/PostToolUse "
+                "hook from end_of_line/skills/clu-phase/SKILL.md"
+            )
 
 
 def _print_notify_health(cfg: ProjectConfig) -> None:
@@ -4009,6 +4049,43 @@ def cmd_heartbeat(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         ts = st.record_heartbeat(data, args.token, args.phase)
     print(f"heartbeat {args.phase} @ {ts}")
+    return ExitCode.OK
+
+
+@_translate_claim_mismatch
+def cmd_activity(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """PreToolUse/PostToolUse hook callback — stamps the active-tool window.
+
+    Token-validated so a stale or forged caller can't poison the marker.
+    Either `--start-bash` or `--end-bash` must be set (mutex enforced by
+    argparse); neither set → no-op rejection so a buggy hook config fails
+    loudly rather than silently writing nothing.
+
+    Lock acquisition uses a 2-second timeout. Under contention (supervisor
+    tick + concurrent hook + worker callbacks), we'd rather drop the
+    marker update than freeze the worker's Bash invocation. The hook's
+    `|| true` wrapper turns the silent drop into a no-op for Claude Code.
+    Manual `locked + load + save_atomic` rather than `st.mutate` because
+    only this hot-path callback needs `timeout_seconds`; growing the
+    public `mutate` API for one caller would be overkill.
+    """
+    if not (args.start_bash or args.end_bash):
+        return _die(
+            ExitCode.INVALID_VALUE,
+            "clu activity: one of --start-bash / --end-bash required",
+        )
+    try:
+        with st.locked(state_path, timeout_seconds=2.0):
+            data = st.load(state_path)
+            st.assert_claim_match(data, args.token, args.phase)
+            claim = data["current_claim"]
+            if args.start_bash:
+                st.mark_active_tool_start(claim, st.utcnow())
+            else:
+                st.clear_active_tool(claim)
+            st.save_atomic(state_path, data)
+    except st.LockTimeout:
+        return ExitCode.OK
     return ExitCode.OK
 
 
