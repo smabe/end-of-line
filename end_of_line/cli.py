@@ -2044,6 +2044,11 @@ def _print_stuck_tool_health(
         return
     cpu_max = cfg.stuck_tool_cpu_threshold_seconds
     project_root = cfg.project_root.resolve()
+    # Take ONE ps snapshot for all plans. Without hoisting, each
+    # walk_worker_tree call forks its own `ps -eo ...` — O(N) subprocesses
+    # for N active plans. The snapshot is intentionally shared across
+    # plans; `clu doctor` reports a single moment in time anyway.
+    shared_ps = ps_output if ps_output is not None else supervisor.capture_ps_snapshot()
     findings: list[tuple[str, str, int, "supervisor.Descendant"]] = []
     no_marker_claims: list[tuple[str, str]] = []
     for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
@@ -2062,7 +2067,7 @@ def _print_stuck_tool_health(
             ).total_seconds()
         except ValueError:
             continue
-        descendants = supervisor.walk_worker_tree(pid, ps_output=ps_output)
+        descendants = supervisor.walk_worker_tree(pid, ps_output=shared_ps)
         for d in descendants:
             if d.elapsed_seconds > active_age_s + supervisor.STUCK_TOOL_DRIFT_SECONDS:
                 continue

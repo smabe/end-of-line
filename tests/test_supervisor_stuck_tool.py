@@ -463,6 +463,40 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
         # signal-to-noise across many plans.
         self.assertNotIn("Stuck tools", buf.getvalue())
 
+    def test_doctor_takes_single_ps_snapshot_for_all_plans(self) -> None:
+        # _print_stuck_tool_health should fork `ps` once and reuse the
+        # snapshot across all plan iterations. Without hoisting, N active
+        # plans = N ps subprocesses on every `clu doctor` invocation.
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from end_of_line.cli import _print_stuck_tool_health
+        from end_of_line.config import load_project_config
+
+        project = self.tmp_path / "proj"
+        project.mkdir()
+        for slug in ("plan-a", "plan-b", "plan-c"):
+            self._register(project, slug=slug)
+            self._write_state_with_wedge(project, slug=slug)
+        cfg = load_project_config(project)
+
+        ps_calls = []
+        real_run = __import__("subprocess").run
+
+        def counting_run(*args, **kwargs):
+            argv = args[0] if args else kwargs.get("args")
+            if argv and argv[:2] == ["ps", "-eo"]:
+                ps_calls.append(argv)
+            return real_run(*args, **kwargs)
+
+        with patch("end_of_line.supervisor.subprocess.run", side_effect=counting_run):
+            with redirect_stdout(io.StringIO()):
+                _print_stuck_tool_health(cfg)  # ps_output=None → live ps
+        self.assertEqual(
+            len(ps_calls), 1,
+            f"expected 1 ps call shared across plans, got {len(ps_calls)}",
+        )
+
     def test_doctor_silent_when_no_active_claims(self) -> None:
         import io
         from contextlib import redirect_stdout

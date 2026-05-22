@@ -107,6 +107,24 @@ def _parse_ps_output(raw: str) -> list[Descendant]:
     return out
 
 
+def capture_ps_snapshot() -> str:
+    """Run `ps -eo pid,ppid,etime,time,command` once, return stdout.
+
+    Empty string on subprocess failure (treated as an empty process list
+    by `_parse_ps_output`). Exposed so callers that walk multiple worker
+    trees in one pass (`clu doctor`) can share a single snapshot instead
+    of forking ps per plan.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,ppid,etime,time,command"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
 def walk_worker_tree(
     root_pid: int,
     *,
@@ -119,16 +137,9 @@ def walk_worker_tree(
     `_emit_stuck_tool` does the filtering; this walker is pure.
     """
     if ps_output is None:
-        try:
-            result = subprocess.run(
-                ["ps", "-eo", "pid,ppid,etime,time,command"],
-                capture_output=True, text=True, timeout=5,
-            )
-        except (subprocess.SubprocessError, OSError):
+        ps_output = capture_ps_snapshot()
+        if not ps_output:
             return []
-        if result.returncode != 0:
-            return []
-        ps_output = result.stdout
 
     procs = _parse_ps_output(ps_output)
     by_ppid: dict[int, list[Descendant]] = {}
