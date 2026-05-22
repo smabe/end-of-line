@@ -308,21 +308,20 @@ When the operator says `ship` (or equivalent):
    polling. The operator's UserPromptSubmit hook handles AFK surfacing
    separately; this is the at-desk live feed.
 
-7. **Tear down the Monitor when the plan completes.** When the
-   plan-scoped `TASK_UPDATE task=<slug> status=completed` arrives
-   (no `parent=` field — that's the whole-plan event, not a phase
-   event), call `TaskStop` on the Monitor's task_id. The watch was
-   your dispatch-time live feed; after the plan is done it's a
-   zombie stream that survives `/clear` (because of `persistent:
-   True`) and pollutes future sessions with leftover monitors. Same
-   teardown applies to `paused`, `halted`, and any other terminal
-   plan-scoped state — anything that means "this plan isn't going
-   to emit useful events again." If the operator runs `clu archive`
-   manually, also TaskStop at that point. Defensive: if you see
-   `clu watch` processes already running at session start that
-   aren't yours, those are leftover monitors from a prior session
-   — TaskStop them (or kill the underlying PIDs if the task_ids
-   aren't surfaced).
+7. **Tear down the Monitor when the plan completes.** The single
+   teardown trigger is `TASK_UPDATE task=<slug> status=completed`
+   with NO `parent=` field — that's the whole-plan completion event
+   (emitted on `EVENT_PLAN_COMPLETED`), not a phase event. When that
+   line arrives, call `TaskStop` on the Monitor's task_id. Without
+   teardown the watch is a zombie stream that survives `/clear`
+   (because of `persistent: True`) and pollutes future sessions
+   with leftover monitors. Don't tear down on `status=in_progress
+   msg="paused"` — paused plans can be resumed, and you'd lose the
+   live feed for the rest of the run. Defensive: if `clu watch`
+   processes are already running at session start that you didn't
+   start yourself, those are leftovers from a prior session — you
+   can't `TaskStop` them (task_ids don't persist across sessions),
+   so kill the underlying PIDs.
 
 ### Reacting to task-list protocol notifications
 
