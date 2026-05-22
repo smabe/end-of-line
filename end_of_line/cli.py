@@ -4066,31 +4066,25 @@ def cmd_activity(args, cfg: ProjectConfig, state_path: Path) -> int:
     argparse); neither set → no-op rejection so a buggy hook config fails
     loudly rather than silently writing nothing.
 
-    Lock acquisition uses a 2-second timeout. Under contention (supervisor
-    tick + concurrent hook + worker callbacks), we'd rather drop the
-    marker update than freeze the worker's Bash invocation. The hook's
-    `|| true` wrapper turns the silent drop into a no-op for Claude Code.
-    Manual `locked + load + save_atomic` rather than `st.mutate` because
-    only this hot-path callback needs `timeout_seconds`; growing the
-    public `mutate` API for one caller would be overkill.
+    Both the operator-facing `clu activity` path and the hot-path
+    `python3 -m end_of_line.activity_hook` thin entry point delegate to
+    `state.stamp_activity_marker`. The 2-second lock timeout matches the
+    thin entry — under contention we'd rather drop the marker update
+    than freeze the worker's Bash invocation. `stamp_activity_marker`
+    returns False on `LockTimeout`; we still exit 0 to keep the operator-
+    side UX consistent with the hook-side `|| true` semantics.
     """
     if not (args.start_bash or args.end_bash):
         return _die(
             ExitCode.INVALID_VALUE,
             "clu activity: one of --start-bash / --end-bash required",
         )
-    try:
-        with st.locked(state_path, timeout_seconds=2.0):
-            data = st.load(state_path)
-            st.assert_claim_match(data, args.token, args.phase)
-            claim = data["current_claim"]
-            if args.start_bash:
-                st.mark_active_tool_start(claim, st.utcnow())
-            else:
-                st.clear_active_tool(claim)
-            st.save_atomic(state_path, data)
-    except st.LockTimeout:
-        return ExitCode.OK
+    st.stamp_activity_marker(
+        state_path,
+        token=args.token, phase=args.phase,
+        action="start" if args.start_bash else "end",
+        timeout_seconds=2.0,
+    )
     return ExitCode.OK
 
 

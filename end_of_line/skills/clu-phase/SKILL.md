@@ -273,7 +273,7 @@ OR `.claude/settings.local.json` (gitignored). Hooks merge across scopes
         "matcher": "Bash",
         "hooks": [{
           "type": "command",
-          "command": "[ -n \"$CLU_TOKEN\" ] && clu activity --start-bash --project \"$CLU_PROJECT\" --plan \"$CLU_PLAN\" --phase \"$CLU_PHASE\" --token \"$CLU_TOKEN\" 2>/dev/null || true"
+          "command": "[ -n \"$CLU_TOKEN\" ] && python3 -m end_of_line.activity_hook --start-bash --project \"$CLU_PROJECT\" --plan \"$CLU_PLAN\" --phase \"$CLU_PHASE\" --token \"$CLU_TOKEN\" 2>/dev/null || true"
         }]
       }
     ],
@@ -282,13 +282,20 @@ OR `.claude/settings.local.json` (gitignored). Hooks merge across scopes
         "matcher": "Bash",
         "hooks": [{
           "type": "command",
-          "command": "[ -n \"$CLU_TOKEN\" ] && clu activity --end-bash --project \"$CLU_PROJECT\" --plan \"$CLU_PLAN\" --phase \"$CLU_PHASE\" --token \"$CLU_TOKEN\" 2>/dev/null || true"
+          "command": "[ -n \"$CLU_TOKEN\" ] && python3 -m end_of_line.activity_hook --end-bash --project \"$CLU_PROJECT\" --plan \"$CLU_PLAN\" --phase \"$CLU_PHASE\" --token \"$CLU_TOKEN\" 2>/dev/null || true"
         }]
       }
     ]
   }
 }
 ```
+
+The `python3 -m end_of_line.activity_hook` entry point imports only
+`end_of_line.state` (vs `clu activity` which imports the full
+orchestrator surface). At ~37ms per call vs ~62ms for `clu activity`,
+the savings add up over hundreds of Bash invocations per phase. The
+full `clu activity --start-bash / --end-bash` subcommand still works
+unchanged — operators with the older snippet don't need to update.
 
 Three parts of the snippet are load-bearing:
 

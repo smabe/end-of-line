@@ -719,6 +719,41 @@ def clear_active_tool(claim: dict) -> None:
     claim.pop("active_tool_started_at", None)
 
 
+def stamp_activity_marker(
+    state_path: Path,
+    *,
+    token: str,
+    phase: str,
+    action: str,
+    timeout_seconds: float | None = None,
+) -> bool:
+    """Stamp or clear `current_claim.active_tool_started_at` under lock.
+
+    `action` is "start" (PreToolUse) or "end" (PostToolUse). Token + phase
+    are validated against the live claim; mismatch raises `ClaimMismatch`.
+    `timeout_seconds` is forwarded to `locked` — the hot-path hook entry
+    point passes 2.0 so a contended lock drops the update rather than
+    freezing the worker's Bash invocation. Returns True on stamp, False
+    on `LockTimeout`. Shared by `cli.cmd_activity` and the thin
+    `end_of_line.activity_hook` entry point.
+    """
+    if action not in ("start", "end"):
+        raise ValueError(f"action must be 'start' or 'end', got {action!r}")
+    try:
+        with locked(state_path, timeout_seconds=timeout_seconds):
+            data = load(state_path)
+            assert_claim_match(data, token, phase)
+            claim = data["current_claim"]
+            if action == "start":
+                mark_active_tool_start(claim, utcnow())
+            else:
+                clear_active_tool(claim)
+            save_atomic(state_path, data)
+    except LockTimeout:
+        return False
+    return True
+
+
 def add_blocker(
     data: dict,
     phase_id: str,
