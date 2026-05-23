@@ -459,6 +459,39 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_validate_args(p_integrate)
 
+    p_ship = sub.add_parser(
+        "ship",
+        help="One-action post-worker integration: validate, merge "
+             "to main (or open PR), push, trigger archive. Operator-"
+             "facing; preview-then-confirm gated by --yes.",
+    )
+    p_ship.add_argument("--project", type=Path, required=True)
+    ship_target = p_ship.add_mutually_exclusive_group(required=True)
+    ship_target.add_argument("--plan", help="Plan slug to ship.")
+    ship_target.add_argument(
+        "--all-done", action="store_true",
+        help="Ship every DONE plan with an unmerged branch (clu-ship.md phase 4).",
+    )
+    ship_mode = p_ship.add_mutually_exclusive_group()
+    ship_mode.add_argument(
+        "--direct", action="store_true",
+        help="Merge to main directly and push (default).",
+    )
+    ship_mode.add_argument(
+        "--as-pr", action="store_true",
+        help="Open a GitHub PR instead of merging directly "
+             "(clu-ship.md phase 5).",
+    )
+    p_ship.add_argument(
+        "--check", action="store_true",
+        help="Validate only; no destructive steps.",
+    )
+    p_ship.add_argument(
+        "--yes", action="store_true",
+        help="Confirm destructive steps. Without this, prints a "
+             "preview and exits.",
+    )
+
     p_unregister = sub.add_parser(
         "unregister",
         help="Remove plan(s) from the host registry. Per-plan: "
@@ -1042,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_validate(args)
     if args.cmd == "integrate":
         return cmd_integrate(args)
+    if args.cmd == "ship":
+        return cmd_ship(args)
 
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -3869,6 +3904,189 @@ def cmd_integrate(args) -> int:
         file=sys.stderr,
     )
     return cmd_validate(args)
+
+
+def cmd_ship(args) -> int:
+    """One-action post-worker integration (clu-ship.md).
+
+    Phase 3 implements `--plan X --direct` (single-plan direct
+    mode). `--all-done` (phase 4) and `--as-pr` (phase 5) error out
+    until their phases land so the argparse surface stays stable.
+    """
+    if args.as_pr:
+        return _die(
+            ExitCode.GENERIC,
+            "`clu ship --as-pr` is not yet implemented (clu-ship.md "
+            "phase 5). Use `--direct` for now.",
+        )
+    if args.all_done:
+        return _die(
+            ExitCode.GENERIC,
+            "`clu ship --all-done` is not yet implemented (clu-ship.md "
+            "phase 4). Use `--plan <slug>` for single-plan ship.",
+        )
+    # Default to direct mode when neither flag is set (phase 7 will
+    # add the .orchestrator.json `ship_mode` config default).
+    return _cmd_ship_direct_plan(args)
+
+
+def _cmd_ship_direct_plan(args) -> int:
+    """Single-plan direct-mode ship: validate → preview → --yes →
+    FF-first merge (merge-commit fallback) → push main + branch →
+    spawn post-action tick so auto_archive_rule fires immediately.
+    """
+    try:
+        st.validate_slug(args.plan, kind="plan slug")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    project_root = args.project.resolve()
+    if not project_root.is_dir():
+        return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+    cfg = load_project_config(project_root)
+    state_path = cfg.state_path(args.plan)
+    if not state_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
+    data = st.load(state_path)
+
+    if data.get("status") != st.STATUS_DONE:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"plan {args.plan!r} is not done (status={data.get('status')!r}); "
+            f"ship requires STATUS_DONE",
+        )
+
+    wt = st.get_worktree(data)
+    if wt is None:
+        return _die(
+            ExitCode.GENERIC,
+            f"plan {args.plan!r} has no worktree record; nothing to ship",
+        )
+    branch = wt["branch"]
+
+    if st.is_branch_merged_into(project_root, branch, "origin/main"):
+        return _die(
+            ExitCode.GENERIC,
+            f"branch {branch!r} is already merged into origin/main; "
+            f"auto_archive_rule will pick it up on the next tick",
+        )
+
+    # Canonical-dirty check. .orchestrator/ state files are untracked
+    # by design; ignore them so a live state file doesn't read as dirty.
+    porcelain = subprocess.run(
+        ["git", "-C", str(project_root), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    dirty = [line for line in porcelain.splitlines() if not line.startswith("??")]
+    if dirty:
+        return _die(
+            ExitCode.GENERIC,
+            f"canonical checkout has uncommitted changes; clean them "
+            f"first.\ngit status:\n" + "\n".join(dirty),
+        )
+
+    # Validate (dry-merge). Suite ON by default; the caller can drop
+    # it later via project config if needed. --check honors test_command
+    # the same way.
+    result = dry_merge.attempt_merge(
+        project_root, "main", [branch], cfg.test_command,
+    )
+    if result.outcome != "clean":
+        print(f"validate: outcome={result.outcome}")
+        if result.conflict_files:
+            print(f"conflict files: {', '.join(result.conflict_files)}")
+        if result.test_exit_code is not None:
+            print(f"test exit code: {result.test_exit_code}")
+        if result.stderr_tail:
+            print(f"stderr:\n{result.stderr_tail}", file=sys.stderr)
+        return ExitCode.GENERIC
+
+    if args.check:
+        print(
+            f"validate: clean — ready to ship {args.plan!r} "
+            f"(branch {branch!r}).",
+        )
+        return ExitCode.OK
+
+    if not args.yes:
+        print(f"ready to ship {args.plan!r}:")
+        print(f"  validate: clean")
+        print(f"  merge:    {branch!r} → main (FF-first, merge-commit fallback)")
+        print(f"  push:     origin main + {branch!r}")
+        print(f"  trigger:  tick (auto_archive_rule fires next)")
+        print("")
+        print("re-run with --yes to apply.")
+        return ExitCode.OK
+
+    # Apply.
+    r = subprocess.run(
+        ["git", "-C", str(project_root), "checkout", "main"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return _die(
+            ExitCode.GENERIC,
+            f"git checkout main failed: {r.stderr.strip()}",
+        )
+
+    r = subprocess.run(
+        ["git", "-C", str(project_root), "merge", "--ff-only", branch],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        # FF not possible; fall back to merge-commit. Diverges from gh /
+        # git-town / jj which all commit to one strategy — see
+        # docs/architecture.md for the rationale.
+        r = subprocess.run(
+            ["git", "-C", str(project_root), "merge",
+             "--no-ff", "--no-edit", branch],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return _die(
+                ExitCode.GENERIC,
+                f"git merge {branch!r} → main failed: {r.stderr.strip()}",
+            )
+
+    r = subprocess.run(
+        ["git", "-C", str(project_root), "push", "origin", "main"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return _die(
+            ExitCode.GENERIC,
+            f"git push origin main failed: {r.stderr.strip()}\n"
+            f"local main is ahead of origin; re-run "
+            f"`clu ship --plan {args.plan} --direct --yes` to retry.",
+        )
+
+    # Branch push is best-effort: if the branch was deleted upstream
+    # (auto-delete-head-branches, another worker) we don't want to fail
+    # the ship — main already has the work.
+    r = subprocess.run(
+        ["git", "-C", str(project_root), "push", "origin", branch],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(
+            f"warning: git push origin {branch!r} failed (non-fatal): "
+            f"{r.stderr.strip()}",
+            file=sys.stderr,
+        )
+
+    # Sanity-check: origin/main now sees the branch as an ancestor. If
+    # not, the push side-effect didn't update the local ref and the
+    # post-action tick would be premature.
+    if not st.is_branch_merged_into(project_root, branch, "origin/main"):
+        return _die(
+            ExitCode.GENERIC,
+            f"push succeeded but origin/main didn't advance past "
+            f"{branch!r}; investigate before triggering auto-archive.",
+        )
+
+    _spawn_post_action_tick(cfg)
+    print(f"shipped {args.plan!r}: {branch!r} → main; auto-archive triggered.")
+    return ExitCode.OK
 
 
 def _perform_archive(
