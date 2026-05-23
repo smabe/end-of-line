@@ -29,7 +29,8 @@ For the *why* behind each, see
   hood / Tests / `Co-Authored-By:` trailer.
 - **`ExitCode` IntEnum, never bare ints.** Use `_die(ExitCode.X, msg)`.
 - **`--token` on every worker callback** (`complete / block / spawn /
-  task-done / heartbeat`); validated against the live claim.
+  task-done / heartbeat / verify / attest`); validated against the
+  live claim.
 - **`state.validate_slug` on every external `plan` / `phase_id`** before
   any path join. Regex `^[a-z0-9][a-z0-9_-]{0,63}$`.
 - **`EVENT_*` constants, never raw strings.** A typo silently breaks
@@ -40,7 +41,8 @@ For the *why* behind each, see
   that touches `registry.register` (directly or via `main(["init",
   ...])`). Without it, tests pollute the real `~/.config/clu/registry.json`.
 - **One tick = one action.** `supervisor.tick` is first-match-wins
-  through an 8-priority chain; never do two things per tick.
+  through a 9-priority chain (canonical list in `supervisor.py`
+  module docstring); never do two things per tick.
 
 ## What NOT to do
 
