@@ -3909,16 +3909,26 @@ def cmd_integrate(args) -> int:
 def cmd_ship(args) -> int:
     """One-action post-worker integration (clu-ship.md).
 
-    Phases 3-4 implement direct mode (single plan + --all-done).
-    `--as-pr` (phase 5) errors out until that phase lands so the
-    argparse surface stays stable.
+    Mode resolution: explicit --direct / --as-pr flag wins; otherwise
+    reads `dispatch.ship_mode` from `.orchestrator.json` (default
+    "direct"). The flag form is for one-off overrides; per-project
+    config is the steady-state convenience.
     """
-    if args.as_pr:
+    if args.direct:
+        mode = "direct"
+    elif args.as_pr:
+        mode = "as_pr"
+    else:
+        project_root = args.project.resolve()
+        if not project_root.is_dir():
+            return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+        cfg = load_project_config(project_root)
+        mode = cfg.dispatch.ship_mode
+
+    if mode == "as_pr":
         if args.all_done:
             return _cmd_ship_as_pr_all_done(args)
         return _cmd_ship_as_pr_plan(args)
-    # Default to direct mode when neither flag is set (phase 7 will
-    # add the .orchestrator.json `ship_mode` config default).
     if args.all_done:
         return _cmd_ship_direct_all_done(args)
     return _cmd_ship_direct_plan(args)
@@ -4523,6 +4533,10 @@ def _perform_archive(
             cfg, data, trigger="archive", require_all_phases_done=False,
         )
         after = st.get_worktree(data)
+        # Clear clu-ship lifecycle markers so they don't haunt the
+        # orphaned state file after archive (clu-ship.md phase 7).
+        data.pop("ship_pending", None)
+        data.pop("ready_to_ship_announced", None)
         plan_dir = cfg.project_root / cfg.plan_dir
         plan_md = plan_dir / f"{plan}.md"
         sources: list[Path] = []

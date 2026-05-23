@@ -57,6 +57,12 @@ KIND_STALLED_CLAIM = "stalled_claim"
 KIND_GATE_CLEAN = "gate_clean"
 KIND_GATE_DIRTY = "gate_dirty"
 KIND_PLAN_AUTO_ARCHIVED = "plan_auto_archived"
+# DONE plans exist with unmerged worktree branches — surface the
+# copy-paste `clu ship` invocation in the inbox so the operator can
+# action it from wherever the notification lands (clu-ship.md).
+# Mode-aware body via render_ready_to_ship; suppressed by per-plan
+# data["ship_pending"] once ship is in flight.
+KIND_READY_TO_SHIP = "ready_to_ship"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
     KIND_HALTED,
@@ -227,6 +233,24 @@ def render_gate_dirty(batch_id: str, outcome: str, follow_up_path: str) -> str:
 
 def render_plan_auto_archived(slug: str, branch: str) -> str:
     return f"Auto-archived {slug} (branch {branch} merged to origin/main)"
+
+
+def render_ready_to_ship(slugs: list[str], mode: str) -> str:
+    """Mode-aware body for KIND_READY_TO_SHIP. Always includes the
+    exact copy-paste `clu ship` invocation the operator should run."""
+    mode_label = "(PR mode)" if mode == "as_pr" else ""
+    mode_flag = "--as-pr" if mode == "as_pr" else "--direct"
+    if len(slugs) == 1:
+        slug = slugs[0]
+        head = f"READY TO SHIP{f' {mode_label}' if mode_label else ''}: {slug}"
+        cmd = f"clu ship --plan {slug} {mode_flag} --yes"
+    else:
+        head = (
+            f"READY TO SHIP{f' {mode_label}' if mode_label else ''}: "
+            f"{len(slugs)} plan(s) — {', '.join(slugs)}"
+        )
+        cmd = f"clu ship --all-done {mode_flag} --yes"
+    return f"{head}\nRun: {cmd}"
 
 
 def render_worktree_conflict(

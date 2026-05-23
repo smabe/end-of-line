@@ -402,6 +402,25 @@ class CmdArchiveAtomicCommitTests(WorktreeCleanupBase):
         self.assertEqual(rc2, 0)
         self.assertEqual(self._commit_count(), after_first)
 
+    def test_archive_clears_ship_pending_marker(self) -> None:
+        # Operator-facing archive clears stale clu-ship markers so they
+        # don't haunt the orphaned state file post-archive (clu-ship.md
+        # phase 7 requirement).
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        with st.mutate(self._state_path("alpha")) as data:
+            data["status"] = st.STATUS_DONE
+            data["ship_pending"] = {
+                "mode": "as_pr",
+                "pr_url": "https://github.com/example/repo/pull/1",
+                "ts": "2026-05-23T12:00:00Z",
+            }
+            data["ready_to_ship_announced"] = {"branch_sha": "abc123"}
+        rc, _, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        data = st.load(self._state_path("alpha"))
+        self.assertNotIn("ship_pending", data)
+        self.assertNotIn("ready_to_ship_announced", data)
+
 
 if __name__ == "__main__":
     unittest.main()

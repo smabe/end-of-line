@@ -45,6 +45,28 @@ class LoadProjectConfigTests(_ConfigTestBase):
         self.assertEqual(cfg.dispatch.command, "echo hi")
         self.assertEqual(cfg.dispatch.path, "")
 
+    def test_ship_mode_default_direct(self) -> None:
+        # No dispatch.ship_mode → defaults to "direct".
+        self._write({"dispatch": {}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.dispatch.ship_mode, "direct")
+
+    def test_ship_mode_explicit_direct(self) -> None:
+        self._write({"dispatch": {"ship_mode": "direct"}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.dispatch.ship_mode, "direct")
+
+    def test_ship_mode_explicit_as_pr(self) -> None:
+        self._write({"dispatch": {"ship_mode": "as_pr"}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.dispatch.ship_mode, "as_pr")
+
+    def test_ship_mode_invalid_raises(self) -> None:
+        self._write({"dispatch": {"ship_mode": "bogus"}})
+        with self.assertRaises(ConfigError) as ctx:
+            load_project_config(self.root)
+        self.assertIn("ship_mode", str(ctx.exception))
+
     def test_dispatch_path_explicit_empty_string(self) -> None:
         self._write({"dispatch": {"path": ""}})
         cfg = load_project_config(self.root)

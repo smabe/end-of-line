@@ -418,6 +418,73 @@ def dry_merge_gate_rule(
 register_rule(dry_merge_gate_rule)
 
 
+def ready_to_ship_rule(
+    project_root: Path, plans: list[ProjectPlan],
+) -> RuleResult | None:
+    """Surface KIND_READY_TO_SHIP when DONE plans have unmerged
+    worktree branches and no in-flight ship_pending stamp
+    (clu-ship.md phase 7).
+
+    Slots between `dry_merge_gate_rule` and `auto_archive_rule`:
+    - dry_merge_gate runs first so batch-validate dirty surfaces
+      before we'd point the operator at `clu ship`.
+    - auto_archive owns plans whose branch is already merged
+      into origin/main; we skip those.
+
+    Dedup: stamps `data["ready_to_ship_announced"] = {"branch_sha":
+    <sha>}` after firing so subsequent ticks at the same branch
+    tip don't re-spam. Re-fires when the worker pushes new commits
+    (branch_sha changes).
+    """
+    cfg = load_project_config(project_root)
+
+    eligible: list[tuple[ProjectPlan, str, str]] = []  # (plan, branch, sha)
+    for p in plans:
+        if p.state.get("status") != st.STATUS_DONE:
+            continue
+        wt = st.get_worktree(p.state)
+        if not wt:
+            continue
+        branch = wt["branch"]
+        if st.is_branch_merged_into(project_root, branch):
+            continue
+        if p.state.get("ship_pending"):
+            continue
+        r = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--verify", branch],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            continue
+        branch_sha = r.stdout.strip()
+        announced = p.state.get("ready_to_ship_announced") or {}
+        if announced.get("branch_sha") == branch_sha:
+            continue
+        eligible.append((p, branch, branch_sha))
+
+    if not eligible:
+        return None
+
+    mode = cfg.dispatch.ship_mode
+    slugs = [e[0].slug for e in eligible]
+    field_updates = {
+        p.state_path: {"ready_to_ship_announced": {"branch_sha": sha}}
+        for p, _, sha in eligible
+    }
+    return RuleResult(
+        events_per_plan={},
+        rule_name="ready_to_ship",
+        notifies=[(
+            notify.KIND_READY_TO_SHIP,
+            notify.render_ready_to_ship(slugs, mode),
+        )],
+        field_updates_per_plan=field_updates,
+    )
+
+
+register_rule(ready_to_ship_rule)
+
+
 def auto_archive_rule(
     project_root: Path, plans: list[ProjectPlan],
 ) -> RuleResult | None:

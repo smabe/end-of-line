@@ -438,6 +438,49 @@ class ShipAsPrPlanTests(ShipBase):
         self.assertEqual(data["ship_pending"]["mode"], "as_pr")
 
 
+class ShipModeResolutionTests(ShipBase):
+    """`cmd_ship` resolves mode from .orchestrator.json
+    `dispatch.ship_mode` when no --direct/--as-pr flag is passed."""
+
+    def _write_config(self, mode: str) -> None:
+        (self.project / ".orchestrator.json").write_text(
+            f'{{"dispatch":{{"ship_mode":"{mode}"}}}}'
+        )
+
+    def test_no_flag_no_config_defaults_to_direct(self) -> None:
+        # Config absent → DispatchSpec default "direct" → direct
+        # path runs validate/preview without opening any PR.
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        rc, out, _ = self._ship("--plan", "alpha", "--check")
+        self.assertEqual(rc, ExitCode.OK)
+        # Direct's --check body says "ready to ship", PR mode says
+        # "ready to open PR".
+        self.assertIn("ready to ship", out.lower())
+        self.assertNotIn("open pr", out.lower())
+
+    def test_config_as_pr_routes_to_pr_mode(self) -> None:
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        self._write_config("as_pr")
+        rc, out, _ = self._ship("--plan", "alpha", "--check")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("open pr", out.lower())
+
+    def test_explicit_flag_overrides_config(self) -> None:
+        # Config says as_pr; --direct flag overrides.
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        self._write_config("as_pr")
+        rc, out, _ = self._ship("--plan", "alpha", "--direct", "--check")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("ready to ship", out.lower())
+        self.assertNotIn("open pr", out.lower())
+
+
 class ShipAsPrAllDoneTests(ShipBase):
     """`clu ship --as-pr --all-done` opens PRs for every DONE plan
     with an unmerged worktree branch, behind one --yes."""

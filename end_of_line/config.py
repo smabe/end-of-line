@@ -41,6 +41,11 @@ class DispatchSpec:
     # {backup_path}, {diagnosis}, {schema_json}, {log_path}). Unset →
     # auto-repair disabled; clu falls back to a plain corrupt notification.
     repair_command: str | None = None
+    # Project-default ship mode for `clu ship` when neither --direct
+    # nor --as-pr is passed. "direct" = local merge + push to main;
+    # "as_pr" = open a GitHub PR and let auto_archive_rule pick up
+    # cleanup once GitHub merges (clu-ship.md).
+    ship_mode: str = "direct"
 
 
 @dataclass
@@ -235,6 +240,18 @@ def _validate_lease_ttl_scale(raw: dict) -> float:
     return val
 
 
+_SHIP_MODES = ("direct", "as_pr")
+
+
+def _validate_ship_mode(disp: dict) -> str:
+    val = disp.get("ship_mode", "direct")
+    if val not in _SHIP_MODES:
+        raise ConfigError(
+            f"dispatch.ship_mode: must be one of {_SHIP_MODES}, got {val!r}"
+        )
+    return val
+
+
 def _validate_auto_archive(raw: dict) -> bool:
     value = raw.get("auto_archive", True)
     if not isinstance(value, bool):
@@ -289,6 +306,7 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             command=disp.get("command", ""),
             path=raw_path,
             repair_command=disp.get("repair_command") or None,
+            ship_mode=_validate_ship_mode(disp),
         ),
         notify=NotifySpec(
             channels=channels,
