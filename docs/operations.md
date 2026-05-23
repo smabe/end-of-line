@@ -1157,12 +1157,18 @@ update's status.
 event set — the four events the operator should react to in flight rather
 than at next session boundary:
 
-| Event | Surfaced when |
+| Event (state name) | Surfaced when |
 |---|---|
 | `tool_stuck` | Worker's Bash tool has been near-zero CPU for ≥5 min (per #67 stuck-tool detection) |
 | `phase_blocked` | Worker called `clu block` |
 | `attestation_refused` | Worker hit the verify or simplify quality gate |
 | `stalled_claim_notified` | Claim's lease expired with plan still `running` |
+
+Note the name pairing: `clu watch --operator` streams `EVENT_*` names from
+state.events, while the inbox-hook surface (next section) uses the shorter
+`KIND_*` names — `stalled_claim_notified` (watch) corresponds to
+`stalled_claim` (inbox). Both surfaces refer to the same logical event
+class; only the wire name differs.
 
 Default `clu watch` is too chatty for live dashboarding (phase_started,
 queue_popped, lease_extended noise drowns the signal). `--operator`
@@ -1220,11 +1226,11 @@ is uniform: **investigate autonomously → recommend a recovery path →
 wait for explicit operator approval before any destructive action**.
 This honors the operator-approval checkpoint in user-level CLAUDE.md.
 
-| Event | Investigate by | Recommend (gated on approval) |
+| Event (inbox name) | Investigate by | Recommend (gated on approval) |
 |---|---|---|
 | `tool_stuck` | `ps -p <worker_pid>` + `pgrep -P <worker_pid>` | `kill <pid>` / `clu release-claim` / `clu force-complete` |
 | `attestation_refused` | Read worker log, compare `stamped_at` to current HEAD | `clu verify` / `clu attest --simplify` / `clu complete --skip-verify` / `--skip-simplify` |
-| `stalled_claim_notified` | Read worker log, walk pid tree, check `git status` for uncommitted work | `clu force-complete --commit <sha>` (work on disk) / `clu release-claim` (worker dead) / `clu retry` (clean exit) |
+| `stalled_claim` | Read worker log, walk pid tree, check `git status` for uncommitted work | `clu force-complete --commit <sha>` (work on disk) / `clu release-claim` (worker dead) / `clu retry` (clean exit) |
 | `phase_blocked` | (existing blocker flow — see `## Background monitoring`) | `clu answer --plan <slug> <blocker_id> <answer>` |
 
 Adding a new wedge class is one entry in
