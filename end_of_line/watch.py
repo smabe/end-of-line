@@ -425,8 +425,11 @@ def stream_loop(
             cfg_loader = lambda sp: load_project_config(_state_path_to_project(sp))
         bootstrap_task_list(list(cursors.keys()), cfg_loader, sink)
 
-    for slug, data in baseline:
-        print(_snapshot_line(slug, data), file=sink, flush=True)
+    # Operator mode wants ONLY wedge events; suppress the per-plan snapshot
+    # baseline so the dashboard signal stays clean.
+    if not operator:
+        for slug, data in baseline:
+            print(_snapshot_line(slug, data), file=sink, flush=True)
 
     if _before_first_tick is not None:
         _before_first_tick()

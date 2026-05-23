@@ -16,9 +16,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import state as st
+from end_of_line import state as st, watch
 from end_of_line.cli import ExitCode, main
-from end_of_line.watch import project_event
+from end_of_line.watch import _FORMATTERS, _OPERATOR_VISIBLE, project_event
 from tests import CluTestCase
 
 
@@ -133,7 +133,8 @@ def _init_plan(project: Path, slug: str) -> None:
     plans.mkdir(exist_ok=True)
     (plans / f"{slug}.md").write_text(_PLAN_BODY)
     rc = main(["init", "--project", str(project), "--plan", slug])
-    assert rc == 0
+    if rc != 0:
+        raise RuntimeError(f"init failed with rc={rc}")
 
 
 class OperatorCliFlagTest(CluTestCase):
@@ -147,37 +148,63 @@ class OperatorCliFlagTest(CluTestCase):
 
     def test_operator_flag_passes_to_stream_loop(self) -> None:
         _init_plan(self.project, "myplan")
-        with mock.patch("end_of_line.watch.stream_loop", return_value=0) as m:
+        with mock.patch("end_of_line.watch.stream_loop",
+                        spec=watch.stream_loop, return_value=0) as m:
             rc = main(["watch", "--project", str(self.project),
                        "--plan", "myplan", "--operator"])
         self.assertEqual(rc, 0)
         m.assert_called_once()
-        kwargs = m.call_args.kwargs
-        self.assertTrue(kwargs.get("operator"))
+        self.assertIs(m.call_args.kwargs["operator"], True)
 
     def test_operator_flag_composes_with_all(self) -> None:
         _init_plan(self.project, "myplan")
-        with mock.patch("end_of_line.watch.stream_loop", return_value=0) as m:
+        with mock.patch("end_of_line.watch.stream_loop",
+                        spec=watch.stream_loop, return_value=0) as m:
             rc = main(["watch", "--all", "--operator"])
         self.assertEqual(rc, 0)
-        self.assertTrue(m.call_args.kwargs.get("operator"))
+        self.assertIs(m.call_args.kwargs["operator"], True)
 
     def test_operator_flag_composes_with_json(self) -> None:
         _init_plan(self.project, "myplan")
-        with mock.patch("end_of_line.watch.stream_loop", return_value=0) as m:
+        with mock.patch("end_of_line.watch.stream_loop",
+                        spec=watch.stream_loop, return_value=0) as m:
             rc = main(["watch", "--project", str(self.project),
                        "--plan", "myplan", "--operator", "--json"])
         self.assertEqual(rc, 0)
-        self.assertTrue(m.call_args.kwargs.get("operator"))
-        self.assertTrue(m.call_args.kwargs.get("json_mode"))
+        self.assertIs(m.call_args.kwargs["operator"], True)
+        self.assertIs(m.call_args.kwargs["json_mode"], True)
 
     def test_default_operator_kwarg_is_false(self) -> None:
         _init_plan(self.project, "myplan")
-        with mock.patch("end_of_line.watch.stream_loop", return_value=0) as m:
+        with mock.patch("end_of_line.watch.stream_loop",
+                        spec=watch.stream_loop, return_value=0) as m:
             rc = main(["watch", "--project", str(self.project),
                        "--plan", "myplan"])
         self.assertEqual(rc, 0)
-        self.assertFalse(m.call_args.kwargs.get("operator", False))
+        # Distinguish "kwarg present and False" from "kwarg missing entirely":
+        # both behaviors silence the filter, but a regression that drops the
+        # kwarg should fail this assertion explicitly.
+        self.assertIn("operator", m.call_args.kwargs)
+        self.assertIs(m.call_args.kwargs["operator"], False)
+
+    def test_operator_task_list_mutex(self) -> None:
+        _init_plan(self.project, "myplan")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main(["watch", "--project", str(self.project),
+                       "--plan", "myplan", "--operator", "--task-list"])
+        self.assertEqual(rc, int(ExitCode.GENERIC))
+        self.assertIn("mutually exclusive", err.getvalue().lower())
+
+
+class OperatorVisibleHasFormatterTest(unittest.TestCase):
+    """Every operator-visible event must have a renderer. Forward-compat
+    guard: adding a new event to _OPERATOR_VISIBLE without a _FORMATTERS
+    entry would silently drop the event from the operator dashboard."""
+
+    def test_every_operator_visible_event_has_a_formatter(self) -> None:
+        missing = [e for e in _OPERATOR_VISIBLE if e not in _FORMATTERS]
+        self.assertEqual(missing, [], f"operator-visible events lacking formatters: {missing}")
 
 
 if __name__ == "__main__":

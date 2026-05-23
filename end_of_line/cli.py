@@ -3300,6 +3300,11 @@ def cmd_watch(args) -> int:
         return _die(ExitCode.GENERIC,
                     "--task-list requires --plan or single-project "
                     "(mutually exclusive with --all)")
+    if task_list_mode and getattr(args, "watch_operator", False):
+        return _die(ExitCode.GENERIC,
+                    "--operator and --task-list are mutually exclusive "
+                    "(operator filter not yet wired into task-list mode; "
+                    "use one or the other)")
 
     if all_mode:
         for e in registry.entries():
@@ -3336,7 +3341,7 @@ def cmd_watch(args) -> int:
             json_mode=args.json,
             task_list_mode=task_list_mode,
             verbose=args.verbose,
-            operator=getattr(args, "watch_operator", False),
+            operator=args.watch_operator,
             poll_interval=interval,
         )
     except FileNotFoundError as exc:
