@@ -50,6 +50,28 @@ For the *why* behind each, see
 - Don't add a worker callback that skips token validation. The token
   is the entire security boundary.
 
+## Project structure
+
+- **`end_of_line/`** — the `clu` package. `cli.py` is the CLI surface;
+  `state.py` the schema; `supervisor.py` the tick loop; `notify_*.py`
+  pluggable channels (iMessage / Discord / watch); `hooks/` ships
+  Claude Code SessionStart + PreToolUse hooks; `skills/` bundles
+  `/clu-plan`, `/clu-phase`, `/clu-reply`, `/clu-monitor`.
+- **`tests/`** — `unittest` suite. `tests/__init__.py` exports
+  `CluTestCase` + `isolate_registry` helpers (see Conventions).
+- **`docs/`** — depth docs (see "Where to look for depth" below).
+  `design-briefs/` for in-flight design; `adr/` for ADRs;
+  `history/` for frozen pre-Day-1 brainstorms (read-only).
+- **`plans/`** — active master + sub-plan markdown. State at
+  `plans/.orchestrator/<slug>.state.json`. `plans/archive/<slug>/`
+  holds shipped plans (reference only — they're frozen state, not
+  current scope).
+- **`examples/`** — example `.orchestrator.json` configs.
+- **`experiments/`** — scratch / one-off probes.
+- **`CONTEXT.md`** — domain vocabulary (Supervisor / Worker /
+  Operator / Plan / Phase). Read once at onboarding; the terms are
+  mandatory in code, commits, and docs.
+
 ## Where to look for depth
 
 | Doc | Owns |
