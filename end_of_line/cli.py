@@ -418,32 +418,46 @@ def main(argv: list[str] | None = None) -> int:
         help="Preview the grouping without moving any files.",
     )
 
+    def _add_validate_args(p: argparse.ArgumentParser) -> None:
+        # Shared between `clu validate` (canonical) and `clu integrate`
+        # (deprecation alias). Kept inline so both subparsers stay in
+        # lock-step with no risk of drift.
+        p.add_argument("--project", type=Path, required=True)
+        p.add_argument(
+            "--batch",
+            default=None,
+            help="Batch id; resolves DONE member branches from the registry.",
+        )
+        p.add_argument(
+            "--branches",
+            default=None,
+            help="Comma-separated branch names; overrides --batch resolution.",
+        )
+        p.add_argument(
+            "--no-suite", action="store_true",
+            help="Textual-merge only — skip test_command even when configured.",
+        )
+        p.add_argument(
+            "--base-ref", default="main",
+            help="Base ref to merge off. Defaults to main.",
+        )
+
+    p_validate = sub.add_parser(
+        "validate",
+        help="Dry-merge a batch's branches in a scratch worktree and "
+             "optionally run the project's test_command. Mode-agnostic "
+             "validate path; does NOT mutate plan state or files (the "
+             "cross-plan rule owns that). Used by `clu ship --check`.",
+    )
+    _add_validate_args(p_validate)
+
     p_integrate = sub.add_parser(
         "integrate",
-        help="Dry-merge a batch's branches in a scratch worktree and "
-             "optionally run the project's test_command. Operator-on-demand "
-             "replay; does NOT mutate plan state or file follow-ups (the "
-             "cross-plan rule owns that).",
+        help="DEPRECATED alias for `clu validate`. The verb 'integrate' "
+             "never updated main; use `clu validate` for dry-merge "
+             "validation, `clu ship` to actually land code.",
     )
-    p_integrate.add_argument("--project", type=Path, required=True)
-    p_integrate.add_argument(
-        "--batch",
-        default=None,
-        help="Batch id; resolves DONE member branches from the registry.",
-    )
-    p_integrate.add_argument(
-        "--branches",
-        default=None,
-        help="Comma-separated branch names; overrides --batch resolution.",
-    )
-    p_integrate.add_argument(
-        "--no-suite", action="store_true",
-        help="Textual-merge only — skip test_command even when configured.",
-    )
-    p_integrate.add_argument(
-        "--base-ref", default="main",
-        help="Base ref to merge off. Defaults to main.",
-    )
+    _add_validate_args(p_integrate)
 
     p_unregister = sub.add_parser(
         "unregister",
@@ -1024,6 +1038,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_notify_test(args)
     if args.cmd == "answer":
         return cmd_answer(args)
+    if args.cmd == "validate":
+        return cmd_validate(args)
     if args.cmd == "integrate":
         return cmd_integrate(args)
 
@@ -3761,11 +3777,13 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     return ExitCode.OK
 
 
-def cmd_integrate(args) -> int:
+def cmd_validate(args) -> int:
     """Operator-on-demand dry merge of a batch's branches.
 
-    Wraps dry_merge.attempt_merge directly; does NOT mutate plan state
-    or write follow-up plan files (the cross-plan rule owns that).
+    Mode-agnostic: shared by `clu ship --direct --check` and
+    `clu ship --as-pr --check` (clu-ship.md). Wraps
+    dry_merge.attempt_merge directly; does NOT mutate plan state or
+    write follow-up plan files (the cross-plan rule owns that).
     Useful for replay-after-fix, stuck batches, or CI-side validation.
     """
     project_root = args.project.resolve()
@@ -3835,6 +3853,22 @@ def cmd_integrate(args) -> int:
         print(f"stderr:\n{result.stderr_tail}", file=sys.stderr)
 
     return ExitCode.OK if result.outcome == "clean" else ExitCode.GENERIC
+
+
+def cmd_integrate(args) -> int:
+    """Deprecation alias for `clu validate` (clu-ship.md retired the
+    misleading `integrate` verb — it never updated main; it was a
+    dry-merge validator). Prints a stderr notice and delegates."""
+    print(
+        "warning: `clu integrate` is deprecated; use `clu validate` "
+        "instead. The verb 'integrate' was misleading — it doesn't "
+        "update main; it only dry-merges branches against a scratch "
+        "worktree. `clu ship` is the new operator action for landing "
+        "code; `clu validate` is the dry-validate path used by both "
+        "`clu ship --check` modes.",
+        file=sys.stderr,
+    )
+    return cmd_validate(args)
 
 
 def _perform_archive(
