@@ -438,6 +438,153 @@ class ShipAsPrPlanTests(ShipBase):
         self.assertEqual(data["ship_pending"]["mode"], "as_pr")
 
 
+class ShipAsPrAllDoneTests(ShipBase):
+    """`clu ship --as-pr --all-done` opens PRs for every DONE plan
+    with an unmerged worktree branch, behind one --yes."""
+
+    def _setup_done_plan(self, slug: str) -> None:
+        self._init_plan(slug)
+        self._add_worker_commit(slug)
+        self._set_done(slug)
+
+    def _gh_fake_batch(
+        self, *,
+        version_ok: bool = True,
+        auth_ok: bool = True,
+        fail_for: set[str] | None = None,
+    ):
+        """gh fake that returns a unique URL per branch and can
+        selectively fail PR-create for specific branch names."""
+        real_run = subprocess.run
+        fail_for = fail_for or set()
+
+        def fake(*args, **kwargs):
+            argv = args[0] if args else kwargs.get("args", [])
+            if not isinstance(argv, list):
+                return real_run(*args, **kwargs)
+            if argv[:2] == ["gh", "--version"]:
+                if version_ok:
+                    return subprocess.CompletedProcess(argv, 0, "gh 2.0.0\n", "")
+                raise FileNotFoundError("gh")
+            if argv[:3] == ["gh", "auth", "status"]:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0 if auth_ok else 1,
+                    "ok" if auth_ok else "",
+                    "" if auth_ok else "not authenticated\n",
+                )
+            if argv[:3] == ["gh", "pr", "create"]:
+                # Extract --head value for per-branch URL/failure.
+                head = ""
+                for i, a in enumerate(argv):
+                    if a == "--head" and i + 1 < len(argv):
+                        head = argv[i + 1]
+                        break
+                if head in fail_for:
+                    return subprocess.CompletedProcess(
+                        argv, 1, "", "gh: simulated failure\n",
+                    )
+                slug = head.rsplit("/", 1)[-1] if "/" in head else head
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    f"https://github.com/example/repo/pull/{slug}\n", "",
+                )
+            return real_run(*args, **kwargs)
+
+        return fake
+
+    def test_no_eligible_plans_returns_ok(self) -> None:
+        rc, out, _ = self._ship("--all-done", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("nothing to ship", out.lower())
+
+    def test_skips_already_merged_plans(self) -> None:
+        self._setup_done_plan("alpha")
+        branch = self._branch("alpha")
+        _git(self.project, "merge", "--no-ff", "--no-edit", branch)
+        _git(self.project, "push", "origin", "main")
+        rc, out, _ = self._ship("--all-done", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("nothing to ship", out.lower())
+
+    def test_preview_lists_eligible_plans(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        rc, out, _ = self._ship("--all-done", "--as-pr")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("alpha", out)
+        self.assertIn("beta", out)
+        self.assertIn("--yes", out)
+        # No PR stamps.
+        for slug in ("alpha", "beta"):
+            data = st.load(self._state_path(slug))
+            self.assertNotIn("ship_pending", data)
+
+    def test_check_validates_each_eligible_plan(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake_batch(),
+        ):
+            rc, out, _ = self._ship("--all-done", "--as-pr", "--check")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("alpha", out)
+        self.assertIn("beta", out)
+        # No PR stamps under --check.
+        for slug in ("alpha", "beta"):
+            data = st.load(self._state_path(slug))
+            self.assertNotIn("ship_pending", data)
+
+    def test_ships_multiple_plans_opens_a_pr_each(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake_batch(),
+        ):
+            rc, out, _ = self._ship("--all-done", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        for slug in ("alpha", "beta"):
+            data = st.load(self._state_path(slug))
+            pending = data.get("ship_pending")
+            self.assertIsNotNone(pending, f"{slug} should be stamped")
+            self.assertEqual(pending["mode"], "as_pr")
+            self.assertIn(slug, pending["pr_url"])
+
+    def test_continues_past_per_plan_failure(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        alpha_branch = self._branch("alpha")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake_batch(fail_for={alpha_branch}),
+        ):
+            rc, _, err = self._ship("--all-done", "--as-pr", "--yes")
+        # Overall rc reflects failure; beta still got its PR.
+        self.assertNotEqual(rc, ExitCode.OK)
+        self.assertIn("alpha", err.lower())
+        beta_data = st.load(self._state_path("beta"))
+        self.assertEqual(beta_data["ship_pending"]["mode"], "as_pr")
+        alpha_data = st.load(self._state_path("alpha"))
+        self.assertNotIn("ship_pending", alpha_data)
+
+    def test_gh_preflight_failure_halts_before_apply(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake_batch(version_ok=False),
+        ):
+            rc, _, err = self._ship("--all-done", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn("gh", err.lower())
+        # No PR was opened — both plans untouched.
+        for slug in ("alpha", "beta"):
+            data = st.load(self._state_path(slug))
+            self.assertNotIn("ship_pending", data)
+
+
 class ShipAllDoneTests(ShipBase):
     """`clu ship --all-done --direct` ships every DONE plan with an
     unmerged worktree branch, behind one --yes."""

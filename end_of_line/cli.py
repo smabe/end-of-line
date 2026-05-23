@@ -3915,12 +3915,7 @@ def cmd_ship(args) -> int:
     """
     if args.as_pr:
         if args.all_done:
-            return _die(
-                ExitCode.GENERIC,
-                "`clu ship --as-pr --all-done` is not yet implemented "
-                "(clu-ship.md phase 6). Use `--plan <slug>` for single-"
-                "plan as-pr ship.",
-            )
+            return _cmd_ship_as_pr_all_done(args)
         return _cmd_ship_as_pr_plan(args)
     # Default to direct mode when neither flag is set (phase 7 will
     # add the .orchestrator.json `ship_mode` config default).
@@ -4370,22 +4365,42 @@ def _cmd_ship_as_pr_plan(args) -> int:
     if err is not None:
         return _die(ExitCode.GENERIC, err)
 
-    # Push the branch so gh can open a PR against it.
+    ok, msg = _ship_apply_one_as_pr(
+        project_root, cfg, branch, args.plan, state_path,
+    )
+    if not ok:
+        return _die(ExitCode.GENERIC, msg)
+    print(msg)
+    return ExitCode.OK
+
+
+def _ship_apply_one_as_pr(
+    project_root: Path,
+    cfg: ProjectConfig,
+    branch: str,
+    plan_slug: str,
+    state_path: Path,
+) -> tuple[bool, str]:
+    """Apply the destructive ship steps for one plan in PR mode:
+    push branch, open PR (idempotent), stamp state.ship_pending.
+    Returns (success, message). Caller is responsible for: gh
+    preflight (once for the batch), canonical-dirty check (not
+    needed for PR mode), and validate (dry-merge).
+    """
     r = subprocess.run(
         ["git", "-C", str(project_root), "push", "--set-upstream",
          "origin", branch],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
-        return _die(
-            ExitCode.GENERIC,
-            f"git push origin {branch!r} failed: {r.stderr.strip()}",
+        return False, (
+            f"git push origin {branch!r} failed: {r.stderr.strip()}"
         )
 
-    plan_md = project_root / cfg.plan_dir / f"{args.plan}.md"
-    ok, url_or_err = _gh_create_pr(project_root, branch, plan_md, args.plan)
+    plan_md = project_root / cfg.plan_dir / f"{plan_slug}.md"
+    ok, url_or_err = _gh_create_pr(project_root, branch, plan_md, plan_slug)
     if not ok:
-        return _die(ExitCode.GENERIC, url_or_err)
+        return False, url_or_err
 
     with st.mutate(state_path) as d:
         d["ship_pending"] = {
@@ -4394,7 +4409,94 @@ def _cmd_ship_as_pr_plan(args) -> int:
             "ts": st.utcnow(),
         }
 
-    print(f"opened PR for {args.plan!r}: {url_or_err}")
+    return True, f"opened PR for {plan_slug!r}: {url_or_err}"
+
+
+def _cmd_ship_as_pr_all_done(args) -> int:
+    """Batch PR-mode ship: every DONE plan with an unmerged worktree
+    branch gets a PR behind one --yes. Per-plan failures are logged
+    and the batch continues; overall exit code reflects whether any
+    plan failed. No canonical-dirty check (PR-mode doesn't touch
+    canonical); no post-action tick (no origin/main advance yet —
+    that happens when GitHub merges the PR).
+    """
+    project_root = args.project.resolve()
+    if not project_root.is_dir():
+        return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+    cfg = load_project_config(project_root)
+
+    plans = cross_plan_rules.load_plans_for_project(project_root, cfg)
+    eligible: list[tuple[str, str, Path]] = []  # (slug, branch, state_path)
+    for p in plans:
+        if p.state.get("status") != st.STATUS_DONE:
+            continue
+        wt = st.get_worktree(p.state)
+        if wt is None:
+            continue
+        branch = wt["branch"]
+        if st.is_branch_merged_into(project_root, branch, "origin/main"):
+            continue
+        eligible.append((p.slug, branch, p.state_path))
+
+    if not eligible:
+        print("nothing to ship: no DONE plans with unmerged worktree branches.")
+        return ExitCode.OK
+
+    print(f"validating {len(eligible)} plan(s):")
+    validate_failures: set[str] = set()
+    for slug, branch, _ in eligible:
+        result = dry_merge.attempt_merge(
+            project_root, "main", [branch], cfg.test_command,
+        )
+        if result.outcome == "clean":
+            print(f"  {slug} ({branch}): clean")
+        else:
+            detail = f"outcome={result.outcome}"
+            if result.conflict_files:
+                detail += f", conflicts={','.join(result.conflict_files)}"
+            print(f"  {slug} ({branch}): {detail}")
+            validate_failures.add(slug)
+
+    if args.check:
+        return (
+            ExitCode.GENERIC if validate_failures else ExitCode.OK
+        )
+
+    if not args.yes:
+        print("")
+        print(f"ready to open PRs for {len(eligible)} plan(s):")
+        for slug, branch, _ in eligible:
+            marker = " (VALIDATE FAILED — will skip)" if slug in validate_failures else ""
+            print(f"  {slug} → PR (head={branch}, base=main){marker}")
+        print("")
+        print("re-run with --yes to apply.")
+        return ExitCode.OK
+
+    # gh preflight ONCE for the batch.
+    err = _gh_preflight()
+    if err is not None:
+        return _die(ExitCode.GENERIC, err)
+
+    apply_failures: list[tuple[str, str]] = []
+    successes: list[str] = []
+    for slug, branch, state_path in eligible:
+        if slug in validate_failures:
+            print(f"skipped {slug}: validate failed", file=sys.stderr)
+            continue
+        ok, msg = _ship_apply_one_as_pr(
+            project_root, cfg, branch, slug, state_path,
+        )
+        if ok:
+            successes.append(slug)
+            print(msg)
+        else:
+            apply_failures.append((slug, msg))
+            print(f"failed {slug}: {msg}", file=sys.stderr)
+
+    print("")
+    print(f"opened {len(successes)}/{len(eligible)} PR(s).")
+    if apply_failures or validate_failures:
+        return ExitCode.GENERIC
     return ExitCode.OK
 
 
