@@ -55,6 +55,17 @@ _VERBOSE_ONLY: frozenset[str] = frozenset({
     st.EVENT_WORKTREE_RETAINED_AHEAD,
 })
 
+# Operator-dashboard (#70) filter — the cross-plan-worth-interrupting set.
+# Under `clu watch --operator`, only these events render; the _VERBOSE_ONLY
+# gate is bypassed (stalled_claim_notified is operator-relevant even when
+# the normal verbose check would hide it).
+_OPERATOR_VISIBLE: frozenset[str] = frozenset(filter(None, {
+    getattr(st, "EVENT_TOOL_STUCK", None),
+    st.EVENT_PHASE_BLOCKED,
+    getattr(st, "EVENT_ATTESTATION_REFUSED", None),
+    st.EVENT_STALLED_CLAIM_NOTIFIED,
+}))
+
 
 def _trunc(s: str | None, n: int = 100) -> str:
     if not s:
@@ -377,6 +388,7 @@ def stream_loop(
     json_mode: bool = False,
     task_list_mode: bool = False,
     verbose: bool = False,
+    operator: bool = False,
     sink: TextIO | None = None,
     poll_interval: float = 1.0,
     max_ticks: int | None = None,
@@ -434,7 +446,8 @@ def stream_loop(
                     if task_list_mode:
                         line_or_none = project_event_task(evt, slug, verbose=verbose)
                     else:
-                        line_or_none = project_event(evt, slug, verbose=verbose)
+                        line_or_none = project_event(evt, slug, verbose=verbose,
+                                                     operator=operator)
                     if line_or_none is None:
                         continue
                     if json_mode:
@@ -456,9 +469,15 @@ def project_event(
     plan_slug: str,
     *,
     verbose: bool = False,
+    operator: bool = False,
 ) -> str | None:
     t = event.get("type")
-    if t in _VERBOSE_ONLY and not verbose:
+    if operator:
+        if t not in _OPERATOR_VISIBLE:
+            return None
+        # operator mode bypasses the _VERBOSE_ONLY gate so wedge signals
+        # like stalled_claim_notified render at default volume.
+    elif t in _VERBOSE_ONLY and not verbose:
         return None
     fmt = _FORMATTERS.get(t)
     return fmt(plan_slug, event) if fmt else None

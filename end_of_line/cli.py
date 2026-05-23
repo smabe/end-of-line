@@ -953,6 +953,15 @@ def main(argv: list[str] | None = None) -> int:
              "See docs/operations.md § 'Task-list mode'.",
     )
     p_watch.add_argument(
+        "--operator", action="store_true", default=False,
+        dest="watch_operator",
+        help="Narrow output to cross-plan wedge events the operator "
+             "should act on immediately: tool_stuck, phase_blocked, "
+             "attestation_refused, stalled_claim_notified. Bypasses the "
+             "verbose gate. Composes with --all, --json. Used by the "
+             "operator-dashboard Monitor (#70).",
+    )
+    p_watch.add_argument(
         "--interval", type=float, default=None,
         help="Poll interval seconds (default: 1.0 single-project, 5.0 with --all)",
     )
@@ -3327,6 +3336,7 @@ def cmd_watch(args) -> int:
             json_mode=args.json,
             task_list_mode=task_list_mode,
             verbose=args.verbose,
+            operator=getattr(args, "watch_operator", False),
             poll_interval=interval,
         )
     except FileNotFoundError as exc:
