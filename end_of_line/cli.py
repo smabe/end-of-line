@@ -2013,12 +2013,14 @@ def cmd_install_hook(args) -> int:
     else:
         print(f"UserPromptSubmit hook already installed at {hook_path}")
 
-    install_session_start = getattr(args, "install_session_start", False)
     session_start_path: str | None = None
-    if install_session_start:
+    if args.install_session_start:
         session_start_path = _resolve_hook_script_path("clu_session_start.py")
         ss_command = _hook_command(session_start_path)
-        ss = hooks.setdefault("SessionStart", [])
+        ss = hooks.get("SessionStart")
+        if not isinstance(ss, list):
+            ss = []
+            hooks["SessionStart"] = ss
         already_ss = any(_entry_mentions_hook_path(e, session_start_path) for e in ss)
         if not already_ss:
             ss.append(_build_hook_entry(ss_command, nested=nested))
@@ -2063,21 +2065,28 @@ def cmd_uninstall_hook(args) -> int:
     hooks_block = data.setdefault("hooks", {})
 
     changed = False
-    ups = hooks_block.get("UserPromptSubmit", [])
+    ups = hooks_block.get("UserPromptSubmit") or []
+    if not isinstance(ups, list):
+        ups = []
     filtered_ups = [e for e in ups if not _entry_mentions_hook_path(e, hook_path)]
-    if len(filtered_ups) == len(ups):
-        print("clu inbox hook not present in settings.json")
-    else:
+    ups_removed = len(filtered_ups) != len(ups)
+    if ups_removed:
         hooks_block["UserPromptSubmit"] = filtered_ups
         changed = True
         print(f"Uninstalled UserPromptSubmit hook ({hook_path})")
 
-    ss = hooks_block.get("SessionStart", [])
+    ss = hooks_block.get("SessionStart") or []
+    if not isinstance(ss, list):
+        ss = []
     filtered_ss = [e for e in ss if not _entry_mentions_hook_path(e, session_start_path)]
-    if len(filtered_ss) != len(ss):
+    ss_removed = len(filtered_ss) != len(ss)
+    if ss_removed:
         hooks_block["SessionStart"] = filtered_ss
         changed = True
         print(f"Uninstalled SessionStart hook ({session_start_path})")
+
+    if not (ups_removed or ss_removed):
+        print("No clu hooks present in settings.json")
 
     if changed:
         tmp = settings_path.with_suffix(".tmp")
