@@ -571,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the CLAUDE.md note prompt (non-interactive runs).",
     )
 
-    sub.add_parser(
+    p_install_hook = sub.add_parser(
         "install-hook",
         help="Register the clu UserPromptSubmit hook in "
              "~/.claude/settings.json so Claude Code sessions see "
@@ -579,11 +579,20 @@ def main(argv: list[str] | None = None) -> int:
              "Idempotent; preserves the operator's other hooks and "
              "their nested/flat array style.",
     )
+    p_install_hook.add_argument(
+        "--session-start", action="store_true", default=False,
+        dest="install_session_start",
+        help="Also install the SessionStart hook for cold-start "
+             "Monitor arming on the operator dashboard (#70). Composes "
+             "with the default UserPromptSubmit install — pass once to "
+             "get both surfaces.",
+    )
     sub.add_parser(
         "uninstall-hook",
-        help="Remove the clu UserPromptSubmit hook from "
-             "~/.claude/settings.json (leaving the operator's other "
-             "hooks intact) and clear the monitor marker.",
+        help="Remove the clu UserPromptSubmit hook (and SessionStart "
+             "hook, if installed) from ~/.claude/settings.json, "
+             "leaving the operator's other hooks intact. Clears the "
+             "monitor marker.",
     )
 
     p_blockers = sub.add_parser(
@@ -1891,16 +1900,19 @@ def _hook_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
-def _resolve_hook_script_path() -> str:
-    """Absolute on-disk path to the bundled UserPromptSubmit hook script.
+def _resolve_hook_script_path(script_name: str = "clu_inbox_surface.py") -> str:
+    """Absolute on-disk path to a bundled hook script.
 
     Resolved at install time and baked into `settings.json` so the hook
     keeps working even if `sys.executable` / the cwd change between
     install and trigger. `importlib.resources.files(...)` returns a
     Traversable; on a real install it's a concrete `Path`.
+
+    Default script is the UserPromptSubmit inbox surface. Pass
+    `"clu_session_start.py"` for the #70 SessionStart hook.
     """
     from importlib.resources import files
-    return str(files("end_of_line").joinpath("hooks/clu_inbox_surface.py"))
+    return str(files("end_of_line").joinpath(f"hooks/{script_name}"))
 
 
 def _hook_command(hook_path: str) -> str:
@@ -1964,10 +1976,12 @@ def _build_hook_entry(command: str, *, nested: bool) -> dict:
 def cmd_install_hook(args) -> int:
     """Register the clu inbox surface hook in `~/.claude/settings.json`.
 
-    Adds (or refreshes) a single UserPromptSubmit entry pointing at the
-    bundled hook script. Idempotent on absolute hook_path. Refuses on
-    malformed settings.json (don't try to repair). Writes the marker
-    on success.
+    Adds (or refreshes) a UserPromptSubmit entry pointing at the bundled
+    inbox-surface script. With `--session-start`, also adds a
+    SessionStart entry pointing at the bundled session-start script (#70
+    cold-start dashboard arming). Both entries are idempotent on
+    absolute hook_path. Refuses on malformed settings.json (don't try
+    to repair). Writes the marker on success.
     """
     hook_path = _resolve_hook_script_path()
     command = _hook_command(hook_path)
@@ -1990,18 +2004,38 @@ def cmd_install_hook(args) -> int:
     ups = hooks.setdefault("UserPromptSubmit", [])
     nested = _detect_nested_style(hooks)
 
-    already = any(_entry_mentions_hook_path(e, hook_path) for e in ups)
-    if not already:
+    changed = False
+    already_ups = any(_entry_mentions_hook_path(e, hook_path) for e in ups)
+    if not already_ups:
         ups.append(_build_hook_entry(command, nested=nested))
+        changed = True
+        print(f"Installed UserPromptSubmit hook → {hook_path}")
+    else:
+        print(f"UserPromptSubmit hook already installed at {hook_path}")
+
+    install_session_start = getattr(args, "install_session_start", False)
+    session_start_path: str | None = None
+    if install_session_start:
+        session_start_path = _resolve_hook_script_path("clu_session_start.py")
+        ss_command = _hook_command(session_start_path)
+        ss = hooks.setdefault("SessionStart", [])
+        already_ss = any(_entry_mentions_hook_path(e, session_start_path) for e in ss)
+        if not already_ss:
+            ss.append(_build_hook_entry(ss_command, nested=nested))
+            changed = True
+            print(f"Installed SessionStart hook → {session_start_path}")
+        else:
+            print(f"SessionStart hook already installed at {session_start_path}")
+
+    if changed:
         tmp = settings_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, settings_path)
-        print(f"Installed UserPromptSubmit hook → {hook_path}")
-    else:
-        print(f"Hook already installed at {hook_path}")
     print(f"Settings: {settings_path}")
 
     monitor.record_hook_installed(hook_path, str(settings_path))
+    if session_start_path is not None:
+        monitor.record_session_start_installed(session_start_path)
     return ExitCode.OK
 
 
@@ -2025,18 +2059,30 @@ def cmd_uninstall_hook(args) -> int:
         )
 
     hook_path = _resolve_hook_script_path()
-    ups = data.get("hooks", {}).get("UserPromptSubmit", [])
-    filtered = [
-        e for e in ups if not _entry_mentions_hook_path(e, hook_path)
-    ]
-    if len(filtered) == len(ups):
+    session_start_path = _resolve_hook_script_path("clu_session_start.py")
+    hooks_block = data.setdefault("hooks", {})
+
+    changed = False
+    ups = hooks_block.get("UserPromptSubmit", [])
+    filtered_ups = [e for e in ups if not _entry_mentions_hook_path(e, hook_path)]
+    if len(filtered_ups) == len(ups):
         print("clu inbox hook not present in settings.json")
     else:
-        data.setdefault("hooks", {})["UserPromptSubmit"] = filtered
+        hooks_block["UserPromptSubmit"] = filtered_ups
+        changed = True
+        print(f"Uninstalled UserPromptSubmit hook ({hook_path})")
+
+    ss = hooks_block.get("SessionStart", [])
+    filtered_ss = [e for e in ss if not _entry_mentions_hook_path(e, session_start_path)]
+    if len(filtered_ss) != len(ss):
+        hooks_block["SessionStart"] = filtered_ss
+        changed = True
+        print(f"Uninstalled SessionStart hook ({session_start_path})")
+
+    if changed:
         tmp = settings_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, settings_path)
-        print(f"Uninstalled UserPromptSubmit hook ({hook_path})")
     monitor.clear_marker()
     return ExitCode.OK
 

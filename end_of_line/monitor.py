@@ -84,6 +84,28 @@ def record_hook_installed(
         data["settings_json_path"] = settings_json_path
 
 
+def record_session_start_installed(
+    session_start_hook_path: str, *, path: Path | None = None,
+) -> None:
+    """Stamp the SessionStart hook path onto the existing v2 marker (#70).
+
+    Additive — does not bump schema_version. Operators running
+    `clu install-hook --session-start` get both this field and the
+    existing `hook_path` field populated. The marker remains v2-schema
+    so older code reading the marker doesn't refuse.
+    """
+    path = path or marker_path()
+    if path.exists() and load_marker(path) is None:
+        path.unlink()
+    with st.locked_json(
+        path, expected_version=SCHEMA_VERSION, empty=_empty,
+    ) as data:
+        data["session_start_hook_path"] = session_start_hook_path
+        # Stamp install-time too, so the operator can audit when the
+        # SessionStart hook was added separately from UserPromptSubmit.
+        data["session_start_installed_at"] = st.utcnow()
+
+
 def clear_marker(path: Path | None = None) -> None:
     path = path or marker_path()
     try:
