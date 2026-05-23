@@ -3753,9 +3753,14 @@ def _write_attestation_refused_inbox(
 ) -> None:
     """Mirror EVENT_ATTESTATION_REFUSED to the inbox so the #70
     operator-dashboard hook can surface it. Lazy-imports inbox to keep
-    cli.py's import surface tight."""
+    cli.py's import surface tight. `stamped_at` must be the under-lock
+    fresh value (matches the state event) — caller is responsible for
+    capturing it inside the mutate block.
+    """
     from . import inbox
-    plan_slug = data_snap.get("plan_slug") or ""
+    plan_slug = data_snap.get("plan_slug") or "<unknown>"
+    stamped_short = stamped_at[:7] if stamped_at else "never"
+    head_short = head_sha[:7] if head_sha else "?"
     try:
         inbox.write_event(
             type="attestation_refused",
@@ -3763,7 +3768,7 @@ def _write_attestation_refused_inbox(
             project_root=str(cfg.project_root.resolve()),
             summary=(
                 f"{plan_slug}/{phase} hit the {gate} gate "
-                f"(stamped {stamped_at or 'never'}, HEAD {head_sha[:7] or '?'})"
+                f"(stamped {stamped_short}, HEAD {head_short})"
             ),
             details={
                 "phase_id": phase,
@@ -3772,8 +3777,10 @@ def _write_attestation_refused_inbox(
                 "head_sha": head_sha,
             },
         )
-    except OSError:
-        # Never let a broken inbox dir block the refusal exit path.
+    except (OSError, ValueError, TypeError):
+        # Never let a broken inbox dir / serialization failure block the
+        # refusal exit path. The state event is the source of truth; the
+        # inbox is a parallel surface.
         pass
 
 
@@ -3802,7 +3809,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         if verify_gate_active:
             stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
             if stamped_at is None or stamped_at != head_sha:
-                emitted = False
+                emitted_stamped: str | None = None  # set when the under-lock emit fires
                 with st.mutate(state_path) as data:
                     # Re-read under lock so the event payload reflects the
                     # state at emit time, not the pre-lock snapshot. If a
@@ -3815,12 +3822,15 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                             phase=args.phase, gate=st.ATTESTATION_VERIFY,
                             stamped_at=fresh_stamped, head_sha=head_sha,
                         )
-                        emitted = True
-                if emitted:
+                        emitted_stamped = fresh_stamped  # may be None (never stamped)
+                        _emitted = True
+                    else:
+                        _emitted = False
+                if _emitted:
                     _write_attestation_refused_inbox(
                         cfg, data_snap, args.phase,
                         gate=st.ATTESTATION_VERIFY,
-                        stamped_at=stamped_at, head_sha=head_sha,
+                        stamped_at=emitted_stamped, head_sha=head_sha,
                     )
                 return _die(
                     ExitCode.STATUS_TRANSITION,
@@ -3837,7 +3847,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 if files_changed > t_files or lines_changed > t_lines:
                     stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_SIMPLIFY)
                     if stamped_at is None or stamped_at != head_sha:
-                        emitted = False
+                        emitted_stamped_s: str | None = None
                         with st.mutate(state_path) as data:
                             fresh_stamped = st.attestation_commit_sha(data, st.ATTESTATION_SIMPLIFY)
                             if fresh_stamped is None or fresh_stamped != head_sha:
@@ -3846,12 +3856,15 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                                     phase=args.phase, gate=st.ATTESTATION_SIMPLIFY,
                                     stamped_at=fresh_stamped, head_sha=head_sha,
                                 )
-                                emitted = True
-                        if emitted:
+                                emitted_stamped_s = fresh_stamped
+                                _emitted_s = True
+                            else:
+                                _emitted_s = False
+                        if _emitted_s:
                             _write_attestation_refused_inbox(
                                 cfg, data_snap, args.phase,
                                 gate=st.ATTESTATION_SIMPLIFY,
-                                stamped_at=stamped_at, head_sha=head_sha,
+                                stamped_at=emitted_stamped_s, head_sha=head_sha,
                             )
                         return _die(
                             ExitCode.STATUS_TRANSITION,

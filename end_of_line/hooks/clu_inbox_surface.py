@@ -107,16 +107,27 @@ STALLED_CLAIM_INSTRUCTION = (
 )
 
 
-def _has_tool_stuck(events: Iterable[dict]) -> bool:
-    return any(e.get("type") == "tool_stuck" for e in events)
+# Registry of (event_type, instruction) pairs for #70 wedge-class
+# composition. main() iterates this once and appends each instruction
+# block at most once per surface pass. Adding a new wedge class is
+# one entry, not a four-step ritual (constant + predicate + main()
+# wire + parts splice). Order here is the render order in
+# additionalContext — most actionable first.
+WEDGE_INSTRUCTION_BLOCKS: list[tuple[str, str]] = [
+    ("tool_stuck", TOOL_STUCK_INSTRUCTION),
+    ("attestation_refused", ATTESTATION_REFUSED_INSTRUCTION),
+    ("stalled_claim", STALLED_CLAIM_INSTRUCTION),
+]
 
 
-def _has_attestation_refused(events: Iterable[dict]) -> bool:
-    return any(e.get("type") == "attestation_refused" for e in events)
+def _has_event_type(events: Iterable[dict], type_: str) -> bool:
+    return any(e.get("type") == type_ for e in events)
 
 
-def _has_stalled_claim(events: Iterable[dict]) -> bool:
-    return any(e.get("type") == "stalled_claim" for e in events)
+def _wedge_sections(events: list[dict]) -> list[str]:
+    """Return the instruction blocks whose event class is present."""
+    return [block for type_, block in WEDGE_INSTRUCTION_BLOCKS
+            if _has_event_type(events, type_)]
 
 
 def _log_path() -> Path:
@@ -218,23 +229,12 @@ def main() -> int:
         blockers_section = _build_blockers_section(blockers)
 
         # Append the investigate-then-recommend contracts once per class
-        # for any wedge event present. The inbox cap in _build_context
-        # never drops these wedge events because they're rare.
-        tool_stuck_section = (
-            TOOL_STUCK_INSTRUCTION if _has_tool_stuck(events) else ""
-        )
-        attestation_section = (
-            ATTESTATION_REFUSED_INSTRUCTION
-            if _has_attestation_refused(events) else ""
-        )
-        stalled_claim_section = (
-            STALLED_CLAIM_INSTRUCTION if _has_stalled_claim(events) else ""
-        )
+        # for any wedge event present, in the registry order. The inbox
+        # cap in _build_context never drops these wedge events because
+        # they're rare.
+        wedge_sections = _wedge_sections(events)
 
-        parts = [s for s in (
-            events_context, blockers_section,
-            tool_stuck_section, attestation_section, stalled_claim_section,
-        ) if s]
+        parts = [s for s in (events_context, blockers_section, *wedge_sections) if s]
         if not parts:
             return 0
         context = "\n\n".join(parts)
