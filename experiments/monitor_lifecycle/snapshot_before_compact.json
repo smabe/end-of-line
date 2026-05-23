@@ -1,0 +1,18 @@
+[
+  {
+    "label": "D",
+    "pid": 31730,
+    "alive": true,
+    "total_ticks": 5,
+    "last_line": "tick 5 2026-05-23T15:43:57+00:00 label=D pid=31730",
+    "age_seconds": 2.4
+  },
+  {
+    "label": "E",
+    "pid": 31727,
+    "alive": true,
+    "total_ticks": 5,
+    "last_line": "tick 5 2026-05-23T15:43:57+00:00 label=E pid=31727",
+    "age_seconds": 2.4
+  }
+]

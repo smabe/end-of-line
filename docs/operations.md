@@ -1053,6 +1053,11 @@ Each stdout line becomes a notification; Claude acts on BLOCKED events
 and dispatch failures (surfaces the error). The `/clu-plan` skill
 arms this automatically.
 
+Monitor's lifecycle across `/clear`, `/compact`, and concurrency is
+characterized empirically in [`docs/research/monitor-lifecycle.md`](research/monitor-lifecycle.md) —
+armed Monitors survive both session-reset commands until their own
+`timeout_ms` boundary.
+
 Inbox (`/clu-monitor`) and `clu watch` are complementary: both run in
 the same session without conflict. The inbox surfaces events from
 between sessions (across `/clear` or restart boundaries); `clu watch`
