@@ -7,17 +7,6 @@ of Line). Public pitch and install live in [`README.md`](README.md);
 this file is the project-private brief for agents starting a fresh
 session.
 
-## Mandate references
-
-The cross-system verification + operator-approval checkpoint mandates
-that govern scoping and novel artifacts live in user-level CLAUDE.md
-(`~/.claude/CLAUDE.md` ↔ `~/projects/abe-skills/CLAUDE.md`) so they
-apply across all projects. clu's #19 (`/clu-monitor` calling
-`/schedule` without verifying it's a remote-only mechanism) was the
-canonical failure that motivated them — ~6h of worker time on a
-broken design, fixed by the `clu-inbox` rebuild in #20. Receipts in
-`docs/history/plans/clu-monitor/` and `docs/history/plans/clu-inbox/`.
-
 ## Stack + run/test
 
 Python 3.11+, stdlib only, zero runtime deps. `unittest`, not pytest.
@@ -73,70 +62,10 @@ For the *why* behind each, see
 | [`docs/_outline.md`](docs/_outline.md) | Structural contract for the docs library |
 | [`docs/history/`](docs/history/) | Frozen pre-Day-1 brainstorms |
 
-## Status (as of 2026-05-19)
-
-The substrate is mature: per-plan **worktrees** (#24), multi-channel
-**notifications** (iMessage / Discord / clu-watch-only per #11), the
-**inbox-hook** session surface (#20) with stuck-blocker + stalled-claim
-re-pings, per-project **plan queue** + auto-repair (`clu-queue`), and
-the cron-driven supervisor with 8-priority tick chain. CLI surface
-covers the operator lease lifecycle (`extend-lease`, `release-claim
-[--reset-attempts]`, `force-complete`), worker-callback queue enqueue
-(#17), worktree GC (`clu worktree gc/attach/reattach`), and
-introspection (`clu watch [--task-list]`, `clu doctor`,
-`clu blockers`). Plan files in `plans/`; shipped plans archived to
-`plans/archive/<slug>/<filename>.md` (master + sub-plans grouped per
-slug), state at
-`<plan_dir>/.orchestrator/<slug>.state.json`. Architecture canonical
-in [`docs/architecture.md`](docs/architecture.md); module API map in
-[`docs/reference.md`](docs/reference.md).
-
-**Recent ships (2026-05-15 → 2026-05-19), newest first** — for
-per-ship detail and commit ranges, follow the linked memory entries:
-
-- **#56 — gate-worktree-head** (`ca5e4c0`, merged `1c8011c`).
-  Worktree-aware HEAD resolution in `cmd_verify` / `cmd_attest` /
-  `cmd_complete` / `_compute_phase_diff`. Fixes the canonical-vs-
-  canonical no-op gate from #55: `state.claim_git_root(data, cfg)`
-  helper resolves to the worktree path when active, so stamps record
-  the worker's actual HEAD instead of canonical-main. Tests 1037 →
-  1040.
-- **#55 — attestation-gate** (`aee9ffb → 8b54321`, merged `a4c6352`,
-  supersedes #10). Programmatic enforcement of `/code-review` + verify
-  mandates: `current_claim.attestations` slot, `clu verify` runs
-  the project's test command + stamps, `clu attest --simplify` is
-  worker self-attestation, `cmd_complete` refuses with
-  `STATUS_TRANSITION` when stamps are missing or stale (diff
-  threshold defaults `{files:1, lines:30}`). Tests 986 → 1037.
-- **#48 + #49 — force-complete + osascript-stderr** (`7f07392`,
-  `ca26a64`). Operator-rescue followups from notify-multi-channel.
-  `clu force-complete --plan P --phase X --commit SHA` for
-  stall-with-work-on-disk; `_osascript_send` now captures stderr to
-  `~/.config/clu/imessage.log`. Tests 816 → 835.
-- **#11 — notify-multi-channel** (`f903c71 → 15935cc`, merged
-  `bb4b6b8`). Notifier / InboundPoller protocols, Discord backend
-  (stdlib REST + reply correlation), `channels: [...]` config schema
-  with auto-migration from flat `notify.imessage`, runtime
-  `--no-notify` flag, `clu notify-test`. clu is now clone-and-go off
-  macOS. Tests 816 → 880+.
-- **#39 — clu-watch --task-list** (`c6caa7b → 6b3b39a`, merged
-  `cb6118e`). TASK_CREATE / TASK_UPDATE protocol over the watch
-  stream so AI agents can drive Claude's TaskCreate UI; /clu-plan
-  auto-arms `--task-list` Monitor. Tests 698 → 737.
-- **#37 + #38 — clu-watch** (`753a4b8 → 8b17c8f`, merged `929216f`).
-  New `end_of_line/watch.py` streams state events for AI agents;
-  /clu-plan auto-arms Monitor. Tests 614 → 698.
-- **#17 — queue-worker-callback** (`7795c5d → a4a54dc`, merged
-  `39a9af4`). v2 worker-callback queue enqueue (`clu queue add
-  --token T` from inside a phase). Tests 580 → 614.
-- **Day 5–6 small ships** — `/clu-plan` skill + cwd fix (#35 #36),
-  small-cli-fixes (#23 #31 #32), lease-claim-operator-control (#26
-  #27 #29 #30), test-isolation-base (#22), worktree-blocker-followups
-  (#25 #28 #33 #34). See `MEMORY.md` for each.
-
-**Open candidates** — `gh issue list --state open` for the live
-backlog; both prior bullets (#54 coolant lifecycle, multi-plan
-inbound routing #3) shipped and are no longer candidates.
+For ship history + per-feature memory, see
+`~/.claude/projects/-Users-smabe-projects-end-of-line/memory/MEMORY.md`
+(loaded automatically each session). Live backlog:
+`gh issue list --state open`.
 
 ## Locked config decisions
 
@@ -153,12 +82,3 @@ Don't re-litigate without a real reason:
 
 [`/Users/smabe/projects/HealthData`](../HealthData) — the iOS app this
 orchestrator was built to drive.
-
-## graphify
-
-This project has a graphify knowledge graph at graphify-out/.
-
-Rules:
-- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
-- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
