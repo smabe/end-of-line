@@ -134,12 +134,9 @@ per-ship detail and commit ranges, follow the linked memory entries:
   #27 #29 #30), test-isolation-base (#22), worktree-blocker-followups
   (#25 #28 #33 #34). See `MEMORY.md` for each.
 
-**Open candidates** — pick from the backlog or propose new work:
-
-- **#54 — Emit coolant lifecycle events on worker dispatch and reap.**
-  Observability surface for the supervisor/worker handshake.
-- **Multi-plan inbound routing.** Day 2.4 deferred last-pinged routing
-  for ambiguous bare-digit replies. Not yet filed.
+**Open candidates** — `gh issue list --state open` for the live
+backlog; both prior bullets (#54 coolant lifecycle, multi-plan
+inbound routing #3) shipped and are no longer candidates.
 
 ## Locked config decisions
 
