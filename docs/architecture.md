@@ -355,14 +355,16 @@ is **written to disk** (`plans/merge-resolve-<batch>-<YYYYMMDDhhmm>.md` +
 `-fix.md`) but **not queued** — the operator runs `clu queue add
 merge-resolve-...` manually after reviewing the conflict report.
 
-### `clu integrate` — operator override
+### `clu validate` — operator override
 
-`clu integrate --project P --batch B` lets the operator re-run the engine
-on demand (e.g. after fixing conflicts and pushing new commits). It wraps
-`dry_merge.attempt_merge` directly and does **not** fire the rule — no
-state mutation, no follow-up emission. Useful for replay-after-fix, stuck
-batches, or CI-side verification. `--branches a,b,c` bypasses batch
-resolution entirely for ad-hoc cross-branch checks.
+`clu validate --project P --batch B` lets the operator re-run the
+dry-merge engine on demand (e.g. after fixing conflicts and pushing
+new commits). Wraps `dry_merge.attempt_merge` directly; does **not**
+fire the rule, no state mutation, no follow-up emission. Useful for
+replay-after-fix, stuck batches, or CI-side verification.
+`--branches a,b,c` bypasses batch resolution entirely for ad-hoc
+cross-branch checks. `clu integrate` is a stderr-warning deprecation
+alias that delegates here (clu-ship.md).
 
 ```
 ┌── cron tick-all ──────────────────────────────┐
@@ -373,11 +375,52 @@ resolution entirely for ad-hoc cross-branch checks.
 │      queue_advancement_rule                   │
 │      worktree_conflict_rule                   │
 │      dry_merge_gate_rule ← fires when ≥2 DONE │
+│      ready_to_ship_rule ← DONE + unmerged    │
+│      auto_archive_rule ← merged → cleanup    │
 └───────────────────────────────────────────────┘
 
 operator (on demand):
-  clu integrate --project P [--batch B | --branches a,b]
+  clu validate --project P [--batch B | --branches a,b]
+  clu ship     --project P --plan X [--direct | --as-pr] [--check] [--yes]
+  clu ship     --project P --all-done [--direct | --as-pr] [--yes]
 ```
+
+### `clu ship` — post-worker integration
+
+The single operator action after `STATUS_DONE`. Two modes, picked
+from `.orchestrator.json` `dispatch.ship_mode` (default `direct`):
+
+- **direct**: validate → merge worker branch into main (FF-first;
+  fall back to `--no-ff --no-edit` merge-commit) → push origin
+  main + branch → trigger an immediate tick so `auto_archive_rule`
+  fires without waiting for cron.
+- **as_pr**: validate → push branch with `--set-upstream` →
+  `gh pr create` → stamp `state.ship_pending`. The supervisor's
+  `ready_to_ship_rule` suppresses re-surfacing while the PR is
+  open; `auto_archive_rule` picks up cleanup when GitHub merges
+  the PR and the next fetch bumps local `origin/main`.
+
+**Why FF-first-then-merge-commit?** `gh pr merge`, `git-town ship`,
+and `jj` all commit to one merge strategy. clu deliberately
+diverges: prefer the cleaner history when FF works, fall back to
+merge-commit when main has diverged. The solo-agentic loop hits
+both shapes often enough that picking one upfront wastes either
+linear history or merged-status detection. The fallback is
+two extra git invocations per ship — cheap insurance against
+operator-surprise commits on main.
+
+**Why preview-then-confirm via `--yes`?** Destructive multi-step:
+local merge → push origin main → push branch → tick. Without
+explicit `--yes`, `clu ship` prints the action list and exits OK.
+This matches the operator-approval-checkpoint mandate at the cost
+of one extra invocation per ship.
+
+**ready_to_ship_rule** (slotted between `dry_merge_gate_rule` and
+`auto_archive_rule`) emits `KIND_READY_TO_SHIP` to the inbox when
+DONE plans exist with unmerged branches and no in-flight
+`ship_pending` stamp. Body includes the exact copy-paste `clu
+ship` command. Dedup via `state.ready_to_ship_announced.branch_sha`
+so the surface re-fires only when the worker pushes new commits.
 
 ## Auto-archive on merge
 

@@ -138,8 +138,12 @@ resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
 
 - `ProjectConfig` — dataclass: `project_root`, `plan_dir`, `dispatch`,
   `notify`, `test_command: str | None` (shell command run inside the
-  scratch worktree by `dry_merge.attempt_merge` and `clu integrate`; null
-  = textual-merge-only).
+  scratch worktree by `dry_merge.attempt_merge`, `cmd_validate`, and
+  `cmd_ship`'s validate gate; null = textual-merge-only).
+- `DispatchSpec.ship_mode: str` — project default for `clu ship` mode
+  resolution when neither `--direct` nor `--as-pr` is passed. Values:
+  `"direct"` (local merge + push, default) or `"as_pr"` (open a PR
+  via `gh pr create`). Validated by `_validate_ship_mode`.
 - `ProjectConfig.state_path(plan_slug)` — returns the canonical state
   path; raises `InvalidSlug` if resolution escapes the orchestrator dir.
 - `ProjectConfig.queue_path()` — `<project>/<plan_dir>/.orchestrator/
@@ -862,8 +866,8 @@ mutates, never writes.
 
 Pure-function engine for textual + suite integration testing of parallel
 branches. No state I/O; no cross-plan rule logic. Called by
-`cross_plan_rules.dry_merge_gate_rule` (automatic) and `cmd_integrate`
-(on demand).
+`cross_plan_rules.dry_merge_gate_rule` (automatic), `cmd_validate`
+(on demand), and both `cmd_ship` direct + as-pr paths (validate gate).
 
 **Key types and functions**
 
@@ -1119,15 +1123,40 @@ through this.
   unreadable.
 - `_QUEUE_LOAD_ERRORS` — `(JSONDecodeError, SchemaVersionMismatch,
   KeyError, OSError)` tuple every queue-loader wraps with `try/except`.
-- `cmd_integrate(args)` — operator-on-demand dry-merge. Accepts
-  `--project` + (`--batch B` or `--branches a,b`). Resolves branches via
-  `cross_plan_rules.load_plans_for_project` in batch mode (filters to
-  `status==done AND batch_id==B AND worktree != None`); drops branches
-  whose refs can't be `git rev-parse`-d. Calls `dry_merge.attempt_merge`
-  with `test_cmd = None if args.no_suite else cfg.test_command`. Prints
-  outcome + conflict files to stdout; exits `OK` on clean, `GENERIC` on
-  dirty. Does **not** mutate plan state and does **not** write follow-up
-  plans (the cross-plan rule owns those).
+- `cmd_validate(args)` — operator-on-demand dry-merge (mode-agnostic;
+  reused by `clu ship --check` in both direct and as-pr modes).
+  Accepts `--project` + (`--batch B` or `--branches a,b`). Resolves
+  branches via `cross_plan_rules.load_plans_for_project` in batch mode
+  (filters to `status==done AND batch_id==B AND worktree != None`);
+  drops branches whose refs can't be `git rev-parse`-d. Calls
+  `dry_merge.attempt_merge` with `test_cmd = None if args.no_suite
+  else cfg.test_command`. Prints outcome + conflict files to stdout;
+  exits `OK` on clean, `GENERIC` on dirty. Does **not** mutate plan
+  state and does **not** write follow-up plans (the cross-plan rule
+  owns those).
+- `cmd_integrate(args)` — stderr-warning **deprecation alias** for
+  `cmd_validate`. The verb 'integrate' was misleading (never updated
+  main; only dry-merged). Kept for one version of operator script
+  compatibility; future code should call `cmd_validate` directly.
+- `cmd_ship(args)` — one-action post-worker integration (clu-ship.md).
+  Resolves mode from `--direct` / `--as-pr` flag or, when neither is
+  set, from `cfg.dispatch.ship_mode` (default `"direct"`). Dispatches
+  to one of `_cmd_ship_direct_plan`, `_cmd_ship_direct_all_done`,
+  `_cmd_ship_as_pr_plan`, `_cmd_ship_as_pr_all_done`. All paths
+  share: status-DONE gate, worktree gate, already-merged refusal,
+  validate via `dry_merge.attempt_merge`, `--check` → validate-only
+  exit, `--yes`-less preview exit. Direct paths additionally check
+  canonical-dirty, merge with FF-first/merge-commit fallback, push
+  origin main + branch, and trigger `_spawn_post_action_tick` so
+  `auto_archive_rule` fires immediately. PR paths additionally run
+  `_gh_preflight` (gh installed + authenticated), `_gh_create_pr`
+  (idempotent via `gh pr view` fallback), and stamp
+  `state.ship_pending = {"mode": "as_pr", "pr_url", "ts"}`.
+- `_ship_apply_one_direct(project_root, branch, plan_slug)` and
+  `_ship_apply_one_as_pr(project_root, cfg, branch, plan_slug,
+  state_path)` — shared per-plan apply helpers consumed by both
+  single-plan (`--plan`) and batch (`--all-done`) ship paths.
+  Returns `(success: bool, message: str)`.
 - Worker-side commands: `cmd_complete`, `cmd_block`, `cmd_spawn`,
   `cmd_heartbeat`, `cmd_task_done`, `cmd_verify`, `cmd_attest`. All
   require `--token` matching the live claim (except `cmd_verify` in

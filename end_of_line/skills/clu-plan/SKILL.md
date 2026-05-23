@@ -441,8 +441,12 @@ overlap is foreseeable.
 **If you want sequential execution** (B starts off post-A-merge main):
 
 1. Author + commit + push plan files for both A and B.
-2. `clu init` only A; let it ship and auto-archive on merge to main.
-3. After A's archive commit lands, `clu init` B off post-merge main.
+2. `clu init` only A; when the worker reaches DONE, the operator runs
+   `clu ship --plan A --yes` (or just `clu ship --plan A` to preview
+   first). Mode comes from `.orchestrator.json`'s `dispatch.ship_mode`
+   (default `direct`; `as_pr` opens a GitHub PR instead).
+3. After `clu ship` lands A on origin/main, `auto_archive_rule` cleans
+   up A's worktree on the next tick; `clu init` B off post-merge main.
 4. (Optional) `clu queue add` B at step 3 if you want supervisor
    dispatch instead of running it immediately.
 
@@ -457,6 +461,44 @@ The 2026-05-19 `watch.py` incident (#62 salvage) is the canonical
 failure: two plans queued back-to-back, both modified
 `end_of_line/watch.py`, second worker had to be paused and its work
 salvaged into a one-phase recovery plan.
+
+### Post-worker integration: `clu ship`
+
+Once a plan reaches `STATUS_DONE`, the operator lands it on main
+with **`clu ship`** — one verb, one approval. Two modes; the
+project's `.orchestrator.json` `dispatch.ship_mode` picks the default:
+
+- **`ship_mode: "direct"`** (default): `clu ship --plan X --yes`
+  validates (dry-merge + suite), checks out main, merges (FF-first
+  then merge-commit fallback), pushes origin main + the branch,
+  and triggers an immediate tick so `auto_archive_rule` cleans up
+  the worktree without waiting for cron.
+- **`ship_mode: "as_pr"`**: `clu ship --plan X --yes` opens a
+  GitHub PR (via `gh pr create`) with the plan body as the PR body,
+  stamps `state.ship_pending`, and exits. The operator clicks
+  merge on GitHub; `auto_archive_rule` picks up cleanup when
+  origin/main advances. Use when CI != local suite (iOS,
+  heavyweight CI) or when the operator wants async approval.
+
+Batch form: `clu ship --all-done --yes` ships every DONE plan with
+an unmerged branch in one invocation. Per-plan failures are logged
+and don't halt the batch.
+
+Preview form: drop `--yes` to see the action list without applying.
+Validate-only form: `--check`.
+
+Flag overrides config: `clu ship --plan X --as-pr --yes` (or
+`--direct --yes`) forces a mode for one-off ships.
+
+When a plan hits DONE, the supervisor emits `KIND_READY_TO_SHIP`
+to the inbox with the exact copy-paste command — operators get a
+one-line surface in the channel they already watch (iMessage,
+Discord, clu-watch).
+
+**Do NOT use `clu integrate`** — it's now a stderr-warning
+deprecation alias for `clu validate` (which is the dry-validate
+path `clu ship --check` uses). The verb 'integrate' never updated
+main; the rename was the canonical clu-ship.md cleanup.
 
 ## Worked example
 

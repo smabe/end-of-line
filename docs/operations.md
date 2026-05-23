@@ -491,16 +491,18 @@ refusal/rollback rules apply.
 ### Archiving a plan
 
 `clu archive --project P --plan S` is the standard post-ship step. It does
-two things in one command:
+three things in one command:
 
 1. **Worktree cleanup** — removes the clu-managed worktree + branch if the
    branch is fully reachable from origin; retains with a warning when ahead.
 2. **Plan-file move** — `git mv plans/<slug>*.md plans/archive/<slug>/`
-   (staging the master + every sub-plan rename; commit separately).
-   Creates `plans/archive/<slug>/` if it doesn't exist. Skips silently
-   when no plan files remain (e.g.
-   manually moved in a prior run). Surfaces as `WORKTREE_SETUP_FAILED` if
-   the file exists but `git mv` fails (e.g. not tracked, conflicts).
+   (master + every sub-plan rename). Creates `plans/archive/<slug>/` if it
+   doesn't exist. Skips silently when no plan files remain (e.g. manually
+   moved in a prior run). Surfaces as `WORKTREE_SETUP_FAILED` if the file
+   exists but `git mv` fails (e.g. not tracked, conflicts).
+3. **Atomic commit** — commits the rename as `chore: archive <slug>` so
+   `git status` is clean on exit. Closes the pre-clu-ship.md footgun
+   where the operator had to remember to commit the staged renames.
 
 After archiving, run `clu unregister --all-archived` to prune the host
 registry entry.
@@ -605,13 +607,13 @@ After pushing fixes to one or more branches, replay the check without waiting
 for the next cron tick:
 
 ```
-clu integrate --project P --batch my-batch
+clu validate --project P --batch my-batch
 ```
 
 Or for ad-hoc cross-branch validation outside of clu plans:
 
 ```
-clu integrate --project P --branches clu/plan-a,clu/plan-b
+clu validate --project P --branches clu/plan-a,clu/plan-b
 ```
 
 Flags:
@@ -625,9 +627,38 @@ Flags:
 
 Exit 0 = clean; exit 1 = dirty. Stdout reports outcome + conflict files.
 
-`clu integrate` does **not** mutate plan state and does **not** write
+`clu validate` does **not** mutate plan state and does **not** write
 follow-up plans — it is read-only from clu's perspective. The cross-plan
 rule owns those side effects.
+
+> `clu integrate` is a stderr-warning deprecation alias for
+> `clu validate` (clu-ship.md). Existing scripts keep working; new
+> scripts should call `clu validate` or `clu ship --check` (which
+> internally delegates to `cmd_validate`).
+
+### `clu ship` — post-worker integration
+
+After a worker reaches `STATUS_DONE`, run `clu ship` to land the work
+on main and clean up:
+
+```
+clu ship --project P --plan X            # preview only
+clu ship --project P --plan X --check    # validate only, no destructive steps
+clu ship --project P --plan X --yes      # apply (mode from .orchestrator.json)
+clu ship --project P --all-done --yes    # ship every DONE plan with an unmerged branch
+```
+
+Mode comes from `dispatch.ship_mode` in `.orchestrator.json` (default
+`"direct"`); `--direct` and `--as-pr` flags override per invocation.
+
+| Mode | What happens on `--yes` |
+|---|---|
+| `direct` | validate → checkout main → FF-first merge (merge-commit fallback) → push origin main + branch → trigger immediate tick |
+| `as_pr`  | validate → push branch with `--set-upstream` → `gh pr create` → stamp `state.ship_pending`; cleanup runs when GitHub merges the PR and the next fetch bumps `origin/main` |
+
+The supervisor's `ready_to_ship_rule` emits `KIND_READY_TO_SHIP` into
+the inbox when DONE plans exist with unmerged branches; the body
+contains the exact copy-paste command.
 
 ### Configuring `test_command`
 
@@ -1449,7 +1480,10 @@ and the next `phase_started` for the same phase starts fresh from zero.
 | `clu worktree gc [--project P] [--confirm] [--delete-branch] [--include-archived]` | List or remove worktrees of done/halted plans (see "Per-plan worktrees") |
 | `clu worktree attach --project P --plan S [PATH] [--branch B] [--base-ref REF]` | Retrofit a worktree onto a plan init'd without one |
 | `clu worktree reattach --project P --plan S` | Re-create the worktree dir from the path/branch already in `state.worktree` (recovery for an externally-removed dir) |
-| `clu integrate --project P [--batch B \| --branches a,b,c] [--no-suite] [--base-ref REF]` | Dry-merge a batch's branches in a scratch worktree and run `test_command` if configured. Operator-on-demand; does NOT mutate plan state or file follow-ups. Exit 0 = clean; exit 1 = dirty |
+| `clu validate --project P [--batch B \| --branches a,b,c] [--no-suite] [--base-ref REF]` | Dry-merge a batch's branches in a scratch worktree and run `test_command` if configured. Mode-agnostic validate path; does NOT mutate plan state or file follow-ups. Exit 0 = clean; exit 1 = dirty |
+| `clu integrate ...` | **DEPRECATED** alias for `clu validate`. Prints a stderr warning; same args. New scripts should call `clu validate` directly. |
+| `clu ship --project P --plan X [--direct \| --as-pr] [--check] [--yes]` | Single-plan post-worker integration. Validate → merge to main (or open PR) → push → trigger archive. Mode defaults from `dispatch.ship_mode` in `.orchestrator.json`. Without `--yes`, prints preview and exits OK. |
+| `clu ship --project P --all-done [--direct \| --as-pr] [--check] [--yes]` | Batch post-worker integration — ships every DONE plan with an unmerged branch behind one `--yes`. Per-plan failures logged; batch continues. |
 
 The full CLI surface — including worker-side commands like `complete`,
 `block`, `spawn`, `heartbeat`, `task-done` — lives under the `cli`
