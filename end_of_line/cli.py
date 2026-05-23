@@ -3883,17 +3883,24 @@ def _perform_archive(
                 _git_mv_exc = exc
     if _git_mv_exc is not None:
         raise _git_mv_exc
+    if plan_moved:
+        # Commit the rename atomically. Both code paths (operator-driven
+        # cmd_archive and supervisor-driven auto_archive_rule) close the
+        # window where a staged-but-uncommitted rename forces the
+        # operator to chase down what `git status` reports. Auto-archive
+        # mode also needs the commit BEFORE unregister: if commit fails
+        # we'd otherwise leave a pruned registry alongside a dirty tree
+        # and the rule chain wouldn't retry.
+        msg = (
+            f"chore: auto-archive {plan} (post-merge cleanup)"
+            if unregister
+            else f"chore: archive {plan}"
+        )
+        subprocess.run(
+            ["git", "-C", str(cfg.project_root), "commit", "-m", msg],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
     if unregister:
-        # Auto-archive mode. Commit BEFORE unregister: if commit fails
-        # we'd otherwise leave a pruned registry alongside a dirty
-        # worktree, and the rule chain wouldn't retry. cmd_archive
-        # (unregister=False) leaves commits to the operator.
-        if plan_moved:
-            subprocess.run(
-                ["git", "-C", str(cfg.project_root), "commit",
-                 "-m", f"chore: auto-archive {plan} (post-merge cleanup)"],
-                check=True, capture_output=True, text=True, timeout=30,
-            )
         registry.unregister(cfg.project_root, plan)
     return before, after, plan_moved
 
@@ -3924,14 +3931,16 @@ def cmd_archive(args) -> int:
     try:
         before, after, plan_moved = _perform_archive(cfg, args.plan, unregister=False)
     except subprocess.CalledProcessError as exc:
-        plan_md = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
         return _die(
             ExitCode.GENERIC,
-            f"git mv failed for {plan_md.name}: {exc.stderr.strip() or str(exc)}",
+            f"git operation failed during archive of {args.plan!r}: "
+            f"{exc.stderr.strip() or str(exc)}",
         )
     except subprocess.TimeoutExpired:
-        plan_md = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
-        return _die(ExitCode.GENERIC, f"git mv timed out for {plan_md}")
+        return _die(
+            ExitCode.GENERIC,
+            f"git operation timed out during archive of {args.plan!r}",
+        )
     move_note = (
         f" Plan file moved to archive/{args.plan}/." if plan_moved else ""
     )

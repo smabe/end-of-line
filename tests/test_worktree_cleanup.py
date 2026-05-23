@@ -331,5 +331,77 @@ class CmdArchivePlanMoveTests(WorktreeCleanupBase):
         self.assertIn("archive", stdout.lower())
 
 
+class CmdArchiveAtomicCommitTests(WorktreeCleanupBase):
+    """clu archive commits the plan-file move atomically — no
+    leftover staged-uncommitted state for the operator to chase."""
+
+    def _staged_or_modified(self) -> str:
+        # Filter out untracked (??) lines — .orchestrator/ state files
+        # are intentionally untracked and orthogonal to archive's
+        # staged-rename footgun.
+        lines = _git(self.project, "status", "--porcelain").stdout.splitlines()
+        return "\n".join(line for line in lines if not line.startswith("??"))
+
+    def _last_commit_subject(self) -> str:
+        return _git(self.project, "log", "-1", "--format=%s").stdout.strip()
+
+    def _commit_count(self) -> int:
+        return int(_git(self.project, "rev-list", "--count", "HEAD").stdout.strip())
+
+    def test_archive_commits_the_move(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        self._set_status("alpha", st.STATUS_DONE)
+        before = self._commit_count()
+        rc, _, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self._staged_or_modified(), "",
+            "expected no staged/modified files after archive; got footgun state",
+        )
+        self.assertEqual(
+            self._commit_count(), before + 1,
+            "expected exactly one new commit for the archive move",
+        )
+
+    def test_archive_commit_message_is_operator_form(self) -> None:
+        # Operator-driven archive says "chore: archive <slug>", NOT
+        # "chore: auto-archive <slug>" (which is reserved for the
+        # supervisor's auto_archive_rule path).
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, _, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        subject = self._last_commit_subject()
+        self.assertEqual(subject, "chore: archive alpha")
+        self.assertNotIn("auto-archive", subject)
+
+    def test_archive_skips_commit_when_nothing_moved(self) -> None:
+        # Plan file already gone from plans/ → no move → no extra commit.
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        self._set_status("alpha", st.STATUS_DONE)
+        # Drop the plan file as if a prior archive partially ran.
+        plan_md = self.project / "plans" / "alpha.md"
+        _git(self.project, "rm", str(plan_md.relative_to(self.project)))
+        _git(self.project, "commit", "-m", "drop alpha plan")
+        before = self._commit_count()
+        rc, _, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self._commit_count(), before,
+            "expected no extra commit when nothing moved",
+        )
+
+    def test_archive_then_archive_creates_only_one_commit(self) -> None:
+        # Second archive is idempotent; should not stack a second move-commit.
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
+        self._set_status("alpha", st.STATUS_DONE)
+        rc1, _, _ = self._archive("alpha")
+        self.assertEqual(rc1, 0)
+        after_first = self._commit_count()
+        rc2, _, _ = self._archive("alpha")
+        self.assertEqual(rc2, 0)
+        self.assertEqual(self._commit_count(), after_first)
+
+
 if __name__ == "__main__":
     unittest.main()
