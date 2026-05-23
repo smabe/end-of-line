@@ -247,8 +247,8 @@ A clean end-to-end against a real project.
 
    | Flag | Default | What it controls |
    |---|---|---|
-   | `--lease-ttl-minutes N` | 30 | How long a worker claim is valid before `lease_expired` fires |
-   | `--stalled-heartbeat-minutes N` | 10 | Threshold for `phase_stalled` (suppressed when no heartbeat received yet — see stall guard below) |
+   | `--lease-ttl-minutes N` | 60 | How long a worker claim is valid before `lease_expired` fires |
+   | `--stalled-heartbeat-minutes N` | derived: `max(15, lease_ttl//2)` (= 30 at the 60-min default) | Threshold for `phase_stalled` (suppressed when no heartbeat received yet — see stall guard below) |
    | `--max-attempts-per-phase N` | 3 | How many times a phase may retry before the plan halts on `max_attempts_exhausted` |
 
    All three accept positive integers only; `≤0` is rejected at parse time.
@@ -501,8 +501,8 @@ three things in one command:
    moved in a prior run). Surfaces as `WORKTREE_SETUP_FAILED` if the file
    exists but `git mv` fails (e.g. not tracked, conflicts).
 3. **Atomic commit** — commits the rename as `chore: archive <slug>` so
-   `git status` is clean on exit. Closes the pre-clu-ship.md footgun
-   where the operator had to remember to commit the staged renames.
+   `git status` is clean on exit. The operator never has to remember to
+   commit the staged renames.
 
 After archiving, run `clu unregister --all-archived` to prune the host
 registry entry.
@@ -632,9 +632,9 @@ follow-up plans — it is read-only from clu's perspective. The cross-plan
 rule owns those side effects.
 
 > `clu integrate` is a stderr-warning deprecation alias for
-> `clu validate` (clu-ship.md). Existing scripts keep working; new
-> scripts should call `clu validate` or `clu ship --check` (which
-> internally delegates to `cmd_validate`).
+> `clu validate`. Existing scripts keep working; new scripts should
+> call `clu validate` or `clu ship --check` (which internally
+> delegates to `cmd_validate`).
 
 ### `clu ship` — post-worker integration
 
@@ -886,7 +886,8 @@ Walk back to Claude after a notification, type literally anything
 
 ```bash
 $ clu install-skill --force      # one-time; installs /clu-phase + /plan
-                                 # + /clu-plan + /brainstorm + /clu-monitor
+                                 # + /clu-plan + /clu-reply
+                                 # + /brainstorm + /clu-monitor
 $ # then, in a Claude Code session opened in any project:
 $ /clu-monitor
 Installed UserPromptSubmit hook → /Users/you/.../end_of_line/hooks/clu_inbox_surface.py
@@ -1303,7 +1304,7 @@ Check, in order:
    `~/.claude/skills/clu-phase/SKILL.md` (or copy
    `examples/clu-phase-skill.md` by hand if you want the legacy
    single-file form). Without it, the worker has no contract to follow
-   and exits without calling `clu complete` — you'll see the 30-minute
+   and exits without calling `clu complete` — you'll see the 60-minute
    lease eventually expire and the attempts counter tick up.
 3. The dispatch command in `.orchestrator.json`. The template variables
    are `{plan_slug}`, `{phase_id}`, `{token}`, `{state_file}`,
@@ -1511,7 +1512,7 @@ hitting the cap, delete it.
 
 ### Extending a live lease
 
-If a worker is still running but has consumed most of its 30-minute
+If a worker is still running but has consumed most of its 60-minute
 window (visible in `clu status` as a short `lease_expires`), extend
 from the operator side without touching the worker:
 
@@ -1527,7 +1528,7 @@ rejected. Appends a `lease_extended` event to the audit log.
 ### Stuck claim that won't release
 
 If the state file shows a live claim whose worker is definitely dead
-(no process at the stamped PID, no log entries) and the 30-minute
+(no process at the stamped PID, no log entries) and the 60-minute
 lease hasn't expired yet:
 
 ```bash
@@ -1551,7 +1552,7 @@ clu resume --project P --plan S
 
 Most of the time, you don't need this — a stale lease releases on the
 next tick after expiry, and the phase's attempts counter ticks up
-exactly once. Reach for `release-claim` when 30 minutes is too long to
+exactly once. Reach for `release-claim` when 60 minutes is too long to
 wait or when the worker's exit pattern wouldn't naturally release
 (e.g., a Popen orphan whose lease is still in the future).
 

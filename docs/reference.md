@@ -264,7 +264,7 @@ itself — `dispatch_for_tick` does that after the lock is released.
 - The halt branch only fires from `STATUS_RUNNING`, which is what
   guarantees the halt iMessage fires exactly once per transition
   (subsequent ticks short-circuit via `TERMINAL_STATUSES`).
-- `_detect_stalled` does NOT release the claim — the 30-min lease still
+- `_detect_stalled` does NOT release the claim — the 60-min lease still
   owns retry. `phase_stalled` is just the notification trigger.
 
 **See also**
@@ -1138,7 +1138,7 @@ through this.
   `cmd_validate`. The verb 'integrate' was misleading (never updated
   main; only dry-merged). Kept for one version of operator script
   compatibility; future code should call `cmd_validate` directly.
-- `cmd_ship(args)` — one-action post-worker integration (clu-ship.md).
+- `cmd_ship(args)` — one-action post-worker integration.
   Resolves mode from `--direct` / `--as-pr` flag or, when neither is
   set, from `cfg.dispatch.ship_mode` (default `"direct"`). Dispatches
   to one of `_cmd_ship_direct_plan`, `_cmd_ship_direct_all_done`,

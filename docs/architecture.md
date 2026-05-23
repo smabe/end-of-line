@@ -32,7 +32,7 @@ Four pieces, three of them processes:
 The supervisor never blocks. Worker spawn is fire-and-forget with a
 0.5-second fast-fail check (`dispatch.dispatch_for_tick`); if the worker
 crashes immediately, the supervisor logs `dispatch_failed` and releases
-the claim on the next tick. If the worker hangs, the 30-minute lease
+the claim on the next tick. If the worker hangs, the 60-minute lease
 expires and the next tick frees the claim.
 
 ## In-session signaling (inbox + UserPromptSubmit hook)
@@ -364,7 +364,7 @@ fire the rule, no state mutation, no follow-up emission. Useful for
 replay-after-fix, stuck batches, or CI-side verification.
 `--branches a,b,c` bypasses batch resolution entirely for ad-hoc
 cross-branch checks. `clu integrate` is a stderr-warning deprecation
-alias that delegates here (clu-ship.md).
+alias that delegates here.
 
 ```
 ┌── cron tick-all ──────────────────────────────┐

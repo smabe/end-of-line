@@ -168,7 +168,7 @@ Both events ride in the **source plan's** state file so the worker's audit trail
 
 ### Stall-detector guard
 
-`phase_stalled` is suppressed when `last_heartbeat_at == started_at` (the canonical `claude --print` case: stdout buffers until exit, so the bundled `/clu-phase` skill never calls `clu heartbeat` between tool calls and the heartbeat timestamp never advances). The lease-expiry path (`lease_expired`) still fires on genuinely-silent workers via `_detect_lease_expired` — the guard only mutes the chatty per-threshold ping, not the final timeout. Closes #27.
+`phase_stalled` is suppressed when `last_heartbeat_at == started_at` (the canonical `claude --print` case: stdout buffers until exit, so the bundled `/clu-phase` skill never calls `clu heartbeat` between tool calls and the heartbeat timestamp never advances). The lease-expiry path (`lease_expired`) still fires on genuinely-silent workers via `_detect_lease_expired` — the guard only mutes the chatty per-threshold ping, not the final timeout.
 
 ## Queue schema
 
@@ -438,12 +438,13 @@ A worker is a fresh process that runs ONE phase. It must:
 1. **Read minimally.** The phase plan file at `<phase_plan_file>`. Any prior phases' commit SHAs from the most recent `phase_completed` events for those phases. The blockers for *this* phase that have been answered (treat them as facts).
 2. **Execute the phase plan.** Follow project conventions (TDD, `/review`, `/commit`).
    While running, ping the supervisor every ~2 minutes so it knows the worker
-   is still alive (default stalled threshold: 10 min):
+   is still alive (default stalled threshold: derived `max(15, lease_ttl//2)`
+   — 30 min at the 60-min lease default):
    ```bash
    clu heartbeat --project P --plan S --phase X --token <token>
    ```
    Without heartbeats the supervisor can't tell "running" from "dead" until
-   the 30-min lease expires.
+   the 60-min lease expires.
 3. **On success**, before exit:
    ```bash
    clu complete --project P --plan S --phase X --commit <sha> [...]
