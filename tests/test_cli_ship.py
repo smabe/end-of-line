@@ -280,6 +280,164 @@ class ShipHappyPathTests(ShipBase):
         self.assertIn("warning", err.lower())
 
 
+class ShipAsPrPlanTests(ShipBase):
+    """`clu ship --as-pr --plan X` opens a GitHub PR instead of
+    merging directly. The supervisor's auto_archive_rule picks up
+    the cleanup once GitHub merges the PR and the operator (or a
+    fetch) bumps local origin/main."""
+
+    def _gh_fake(
+        self, *,
+        version_ok: bool = True,
+        auth_ok: bool = True,
+        pr_create_succeeds: bool = True,
+        pr_create_already_open: bool = False,
+        existing_pr_url: str = "https://github.com/example/repo/pull/42",
+    ):
+        """Build a subprocess.run fake that intercepts gh calls and
+        passes git calls through. Returns the fake fn."""
+        real_run = subprocess.run
+
+        def fake(*args, **kwargs):
+            argv = args[0] if args else kwargs.get("args", [])
+            if not isinstance(argv, list):
+                return real_run(*args, **kwargs)
+            if argv[:2] == ["gh", "--version"]:
+                if version_ok:
+                    return subprocess.CompletedProcess(argv, 0, "gh 2.0.0\n", "")
+                raise FileNotFoundError("gh")
+            if argv[:3] == ["gh", "auth", "status"]:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0 if auth_ok else 1,
+                    "Logged in\n" if auth_ok else "",
+                    "" if auth_ok else "not authenticated\n",
+                )
+            if argv[:3] == ["gh", "pr", "create"]:
+                if pr_create_already_open:
+                    return subprocess.CompletedProcess(
+                        argv, 1, "",
+                        "a pull request for branch already exists\n",
+                    )
+                if pr_create_succeeds:
+                    return subprocess.CompletedProcess(
+                        argv, 0,
+                        f"{existing_pr_url}\n", "",
+                    )
+                return subprocess.CompletedProcess(
+                    argv, 1, "", "gh: unexpected error\n",
+                )
+            if argv[:3] == ["gh", "pr", "view"]:
+                return subprocess.CompletedProcess(
+                    argv, 0, f'{{"url":"{existing_pr_url}"}}\n', "",
+                )
+            return real_run(*args, **kwargs)
+
+        return fake
+
+    def test_refuses_not_done(self) -> None:
+        self._init_plan("alpha")
+        rc, _, err = self._ship("--plan", "alpha", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
+        self.assertIn("done", err.lower())
+
+    def test_refuses_already_merged(self) -> None:
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        branch = self._branch("alpha")
+        _git(self.project, "merge", "--no-ff", "--no-edit", branch)
+        _git(self.project, "push", "origin", "main")
+        self._set_done("alpha")
+        rc, _, err = self._ship("--plan", "alpha", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn("already merged", err.lower())
+
+    def test_check_validates_no_pr_opened(self) -> None:
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake(),
+        ):
+            rc, out, _ = self._ship("--plan", "alpha", "--as-pr", "--check")
+        self.assertEqual(rc, ExitCode.OK)
+        # No PR was created — gh pr create wasn't called.
+        self.assertNotIn("pull/", out)
+
+    def test_preview_without_yes_does_not_open_pr(self) -> None:
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        rc, out, _ = self._ship("--plan", "alpha", "--as-pr")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("--yes", out)
+        self.assertIn("pr", out.lower())
+        # State has no ship_pending stamp.
+        data = st.load(self._state_path("alpha"))
+        self.assertNotIn("ship_pending", data)
+
+    def test_happy_path_creates_pr_and_stamps_state(self) -> None:
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake(),
+        ):
+            rc, out, _ = self._ship("--plan", "alpha", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("pull/42", out)
+        # ship_pending stamped with mode=as_pr + URL + timestamp.
+        data = st.load(self._state_path("alpha"))
+        pending = data.get("ship_pending")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["mode"], "as_pr")
+        self.assertIn("pull/42", pending["pr_url"])
+        self.assertIn("ts", pending)
+
+    def test_gh_not_installed(self) -> None:
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake(version_ok=False),
+        ):
+            rc, _, err = self._ship("--plan", "alpha", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn("gh", err.lower())
+
+    def test_gh_not_authenticated(self) -> None:
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake(auth_ok=False),
+        ):
+            rc, _, err = self._ship("--plan", "alpha", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn("auth", err.lower())
+
+    def test_pr_already_open_is_idempotent(self) -> None:
+        # gh pr create fails with "already exists" → we look up the
+        # existing URL via gh pr view and return success.
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        with mock.patch(
+            "end_of_line.cli.subprocess.run",
+            side_effect=self._gh_fake(pr_create_already_open=True),
+        ):
+            rc, out, _ = self._ship("--plan", "alpha", "--as-pr", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("pull/42", out)
+        # Still stamps the state with the existing URL.
+        data = st.load(self._state_path("alpha"))
+        self.assertEqual(data["ship_pending"]["mode"], "as_pr")
+
+
 class ShipAllDoneTests(ShipBase):
     """`clu ship --all-done --direct` ships every DONE plan with an
     unmerged worktree branch, behind one --yes."""

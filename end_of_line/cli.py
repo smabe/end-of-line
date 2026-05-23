@@ -3914,11 +3914,14 @@ def cmd_ship(args) -> int:
     argparse surface stays stable.
     """
     if args.as_pr:
-        return _die(
-            ExitCode.GENERIC,
-            "`clu ship --as-pr` is not yet implemented (clu-ship.md "
-            "phase 5). Use `--direct` for now.",
-        )
+        if args.all_done:
+            return _die(
+                ExitCode.GENERIC,
+                "`clu ship --as-pr --all-done` is not yet implemented "
+                "(clu-ship.md phase 6). Use `--plan <slug>` for single-"
+                "plan as-pr ship.",
+            )
+        return _cmd_ship_as_pr_plan(args)
     # Default to direct mode when neither flag is set (phase 7 will
     # add the .orchestrator.json `ship_mode` config default).
     if args.all_done:
@@ -4194,6 +4197,204 @@ def _cmd_ship_direct_all_done(args) -> int:
     print(f"shipped {len(successes)}/{len(eligible)} plan(s).")
     if apply_failures or validate_failures:
         return ExitCode.GENERIC
+    return ExitCode.OK
+
+
+def _gh_preflight() -> str | None:
+    """Verify `gh` is installed and authenticated. Returns None on
+    success, an error message on failure."""
+    try:
+        r = subprocess.run(
+            ["gh", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except FileNotFoundError:
+        return (
+            "gh CLI is not installed; install from https://cli.github.com/ "
+            "(or use `--direct` to skip PR mode)"
+        )
+    if r.returncode != 0:
+        return f"`gh --version` returned non-zero: {r.stderr.strip()}"
+    r = subprocess.run(
+        ["gh", "auth", "status"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        return (
+            "gh CLI is not authenticated; run `gh auth login` "
+            "(or use `--direct` to skip PR mode)"
+        )
+    return None
+
+
+def _gh_create_pr(
+    project_root: Path, branch: str, plan_md: Path, plan_slug: str,
+) -> tuple[bool, str]:
+    """Open a PR via `gh pr create`. On "already exists" failure,
+    falls back to `gh pr view` to return the existing URL — keeps
+    the command idempotent across re-runs. Returns (success, url_or_err).
+    """
+    if plan_md.exists():
+        first_line = plan_md.read_text().splitlines()[0] if plan_md.read_text() else ""
+        title = first_line.lstrip("# ").strip() or f"clu-ship: {plan_slug}"
+        body_file = str(plan_md)
+    else:
+        title = f"clu-ship: {plan_slug}"
+        body_file = None
+
+    cmd = [
+        "gh", "pr", "create",
+        "--title", title,
+        "--head", branch,
+        "--base", "main",
+    ]
+    if body_file is not None:
+        cmd += ["--body-file", body_file]
+    else:
+        cmd += ["--body", f"Worker ship for plan {plan_slug!r}."]
+
+    r = subprocess.run(
+        cmd, capture_output=True, text=True,
+        cwd=str(project_root), timeout=60,
+    )
+    if r.returncode == 0:
+        # gh prints the PR URL on stdout.
+        url = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+        return True, url
+
+    # PR may already be open — look up the existing one. The check is
+    # loose ("exists" / "already") because gh's exact phrasing differs
+    # across versions.
+    err = (r.stderr + r.stdout).lower()
+    if "already" in err or "exists" in err:
+        view = subprocess.run(
+            ["gh", "pr", "view", branch, "--json", "url"],
+            capture_output=True, text=True,
+            cwd=str(project_root), timeout=30,
+        )
+        if view.returncode == 0:
+            try:
+                payload = json.loads(view.stdout)
+                url = payload.get("url", "")
+                if url:
+                    return True, url
+            except json.JSONDecodeError:
+                pass
+        return False, (
+            f"PR appears to already exist for {branch!r} but `gh pr view` "
+            f"couldn't return the URL: {view.stderr.strip()}"
+        )
+
+    return False, f"`gh pr create` failed: {r.stderr.strip() or r.stdout.strip()}"
+
+
+def _cmd_ship_as_pr_plan(args) -> int:
+    """Single-plan PR-mode ship: validate → preview → --yes → push
+    branch to origin → `gh pr create` (idempotent across re-runs)
+    → stamp `data['ship_pending'] = {mode, pr_url, ts}` so the
+    ready_to_ship rule (phase 7) suppresses re-surfacing while the
+    PR is open. No direct merge to main; the existing
+    `auto_archive_rule` picks up cleanup when GitHub merges the PR
+    and the next fetch bumps local origin/main.
+    """
+    try:
+        st.validate_slug(args.plan, kind="plan slug")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    project_root = args.project.resolve()
+    if not project_root.is_dir():
+        return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+    cfg = load_project_config(project_root)
+    state_path = cfg.state_path(args.plan)
+    if not state_path.exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
+    data = st.load(state_path)
+
+    if data.get("status") != st.STATUS_DONE:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"plan {args.plan!r} is not done (status={data.get('status')!r}); "
+            f"ship requires STATUS_DONE",
+        )
+
+    wt = st.get_worktree(data)
+    if wt is None:
+        return _die(
+            ExitCode.GENERIC,
+            f"plan {args.plan!r} has no worktree record; nothing to ship",
+        )
+    branch = wt["branch"]
+
+    if st.is_branch_merged_into(project_root, branch, "origin/main"):
+        return _die(
+            ExitCode.GENERIC,
+            f"branch {branch!r} is already merged into origin/main; "
+            f"auto_archive_rule will pick it up on the next tick",
+        )
+
+    # Validate (dry-merge) so a busted branch doesn't open a PR that's
+    # immediately blocked by CI.
+    result = dry_merge.attempt_merge(
+        project_root, "main", [branch], cfg.test_command,
+    )
+    if result.outcome != "clean":
+        print(f"validate: outcome={result.outcome}")
+        if result.conflict_files:
+            print(f"conflict files: {', '.join(result.conflict_files)}")
+        if result.test_exit_code is not None:
+            print(f"test exit code: {result.test_exit_code}")
+        if result.stderr_tail:
+            print(f"stderr:\n{result.stderr_tail}", file=sys.stderr)
+        return ExitCode.GENERIC
+
+    if args.check:
+        print(
+            f"validate: clean — ready to open PR for {args.plan!r} "
+            f"(branch {branch!r}).",
+        )
+        return ExitCode.OK
+
+    if not args.yes:
+        print(f"ready to ship {args.plan!r} via PR:")
+        print(f"  validate: clean")
+        print(f"  push:     origin {branch!r}")
+        print(f"  open:     PR head={branch!r} base=main")
+        print(f"  stamp:    state.ship_pending (suppresses ready-to-ship rule)")
+        print("")
+        print("re-run with --yes to apply.")
+        return ExitCode.OK
+
+    # gh preflight (installed + authenticated) before any destructive step.
+    err = _gh_preflight()
+    if err is not None:
+        return _die(ExitCode.GENERIC, err)
+
+    # Push the branch so gh can open a PR against it.
+    r = subprocess.run(
+        ["git", "-C", str(project_root), "push", "--set-upstream",
+         "origin", branch],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return _die(
+            ExitCode.GENERIC,
+            f"git push origin {branch!r} failed: {r.stderr.strip()}",
+        )
+
+    plan_md = project_root / cfg.plan_dir / f"{args.plan}.md"
+    ok, url_or_err = _gh_create_pr(project_root, branch, plan_md, args.plan)
+    if not ok:
+        return _die(ExitCode.GENERIC, url_or_err)
+
+    with st.mutate(state_path) as d:
+        d["ship_pending"] = {
+            "mode": "as_pr",
+            "pr_url": url_or_err,
+            "ts": st.utcnow(),
+        }
+
+    print(f"opened PR for {args.plan!r}: {url_or_err}")
     return ExitCode.OK
 
 
