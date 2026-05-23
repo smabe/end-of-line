@@ -157,6 +157,7 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 - `simplify_stamped` — emitted by `clu attest --simplify`. Fields: `phase`, `commit_sha` (current HEAD at attest time). Stamps `current_claim.attestations.simplify`.
 - `operator_skip_verify` — emitted by `clu complete --skip-verify`. Audit event; phase still completes. Fields: `phase`.
 - `operator_skip_simplify` — emitted by `clu complete --skip-simplify`. Audit event; phase still completes. Fields: `phase`.
+- `attestation_refused` — emitted by `clu complete` when the verify or simplify quality gate refuses. Fires once per refusal call (no dedup; #70 operator-dashboard wants every gate hit visible). Fields: `phase`, `gate` (`"verify"` | `"simplify"`, matching `ATTESTATION_VERIFY` / `ATTESTATION_SIMPLIFY`), `stamped_at` (last stamp SHA or `null`), `head_sha` (HEAD that was refused; worktree HEAD if a worktree is active). Re-read under lock at emit time — if a concurrent stamp made the gate pass between the snapshot read and the lock acquire, no event is emitted.
 
 ### Worker-enqueue event semantics
 

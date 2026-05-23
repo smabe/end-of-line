@@ -37,6 +37,9 @@ _DEFAULT_VISIBLE: frozenset[str] = frozenset(filter(None, {
     # Queue v2 — present after queue-worker-callback merged
     getattr(st, "EVENT_QUEUE_APPENDED", None),
     getattr(st, "EVENT_QUEUE_REJECTED", None),
+    # Attestation gate refusal (#70) — actionable, the worker is wedged on
+    # a missing/stale verify or simplify stamp.
+    getattr(st, "EVENT_ATTESTATION_REFUSED", None),
 }))
 
 _VERBOSE_ONLY: frozenset[str] = frozenset({
@@ -200,6 +203,21 @@ if _Q_REJECTED:
     )
 
 
+# Attestation-refused formatter (#70 dashboard) — splice in when defined.
+_ATTEST_REFUSED = getattr(st, "EVENT_ATTESTATION_REFUSED", None)
+if _ATTEST_REFUSED:
+    def _fmt_attest_refused(slug: str, e: dict[str, Any]) -> str:
+        gate = e.get("gate", "?")
+        stamped = e.get("stamped_at") or "never"
+        head = (e.get("head_sha") or "?")[:7]
+        stamped_short = stamped[:7] if stamped != "never" else "never"
+        return (
+            f"{_phase_prefix(slug, e)}: ATTESTATION REFUSED ({gate} gate) "
+            f"stamped={stamped_short} head={head}"
+        )
+    _FORMATTERS[_ATTEST_REFUSED] = _fmt_attest_refused
+
+
 _TASK_STATUS_MAP: dict[str, str] = {
     st.EVENT_PHASE_STARTED: "in_progress",
     st.EVENT_PHASE_COMPLETED: "completed",
@@ -211,6 +229,8 @@ _TASK_STATUS_MAP: dict[str, str] = {
     st.EVENT_RESUMED: "in_progress",
     st.EVENT_PHASE_STALLED: "in_progress",
 }
+if _ATTEST_REFUSED:
+    _TASK_STATUS_MAP[_ATTEST_REFUSED] = "in_progress"
 
 _TASK_VERBOSE_STATUS_MAP: dict[str, str] = {
     st.EVENT_LEASE_EXTENDED: "in_progress",

@@ -3698,11 +3698,17 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
             stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
             if stamped_at is None or stamped_at != head_sha:
                 with st.mutate(state_path) as data:
-                    st.append_event(
-                        data, st.EVENT_ATTESTATION_REFUSED,
-                        phase=args.phase, gate="verify",
-                        stamped_at=stamped_at, head_sha=head_sha,
-                    )
+                    # Re-read under lock so the event payload reflects the
+                    # state at emit time, not the pre-lock snapshot. If a
+                    # concurrent `clu verify` stamped between the snapshot
+                    # and now, skip the emit — the gate would now pass.
+                    fresh_stamped = st.attestation_commit_sha(data, st.ATTESTATION_VERIFY)
+                    if fresh_stamped is None or fresh_stamped != head_sha:
+                        st.append_event(
+                            data, st.EVENT_ATTESTATION_REFUSED,
+                            phase=args.phase, gate=st.ATTESTATION_VERIFY,
+                            stamped_at=fresh_stamped, head_sha=head_sha,
+                        )
                 return _die(
                     ExitCode.STATUS_TRANSITION,
                     f"verify gate: stamp missing or stale "
@@ -3719,11 +3725,13 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                     stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_SIMPLIFY)
                     if stamped_at is None or stamped_at != head_sha:
                         with st.mutate(state_path) as data:
-                            st.append_event(
-                                data, st.EVENT_ATTESTATION_REFUSED,
-                                phase=args.phase, gate="simplify",
-                                stamped_at=stamped_at, head_sha=head_sha,
-                            )
+                            fresh_stamped = st.attestation_commit_sha(data, st.ATTESTATION_SIMPLIFY)
+                            if fresh_stamped is None or fresh_stamped != head_sha:
+                                st.append_event(
+                                    data, st.EVENT_ATTESTATION_REFUSED,
+                                    phase=args.phase, gate=st.ATTESTATION_SIMPLIFY,
+                                    stamped_at=fresh_stamped, head_sha=head_sha,
+                                )
                         return _die(
                             ExitCode.STATUS_TRANSITION,
                             f"simplify gate: diff is {files_changed} files / "
