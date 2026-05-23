@@ -238,6 +238,60 @@ class CompleteRefusalTestCase(GitProjectTestCase):
         self.assertEqual(len(self._events_of_type(st.EVENT_OPERATOR_SKIP_VERIFY)), 1)
         self.assertEqual(len(self._events_of_type(st.EVENT_OPERATOR_SKIP_SIMPLIFY)), 1)
 
+    # ---- attestation_refused event (#70 dashboard prereq) ---------------------
+
+    def test_complete_emits_attestation_refused_on_verify_gate_no_stamp(self) -> None:
+        token = self._claim()
+        head = self._head()
+        rc, _ = self._complete(token)
+        self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
+        events = self._events_of_type(st.EVENT_ATTESTATION_REFUSED)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["gate"], "verify")
+        self.assertEqual(events[0]["phase"], "phase-a")
+        self.assertEqual(events[0]["head_sha"], head)
+        self.assertIsNone(events[0]["stamped_at"])
+
+    def test_complete_emits_attestation_refused_on_verify_stale(self) -> None:
+        token = self._claim()
+        old_sha = self._head()
+        self._stamp_verify(old_sha)
+        new_sha = self._make_commit("stale.txt")
+        rc, _ = self._complete(token)
+        self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
+        events = self._events_of_type(st.EVENT_ATTESTATION_REFUSED)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["gate"], "verify")
+        self.assertEqual(events[0]["stamped_at"], old_sha)
+        self.assertEqual(events[0]["head_sha"], new_sha)
+
+    def test_complete_emits_attestation_refused_on_simplify_gate(self) -> None:
+        token = self._claim()
+        self._make_commit("big.txt", lines=50)
+        self._stamp_verify()
+        head = self._head()
+        rc, _ = self._complete(token)
+        self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
+        events = self._events_of_type(st.EVENT_ATTESTATION_REFUSED)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["gate"], "simplify")
+        self.assertEqual(events[0]["phase"], "phase-a")
+        self.assertEqual(events[0]["head_sha"], head)
+        self.assertIsNone(events[0]["stamped_at"])
+
+    def test_complete_no_attestation_refused_event_on_success(self) -> None:
+        token = self._claim()
+        self._stamp_verify()
+        rc, _ = self._complete(token)
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertEqual(self._events_of_type(st.EVENT_ATTESTATION_REFUSED), [])
+
+    def test_complete_no_attestation_refused_event_on_skip_flag(self) -> None:
+        token = self._claim()
+        rc, _ = self._complete(token, "--skip-verify")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertEqual(self._events_of_type(st.EVENT_ATTESTATION_REFUSED), [])
+
     def test_complete_no_commits_phase_still_requires_verify(self) -> None:
         # 0 commits → diff is empty (below threshold) but verify still required.
         token = self._claim()

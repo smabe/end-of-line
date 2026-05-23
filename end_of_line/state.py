@@ -193,6 +193,11 @@ EVENT_SIMPLIFY_STAMPED = "simplify_stamped"
 # quality gate. Fields: phase, operator (True). One event per skip per complete.
 EVENT_OPERATOR_SKIP_VERIFY = "operator_skip_verify"
 EVENT_OPERATOR_SKIP_SIMPLIFY = "operator_skip_simplify"
+# `cmd_complete` refused on the verify or simplify attestation gate. Fires once
+# per refusal call (no dedup — operator-dashboard / #70 wants visibility into
+# every gate hit). Fields: phase, gate ("verify" | "simplify"), stamped_at
+# (last stamp SHA or None), head_sha (current HEAD that was refused).
+EVENT_ATTESTATION_REFUSED = "attestation_refused"
 # Supervisor reaped an orphaned worker process after lease expiry.
 # Fields: phase, pid, signaled ("SIGTERM" | "SIGTERM+SIGKILL"), cmdline_mismatch (bool).
 EVENT_PHASE_ORPHAN_REAPED = "phase_orphan_reaped"

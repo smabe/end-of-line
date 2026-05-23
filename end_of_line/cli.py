@@ -3697,6 +3697,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         if verify_gate_active:
             stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
             if stamped_at is None or stamped_at != head_sha:
+                with st.mutate(state_path) as data:
+                    st.append_event(
+                        data, st.EVENT_ATTESTATION_REFUSED,
+                        phase=args.phase, gate="verify",
+                        stamped_at=stamped_at, head_sha=head_sha,
+                    )
                 return _die(
                     ExitCode.STATUS_TRANSITION,
                     f"verify gate: stamp missing or stale "
@@ -3712,6 +3718,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 if files_changed > t_files or lines_changed > t_lines:
                     stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_SIMPLIFY)
                     if stamped_at is None or stamped_at != head_sha:
+                        with st.mutate(state_path) as data:
+                            st.append_event(
+                                data, st.EVENT_ATTESTATION_REFUSED,
+                                phase=args.phase, gate="simplify",
+                                stamped_at=stamped_at, head_sha=head_sha,
+                            )
                         return _die(
                             ExitCode.STATUS_TRANSITION,
                             f"simplify gate: diff is {files_changed} files / "
