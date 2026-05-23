@@ -360,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument(
         "--lease-ttl-minutes", type=int, default=None,
         dest="lease_ttl_minutes",
-        help="Override default lease TTL (minutes). Default: 30.",
+        help="Override default lease TTL (minutes). Default: 60.",
     )
     p_init.add_argument(
         "--stalled-heartbeat-minutes", type=int, default=None,
@@ -456,6 +456,11 @@ def main(argv: list[str] | None = None) -> int:
         help="DEPRECATED alias for `clu validate`. The verb 'integrate' "
              "never updated main; use `clu validate` for dry-merge "
              "validation, `clu ship` to actually land code.",
+        description="DEPRECATED alias for `clu validate` — kept for one "
+                    "release cycle for muscle-memory continuity. Runs the "
+                    "same dry-merge validation; does NOT touch main. "
+                    "Use `clu validate` directly going forward; use "
+                    "`clu ship` to actually land code.",
     )
     _add_validate_args(p_integrate)
 
@@ -470,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     ship_target.add_argument("--plan", help="Plan slug to ship.")
     ship_target.add_argument(
         "--all-done", action="store_true",
-        help="Ship every DONE plan with an unmerged branch (clu-ship.md phase 4).",
+        help="Ship every DONE plan with an unmerged branch.",
     )
     ship_mode = p_ship.add_mutually_exclusive_group()
     ship_mode.add_argument(
@@ -479,8 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ship_mode.add_argument(
         "--as-pr", action="store_true",
-        help="Open a GitHub PR instead of merging directly "
-             "(clu-ship.md phase 5).",
+        help="Open a GitHub PR instead of merging directly.",
     )
     p_ship.add_argument(
         "--check", action="store_true",
@@ -524,17 +528,20 @@ def main(argv: list[str] | None = None) -> int:
 
     p_install_skill = sub.add_parser(
         "install-skill",
-        help="Copy bundled skills (/clu-phase worker, /plan authorship, "
-             "/brainstorm pre-planning) into ~/.claude/skills/<name>/SKILL.md "
-             "so Claude Code can find them. Default installs all three; use "
-             "--only to install one.",
+        help="Copy bundled skills into ~/.claude/skills/<name>/SKILL.md "
+             "so Claude Code can find them. Six skills ship "
+             "(clu-phase, clu-plan, clu-reply, clu-monitor, plan, brainstorm). "
+             "Default installs all; use --only to install one.",
         description="Copy bundled skills into ~/.claude/skills/<name>/SKILL.md "
-                    "so Claude Code can find them. Three skills ship: /clu-phase "
-                    "(the worker clu's dispatch invokes — required for clu to "
-                    "function), /plan (authorship skill for writing plans in "
-                    "the shape clu's parser expects), and /brainstorm "
+                    "so Claude Code can find them. Six skills ship: "
+                    "/clu-phase (worker dispatch entry — required for clu to "
+                    "function), /clu-plan (clu-format master + sub-plan "
+                    "authorship), /clu-reply (explicit blocker reply for "
+                    "scripted contexts), /clu-monitor (Monitor arming for "
+                    "background notifications on autonomous runs), /plan "
+                    "(project-agnostic plan authorship), /brainstorm "
                     "(parallel-persona pre-planning for fuzzy problem spaces). "
-                    "Default installs all three; pass --only <name> to install one.",
+                    "Default installs all; pass --only <name> to install one.",
     )
     p_install_skill.add_argument(
         "--list", action="store_true", default=False,
@@ -739,9 +746,9 @@ def main(argv: list[str] | None = None) -> int:
              "would see (read-only; doesn't touch plan state).",
         description="Build the same env dict `dispatch_for_tick` would pass "
                     "to subprocess.Popen, then run a one-shot `sh -c` probe "
-                    "to print PATH and resolve gh/pipx/clu. Closes #14: "
-                    "operators can now see what their LaunchAgent worker "
-                    "actually inherits instead of guessing dispatch.path.",
+                    "to print PATH and resolve gh/pipx/clu. Lets operators "
+                    "see what their LaunchAgent worker actually inherits "
+                    "instead of guessing dispatch.path.",
     )
     p_doctor.add_argument(
         "--project", type=Path, required=True,
