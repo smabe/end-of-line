@@ -197,7 +197,7 @@ class ReplyCorrelationTestCase(DiscordInboundPollerBase):
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         self.assertIn("answer", cmd)
-        self.assertIn(blocker_id, cmd)
+        self.assertNotIn(blocker_id, cmd)
         self.assertIn("A", cmd)
 
     def test_reply_without_message_reference_falls_back_to_text_grammar(self):
@@ -217,7 +217,7 @@ class ReplyCorrelationTestCase(DiscordInboundPollerBase):
 
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        self.assertIn(blocker_id, cmd)
+        self.assertNotIn(blocker_id, cmd)
         self.assertIn("1", cmd)
 
     def test_reply_unrecognized_text_advances_cursor_but_no_dispatch(self):

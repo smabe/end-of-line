@@ -51,7 +51,7 @@ scripted context.
 
 4. **Fire the answer:**
    ```bash
-   clu answer --project . --plan "$plan" "$blocker_id" "$answer"
+   clu answer --project . --plan "$plan" "$answer"
    ```
 
 5. **Report result.** On non-zero exit, surface clu's error verbatim.

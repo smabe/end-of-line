@@ -42,7 +42,7 @@ BLOCKER_TEMPLATE = (
 INSTRUCTION = (
     "\nIf the user's next message reads as a reply to one of these "
     "blockers (letter, number, or natural pick), call "
-    "`clu answer --plan <slug> <blocker_id> <answer>` via Bash. "
+    "`clu answer --plan <slug> <answer>` via Bash. "
     "If multiple blockers are open and the reply is ambiguous, ask "
     "the user which plan they mean — don't guess.\n"
 )

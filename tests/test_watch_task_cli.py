@@ -54,16 +54,14 @@ class TaskListMutexTest(CluTestCase):
         self.assertEqual(rc, int(ExitCode.GENERIC))
         self.assertIn("mutually exclusive", err.getvalue())
 
-    def test_task_list_and_all_mutually_exclusive(self) -> None:
+    def test_task_list_with_all_accepted(self) -> None:
         _init_plan(self.project, "foo")
-        err = io.StringIO()
-        with redirect_stderr(err):
+        with _mock_loop():
             rc = main([
                 "watch", "--task-list", "--all",
                 "--project", str(self.project),
             ])
-        self.assertEqual(rc, int(ExitCode.GENERIC))
-        self.assertIn("--task-list requires --plan", err.getvalue())
+        self.assertNotEqual(rc, int(ExitCode.GENERIC))
 
 
 class TaskListPassThroughTest(CluTestCase):
@@ -84,19 +82,18 @@ class TaskListPassThroughTest(CluTestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(m.call_args.kwargs.get("task_list_mode"))
 
-    def test_task_list_missing_master_returns_unknown_task(self) -> None:
-        """State exists but master .md is absent → UNKNOWN_TASK."""
+    def test_task_list_missing_master_skips_silently(self) -> None:
+        """State exists but master .md is absent → bootstrap skips; watch succeeds."""
         _init_plan(self.project, "no-master")
-        # Remove the master plan file so bootstrap raises FileNotFoundError
         (self.project / "plans" / "no-master.md").unlink()
-        err = io.StringIO()
-        with redirect_stderr(err):
+        out = io.StringIO()
+        with _mock_loop(), redirect_stdout(out):
             rc = main([
                 "watch", "--task-list",
                 "--project", str(self.project), "--plan", "no-master",
             ])
-        self.assertEqual(rc, int(ExitCode.UNKNOWN_TASK))
-        self.assertIn("no-master", err.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertNotIn("TASK_CREATE", out.getvalue())
 
 
 class TaskListHelpTextTest(unittest.TestCase):

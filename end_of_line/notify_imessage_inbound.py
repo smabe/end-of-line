@@ -120,7 +120,7 @@ def _cli_dispatch(target: OpenBlocker, answer: str) -> None:
             sys.executable, "-m", "end_of_line.cli", "answer",
             "--project", str(target.project_root),
             "--plan", target.plan_slug,
-            target.blocker_id, answer,
+            answer,
         ],
         check=True,
     )

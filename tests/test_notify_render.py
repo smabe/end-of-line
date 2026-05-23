@@ -45,14 +45,13 @@ class RenderBlockerBasicTests(unittest.TestCase):
 
     def test_includes_copy_pastable_clu_answer_command(self) -> None:
         body = notify.render_blocker(PLAN, BID, PHASE, QUESTION, OPTIONS)
-        # cmd_answer signature: clu answer --plan SLUG <blocker_id> <answer>
-        self.assertIn(f"clu answer --plan {PLAN} {BID}", body)
+        self.assertIn(f"clu answer --plan {PLAN} <choice>", body)
+        self.assertNotIn(BID, body.split("Terminal:")[-1])
 
     def test_no_options_renders_free_text_blocker(self) -> None:
         body = notify.render_blocker(PLAN, BID, PHASE, QUESTION, [])
         self.assertIn(QUESTION, body)
-        # Still includes the terminal command (free-text answer is valid).
-        self.assertIn(f"clu answer --plan {PLAN} {BID}", body)
+        self.assertIn(f"clu answer --plan {PLAN} <choice>", body)
 
 
 class RenderBlockerTruncationTests(unittest.TestCase):
@@ -112,7 +111,7 @@ class RenderBlockerFallbackTests(unittest.TestCase):
     def test_fallback_includes_clu_answer_command(self) -> None:
         q, opts = self._huge()
         body = notify.render_blocker(PLAN, BID, PHASE, q, opts)
-        self.assertIn(f"clu answer --plan {PLAN} {BID}", body)
+        self.assertIn(f"clu answer --plan {PLAN} <choice>", body)
 
     def test_fallback_keeps_plan_and_blocker_header(self) -> None:
         q, opts = self._huge()

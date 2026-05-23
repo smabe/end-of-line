@@ -101,7 +101,7 @@ def render_blocker(
     plan_slug: str, blocker_id: str, phase: str, question: str, options: list[str],
 ) -> str:
     q = _truncate_at_word(question, _QUESTION_TRUNCATE)
-    answer_cmd = f"clu answer --plan {plan_slug} {blocker_id} <choice>"
+    answer_cmd = f"clu answer --plan {plan_slug} <choice>"
     if options:
         opts_block = "\n".join(
             f"[{i}] {_truncate_at_word(o, _OPTION_TRUNCATE)}"

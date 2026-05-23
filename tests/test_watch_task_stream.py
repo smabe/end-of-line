@@ -189,19 +189,19 @@ class TaskListStreamTest(CluTestCase):
         self.assertNotIn("TASK_UPDATE", out)
         self.assertIn("completed", out)
 
-    def test_bootstrap_missing_master_raises_passthrough(self) -> None:
+    def test_bootstrap_missing_master_skips_silently(self) -> None:
         project = self.tmp_path / "no-master-project"
         state_path = project / "plans" / ".orchestrator" / "no-plan.state.json"
         _make_state(state_path, "no-plan")
 
         sink = io.StringIO()
-        with self.assertRaises(FileNotFoundError):
-            stream_loop(
-                [state_path],
-                task_list_mode=True,
-                sink=sink, poll_interval=0, max_ticks=0,
-                cfg_loader=_cfg_loader(project),
-            )
+        stream_loop(
+            [state_path],
+            task_list_mode=True,
+            sink=sink, poll_interval=0, max_ticks=0,
+            cfg_loader=_cfg_loader(project),
+        )
+        self.assertNotIn("TASK_CREATE", sink.getvalue())
 
     def test_bootstrap_ordering_when_phase_active(self) -> None:
         """TASK_CREATE batch → TASK_UPDATE plan → TASK_UPDATE phase → [snapshot]."""

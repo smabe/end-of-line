@@ -73,13 +73,12 @@ class BootstrapEmissionTest(unittest.TestCase):
         self.assertEqual(parent_line, "TASK_CREATE task=my-plan status=pending")
         self.assertNotIn("parent=", parent_line)
 
-    def test_bootstrap_missing_master_file_errors(self):
+    def test_bootstrap_missing_master_file_skips_silently(self):
         slug = "ghost-plan"
         state = self._state_path(slug)
         sink = io.StringIO()
-        with self.assertRaises(FileNotFoundError) as ctx:
-            bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
-        self.assertIn(slug, str(ctx.exception))
+        bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
+        self.assertEqual(sink.getvalue(), "")
 
     def test_bootstrap_single_phase_master_emits_parent_only(self):
         slug = "solo-plan"

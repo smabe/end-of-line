@@ -11,6 +11,7 @@ and ship_mode config default (phase 7).
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import tempfile
 import unittest
@@ -736,6 +737,21 @@ class ShipAllDoneTests(ShipBase):
             check=False,
         )
         self.assertNotEqual(r.returncode, 0)
+
+
+class ShipDefaultsProjectToCwdTests(ShipBase):
+    """clu ship --plan X accepts being invoked without --project from the project CWD."""
+
+    def test_ship_defaults_project_to_cwd(self) -> None:
+        old_cwd = Path.cwd()
+        os.chdir(self.project)
+        self.addCleanup(os.chdir, str(old_cwd))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["ship", "--plan", "alpha", "--direct"])
+        combined_err = err.getvalue()
+        self.assertNotIn("required", combined_err.lower())
+        self.assertNotIn("AttributeError", combined_err)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -106,6 +107,22 @@ class BlockersTestCase(unittest.TestCase):
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
         self.assertIn("q-99", err)
         self.assertIn("no blocker", err)
+
+    def test_blockers_list_defaults_project_to_cwd(self) -> None:
+        old_cwd = Path.cwd()
+        os.chdir(self.project)
+        self.addCleanup(os.chdir, str(old_cwd))
+        rc, out, err = self._run("list", "--plan", "test-plan")
+        self.assertNotIn("AttributeError", err)
+        self.assertIn(rc, (int(ExitCode.OK), int(ExitCode.UNKNOWN_TASK)))
+
+    def test_blockers_show_defaults_project_to_cwd(self) -> None:
+        old_cwd = Path.cwd()
+        os.chdir(self.project)
+        self.addCleanup(os.chdir, str(old_cwd))
+        rc, out, err = self._run("show", "--plan", "test-plan", "q-99")
+        self.assertNotIn("AttributeError", err)
+        self.assertIn(rc, (int(ExitCode.OK), int(ExitCode.UNKNOWN_TASK)))
 
 
 if __name__ == "__main__":

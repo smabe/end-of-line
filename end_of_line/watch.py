@@ -357,7 +357,7 @@ def bootstrap_task_list(
         cfg = cfg_loader(state_path)
         plan_path = cfg.project_root / cfg.plan_dir / f"{slug}.md"
         if not plan_path.exists():
-            raise FileNotFoundError(f"no master plan at {plan_path}")
+            continue
         print(_task_line("TASK_CREATE", slug, status="pending"),
               file=sink, flush=True)
         for phase in parse_sessions_index(plan_path):

@@ -465,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
              "to main (or open PR), push, trigger archive. Operator-"
              "facing; preview-then-confirm gated by --yes.",
     )
-    p_ship.add_argument("--project", type=Path, required=True)
+    p_ship.add_argument("--project", type=Path, default=None)
     ship_target = p_ship.add_mutually_exclusive_group(required=True)
     ship_target.add_argument("--plan", help="Plan slug to ship.")
     ship_target.add_argument(
@@ -3351,10 +3351,6 @@ def cmd_watch(args) -> int:
 
     if task_list_mode and args.json:
         return _die(ExitCode.GENERIC, "--task-list and --json are mutually exclusive")
-    if task_list_mode and all_mode:
-        return _die(ExitCode.GENERIC,
-                    "--task-list requires --plan or single-project "
-                    "(mutually exclusive with --all)")
     if task_list_mode and getattr(args, "watch_operator", False):
         return _die(ExitCode.GENERIC,
                     "--operator and --task-list are mutually exclusive "
@@ -4073,7 +4069,7 @@ def cmd_ship(args) -> int:
     elif args.as_pr:
         mode = "as_pr"
     else:
-        project_root = args.project.resolve()
+        project_root = _resolve_project_arg(args)
         if not project_root.is_dir():
             return _die(ExitCode.GENERIC, f"project not found: {project_root}")
         cfg = load_project_config(project_root)
@@ -4098,7 +4094,7 @@ def _cmd_ship_direct_plan(args) -> int:
     except st.InvalidSlug as exc:
         return _die(ExitCode.INVALID_SLUG, str(exc))
 
-    project_root = args.project.resolve()
+    project_root = _resolve_project_arg(args)
     if not project_root.is_dir():
         return _die(ExitCode.GENERIC, f"project not found: {project_root}")
     cfg = load_project_config(project_root)
@@ -4268,7 +4264,7 @@ def _cmd_ship_direct_all_done(args) -> int:
     are logged and the batch continues; overall exit code reflects
     whether any plan failed.
     """
-    project_root = args.project.resolve()
+    project_root = _resolve_project_arg(args)
     if not project_root.is_dir():
         return _die(ExitCode.GENERIC, f"project not found: {project_root}")
     cfg = load_project_config(project_root)
@@ -4461,7 +4457,7 @@ def _cmd_ship_as_pr_plan(args) -> int:
     except st.InvalidSlug as exc:
         return _die(ExitCode.INVALID_SLUG, str(exc))
 
-    project_root = args.project.resolve()
+    project_root = _resolve_project_arg(args)
     if not project_root.is_dir():
         return _die(ExitCode.GENERIC, f"project not found: {project_root}")
     cfg = load_project_config(project_root)
@@ -4584,7 +4580,7 @@ def _cmd_ship_as_pr_all_done(args) -> int:
     canonical); no post-action tick (no origin/main advance yet —
     that happens when GitHub merges the PR).
     """
-    project_root = args.project.resolve()
+    project_root = _resolve_project_arg(args)
     if not project_root.is_dir():
         return _die(ExitCode.GENERIC, f"project not found: {project_root}")
     cfg = load_project_config(project_root)
@@ -5040,7 +5036,7 @@ def cmd_blockers(args) -> int:
 
 def cmd_blockers_list(args) -> int:
     st.validate_slug(args.plan, kind="plan slug")
-    cfg = load_project_config(args.project.resolve())
+    cfg = load_project_config(_resolve_project_arg(args))
     state_path = cfg.state_path(args.plan)
     if not state_path.exists():
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
@@ -5062,7 +5058,7 @@ def cmd_blockers_list(args) -> int:
 
 def cmd_blockers_show(args) -> int:
     st.validate_slug(args.plan, kind="plan slug")
-    cfg = load_project_config(args.project.resolve())
+    cfg = load_project_config(_resolve_project_arg(args))
     state_path = cfg.state_path(args.plan)
     if not state_path.exists():
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
