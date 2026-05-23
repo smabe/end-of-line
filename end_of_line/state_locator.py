@@ -99,7 +99,10 @@ def _load_open_blockers(entry: PlanEntry) -> tuple[Path, list[OpenBlocker]] | No
         return None
     try:
         data = st.load(state_path)
-    except (FileNotFoundError, st.SchemaVersionMismatch, json.JSONDecodeError, OSError) as exc:
+    except FileNotFoundError:
+        log.debug("state_locator: skipping %s — state file missing", entry.plan_slug)
+        return None
+    except (st.SchemaVersionMismatch, json.JSONDecodeError, OSError) as exc:
         log.warning("state_locator: skipping %s — %s", entry.plan_slug, exc)
         return None
     return state_path, _hydrate_open_blockers(data, entry)

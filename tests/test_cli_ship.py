@@ -628,6 +628,19 @@ class ShipAsPrAllDoneTests(ShipBase):
             data = st.load(self._state_path(slug))
             self.assertNotIn("ship_pending", data)
 
+    def test_all_done_skips_plans_with_deleted_branches(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        alpha_branch = self._branch("alpha")
+        # Simulate post-merge manual branch deletion; git branch -D won't work
+        # while the worktree has the branch checked out, so delete the ref directly.
+        _git(self.project, "update-ref", "-d", f"refs/heads/{alpha_branch}")
+        rc, out, _ = self._ship("--all-done", "--as-pr", "--check")
+        # alpha's branch was deleted — pre-filter skips it silently
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertNotIn("alpha", out)
+        self.assertIn("beta", out)
+
 
 class ShipAllDoneTests(ShipBase):
     """`clu ship --all-done --direct` ships every DONE plan with an
@@ -737,6 +750,19 @@ class ShipAllDoneTests(ShipBase):
             check=False,
         )
         self.assertNotEqual(r.returncode, 0)
+
+    def test_all_done_skips_plans_with_deleted_branches(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        alpha_branch = self._branch("alpha")
+        # Simulate post-merge manual branch deletion; git branch -D won't work
+        # while the worktree has the branch checked out, so delete the ref directly.
+        _git(self.project, "update-ref", "-d", f"refs/heads/{alpha_branch}")
+        rc, out, _ = self._ship("--all-done", "--direct", "--check")
+        # alpha's branch was deleted — pre-filter skips it silently
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertNotIn("alpha", out)
+        self.assertIn("beta", out)
 
 
 class ShipDefaultsProjectToCwdTests(ShipBase):

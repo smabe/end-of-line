@@ -155,9 +155,37 @@ class StateLocatorTestCase(unittest.TestCase):
         _, sp_b, entry_b = _make_project(self.tmp, "plan-b")
         _add_blocker_raw(sp_a)
         sp_b.unlink()  # delete state file
-        with self.assertLogs("end_of_line.state_locator", level=logging.WARNING):
+        # ENOENT should emit DEBUG only (not WARNING)
+        with self.assertLogs("end_of_line.state_locator", level=logging.DEBUG) as cm:
             result = find_blocker_for_reply([entry_a, entry_b], "plan-a 1")
         self.assertEqual(result.variant, "FOUND")
+        warning_lines = [m for m in cm.output if "WARNING" in m and "plan-b" in m]
+        self.assertFalse(warning_lines, f"Expected no WARNING for ENOENT, got: {warning_lines}")
+
+    def test_load_open_blockers_silent_on_enoent(self) -> None:
+        _, sp_a, entry_a = _make_project(self.tmp, "plan-a")
+        _, sp_b, entry_b = _make_project(self.tmp, "plan-b")
+        _add_blocker_raw(sp_a)
+        sp_b.unlink()  # missing state file — should NOT warn, but should DEBUG
+        with self.assertLogs("end_of_line.state_locator", level=logging.DEBUG) as cm:
+            result = find_blocker_for_reply([entry_a, entry_b], "plan-a 1")
+        self.assertEqual(result.variant, "FOUND")
+        # No WARNING for ENOENT
+        warning_lines = [m for m in cm.output if "WARNING" in m and "plan-b" in m]
+        self.assertFalse(warning_lines, f"Expected no WARNING for ENOENT, got: {warning_lines}")
+        # DEBUG line is emitted
+        debug_lines = [m for m in cm.output if "DEBUG" in m and "plan-b" in m]
+        self.assertTrue(debug_lines, "Expected DEBUG log for missing plan-b state file")
+
+    def test_load_open_blockers_warns_on_corrupt(self) -> None:
+        _, sp_a, entry_a = _make_project(self.tmp, "plan-a")
+        _, sp_b, entry_b = _make_project(self.tmp, "plan-b")
+        _add_blocker_raw(sp_a)
+        sp_b.write_bytes(b"not valid json{{{")  # corrupt JSON → still WARNING
+        with self.assertLogs("end_of_line.state_locator", level=logging.WARNING) as cm:
+            result = find_blocker_for_reply([entry_a, entry_b], "plan-a 1")
+        self.assertEqual(result.variant, "FOUND")
+        self.assertTrue(any("plan-b" in line for line in cm.output))
 
     # ------------------------------------------------------------------ #
     # FOUND carries state_path                                              #

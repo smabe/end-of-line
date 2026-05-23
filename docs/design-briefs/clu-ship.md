@@ -117,6 +117,48 @@ Operator preference: option A (commit atomically), because the
 "clu touched git but didn't commit" state was the genuine footgun this
 morning.
 
+## Worktree config management
+
+### The drift scenario
+
+When a config patch propagates through one worker's worktree, sibling
+worktrees that branched off an earlier HEAD are still on the stale
+config. From the 2026-05-23 field session
+(`docs/design-briefs/clu-ship-field-feedback.md`, Friction #6):
+
+> **Scenario.** When the operator answered `clu answer --plan a11y-pass 0`
+> ("patch the config"), the worker patched its own worktree's
+> `.orchestrator.json` and committed it. But the other two in-flight
+> worker worktrees (fm-polish, la-polish) had branched off pre-patch
+> HEAD and still had the stale config. They'd hit the same blocker on
+> their next verify pass — Claude had to pre-emptively `Edit`
+> `.orchestrator.json` in each worktree to avoid two more identical
+> blockers.
+
+### Operator workaround
+
+When answering a blocker that patches the canonical `.orchestrator.json`,
+immediately pre-emptively update the same key in every active worktree.
+Example: answer `clu answer --plan a11y-pass 0`, then for each sibling
+worktree (`fm-polish`, `la-polish`):
+
+```bash
+# in each active worktree root
+# edit .orchestrator.json to match canonical, then commit
+```
+
+Or, from the operator's session, use Claude Code's Edit tool to patch
+`.orchestrator.json` in each worktree path before continuing. This is
+the pre-emptive dance that prevents identical re-blocks.
+
+### Future tool option
+
+A `clu sync-config --to-worktrees` command that copies the canonical
+`.orchestrator.json` into every active worktree registered under the
+plan is deferred pending repeat field signal. Cost of building
+speculatively exceeds cost of the documented workaround for single-digit
+parallel-plan batches; re-evaluate when parallel fleet sizes grow.
+
 ## Open scoping questions for brainstorm
 
 1. **Cleanup defaults.** Should `clu ship` always remove the worktree +

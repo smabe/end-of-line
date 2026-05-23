@@ -4292,6 +4292,8 @@ def _cmd_ship_direct_all_done(args) -> int:
         if wt is None:
             continue
         branch = wt["branch"]
+        if not st.local_branch_exists(project_root, branch):
+            continue
         if st.is_branch_merged_into(project_root, branch, "origin/main"):
             continue
         eligible.append((p.slug, branch))
@@ -4594,6 +4596,8 @@ def _cmd_ship_as_pr_all_done(args) -> int:
         if wt is None:
             continue
         branch = wt["branch"]
+        if not st.local_branch_exists(project_root, branch):
+            continue
         if st.is_branch_merged_into(project_root, branch, "origin/main"):
             continue
         eligible.append((p.slug, branch, p.state_path))
@@ -5036,7 +5040,10 @@ def cmd_blockers(args) -> int:
 
 def cmd_blockers_list(args) -> int:
     st.validate_slug(args.plan, kind="plan slug")
-    cfg = load_project_config(_resolve_project_arg(args))
+    project_root = _resolve_project_arg(args)
+    if not project_root.is_dir():
+        return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+    cfg = load_project_config(project_root)
     state_path = cfg.state_path(args.plan)
     if not state_path.exists():
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
@@ -5058,7 +5065,10 @@ def cmd_blockers_list(args) -> int:
 
 def cmd_blockers_show(args) -> int:
     st.validate_slug(args.plan, kind="plan slug")
-    cfg = load_project_config(_resolve_project_arg(args))
+    project_root = _resolve_project_arg(args)
+    if not project_root.is_dir():
+        return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+    cfg = load_project_config(project_root)
     state_path = cfg.state_path(args.plan)
     if not state_path.exists():
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")

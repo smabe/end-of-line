@@ -69,6 +69,20 @@ def is_branch_merged_into(
     return result.returncode == 0
 
 
+def local_branch_exists(project_root: Path, branch: str) -> bool:
+    """Return True iff `branch` exists as a local ref in `project_root`."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--verify",
+             f"refs/heads/{branch}"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
 SCHEMA_VERSION = 1
 
 
