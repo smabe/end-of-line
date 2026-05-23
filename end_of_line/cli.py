@@ -3909,9 +3909,9 @@ def cmd_integrate(args) -> int:
 def cmd_ship(args) -> int:
     """One-action post-worker integration (clu-ship.md).
 
-    Phase 3 implements `--plan X --direct` (single-plan direct
-    mode). `--all-done` (phase 4) and `--as-pr` (phase 5) error out
-    until their phases land so the argparse surface stays stable.
+    Phases 3-4 implement direct mode (single plan + --all-done).
+    `--as-pr` (phase 5) errors out until that phase lands so the
+    argparse surface stays stable.
     """
     if args.as_pr:
         return _die(
@@ -3919,14 +3919,10 @@ def cmd_ship(args) -> int:
             "`clu ship --as-pr` is not yet implemented (clu-ship.md "
             "phase 5). Use `--direct` for now.",
         )
-    if args.all_done:
-        return _die(
-            ExitCode.GENERIC,
-            "`clu ship --all-done` is not yet implemented (clu-ship.md "
-            "phase 4). Use `--plan <slug>` for single-plan ship.",
-        )
     # Default to direct mode when neither flag is set (phase 7 will
     # add the .orchestrator.json `ship_mode` config default).
+    if args.all_done:
+        return _cmd_ship_direct_all_done(args)
     return _cmd_ship_direct_plan(args)
 
 
@@ -4019,15 +4015,35 @@ def _cmd_ship_direct_plan(args) -> int:
         return ExitCode.OK
 
     # Apply.
+    ok, msg = _ship_apply_one_direct(project_root, branch, args.plan)
+    if not ok:
+        return _die(ExitCode.GENERIC, msg)
+    _spawn_post_action_tick(cfg)
+    print(msg + "; auto-archive triggered.")
+    return ExitCode.OK
+
+
+def _ship_apply_one_direct(
+    project_root: Path, branch: str, plan_slug: str,
+) -> tuple[bool, str]:
+    """Apply the destructive ship steps for one plan in direct mode.
+
+    Returns (success, message). On success, message is the one-line
+    summary suitable for stdout. On failure, message is a human
+    error string suitable for stderr / _die. Branch-push warnings
+    are emitted directly to stderr inside the helper — they don't
+    block success.
+
+    Caller is responsible for: canonical-dirty check up front,
+    validate (dry-merge), and triggering the post-action tick after
+    any successes.
+    """
     r = subprocess.run(
         ["git", "-C", str(project_root), "checkout", "main"],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
-        return _die(
-            ExitCode.GENERIC,
-            f"git checkout main failed: {r.stderr.strip()}",
-        )
+        return False, f"git checkout main failed: {r.stderr.strip()}"
 
     r = subprocess.run(
         ["git", "-C", str(project_root), "merge", "--ff-only", branch],
@@ -4043,9 +4059,8 @@ def _cmd_ship_direct_plan(args) -> int:
             capture_output=True, text=True,
         )
         if r.returncode != 0:
-            return _die(
-                ExitCode.GENERIC,
-                f"git merge {branch!r} → main failed: {r.stderr.strip()}",
+            return False, (
+                f"git merge {branch!r} → main failed: {r.stderr.strip()}"
             )
 
     r = subprocess.run(
@@ -4053,16 +4068,15 @@ def _cmd_ship_direct_plan(args) -> int:
         capture_output=True, text=True,
     )
     if r.returncode != 0:
-        return _die(
-            ExitCode.GENERIC,
-            f"git push origin main failed: {r.stderr.strip()}\n"
-            f"local main is ahead of origin; re-run "
-            f"`clu ship --plan {args.plan} --direct --yes` to retry.",
+        return False, (
+            f"git push origin main failed: {r.stderr.strip()}; "
+            f"local main is ahead of origin — re-run "
+            f"`clu ship --plan {plan_slug} --direct --yes` to retry."
         )
 
     # Branch push is best-effort: if the branch was deleted upstream
-    # (auto-delete-head-branches, another worker) we don't want to fail
-    # the ship — main already has the work.
+    # (auto-delete-head-branches, another worker) we don't fail the
+    # ship — main already has the work.
     r = subprocess.run(
         ["git", "-C", str(project_root), "push", "origin", branch],
         capture_output=True, text=True,
@@ -4078,14 +4092,108 @@ def _cmd_ship_direct_plan(args) -> int:
     # not, the push side-effect didn't update the local ref and the
     # post-action tick would be premature.
     if not st.is_branch_merged_into(project_root, branch, "origin/main"):
-        return _die(
-            ExitCode.GENERIC,
+        return False, (
             f"push succeeded but origin/main didn't advance past "
-            f"{branch!r}; investigate before triggering auto-archive.",
+            f"{branch!r}; investigate before triggering auto-archive."
         )
 
-    _spawn_post_action_tick(cfg)
-    print(f"shipped {args.plan!r}: {branch!r} → main; auto-archive triggered.")
+    return True, f"shipped {plan_slug!r}: {branch!r} → main"
+
+
+def _cmd_ship_direct_all_done(args) -> int:
+    """Batch direct-mode ship: every DONE plan with an unmerged
+    worktree branch ships behind a single --yes. Per-plan failures
+    are logged and the batch continues; overall exit code reflects
+    whether any plan failed.
+    """
+    project_root = args.project.resolve()
+    if not project_root.is_dir():
+        return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+    cfg = load_project_config(project_root)
+
+    # Canonical-dirty check ONCE, up front. Per-plan checks aren't
+    # needed because the apply path leaves no uncommitted residue.
+    porcelain = subprocess.run(
+        ["git", "-C", str(project_root), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    dirty = [line for line in porcelain.splitlines() if not line.startswith("??")]
+    if dirty:
+        return _die(
+            ExitCode.GENERIC,
+            f"canonical checkout has uncommitted changes; clean them "
+            f"first.\ngit status:\n" + "\n".join(dirty),
+        )
+
+    plans = cross_plan_rules.load_plans_for_project(project_root, cfg)
+    eligible: list[tuple[str, str]] = []  # (slug, branch)
+    for p in plans:
+        if p.state.get("status") != st.STATUS_DONE:
+            continue
+        wt = st.get_worktree(p.state)
+        if wt is None:
+            continue
+        branch = wt["branch"]
+        if st.is_branch_merged_into(project_root, branch, "origin/main"):
+            continue
+        eligible.append((p.slug, branch))
+
+    if not eligible:
+        print("nothing to ship: no DONE plans with unmerged worktree branches.")
+        return ExitCode.OK
+
+    print(f"validating {len(eligible)} plan(s):")
+    validate_failures: set[str] = set()
+    for slug, branch in eligible:
+        result = dry_merge.attempt_merge(
+            project_root, "main", [branch], cfg.test_command,
+        )
+        if result.outcome == "clean":
+            print(f"  {slug} ({branch}): clean")
+        else:
+            detail = f"outcome={result.outcome}"
+            if result.conflict_files:
+                detail += f", conflicts={','.join(result.conflict_files)}"
+            print(f"  {slug} ({branch}): {detail}")
+            validate_failures.add(slug)
+
+    if args.check:
+        return (
+            ExitCode.GENERIC if validate_failures else ExitCode.OK
+        )
+
+    if not args.yes:
+        print("")
+        print(f"ready to ship {len(eligible)} plan(s):")
+        for slug, branch in eligible:
+            marker = " (VALIDATE FAILED — will skip)" if slug in validate_failures else ""
+            print(f"  {slug} → main via {branch}{marker}")
+        print("")
+        print("re-run with --yes to apply.")
+        return ExitCode.OK
+
+    # Apply.
+    apply_failures: list[tuple[str, str]] = []
+    successes: list[str] = []
+    for slug, branch in eligible:
+        if slug in validate_failures:
+            print(f"skipped {slug}: validate failed", file=sys.stderr)
+            continue
+        ok, msg = _ship_apply_one_direct(project_root, branch, slug)
+        if ok:
+            successes.append(slug)
+            print(msg)
+        else:
+            apply_failures.append((slug, msg))
+            print(f"failed {slug}: {msg}", file=sys.stderr)
+
+    if successes:
+        _spawn_post_action_tick(cfg)
+
+    print("")
+    print(f"shipped {len(successes)}/{len(eligible)} plan(s).")
+    if apply_failures or validate_failures:
+        return ExitCode.GENERIC
     return ExitCode.OK
 
 

@@ -280,5 +280,115 @@ class ShipHappyPathTests(ShipBase):
         self.assertIn("warning", err.lower())
 
 
+class ShipAllDoneTests(ShipBase):
+    """`clu ship --all-done --direct` ships every DONE plan with an
+    unmerged worktree branch, behind one --yes."""
+
+    def _setup_done_plan(self, slug: str) -> None:
+        self._init_plan(slug)
+        self._add_worker_commit(slug)
+        self._set_done(slug)
+
+    def test_no_eligible_plans_returns_ok(self) -> None:
+        # No DONE plans at all.
+        rc, out, _ = self._ship("--all-done", "--direct", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("nothing to ship", out.lower())
+
+    def test_skips_already_merged_plans(self) -> None:
+        # Plan that's DONE but already merged into origin/main should
+        # NOT be in the eligible set (auto_archive_rule owns it).
+        self._setup_done_plan("alpha")
+        branch = self._branch("alpha")
+        _git(self.project, "merge", "--no-ff", "--no-edit", branch)
+        _git(self.project, "push", "origin", "main")
+        rc, out, _ = self._ship("--all-done", "--direct", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("nothing to ship", out.lower())
+
+    def test_preview_lists_eligible_plans(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        rc, out, _ = self._ship("--all-done", "--direct")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("alpha", out)
+        self.assertIn("beta", out)
+        self.assertIn("--yes", out)
+        # No merge happened — main HEAD unchanged.
+        main_head = _git(self.project, "rev-parse", "main").stdout.strip()
+        origin_head = _git(self.project, "rev-parse", "origin/main").stdout.strip()
+        self.assertEqual(main_head, origin_head)
+
+    def test_ships_multiple_plans(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        alpha_branch = self._branch("alpha")
+        beta_branch = self._branch("beta")
+        with mock.patch("end_of_line.cli._spawn_post_action_tick") as spawn:
+            rc, _, _ = self._ship("--all-done", "--direct", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        # Both branches are ancestors of main.
+        for b in (alpha_branch, beta_branch):
+            r = _git(
+                self.project, "merge-base", "--is-ancestor", b, "main",
+                check=False,
+            )
+            self.assertEqual(r.returncode, 0, f"branch {b} not in main")
+        # Tick triggered exactly once (post-batch), not per-plan.
+        spawn.assert_called_once()
+
+    def test_check_validates_each_eligible_plan(self) -> None:
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        rc, out, _ = self._ship("--all-done", "--direct", "--check")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("alpha", out)
+        self.assertIn("beta", out)
+        # No merge happened.
+        main_head = _git(self.project, "rev-parse", "main").stdout.strip()
+        origin_head = _git(self.project, "rev-parse", "origin/main").stdout.strip()
+        self.assertEqual(main_head, origin_head)
+
+    def test_continues_past_per_plan_failure(self) -> None:
+        # alpha will fail (conflicting change on main); beta should
+        # still ship.
+        self._setup_done_plan("alpha")
+        self._setup_done_plan("beta")
+        # Inject conflict for alpha by writing alpha-work.txt on main.
+        (self.project / "alpha-work.txt").write_text("conflict\n")
+        _git(self.project, "add", "alpha-work.txt")
+        _git(self.project, "commit", "-m", "main writes alpha file")
+        _git(self.project, "push", "origin", "main")
+        with mock.patch("end_of_line.cli._spawn_post_action_tick"):
+            rc, out, err = self._ship("--all-done", "--direct", "--yes")
+        # rc reflects overall failure (alpha failed) but beta still
+        # shipped.
+        self.assertNotEqual(rc, ExitCode.OK)
+        beta_branch = self._branch("beta")
+        r = _git(
+            self.project, "merge-base", "--is-ancestor", beta_branch, "main",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, "beta should have shipped despite alpha failure")
+        combined = (out + err).lower()
+        self.assertIn("alpha", combined)
+        self.assertIn("beta", combined)
+
+    def test_canonical_dirty_refuses_before_starting(self) -> None:
+        self._setup_done_plan("alpha")
+        (self.project / "extra.txt").write_text("oops\n")
+        _git(self.project, "add", "extra.txt")
+        rc, _, err = self._ship("--all-done", "--direct", "--yes")
+        self.assertEqual(rc, ExitCode.GENERIC)
+        self.assertIn("uncommitted", err.lower())
+        # Nothing shipped.
+        alpha_branch = self._branch("alpha")
+        r = _git(
+            self.project, "merge-base", "--is-ancestor", alpha_branch, "main",
+            check=False,
+        )
+        self.assertNotEqual(r.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
