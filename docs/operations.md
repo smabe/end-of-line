@@ -1151,6 +1151,109 @@ line. When a `TASK_UPDATE` arrives, call `TaskUpdate` matching by
 1 s and retry; if still unmatched, create the task on-the-fly with the
 update's status.
 
+#### Operator dashboard mode (`--operator`)
+
+`--operator` narrows the watch stream to the cross-plan-worth-interrupting
+event set — the four events the operator should react to in flight rather
+than at next session boundary:
+
+| Event | Surfaced when |
+|---|---|
+| `tool_stuck` | Worker's Bash tool has been near-zero CPU for ≥5 min (per #67 stuck-tool detection) |
+| `phase_blocked` | Worker called `clu block` |
+| `attestation_refused` | Worker hit the verify or simplify quality gate |
+| `stalled_claim_notified` | Claim's lease expired with plan still `running` |
+
+Default `clu watch` is too chatty for live dashboarding (phase_started,
+queue_popped, lease_extended noise drowns the signal). `--operator`
+inverts the default: narrow set, bypass the verbose gate, suppress the
+per-plan snapshot baseline.
+
+```bash
+clu watch --all --operator             # cross-host dashboard
+clu watch --project . --operator       # single-project dashboard
+clu watch --all --operator --json      # for jq pipelines
+```
+
+Mutex with `--task-list` (the task-list maps don't cover the wedge set
+yet — composition deferred). Composes with everything else.
+
+##### SessionStart hook for cold-start arming
+
+The Monitor a session arms before `/clear` or `/compact` keeps delivering
+events into the new context (per
+[`docs/research/monitor-lifecycle.md`](research/monitor-lifecycle.md)).
+The remaining gap is **cold-start**: a brand-new conversation has no
+prior Monitor. Close it with the SessionStart hook:
+
+```bash
+clu install-hook --session-start      # composes with the default UserPromptSubmit install
+```
+
+Adds a `SessionStart` entry to `~/.claude/settings.json` pointing at
+`end_of_line/hooks/clu_session_start.py`. On every fresh session, the
+hook emits `additionalContext` instructing the session to arm
+`Monitor(command="clu watch --all --operator", persistent=True,
+description="clu operator dashboard")` unless one is already in flight.
+
+The marker records both fields when both hooks are installed:
+
+```bash
+$ cat ~/.config/clu/monitor.json
+{
+  "schema_version": 2,
+  "hook_installed_at": "...",
+  "hook_path": ".../clu_inbox_surface.py",
+  "session_start_hook_path": ".../clu_session_start.py",
+  "session_start_installed_at": "...",
+  "settings_json_path": "/Users/.../.claude/settings.json"
+}
+```
+
+`clu uninstall-hook` removes both entries.
+
+##### Investigate-then-recommend contract
+
+Each of the four wedge event classes carries an instruction block in the
+inbox-hook surface telling the receiving session what to do. The contract
+is uniform: **investigate autonomously → recommend a recovery path →
+wait for explicit operator approval before any destructive action**.
+This honors the operator-approval checkpoint in user-level CLAUDE.md.
+
+| Event | Investigate by | Recommend (gated on approval) |
+|---|---|---|
+| `tool_stuck` | `ps -p <worker_pid>` + `pgrep -P <worker_pid>` | `kill <pid>` / `clu release-claim` / `clu force-complete` |
+| `attestation_refused` | Read worker log, compare `stamped_at` to current HEAD | `clu verify` / `clu attest --simplify` / `clu complete --skip-verify` / `--skip-simplify` |
+| `stalled_claim_notified` | Read worker log, walk pid tree, check `git status` for uncommitted work | `clu force-complete --commit <sha>` (work on disk) / `clu release-claim` (worker dead) / `clu retry` (clean exit) |
+| `phase_blocked` | (existing blocker flow — see `## Background monitoring`) | `clu answer --plan <slug> <blocker_id> <answer>` |
+
+Adding a new wedge class is one entry in
+`end_of_line/hooks/clu_inbox_surface.py::WEDGE_INSTRUCTION_BLOCKS` —
+the predicate + composition happen automatically.
+
+##### End-to-end verification
+
+Smoke-test the full dashboard chain after `clu install-hook --session-start`:
+
+```bash
+# 1. Drop a synthetic attestation_refused into the inbox.
+$ python3 -c "from end_of_line import inbox; inbox.write_event(
+    type='attestation_refused', plan_slug='smoke', project_root='$(pwd)',
+    summary='smoke test', details={'gate': 'verify', 'stamped_at': None,
+    'head_sha': 'abc1234'})"
+
+# 2. Open a fresh Claude Code session in this directory.
+#    The SessionStart hook injects the Monitor-arming instruction.
+#    Claude should arm Monitor(command="clu watch --all --operator", ...).
+# 3. Type "hi" — UserPromptSubmit hook surfaces the inbox event PLUS
+#    the ATTESTATION_REFUSED_INSTRUCTION block.
+# 4. Claude should propose a recovery (clu verify / --skip-verify) and
+#    wait for your approval rather than auto-running anything.
+
+# Verify the event moved:
+$ ls ~/.config/clu/inbox/processed/    # smoke event lands here
+```
+
 ## Troubleshooting
 
 ### Inbound poller crash-loops

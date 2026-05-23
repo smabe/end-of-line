@@ -57,20 +57,29 @@ Inspect the JSON:
 Run via Bash:
 
 ```bash
-clu install-hook
+clu install-hook                       # UserPromptSubmit (inbox surface) only
+clu install-hook --session-start       # adds SessionStart hook too (#70 operator dashboard)
 ```
+
+Pass `--session-start` if the operator wants the cross-plan dashboard
+(live Monitor stream of wedges across every registered plan, armed
+automatically on cold-start sessions). Without it, only the at-desk
+inbox surface installs.
 
 This is the canonical install path:
 
 - Adds a `UserPromptSubmit` entry to `~/.claude/settings.json`,
   preserving any existing hooks and matching the operator's
   nested-vs-flat array style.
-- Idempotent on absolute hook path; re-runs are no-ops.
+- With `--session-start`, ALSO adds a `SessionStart` entry pointing at
+  the bundled `clu_session_start.py` script. Both entries are
+  idempotent on absolute hook path; re-runs are no-ops.
 - Refuses to run in non-TTY contexts (workers shouldn't install
   user-level hooks).
 - Refuses on malformed settings.json rather than guessing how to
   repair — surfaces a clear error.
-- Writes the v2 marker on success.
+- Writes the v2 marker on success (with `session_start_hook_path` field
+  populated when `--session-start` was used).
 
 Capture the output. If `clu install-hook` exits non-zero, report the
 error verbatim to the user with one-line diagnosis (most common: the
@@ -106,16 +115,58 @@ writes — quiet hours gate them, but inbox writes happen
 unconditionally because the inbox is for the operator's *next* turn,
 not for waking them.
 
-### Stuck-tool events (#67)
+### Wedge event contracts (#67, #70)
 
-When the supervisor detects a worker whose Bash tool has been running
-with near-zero CPU for several minutes, it emits a `tool_stuck` inbox
-event and the hook appends an investigate-then-recommend instruction
-block to the surfaced context. The primary session is expected to walk
-the worker's process tree, propose a kill plan to the operator, and
-**wait for explicit approval** before running anything destructive
-(`kill`, `clu release-claim`, `clu force-complete`). This honors the
-operator-approval checkpoint in user-level CLAUDE.md.
+Four event classes carry investigate-then-recommend instruction blocks
+that the hook appends to the surfaced context whenever one fires. Each
+follows the same shape: **investigate autonomously → recommend a
+recovery path → wait for explicit operator approval before any
+destructive action**. The receiving session must honor the
+operator-approval checkpoint from user-level CLAUDE.md.
+
+- **`tool_stuck` (#67)** — worker's Bash tool stuck at near-zero CPU for
+  several minutes. Walk the process tree (`ps -p <worker_pid>` +
+  `pgrep -P`), propose `kill` / `clu release-claim` /
+  `clu force-complete`, wait for approval.
+- **`attestation_refused` (#70 P1)** — worker hit the verify or simplify
+  gate. Read the worker log, compare `stamped_at` to current HEAD,
+  propose `clu verify` / `clu attest --simplify` /
+  `clu complete --skip-verify` / `--skip-simplify`, wait for approval.
+- **`stalled_claim` (#70 P4)** — claim lease expired without
+  `clu complete`. Read the worker log, walk the pid tree, check
+  `git status` for uncommitted work; propose `clu force-complete`
+  (work on disk) / `clu release-claim` (worker dead) / `clu retry`
+  (clean exit), wait for approval.
+- **`phase_blocked`** — already handled by the existing blocker flow
+  (`_build_blockers_section` shows the question + options and routes
+  the operator's natural-language reply through `clu answer`).
+
+Registry at `end_of_line/hooks/clu_inbox_surface.py::WEDGE_INSTRUCTION_BLOCKS`
+— adding a new wedge class is one entry, not a four-step ritual.
+
+### Operator dashboard (#70)
+
+When `clu install-hook --session-start` is used, every fresh Claude Code
+session sees an additionalContext block on `SessionStart` instructing
+the session to arm:
+
+```python
+Monitor(
+    command="clu watch --all --operator",
+    persistent=True,
+    description="clu operator dashboard",
+)
+```
+
+The Monitor streams only the four wedge events listed above (the
+`--operator` filter narrows the default visible set). Combined with the
+inbox-hook contracts, the operator sees wedges live (Monitor) AND at
+next-turn (inbox), with the same investigate-then-recommend handling
+either way.
+
+Pre-`/clear` / pre-`/compact` Monitors survive both reset commands per
+the research note at `docs/research/monitor-lifecycle.md`, so the
+SessionStart hook only matters for genuinely fresh conversations.
 
 ## Live in-session feed (`clu watch`)
 
@@ -124,12 +175,18 @@ user prompt. For *live* streaming while the operator is at-desk, use
 `clu watch` inside Claude's Monitor tool:
 
 ```
-Monitor(command="clu watch --project . --all", persistent=True)
+# Single-plan task-list mode (what /clu-plan auto-arms):
+Monitor(command="clu watch --project . --plan my-feature --task-list", persistent=True)
+
+# Operator dashboard — cross-plan wedge events only:
+Monitor(command="clu watch --all --operator", persistent=True,
+        description="clu operator dashboard")
 ```
 
 Each state transition emits one stdout line, surfaced as a
-notification. The two channels are complementary: inbox for the
-walk-away path, watch for the live-feed path.
+notification. The three channels are complementary: inbox for the
+walk-away path, per-plan task-list for active plan execution,
+`--operator` for the cross-plan dashboard.
 
 ## Failure modes
 
