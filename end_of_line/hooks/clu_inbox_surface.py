@@ -65,9 +65,58 @@ TOOL_STUCK_INSTRUCTION = (
     "this for any destructive intervention.\n"
 )
 
+# #70 operator-dashboard instruction blocks. Each fires once per surface
+# pass when its event class is present in the inbox set. Same
+# investigate-then-recommend-then-await-approval contract as TOOL_STUCK.
+
+ATTESTATION_REFUSED_INSTRUCTION = (
+    "\n## Attestation gate refusal\n\n"
+    "One or more clu workers hit the verify or simplify attestation gate "
+    "(`attestation_refused` events above). The worker's claim is still "
+    "live — the gate refused with `STATUS_TRANSITION` and left the claim "
+    "in place so the worker can stamp + retry. Investigate autonomously: "
+    "read the per-worker log at "
+    "`<project>/plans/.orchestrator/logs/<phase>.<token>.log`, check "
+    "`git log` on the worker's branch, compare the `stamped_at` SHA in "
+    "the event payload to the worker's current HEAD. Recommend the fix "
+    "proactively — typically `clu verify` to re-stamp (when the verify "
+    "command would now pass), `clu attest --simplify` to confirm a "
+    "narrow diff, OR `clu complete --skip-verify` / `--skip-simplify` "
+    "when the gate is a false positive. **Do NOT run any of these until "
+    "the operator explicitly approves** — every bypass is an audit-event "
+    "the operator owns the decision on, per the operator-approval "
+    "checkpoint in user-level CLAUDE.md.\n"
+)
+
+STALLED_CLAIM_INSTRUCTION = (
+    "\n## Stalled-claim events\n\n"
+    "One or more clu plans have a live claim whose lease expired without "
+    "a `clu complete` (`stalled_claim` events above). The worker is "
+    "either dead or has uncommitted work on disk it never reported. "
+    "Investigate autonomously: read the per-worker log at "
+    "`<project>/plans/.orchestrator/logs/<phase>.<token>.log` for the "
+    "claim's token, run `ps -p <pid>` against the `claimed_by.pid` in "
+    "the event payload, check `git status` and `git log` in the project "
+    "/ worktree for uncommitted work the worker may have written. "
+    "Recommend a recovery path — `clu force-complete --plan <P> --phase "
+    "<X> --commit <sha>` if work is on disk, `clu release-claim` if the "
+    "worker is dead with nothing recoverable, or `clu retry` if the "
+    "worker exited cleanly and the phase should re-dispatch from scratch. "
+    "**Do NOT run any of these until the operator explicitly approves** — "
+    "every recovery path mutates state the operator owns.\n"
+)
+
 
 def _has_tool_stuck(events: Iterable[dict]) -> bool:
     return any(e.get("type") == "tool_stuck" for e in events)
+
+
+def _has_attestation_refused(events: Iterable[dict]) -> bool:
+    return any(e.get("type") == "attestation_refused" for e in events)
+
+
+def _has_stalled_claim(events: Iterable[dict]) -> bool:
+    return any(e.get("type") == "stalled_claim" for e in events)
 
 
 def _log_path() -> Path:
@@ -168,15 +217,24 @@ def main() -> int:
         blockers = open_blockers_with_details(entries, project_root)
         blockers_section = _build_blockers_section(blockers)
 
-        # Append the investigate-then-recommend contract once if any
-        # tool_stuck event made it into the surfaced set (events is the
-        # full inbox; the cap in _build_context never drops a tool_stuck
-        # event because they're rare).
+        # Append the investigate-then-recommend contracts once per class
+        # for any wedge event present. The inbox cap in _build_context
+        # never drops these wedge events because they're rare.
         tool_stuck_section = (
             TOOL_STUCK_INSTRUCTION if _has_tool_stuck(events) else ""
         )
+        attestation_section = (
+            ATTESTATION_REFUSED_INSTRUCTION
+            if _has_attestation_refused(events) else ""
+        )
+        stalled_claim_section = (
+            STALLED_CLAIM_INSTRUCTION if _has_stalled_claim(events) else ""
+        )
 
-        parts = [s for s in (events_context, blockers_section, tool_stuck_section) if s]
+        parts = [s for s in (
+            events_context, blockers_section,
+            tool_stuck_section, attestation_section, stalled_claim_section,
+        ) if s]
         if not parts:
             return 0
         context = "\n\n".join(parts)

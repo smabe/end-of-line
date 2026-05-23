@@ -3742,6 +3742,41 @@ def _claim_base_sha(claim: dict, data: dict) -> str | None:
     return claim.get("head_sha_at_claim")
 
 
+def _write_attestation_refused_inbox(
+    cfg: ProjectConfig,
+    data_snap: dict,
+    phase: str,
+    *,
+    gate: str,
+    stamped_at: str | None,
+    head_sha: str,
+) -> None:
+    """Mirror EVENT_ATTESTATION_REFUSED to the inbox so the #70
+    operator-dashboard hook can surface it. Lazy-imports inbox to keep
+    cli.py's import surface tight."""
+    from . import inbox
+    plan_slug = data_snap.get("plan_slug") or ""
+    try:
+        inbox.write_event(
+            type="attestation_refused",
+            plan_slug=plan_slug,
+            project_root=str(cfg.project_root.resolve()),
+            summary=(
+                f"{plan_slug}/{phase} hit the {gate} gate "
+                f"(stamped {stamped_at or 'never'}, HEAD {head_sha[:7] or '?'})"
+            ),
+            details={
+                "phase_id": phase,
+                "gate": gate,
+                "stamped_at": stamped_at,
+                "head_sha": head_sha,
+            },
+        )
+    except OSError:
+        # Never let a broken inbox dir block the refusal exit path.
+        pass
+
+
 @_translate_claim_mismatch
 def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.commits:
@@ -3767,6 +3802,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         if verify_gate_active:
             stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
             if stamped_at is None or stamped_at != head_sha:
+                emitted = False
                 with st.mutate(state_path) as data:
                     # Re-read under lock so the event payload reflects the
                     # state at emit time, not the pre-lock snapshot. If a
@@ -3779,6 +3815,13 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                             phase=args.phase, gate=st.ATTESTATION_VERIFY,
                             stamped_at=fresh_stamped, head_sha=head_sha,
                         )
+                        emitted = True
+                if emitted:
+                    _write_attestation_refused_inbox(
+                        cfg, data_snap, args.phase,
+                        gate=st.ATTESTATION_VERIFY,
+                        stamped_at=stamped_at, head_sha=head_sha,
+                    )
                 return _die(
                     ExitCode.STATUS_TRANSITION,
                     f"verify gate: stamp missing or stale "
@@ -3794,6 +3837,7 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 if files_changed > t_files or lines_changed > t_lines:
                     stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_SIMPLIFY)
                     if stamped_at is None or stamped_at != head_sha:
+                        emitted = False
                         with st.mutate(state_path) as data:
                             fresh_stamped = st.attestation_commit_sha(data, st.ATTESTATION_SIMPLIFY)
                             if fresh_stamped is None or fresh_stamped != head_sha:
@@ -3802,6 +3846,13 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                                     phase=args.phase, gate=st.ATTESTATION_SIMPLIFY,
                                     stamped_at=fresh_stamped, head_sha=head_sha,
                                 )
+                                emitted = True
+                        if emitted:
+                            _write_attestation_refused_inbox(
+                                cfg, data_snap, args.phase,
+                                gate=st.ATTESTATION_SIMPLIFY,
+                                stamped_at=stamped_at, head_sha=head_sha,
+                            )
                         return _die(
                             ExitCode.STATUS_TRANSITION,
                             f"simplify gate: diff is {files_changed} files / "
