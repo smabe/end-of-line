@@ -13,7 +13,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import monitor
+from end_of_line import monitor, registry
+from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.hooks import clu_session_start
 
@@ -182,6 +183,120 @@ class InstallSessionStartFlagTests(SessionStartInstallTestBase):
         self.assertEqual(rc, int(ExitCode.OK))
         ss = self._hooks_block().get("SessionStart", [])
         self.assertEqual(len(ss), 2, "operator's entry must survive")
+
+
+# ---- per-plan Monitor arming based on active plans in CWD ----------------
+
+
+class SessionStartActivePlansTest(unittest.TestCase):
+    """Hook emits per-plan Monitor arming + TaskCreate/TaskUpdate protocol
+    when active (STATUS_RUNNING) plans are detected in the current CWD's
+    registry entries."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._base = Path(self._tmp.name)
+        self._project = self._base / "project"
+        self._project.mkdir()
+        (self._project / "plans" / ".orchestrator").mkdir(parents=True)
+        self._xdg_patch = mock.patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": str(self._base)}
+        )
+        self._xdg_patch.start()
+        self.addCleanup(self._xdg_patch.stop)
+
+    def _register_plan(self, slug: str, status: str = st.STATUS_RUNNING) -> None:
+        """Register a plan in the CWD project and write a proper state file."""
+        registry.register(self._project, slug)
+        state_path = (
+            self._project / "plans" / ".orchestrator" / f"{slug}.state.json"
+        )
+        data = st.empty_state(slug, "plans")
+        data["status"] = status
+        st.save_atomic(state_path, data)
+
+    def _run_hook(self) -> tuple[int, str]:
+        """Run the hook with os.getcwd() patched to the test project dir."""
+        out = io.StringIO()
+        with mock.patch.object(os, "getcwd", return_value=str(self._project.resolve())), \
+             mock.patch.object(sys, "stdin", io.StringIO("")), \
+             mock.patch.object(sys, "stdout", out):
+            rc = clu_session_start.main()
+        payload = json.loads(out.getvalue())
+        return rc, payload["hookSpecificOutput"]["additionalContext"]
+
+    # ------------------------------------------------------------------
+
+    def test_no_active_plans_omits_per_plan_block(self) -> None:
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertIn("clu watch --all --operator", ctx)
+        self.assertNotIn("--task-list", ctx)
+        self.assertNotIn("TASK_CREATE", ctx)
+
+    def test_one_running_plan_emits_arming_block(self) -> None:
+        self._register_plan("my-plan")
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertIn("Monitor(", ctx)
+        self.assertIn("--plan my-plan --task-list", ctx)
+
+    def test_multiple_running_plans_arm_each(self) -> None:
+        self._register_plan("plan-one")
+        self._register_plan("plan-two")
+        self._register_plan("plan-three")
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        # Each plan emits one Monitor(...) block with --project . --plan <slug>
+        self.assertEqual(ctx.count("--project . --plan "), 3)
+        # Protocol block is emitted exactly once (not once per plan)
+        self.assertEqual(ctx.count("clu task-list protocol"), 1)
+
+    def test_non_running_plans_excluded(self) -> None:
+        self._register_plan("paused-plan", status=st.STATUS_PAUSED)
+        self._register_plan("halted-plan", status=st.STATUS_HALTED)
+        self._register_plan("done-plan", status=st.STATUS_DONE)
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("--task-list", ctx)
+        self.assertNotIn("TASK_CREATE", ctx)
+
+    def test_other_project_plans_excluded(self) -> None:
+        other = self._base / "other-project"
+        other.mkdir()
+        (other / "plans" / ".orchestrator").mkdir(parents=True)
+        registry.register(other, "other-slug")
+        state_path = other / "plans" / ".orchestrator" / "other-slug.state.json"
+        st.save_atomic(state_path, st.empty_state("other-slug", "plans"))
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("--task-list", ctx)
+
+    def test_corrupt_state_tolerated(self) -> None:
+        registry.register(self._project, "corrupt-plan")
+        state_path = (
+            self._project / "plans" / ".orchestrator" / "corrupt-plan.state.json"
+        )
+        state_path.write_text("{not valid json")
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertIn("clu watch --all --operator", ctx)
+        self.assertNotIn("--task-list", ctx)
+
+    def test_protocol_block_present_when_plans_active(self) -> None:
+        self._register_plan("active-plan")
+        _, ctx = self._run_hook()
+        self.assertIn("TASK_CREATE", ctx)
+        self.assertIn("TASK_UPDATE", ctx)
+        self.assertIn("└ ", ctx)
+        self.assertIn("Do NOT re-set subject", ctx)
+
+    def test_runtime_output_under_10k_with_max_plans(self) -> None:
+        for i in range(10):
+            self._register_plan(f"plan-{i:02d}")
+        _, ctx = self._run_hook()
+        self.assertLess(len(ctx), 9500)
 
 
 if __name__ == "__main__":
