@@ -223,21 +223,27 @@ itself — `dispatch_for_tick` does that after the lock is released.
 
 **Key types and functions**
 
-- `tick(state_path, config)` — entry point. Walks the eight-priority
+- `tick(state_path, config)` — entry point. Walks the nine-priority
   chain (see `architecture.md`) and returns a `TickResult`.
 - `TickResult` — dataclass with `action`, `detail`, `phase_id`, `token`,
   `notify_body` (rendered iMessage for actions that should ping), and
   `side_notifies: list[tuple[kind, body]]` (gap-fill emissions that
   ride alongside the primary action — see `_emit_*` helpers below).
 - `Action` — typed union of `dispatch`, `idle`, `lease_expired`,
-  `escalate`, `blocker_resumed`, `halt`, `plan_done`, `error`,
-  `stalled`.
+  `worker_dead`, `escalate`, `blocker_resumed`, `halt`, `plan_done`,
+  `error`, `stalled`.
 - `ACTION_NOTIFY_KIND` — map from action → notify kind for quiet-hours
   classification. Adding an action here is the one-line change that
-  makes a new tick path send iMessage.
+  makes a new tick path send iMessage. `worker_dead` maps to
+  `KIND_STALLED` (auto-recovery via re-dispatch; quiet-hours gated).
 - `_detect_stalled(data)` — emits `phase_stalled` once when a claim
   goes past the heartbeat threshold; stamps `stalled_notified=True` on
-  the claim so subsequent ticks fall through.
+  the claim so subsequent ticks fall through. Now priority 3 (after
+  the dead-PID rule).
+- Dead-PID detection (priority 2, issue #72) is inlined in `tick()`
+  rather than a separate `_detect_*` helper because it threads through
+  multiple state-mutation steps (event → release_claim_and_emit →
+  best-effort reap) under the existing `with st.mutate()` window.
 - `_emit_stuck_blocker_repings(data, config, side_notifies)` — re-pings
   any open blocker un-consumed for ≥30 min (and again every 30 min
   thereafter via `last_repinged_at`). Mutates `data` + appends to

@@ -41,7 +41,7 @@ For the *why* behind each, see
   that touches `registry.register` (directly or via `main(["init",
   ...])`). Without it, tests pollute the real `~/.config/clu/registry.json`.
 - **One tick = one action.** `supervisor.tick` is first-match-wins
-  through a 9-priority chain (canonical list in `supervisor.py`
+  through a 10-priority chain (canonical list in `supervisor.py`
   module docstring); never do two things per tick.
 
 ## What NOT to do

@@ -113,6 +113,7 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     {"ts": "ISO8601", "type": "phase_blocked",   "phase": "...", "blocker_id": "q-1"},
     {"ts": "ISO8601", "type": "blocker_answered","blocker_id": "q-1", "answer": "..."},
     {"ts": "ISO8601", "type": "lease_expired",   "phase": "..."},
+    {"ts": "ISO8601", "type": "phase_worker_dead", "phase": "...", "pid": 12345},
     {"ts": "ISO8601", "type": "task_spawned",    "task": "task-1", "source": "simplify"},
     {"ts": "ISO8601", "type": "plan_completed"},
     {"ts": "ISO8601", "type": "queue_popped",   "slug": "...", "added_at": "...", "added_by": "operator | worker", "position": 1},

@@ -100,9 +100,10 @@ If you see an answered blocker, that means: you asked a question previously, the
    ```
    If they differ, you are in a worktree. Git ops stay in `$WORKTREE_ROOT`; `clu --project` calls take `$PROJECT_ROOT`.
 
-2. **Arm the heartbeat ticker.** Long phases that don't ping `clu heartbeat` look identical to hung workers — `clu status` reports `STALLED` and the supervisor's gap-fill notifications fire. Start a background loop that pings every 2 minutes, and trap EXIT to clean it up:
+2. **Arm the heartbeat ticker.** Long phases that don't ping `clu heartbeat` look identical to hung workers — `clu status` reports `STALLED` and the supervisor's gap-fill notifications fire. Start a background loop that pings every 2 minutes, tied to the worker's parent PID so it self-terminates if the worker is SIGKILLed/OOMed (issue #72). The EXIT trap is the fast-cleanup path for graceful exits:
    ```bash
-   ( while :; do
+   WORKER_PID=$PPID
+   ( while kill -0 $WORKER_PID 2>/dev/null; do
        clu heartbeat --project "$PROJECT_ROOT" --plan "$PLAN" \
            --phase "$PHASE" --token "$TOKEN" >/dev/null 2>&1
        sleep 120
@@ -110,7 +111,7 @@ If you see an answered blocker, that means: you asked a question previously, the
    HEARTBEAT_PID=$!
    trap "kill $HEARTBEAT_PID 2>/dev/null" EXIT
    ```
-   The 2-minute interval is well inside the heartbeat threshold (derived from lease TTL: `max(15, lease_ttl//2)`, so 30 min at the default 60-min lease) and loose enough to not flood state.json writes. The EXIT trap is the contract — without it, the ticker survives the worker process and continues pinging a dead claim. Don't skip it.
+   The 2-minute interval is well inside the heartbeat threshold (derived from lease TTL: `max(15, lease_ttl//2)`, so 30 min at the default 60-min lease) and loose enough to not flood state.json writes. **Both terminators are load-bearing**: `kill -0 $WORKER_PID` catches death-by-signal where the EXIT trap doesn't fire (SIGKILL, OOM, crash); the EXIT trap catches graceful exits faster than the next `sleep 120` would notice. Supervisor-side detection (`_detect_dead_pid`) is the third layer that catches the worst case where both fail.
 
 2b. **Export the activity-hook environment.** The stuck-tool detector (`clu doctor`, supervisor gap-fill) scopes its process-tree walk to descendants spawned during the current Bash tool call. That window is stamped by a Claude Code PreToolUse/PostToolUse hook that calls `clu activity --start-bash` / `--end-bash`. The hook reads its context from env, so export the four vars here so they propagate to child processes (including Claude Code and its hooks):
    ```bash
@@ -228,7 +229,7 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Long phases**: the lease is 60 min by default. If your work takes longer, checkpoint by calling `clu block` with a question like "continue?" + options `["yes", "stop here"]`. The user replies, you resume on the next dispatch with their answer in hand. This is normal — phases are meant to be tick-sized, not session-sized.
 
-- **Skipping the heartbeat ticker**: step 2 arms a background `clu heartbeat` loop for every phase. Don't skip it even for short phases — `clu status` mis-reports `STALLED` the moment the phase exceeds the heartbeat threshold (`max(15, lease_ttl//2)`, ~30 min by default) without a heartbeat, and the supervisor's gap-fill notification fires. The 2-min ticker is cheap; the EXIT trap cleans it up automatically.
+- **Skipping the heartbeat ticker**: step 2 arms a background `clu heartbeat` loop for every phase. Don't skip it even for short phases — `clu status` mis-reports `STALLED` the moment the phase exceeds the heartbeat threshold (`max(15, lease_ttl//2)`, ~30 min by default) without a heartbeat, and the supervisor's gap-fill notification fires. The 2-min ticker is cheap; the `kill -0 $WORKER_PID` loop condition + EXIT trap clean it up automatically (issue #72 — old EXIT-only contract missed SIGKILL/OOM cases).
 
 - **Forgetting the activity-hook env exports**: step 2b exports `CLU_PLAN` / `CLU_PHASE` / `CLU_TOKEN` / `CLU_PROJECT`. Without those, the Claude Code PreToolUse hook (if installed) reads empty strings and short-circuits → `tool_stuck` detection silently disables. The phase still works; you just lose the early-warning signal for wedged Bash subprocesses. `clu doctor` flags the missing marker.
 

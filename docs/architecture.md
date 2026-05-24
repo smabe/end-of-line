@@ -92,7 +92,7 @@ escalations, not emergencies) but write to the inbox unconditionally.
 
 ## One tick = one action
 
-`supervisor.tick` walks an eight-priority chain. First match wins; the
+`supervisor.tick` walks a nine-priority chain. First match wins; the
 tick writes one event and returns. This ordering is load-bearing — every
 debugging session that asks "why didn't this tick advance?" reduces to
 "which rule fired first?".
@@ -100,7 +100,16 @@ debugging session that asks "why didn't this tick advance?" reduces to
 1. **Stale lease release.** If `current_claim.lease_expires` is in the
    past, drop the claim and write `lease_expired`. The phase's attempts
    counter ticks up next time it's dispatched.
-2. **Stalled heartbeat.** If a live claim hasn't heartbeat within the
+2. **Dead-PID release.** If the claim's worker PID is gone (ESRCH) or
+   recycled to an unrelated process (cmdline mismatch), drop the claim
+   and write `phase_worker_dead`. Fires before stalled-heartbeat so a
+   zombie heartbeat-keeper (issue #72) doesn't keep the lease looking
+   fresh until full TTL — detection now happens within one tick instead
+   of waiting 60 min. Probe via `state.claim_worker_alive(claim,
+   cmdline_match=...)`; on dead, emit event → release_claim_and_emit
+   (atomic release + coolant) → best-effort `reap_orphan_pid`. Best-
+   effort reap is last so a wedged `ps` can't crash the tick.
+3. **Stalled heartbeat.** If a live claim hasn't heartbeat within the
    threshold returned by `state.stalled_threshold_for_phase` —
    explicit `config.stalled_heartbeat_minutes` if set, else
    `max(15, lease_ttl_for_phase // 2)` — emit `phase_stalled` once and
@@ -109,28 +118,28 @@ debugging session that asks "why didn't this tick advance?" reduces to
    Deriving from lease TTL prevents false alarms when workers in deep
    tool-use chains skip heartbeats while still inside their lease
    window (60-min default → 30-min threshold).
-3. **Blocker SLA escalation.** If an open blocker is older than
+4. **Blocker SLA escalation.** If an open blocker is older than
    `blocked_question_sla_hours` (default 24), pause the plan and emit
    `blocker_sla_exceeded`. **Skipped during quiet hours** so an
    overnight rollover doesn't ping the user at 3am — the next loud tick
    re-checks.
-4. **Answered-blocker resume.** A blocker with `answer != null and not
+5. **Answered-blocker resume.** A blocker with `answer != null and not
    consumed` flips to `consumed=True`, the plan returns to `running`,
    and the supervisor returns `blocker_resumed`. The next tick after
    that dispatches the phase again with the answer in state.
-5. **Terminal status idle.** `paused / halted / halted_for_replan /
+6. **Terminal status idle.** `paused / halted / halted_for_replan /
    done` short-circuit to idle. This is what guarantees `halt` and
    `plan_done` notifications fire exactly once per transition.
-6. **Active claim idle.** A live, non-stalled claim means a worker is
+7. **Active claim idle.** A live, non-stalled claim means a worker is
    running; the supervisor returns idle and waits for the worker's
    callback.
-7. **Dispatch.** Walk phases from the master plan's `## Sessions index`
+8. **Dispatch.** Walk phases from the master plan's `## Sessions index`
    in order. Skip completed phases (a `phase_completed` event exists)
    and phases with an open blocker. The first remaining phase claims —
    unless it's already at `max_attempts_per_phase`, in which case the
    plan halts. The returned `TickResult` carries the new token, which
    `cmd_tick` then hands to `dispatch.dispatch_for_tick`.
-8. **All-done.** All phases completed and no pending spawned tasks →
+9. **All-done.** All phases completed and no pending spawned tasks →
    write `plan_completed`, set status to `done`, return `plan_done`.
    Otherwise idle.
 
@@ -585,7 +594,7 @@ worker          clu (state.json)            notify          iMessage          op
 4. **Poller → state.** `route_reply` shells out to `clu answer <id>
    <index>` against the resolved plan. That command writes the answer
    into the blocker and appends `blocker_answered`.
-5. **Next tick.** Rule 4 of the priority chain fires: `consumed=True`,
+5. **Next tick.** Rule 5 of the priority chain fires: `consumed=True`,
    status flips back to `running`, event `blocker_consumed` is logged,
    tick returns `blocker_resumed`.
 6. **Tick after that.** The phase no longer has an open blocker, so
