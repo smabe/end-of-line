@@ -2,14 +2,16 @@
 
 Action priority (first match wins):
   1. Stale lease release
-  2. Stalled heartbeat → emit phase_stalled once
-  3. Stale-question escalation
-  4. Answered-question resume (mark consumed)
-  5. Plan halted/paused → idle
-  6. Active claim → idle
-  7. Dispatch next pending phase
-  8. All phases complete → mark plan done
-  9. Idle
+  2. Dead-PID release (issue #72: heartbeat-zombie keeps the lease fresh
+     after worker death; catch within one tick instead of full lease TTL)
+  3. Stalled heartbeat → emit phase_stalled once
+  4. Stale-question escalation
+  5. Answered-question resume (mark consumed)
+  6. Plan halted/paused → idle
+  7. Active claim → idle
+  8. Dispatch next pending phase
+  9. All phases complete → mark plan done
+  10. Idle
 """
 from __future__ import annotations
 
@@ -161,7 +163,7 @@ def walk_worker_tree(
 
 
 Action = Literal[
-    "dispatch", "idle", "lease_expired", "escalate",
+    "dispatch", "idle", "lease_expired", "worker_dead", "escalate",
     "blocker_resumed", "halt", "plan_done", "error", "stalled",
 ]
 
@@ -195,6 +197,7 @@ class TickResult:
 # change a future contributor needs to make a tick path notify.
 ACTION_NOTIFY_KIND: dict[Action, str] = {
     "stalled": notify.KIND_STALLED,
+    "worker_dead": notify.KIND_STALLED,
     "plan_done": notify.KIND_COMPLETED,
     "halt": notify.KIND_HALTED,
 }
@@ -477,6 +480,43 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         cmdline_mismatch=reap.cmdline_mismatch,
                     )
                 return _attach(TickResult("lease_expired", f"phase={phase_id}"))
+
+            # issue #72: heartbeat-keeper subprocess survives worker death
+            # (EXIT trap doesn't fire on SIGKILL/OOM/crash) and keeps the
+            # lease looking fresh until full TTL. The dead-PID probe is the
+            # tick-side half of the fix; the shell-side `kill -0 $WORKER_PID`
+            # loop condition in /clu-phase SKILL.md ships in the same change
+            # as the worker-side half.
+            cmdline_match = f"/clu-phase {data['plan_slug']} {phase_id}"
+            if pid and not st.claim_worker_alive(
+                claim, cmdline_match=cmdline_match,
+            ):
+                # Order matters: durable state first (event + release +
+                # coolant), best-effort reap last. If `reap_orphan_pid`
+                # raises (e.g. ps timeout), the claim is already released
+                # and the event is on disk — next tick won't re-fire.
+                st.append_event(
+                    data, st.EVENT_PHASE_WORKER_DEAD,
+                    phase=phase_id, pid=pid,
+                )
+                st.release_claim_and_emit(
+                    data,
+                    coolant_enabled=config.coolant.enabled,
+                    coolant_script_override=config.coolant.script_dir,
+                )
+                try:
+                    st.reap_orphan_pid(pid, cmdline_match=cmdline_match)
+                except Exception:
+                    pass
+                return _attach(TickResult(
+                    "worker_dead",
+                    f"phase={phase_id}",
+                    phase_id=phase_id,
+                    token=claimed_by,
+                    notify_body=notify.render_worker_dead(
+                        data["plan_slug"], phase_id, pid,
+                    ),
+                ))
 
         # Surface stalled claims once. Don't release the claim — the lease
         # owns retry; this event is just the signal the notification adapter

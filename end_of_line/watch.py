@@ -40,6 +40,9 @@ _DEFAULT_VISIBLE: frozenset[str] = frozenset(filter(None, {
     # Attestation gate refusal (#70) — actionable, the worker is wedged on
     # a missing/stale verify or simplify stamp.
     getattr(st, "EVENT_ATTESTATION_REFUSED", None),
+    # Dead-PID detection (#72) — operator-actionable: a worker died, the
+    # claim got released, next tick re-dispatches.
+    getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
 }))
 
 _VERBOSE_ONLY: frozenset[str] = frozenset({
@@ -64,6 +67,7 @@ _OPERATOR_VISIBLE: frozenset[str] = frozenset(filter(None, {
     st.EVENT_PHASE_BLOCKED,
     getattr(st, "EVENT_ATTESTATION_REFUSED", None),
     st.EVENT_STALLED_CLAIM_NOTIFIED,
+    getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
 }))
 
 
@@ -214,6 +218,15 @@ if _Q_REJECTED:
     )
 
 
+# Dead-PID formatter (#72) — splice in only when constant is defined so
+# older state files predating worker-pid-liveness don't trip up the dispatch.
+_WORKER_DEAD = getattr(st, "EVENT_PHASE_WORKER_DEAD", None)
+if _WORKER_DEAD:
+    _FORMATTERS[_WORKER_DEAD] = lambda slug, e: (
+        f"{_phase_prefix(slug, e)}: WORKER DEAD pid={e.get('pid', '?')}"
+    )
+
+
 # Attestation-refused formatter (#70 dashboard) — splice in when defined.
 _ATTEST_REFUSED = getattr(st, "EVENT_ATTESTATION_REFUSED", None)
 if _ATTEST_REFUSED:
@@ -242,6 +255,8 @@ _TASK_STATUS_MAP: dict[str, str] = {
 }
 if _ATTEST_REFUSED:
     _TASK_STATUS_MAP[_ATTEST_REFUSED] = "in_progress"
+if _WORKER_DEAD:
+    _TASK_STATUS_MAP[_WORKER_DEAD] = "in_progress"
 
 _TASK_VERBOSE_STATUS_MAP: dict[str, str] = {
     st.EVENT_LEASE_EXTENDED: "in_progress",

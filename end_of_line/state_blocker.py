@@ -139,6 +139,13 @@ def render_halted(plan_slug: str, phase: str, attempts: int) -> str:
     )
 
 
+def render_worker_dead(plan_slug: str, phase: str, pid: int) -> str:
+    return (
+        f"💀 {plan_slug}/{phase} worker died (pid={pid}) — "
+        f"claim released, will re-dispatch next tick."
+    )
+
+
 def render_stuck_blocker(
     plan_slug: str, blocker_id: str, phase: str,
     question: str, options: list[str], age_min: int,

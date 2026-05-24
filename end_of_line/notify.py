@@ -22,6 +22,7 @@ from .state_blocker import (
     render_halted,
     render_stalled,
     render_stuck_blocker,
+    render_worker_dead,
 )
 
 if TYPE_CHECKING:
@@ -172,6 +173,7 @@ def in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:
 __all__ = [
     "BLOCKER_BODY_SOFT_LIMIT", "KIND_STUCK_BLOCKER",
     "render_blocker", "render_halted", "render_stalled", "render_stuck_blocker",
+    "render_worker_dead",
 ]
 
 

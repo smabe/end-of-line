@@ -270,6 +270,125 @@ class SupervisorTestCase(CluTestCase):
         self.assertFalse(reaped["cmdline_mismatch"])
         self.assertEqual(reaped["pid"], 88888)
 
+    # --- dead-PID detection (priority 2, before stalled-heartbeat) ---
+
+    def _claim_with_pid(
+        self, pid: int | None = None, lease_expires: str | None = None,
+    ) -> None:
+        """Claim phase 'a' and stamp PID; optionally pin lease_expires."""
+        tick(self.state_path, self.cfg)
+        with st.locked(self.state_path):
+            data = st.load(self.state_path)
+            if pid is not None:
+                data["current_claim"]["pid"] = pid
+            else:
+                data["current_claim"].pop("pid", None)
+            if lease_expires is not None:
+                data["current_claim"]["lease_expires"] = lease_expires
+            st.save_atomic(self.state_path, data)
+
+    def test_dead_pid_fires_releases_claim_and_emits_event(self) -> None:
+        # Lease far in the future so lease-expiry (priority 1) doesn't preempt.
+        self._claim_with_pid(pid=99999, lease_expires="2099-01-01T00:00:00Z")
+        original_claim = dict(self._read()["current_claim"])
+        original_token = original_claim["claimed_by"]
+        reap_return = st.ReapResult(
+            signaled=None, escalated_kill=False, cmdline_mismatch=False,
+        )
+        with mock.patch(
+            "end_of_line.state.claim_worker_alive", return_value=False,
+        ) as mock_alive, mock.patch(
+            "end_of_line.state.reap_orphan_pid", return_value=reap_return,
+        ) as mock_reap, mock.patch(
+            "end_of_line.supervisor.coolant.emit_stop",
+        ) as emit:
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "worker_dead")
+        self.assertIsNone(self._read()["current_claim"])
+        event_types = [e["type"] for e in self._read()["events"]]
+        self.assertIn(st.EVENT_PHASE_WORKER_DEAD, event_types)
+        # PID-reuse defense: helper + reap must both receive cmdline_match.
+        # If a future refactor drops the kwarg, the PID-reuse protection
+        # silently disappears — pin both sites in tests.
+        mock_alive.assert_called_once()
+        self.assertEqual(
+            mock_alive.call_args.kwargs["cmdline_match"],
+            "/clu-phase test-plan a",
+        )
+        mock_reap.assert_called_once_with(
+            original_claim["pid"], cmdline_match="/clu-phase test-plan a",
+        )
+        emit.assert_called_once()
+        self.assertEqual(emit.call_args.kwargs["session_id"], original_token)
+        # Operator-notification wiring: notify_body must be set so
+        # ACTION_NOTIFY_KIND["worker_dead"] fires an iMessage in cmd_tick.
+        self.assertIsNotNone(result.notify_body)
+        self.assertIn("99999", result.notify_body)
+
+    def test_live_pid_no_op_falls_through(self) -> None:
+        import os as _os
+        self._claim_with_pid(
+            pid=_os.getpid(), lease_expires="2099-01-01T00:00:00Z",
+        )
+        with mock.patch(
+            "end_of_line.state.claim_worker_alive", return_value=True,
+        ):
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "idle")
+        self.assertIsNotNone(self._read()["current_claim"])
+        event_types = [e["type"] for e in self._read()["events"]]
+        self.assertNotIn(st.EVENT_PHASE_WORKER_DEAD, event_types)
+
+    def test_pid_none_skips_dead_pid_check(self) -> None:
+        # Popen→_stamp_pid race window: claim active, pid not yet stamped.
+        # The rule must not fire (and must not call the helper either).
+        self._claim_with_pid(pid=None, lease_expires="2099-01-01T00:00:00Z")
+        with mock.patch(
+            "end_of_line.state.claim_worker_alive",
+        ) as mock_alive:
+            result = tick(self.state_path, self.cfg)
+        mock_alive.assert_not_called()
+        self.assertEqual(result.action, "idle")
+        self.assertIsNotNone(self._read()["current_claim"])
+
+    def test_dead_pid_reap_exception_does_not_block_release(self) -> None:
+        # Ordering invariant: durable state (event + release) must complete
+        # even if best-effort reap raises (e.g. `ps` timeout, OSError). If
+        # reap blocked release, we'd loop forever — every tick would re-detect
+        # the same dead PID and crash before releasing.
+        self._claim_with_pid(pid=99999, lease_expires="2099-01-01T00:00:00Z")
+        with mock.patch(
+            "end_of_line.state.claim_worker_alive", return_value=False,
+        ), mock.patch(
+            "end_of_line.state.reap_orphan_pid",
+            side_effect=OSError("simulated ps failure"),
+        ):
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "worker_dead")
+        self.assertIsNone(self._read()["current_claim"])
+        event_types = [e["type"] for e in self._read()["events"]]
+        self.assertIn(st.EVENT_PHASE_WORKER_DEAD, event_types)
+
+    def test_pid_reuse_cmdline_mismatch_treated_as_dead(self) -> None:
+        # claim_worker_alive returns False when PID exists but cmdline mismatch
+        # — the rule fires the same as for a dead PID. The reap call records
+        # the mismatch flag for the audit trail.
+        import os as _os
+        self._claim_with_pid(
+            pid=_os.getpid(), lease_expires="2099-01-01T00:00:00Z",
+        )
+        reap_return = st.ReapResult(
+            signaled=None, escalated_kill=False, cmdline_mismatch=True,
+        )
+        with mock.patch(
+            "end_of_line.state.claim_worker_alive", return_value=False,
+        ), mock.patch(
+            "end_of_line.state.reap_orphan_pid", return_value=reap_return,
+        ):
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "worker_dead")
+        self.assertIsNone(self._read()["current_claim"])
+
     def test_lease_expired_emits_coolant_stop(self) -> None:
         """The lease-expiry branch decrements coolant's counter — the
         worker's CPU footprint dropped when the process died (or hung)

@@ -312,5 +312,56 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(st.completed_phase_ids(data), {"a", "b"})
 
 
+class TestClaimWorkerAlive(unittest.TestCase):
+    """Liveness probe used by the supervisor's dead-PID rule. Mirrors
+    `reap_orphan_pid`'s ESRCH/EPERM/cmdline-match contract.
+    """
+
+    def test_pid_none_returns_true(self) -> None:
+        # Popen-to-_stamp_pid race: claim active but pid not yet stamped.
+        # Default to alive so the supervisor doesn't kill a freshly-claimed phase.
+        self.assertTrue(st.claim_worker_alive({}))
+        self.assertTrue(st.claim_worker_alive({"pid": None}))
+
+    def test_dead_pid_returns_false(self) -> None:
+        # 99999 is well above any plausible live PID on a typical macOS / Linux
+        # box and even if it happens to be live, cmdline_match would fail.
+        with patch("end_of_line.state.os.kill", side_effect=ProcessLookupError):
+            self.assertFalse(st.claim_worker_alive({"pid": 99999}))
+
+    def test_live_pid_permission_error_treated_as_alive(self) -> None:
+        # EPERM means the process exists but we lack signaling permission
+        # (cross-user / sandboxed). Treat as alive — mirrors reap_orphan_pid.
+        with patch("end_of_line.state.os.kill", side_effect=PermissionError):
+            self.assertTrue(st.claim_worker_alive({"pid": 1}))
+
+    def test_cmdline_match_mismatch_returns_false(self) -> None:
+        # PID is alive but cmdline doesn't match the expected /clu-phase
+        # invocation → PID was reused. Treat as dead.
+        from subprocess import CompletedProcess
+        with patch("end_of_line.state.os.kill", return_value=None), patch(
+            "end_of_line.state.subprocess.run",
+            return_value=CompletedProcess(
+                args=[], returncode=0, stdout="some other command", stderr="",
+            ),
+        ):
+            self.assertFalse(st.claim_worker_alive(
+                {"pid": 1}, cmdline_match="/clu-phase foo bar",
+            ))
+
+    def test_cmdline_match_hit_returns_true(self) -> None:
+        from subprocess import CompletedProcess
+        with patch("end_of_line.state.os.kill", return_value=None), patch(
+            "end_of_line.state.subprocess.run",
+            return_value=CompletedProcess(
+                args=[], returncode=0,
+                stdout="claude /clu-phase foo bar token", stderr="",
+            ),
+        ):
+            self.assertTrue(st.claim_worker_alive(
+                {"pid": 1}, cmdline_match="/clu-phase foo bar",
+            ))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -215,6 +215,13 @@ EVENT_ATTESTATION_REFUSED = "attestation_refused"
 # Supervisor reaped an orphaned worker process after lease expiry.
 # Fields: phase, pid, signaled ("SIGTERM" | "SIGTERM+SIGKILL"), cmdline_mismatch (bool).
 EVENT_PHASE_ORPHAN_REAPED = "phase_orphan_reaped"
+# Supervisor's `_detect_dead_pid` rule fired: the claim's worker PID is gone
+# (ESRCH) or has been recycled to an unrelated process (cmdline mismatch),
+# but the lease hasn't expired yet — without this rule we'd zombie the claim
+# until full lease TTL. Fires before `_detect_stalled` so a fresh-heartbeat
+# zombie (issue #72) is caught within one tick of worker death.
+# Fields: phase, pid, cmdline_mismatch (bool).
+EVENT_PHASE_WORKER_DEAD = "phase_worker_dead"
 # Supervisor's process-tree walker detected a long-lived, low-CPU descendant
 # of the worker pid — i.e. a Bash tool wedged on something (canonical case:
 # xcodebuild hanging on simulator HK auth). Detection only, no auto-kill.
@@ -247,6 +254,47 @@ class ReapResult:
     signaled: str | None
     escalated_kill: bool
     cmdline_mismatch: bool
+
+
+def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
+    """Liveness probe for the supervisor's `_detect_dead_pid` rule.
+
+    Mirrors `reap_orphan_pid`'s ESRCH/EPERM/cmdline-match contract. Returns
+    True when the PID is reachable AND (if `cmdline_match` is given) the
+    process cmdline contains the expected substring; False otherwise.
+
+    PID=None → True. The Popen-to-_stamp_pid race window leaves a brief
+    period where current_claim is set but pid is not yet stamped — treat
+    that as alive so the supervisor doesn't kill a freshly-claimed phase.
+    """
+    pid = claim.get("pid")
+    if pid is None:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # EPERM means the process exists but we can't signal it (cross-user
+        # or sandboxed). Treat as alive — matches reap_orphan_pid's behavior.
+        return True
+    if cmdline_match is None:
+        return True
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # ps wedged / missing / signal-interrupted → can't disprove liveness.
+        # Default to alive so the supervisor doesn't kill a real worker on
+        # transient host weirdness.
+        return True
+    if result.returncode != 0:
+        return False
+    return cmdline_match in result.stdout
 
 
 def reap_orphan_pid(pid: int, cmdline_match: str | None = None) -> ReapResult:
