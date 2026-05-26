@@ -56,6 +56,7 @@ Inspect the JSON:
 
 Run via Bash:
 
+<!-- skilltest -->
 ```bash
 clu install-hook                       # UserPromptSubmit (inbox surface) only
 clu install-hook --session-start       # adds SessionStart hook too (#70 operator dashboard)

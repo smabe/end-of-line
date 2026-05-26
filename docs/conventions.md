@@ -225,6 +225,36 @@ call in `setUp`. Forgetting it doesn't fail the test — it just
 quietly writes to your real config dir, and you discover it later
 when `clu` lists a dozen phantom plans.
 
+## Skill fence tags (`<!-- skilltest -->`)
+
+Bash fences in `end_of_line/skills/*/SKILL.md` go stale when a flag
+gets renamed or a verb gets removed and nobody updates the example.
+`tests/test_skill_fences.py` runs tagged fences under a sandboxed
+shell to catch this class of drift.
+
+To mark a fence as runnable, prefix it with the marker line — an
+HTML comment that's invisible in rendered markdown, immediately
+followed (blank lines allowed) by the ```bash opening fence. The
+marker must sit on its own line. The fence must be `bash` (not `sh`/`shell`/untagged) so the
+parser stays unambiguous.
+
+Sandbox: each tagged fence runs in a `tempfile.TemporaryDirectory()`
+with `HOME` and `XDG_CONFIG_HOME` redirected inside it, so
+`clu install-hook` / `clu install-skill` style commands write to the
+sandbox and not the operator's real config. The harness reuses the
+spirit of `tests.isolate_registry()` — same containment, different
+mechanism (env vars, since the fence runs as a subprocess not
+in-process).
+
+Tagging is opt-in. Most existing fences use placeholders (`<slug>`,
+`<phase-id>`) and can't be executed verbatim — leave those untagged.
+Tag fences when:
+
+- The example has no placeholders (constants only).
+- The command terminates on its own (no `clu watch` / streaming
+  commands — they'd hit the 30s timeout).
+- Side effects stay inside `HOME` / `XDG_CONFIG_HOME` / cwd.
+
 ## Atomic state mutations
 
 Reads and writes to a state file go through `state.mutate`:
