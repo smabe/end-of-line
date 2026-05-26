@@ -68,9 +68,10 @@ Ask only what you can't infer:
 
 #### Phase granularity
 
-Each phase has ~100s of overhead (cron tick gap + cold-context ramp +
-subprocess startup) before any real work happens. Don't phase finer
-than the work justifies.
+Each phase has ~30–60s of overhead (cold-context worker ramp +
+subprocess startup; push-dispatch since #52 closed the cron-tick gap
+between phases) before any real work happens. Don't phase finer than
+the work justifies.
 
 Rules of thumb:
 
@@ -80,8 +81,9 @@ Rules of thumb:
 - **A "meaningful commit" isn't a single function.** It's a
   minimum-viable slice that's TDD-able and reviewable on its own —
   a function plus its first caller usually qualifies.
-- **Target 2–4 phases for typical features.** 5+ is rare and usually a
-  sign of over-decomposition.
+- **Target 3–6 phases for typical features.** 7+ is fine when each
+  phase is a genuinely independent slice (notify-multi-channel was 7,
+  clu-ship was 8); treat it as a smell to re-check, not a hard cap.
 - **Phase when there's a forcing function:** schema bumps, API surface
   changes that other plans queue against, config fields workers need
   to read in earlier phases.
@@ -89,7 +91,7 @@ Rules of thumb:
 Receipt: auto-archive-on-merge (2026-05-18) was 3 phases; the first
 phase added a single ~15-line helper plus 5 tests and could have
 shipped inside the next phase's commit without losing TDD-ability.
-Each saved phase is ~100s of dead time off the plan's wall clock.
+Each saved phase is ~30–60s of dead time off the plan's wall clock.
 
 ### Step 2: Pre-author research (optional, scale to size)
 
@@ -167,8 +169,17 @@ conflicts across worktrees were the canonical failure (clu #50;
 - Structured commit format (Title / Why / What's new / Under the hood /
   Tests / `Co-Authored-By:` trailer).
 - Stage explicit paths (no `git add -A`).
+- **Stamp attestations AFTER the commit.** The gate compares stamp SHA
+  against HEAD; pre-commit stamps go stale the moment you commit.
+  - `clu verify --plan <slug> --phase <id> --token <T>` runs the
+    project verify command and stamps `attestations.verify`.
+  - `clu attest --simplify --plan <slug> --phase <id> --token <T>`
+    stamps `attestations.simplify` (required when phase diff exceeds
+    `simplify_threshold`; auto-passes below it).
 - Call `clu complete --plan <slug> --phase <id> --token <T>` with the
-  worker token on success.
+  worker token on success. The completion gate refuses with
+  `EVENT_ATTESTATION_REFUSED` + an inbox surface if stamps are missing
+  or stale.
 
 ## Sessions index
 
@@ -182,6 +193,15 @@ The Sessions index is load-bearing. `parse_sessions_index()` derives
 phase IDs from the sub-plan filename: if the filename is
 `<slug>-<phase>.md`, the phase ID is `<phase>`. Both must be valid
 slugs per `st.validate_slug` regex `^[a-z0-9][a-z0-9_-]{0,63}$`.
+
+**The `Effort` column is mechanically load-bearing, not decorative.**
+`parse_effort_minutes()` reads it at `clu init` time to scale each
+phase's lease TTL (default 60min × `lease_ttl_scale`, capped by
+`lease_ttl_minutes`). Formats accepted: `45m`, `1h`, `2.5h`, or a
+bare integer interpreted as minutes. Undersize → lease expires
+mid-phase and the worker halts; oversize is fine. Estimate honestly;
+a 4-hour phase tagged `1h` is a footgun. Shipped in lease-reliability
+(#57/#58).
 
 #### Sub-plan template (one per phase)
 
@@ -221,10 +241,13 @@ See `plans/<slug>.md`. Summary:
    - <Concrete check 2 — e.g. manual smoke command + expected output>
    - <Concrete check 3 — e.g. grep confirms no regressions>
 
-4. **Commit + complete.**
+4. **Commit + attest + complete.**
    - Structured commit: `<slug>: phase <phase-id> — <scope> (#issue
      if applicable)`.
    - Stage explicit paths: `<file1>`, `<file2>`, `<test file>`.
+   - **After the commit** (HEAD must be the SHA being attested):
+     - `clu verify --plan <slug> --phase <phase-id> --token <T>`
+     - `clu attest --simplify --plan <slug> --phase <phase-id> --token <T>`
    - `clu complete --plan <slug> --phase <phase-id> --token <T>`.
 
 ## Failure modes to watch
@@ -288,13 +311,26 @@ When the operator says `ship` (or equivalent):
    clu queue add --project . <slug-1> <slug-2> <slug-3>
    ```
 
-5. **Confirm to the operator** with the dispatched state:
+5. **Confirm to the operator** with the dispatched state. Both
+   `clu init` and `clu queue add` print a one-line resolved-model
+   summary (worker-model-line #51) — surface it to the operator if
+   they're choosing between sonnet/opus for this run:
    ```bash
    clu queue list --project .
-   clu list  # fleet view
+   clu list                              # fleet view (snapshot)
+   clu watch --all --task-list           # fleet stream (alt to list)
    ```
 
-6. **Arm live progress monitoring** via the Monitor tool:
+6. **Arm live progress monitoring** via the Monitor tool — only when
+   the SessionStart hook hasn't already done it. The hook
+   (`end_of_line/hooks/clu_session_start.py`) auto-arms one
+   `--task-list` Monitor per active plan on every fresh session in a
+   clu-managed cwd, and the hook docstring guarantees idempotency
+   (won't double-arm if one is already in flight). So the manual
+   block below is the fallback for the "just queued this in the
+   current session" case — the hook hasn't fired yet because no new
+   session has opened. After `/clear` or a fresh session, the hook
+   does it for you.
    ```
    Monitor(
        description="clu <slug> phase progress",
@@ -307,6 +343,14 @@ When the operator says `ship` (or equivalent):
    arrives as a notification, so you see what clu is doing without
    polling. The operator's UserPromptSubmit hook handles AFK surfacing
    separately; this is the at-desk live feed.
+
+   **Cross-plan wedge events** (`tool_stuck`, `phase_blocked`,
+   `attestation_refused`, `stalled_claim_notified`) stream on a
+   different filter — `clu watch --all --operator` — armed once per
+   session by the user-CLAUDE.md SessionStart instruction (operator
+   dashboard, #70). It's complementary to per-plan `--task-list`,
+   not redundant: `--operator` is host-wide wedge surfacing,
+   `--task-list` is per-plan execution progress.
 
 7. **Tear down the Monitor when the plan completes.** The single
    teardown trigger is `TASK_UPDATE task=<slug> status=completed`
@@ -385,6 +429,16 @@ after step 1. Don't run `clu init` without explicit operator intent.
   --token <T>`.** That's the worker's exit contract (per `/clu-phase`
   SKILL.md and the project CLAUDE.md mandate `--token on every worker
   callback`). Omitting it = lease-expiry = halt.
+- **Attestation gate (#55) must be satisfied BEFORE `clu complete`.**
+  Sub-plans must include, AFTER the commit and BEFORE complete, both
+  `clu verify --plan ... --phase ... --token <T>` (runs project
+  verify command, stamps `attestations.verify@HEAD`) and
+  `clu attest --simplify --plan ... --phase ... --token <T>` (stamps
+  `attestations.simplify@HEAD`). The gate compares stamp SHA against
+  HEAD; stale or missing stamps refuse completion with
+  `EVENT_ATTESTATION_REFUSED` + an inbox surface. Skip flags exist
+  (`--skip-verify`, `--skip-simplify`) but emit audit events — use
+  only with operator approval.
 - **Phase IDs and plan slugs must match `^[a-z0-9][a-z0-9_-]{0,63}$`.**
   `st.validate_slug` enforces this. Sub-plan filenames derive phase
   IDs by stripping `<plan-slug>-` from the basename.
@@ -536,8 +590,9 @@ Smallest-first.
 - TDD: failing tests first.
 - `/code-review` after if diff >1 file or ~30 lines.
 - Full suite green.
-- Structured commit format.
-- Stage explicit paths.
+- Structured commit format; stage explicit paths.
+- **Post-commit attestations:** `clu verify` then `clu attest --simplify`
+  (each with `--plan auth-cleanup --phase <id> --token <T>`).
 - Call `clu complete --plan auth-cleanup --phase <id> --token <T>`.
 
 ## Sessions index
