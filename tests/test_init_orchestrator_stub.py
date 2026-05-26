@@ -5,6 +5,7 @@ augments it with `{"verify_required": true}` so the knob is
 discoverable. When the block already exists (any contents), cmd_init
 leaves it untouched — the operator has already expressed intent.
 """
+
 from __future__ import annotations
 
 import json
@@ -117,6 +118,7 @@ class InitQualityStubTestCase(unittest.TestCase):
         self.assertEqual(self._init(), 0)
         # No config created by the stub helper.
         self.assertFalse(self.cfg_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

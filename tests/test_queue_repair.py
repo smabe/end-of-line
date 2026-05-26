@@ -11,6 +11,7 @@ The load-bearing assertion in this suite: whenever validation says no,
 the queue file on disk MUST equal the pre-repair bytes. Drift here is
 how silent data loss creeps in.
 """
+
 from __future__ import annotations
 
 import io
@@ -31,14 +32,26 @@ def _valid_payload() -> dict:
     return {
         "schema_version": 1,
         "queue": [
-            {"slug": "alpha", "added_at": st.utcnow(),
-             "added_by": "operator", "position_at_add": "tail"},
-            {"slug": "beta", "added_at": st.utcnow(),
-             "added_by": "operator", "position_at_add": "tail"},
+            {
+                "slug": "alpha",
+                "added_at": st.utcnow(),
+                "added_by": "operator",
+                "position_at_add": "tail",
+            },
+            {
+                "slug": "beta",
+                "added_at": st.utcnow(),
+                "added_by": "operator",
+                "position_at_add": "tail",
+            },
         ],
         "history": [
-            {"slug": "gamma", "added_at": st.utcnow(),
-             "ended_at": st.utcnow(), "outcome": "removed"},
+            {
+                "slug": "gamma",
+                "added_at": st.utcnow(),
+                "ended_at": st.utcnow(),
+                "outcome": "removed",
+            },
         ],
     }
 
@@ -66,6 +79,7 @@ class _Base(unittest.TestCase):
         def _record(spec, kind, body, **kw):
             sent.append((kind, body))
             return True
+
         self.notify_patcher = mock.patch.object(notify, "notify", side_effect=_record)
         self.notify_patcher.start()
         self.addCleanup(self.notify_patcher.stop)
@@ -75,7 +89,8 @@ class _Base(unittest.TestCase):
         return ProjectConfig(
             project_root=self.project,
             dispatch=DispatchSpec(
-                kind="shell", command="echo phase",
+                kind="shell",
+                command="echo phase",
                 repair_command=repair_command,
             ),
             notify=NotifySpec.imessage_only("self"),
@@ -90,23 +105,26 @@ class _Base(unittest.TestCase):
 
     def _diagnosis_hash(self, exc: Exception) -> str:
         import hashlib
-        return hashlib.sha256(
-            f"{type(exc).__name__}: {exc}".encode()
-        ).hexdigest()[:8]
+
+        return hashlib.sha256(f"{type(exc).__name__}: {exc}".encode()).hexdigest()[:8]
 
 
 def _worker_writes(bytes_to_write: bytes):
     """Stub-side-effect: worker overwrites the corrupt_path with bytes."""
+
     def _side(cfg, corrupt_path, backup_path, diagnosis, log_path, **kw):
         corrupt_path.write_bytes(bytes_to_write)
         return 0
+
     return _side
 
 
 def _worker_no_op(rc: int = 9):
     """Worker exits without modifying corrupt_path (REPAIR_DECLINED, timeout, etc.)."""
+
     def _side(cfg, corrupt_path, backup_path, diagnosis, log_path, **kw):
         return rc
+
     return _side
 
 
@@ -115,9 +133,7 @@ class RepairDisabledTests(_Base):
         self._set_backup_in_corrupt(self.backup_bytes)
         cfg = self._cfg(repair_command=None)
         exc = json.JSONDecodeError("expecting value", "{", 0)
-        with mock.patch(
-            "end_of_line.dispatch.dispatch_repair_worker"
-        ) as mock_disp:
+        with mock.patch("end_of_line.dispatch.dispatch_repair_worker") as mock_disp:
             _handle_corrupt_queue(cfg, exc, self.queue_path)
         mock_disp.assert_not_called()
         # Backup file written + throttle bumped + KIND_QUEUE_CORRUPT fired.
@@ -135,9 +151,15 @@ class RepairValidationTests(_Base):
         cfg = self._cfg(repair_command="run repair {corrupt_path}")
         throttle = self.queue_path.with_name(self.queue_path.name + ".repair-attempts")
         # Seed prior throttle hits — successful repair must clear them.
-        throttle.write_text(json.dumps({
-            "attempts": 2, "last_at": st.utcnow(), "diagnosis_hash": "x",
-        }))
+        throttle.write_text(
+            json.dumps(
+                {
+                    "attempts": 2,
+                    "last_at": st.utcnow(),
+                    "diagnosis_hash": "x",
+                }
+            )
+        )
         exc = json.JSONDecodeError("expecting value", "{", 0)
         with mock.patch(
             "end_of_line.dispatch.dispatch_repair_worker",
@@ -154,12 +176,20 @@ class RepairValidationTests(_Base):
         dropped = {
             "schema_version": 1,
             "queue": [
-                {"slug": "beta", "added_at": st.utcnow(),
-                 "added_by": "operator", "position_at_add": "tail"},
+                {
+                    "slug": "beta",
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                },
             ],
             "history": [
-                {"slug": "gamma", "added_at": st.utcnow(),
-                 "ended_at": st.utcnow(), "outcome": "removed"},
+                {
+                    "slug": "gamma",
+                    "added_at": st.utcnow(),
+                    "ended_at": st.utcnow(),
+                    "outcome": "removed",
+                },
             ],
         }
         exc = json.JSONDecodeError("nope", "{", 0)
@@ -177,10 +207,15 @@ class RepairValidationTests(_Base):
         self._set_backup_in_corrupt(self.backup_bytes)
         cfg = self._cfg(repair_command="run repair")
         empty = {
-            "schema_version": 1, "queue": [],
+            "schema_version": 1,
+            "queue": [],
             "history": [
-                {"slug": "gamma", "added_at": st.utcnow(),
-                 "ended_at": st.utcnow(), "outcome": "removed"},
+                {
+                    "slug": "gamma",
+                    "added_at": st.utcnow(),
+                    "ended_at": st.utcnow(),
+                    "outcome": "removed",
+                },
             ],
         }
         exc = json.JSONDecodeError("nope", "{", 0)
@@ -198,10 +233,18 @@ class RepairValidationTests(_Base):
         removed_history = {
             "schema_version": 1,
             "queue": [
-                {"slug": "alpha", "added_at": st.utcnow(),
-                 "added_by": "operator", "position_at_add": "tail"},
-                {"slug": "beta", "added_at": st.utcnow(),
-                 "added_by": "operator", "position_at_add": "tail"},
+                {
+                    "slug": "alpha",
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                },
+                {
+                    "slug": "beta",
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                },
             ],
             "history": [],
         }
@@ -212,9 +255,7 @@ class RepairValidationTests(_Base):
         ):
             _handle_corrupt_queue(cfg, exc, self.queue_path)
         self.assertEqual(self.queue_path.read_bytes(), self.backup_bytes)
-        kind, body = next(
-            (k, b) for k, b in self.sent if k == notify.KIND_QUEUE_REPAIR_FAILED
-        )
+        kind, body = next((k, b) for k, b in self.sent if k == notify.KIND_QUEUE_REPAIR_FAILED)
         self.assertIn("gamma", body)
 
     def test_repair_reverts_on_still_unparseable(self) -> None:
@@ -258,6 +299,7 @@ class RepairValidationTests(_Base):
         self.queue_path.write_bytes(b"{not json")
         exc = json.JSONDecodeError("nope", "{", 0)
         from end_of_line import dispatch as dispatch_mod
+
         with mock.patch(
             "end_of_line.dispatch.dispatch_repair_worker",
             side_effect=_worker_no_op(rc=dispatch_mod.REPAIR_RC_TIMEOUT),
@@ -273,13 +315,16 @@ class RepairThrottleTests(_Base):
         exc = json.JSONDecodeError("nope", "{", 0)
         diagnosis_hash = self._diagnosis_hash(exc)
         throttle = self.queue_path.with_name(self.queue_path.name + ".repair-attempts")
-        throttle.write_text(json.dumps({
-            "attempts": 3, "last_at": st.utcnow(),
-            "diagnosis_hash": diagnosis_hash,
-        }))
-        with mock.patch(
-            "end_of_line.dispatch.dispatch_repair_worker"
-        ) as mock_disp:
+        throttle.write_text(
+            json.dumps(
+                {
+                    "attempts": 3,
+                    "last_at": st.utcnow(),
+                    "diagnosis_hash": diagnosis_hash,
+                }
+            )
+        )
+        with mock.patch("end_of_line.dispatch.dispatch_repair_worker") as mock_disp:
             _handle_corrupt_queue(cfg, exc, self.queue_path)
         mock_disp.assert_not_called()
         self.assertIn(notify.KIND_QUEUE_CORRUPT, self._kinds())
@@ -292,10 +337,15 @@ class RepairThrottleTests(_Base):
         exc = json.JSONDecodeError("nope", "{", 0)
         diagnosis_hash = self._diagnosis_hash(exc)
         throttle = self.queue_path.with_name(self.queue_path.name + ".repair-attempts")
-        throttle.write_text(json.dumps({
-            "attempts": 2, "last_at": st.utcnow(),
-            "diagnosis_hash": diagnosis_hash,
-        }))
+        throttle.write_text(
+            json.dumps(
+                {
+                    "attempts": 2,
+                    "last_at": st.utcnow(),
+                    "diagnosis_hash": diagnosis_hash,
+                }
+            )
+        )
         with mock.patch(
             "end_of_line.dispatch.dispatch_repair_worker",
             side_effect=_worker_writes(_valid_bytes()),
@@ -309,10 +359,15 @@ class RepairThrottleTests(_Base):
         throttle = self.queue_path.with_name(self.queue_path.name + ".repair-attempts")
         # Old hash with 3 attempts already; new corruption diagnosis hash
         # differs → not blocked.
-        throttle.write_text(json.dumps({
-            "attempts": 3, "last_at": st.utcnow(),
-            "diagnosis_hash": "deadbeef",
-        }))
+        throttle.write_text(
+            json.dumps(
+                {
+                    "attempts": 3,
+                    "last_at": st.utcnow(),
+                    "diagnosis_hash": "deadbeef",
+                }
+            )
+        )
         exc = json.JSONDecodeError("nope", "{", 0)
         with mock.patch(
             "end_of_line.dispatch.dispatch_repair_worker",
@@ -345,10 +400,7 @@ class RepairFilesystemTests(_Base):
 
 class RepairExtractSlugsTests(unittest.TestCase):
     def test_best_effort_extract_slugs_finds_all(self) -> None:
-        data = (
-            b'{"queue": [{"slug": "foo"}, {"slug": "bar"}],'
-            b' "history": [{"slug": "baz"}]}'
-        )
+        data = b'{"queue": [{"slug": "foo"}, {"slug": "bar"}], "history": [{"slug": "baz"}]}'
         self.assertEqual(
             queue.best_effort_extract_slugs(data),
             {"foo", "bar", "baz"},
@@ -364,10 +416,7 @@ class RepairExtractSlugsTests(unittest.TestCase):
         )
 
     def test_best_effort_extract_history_slugs_isolates_history(self) -> None:
-        data = (
-            b'{"queue": [{"slug": "alpha"}],'
-            b' "history": [{"slug": "gamma"}, {"slug": "delta"}]}'
-        )
+        data = b'{"queue": [{"slug": "alpha"}], "history": [{"slug": "gamma"}, {"slug": "delta"}]}'
         self.assertEqual(
             queue.best_effort_extract_history_slugs(data),
             {"gamma", "delta"},
@@ -390,6 +439,7 @@ class RepairMultiProjectTests(unittest.TestCase):
         def _record(spec, kind, body, **kw):
             sent.append((kind, body))
             return True
+
         np = mock.patch.object(notify, "notify", side_effect=_record)
         np.start()
         self.addCleanup(np.stop)
@@ -428,10 +478,14 @@ class RepairMultiProjectTests(unittest.TestCase):
             "| only | `foo-only.md` | x | 1h |\n"
         )
         with queue.mutate(b_cfg.queue_path()) as data:
-            data["queue"].append({
-                "slug": "foo", "added_at": st.utcnow(),
-                "added_by": "operator", "position_at_add": "tail",
-            })
+            data["queue"].append(
+                {
+                    "slug": "foo",
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                }
+            )
 
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -440,10 +494,7 @@ class RepairMultiProjectTests(unittest.TestCase):
         # B's queue drained; A is still corrupt (no repair_command set, so
         # the pipeline did backup + notify, not write).
         self.assertEqual(queue.load(b_cfg.queue_path())["queue"], [])
-        b_slugs = {
-            e.plan_slug for e in registry.entries()
-            if Path(e.project_root).resolve() == b
-        }
+        b_slugs = {e.plan_slug for e in registry.entries() if Path(e.project_root).resolve() == b}
         self.assertIn("foo", b_slugs)
         self.assertIn(notify.KIND_QUEUE_CORRUPT, [k for k, _ in self.sent])
 

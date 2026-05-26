@@ -5,6 +5,7 @@ reply target?" Three callers previously each maintained a private walk:
 notify_imessage_inbound, cli.cmd_answer, and notify_discord_inbound. The
 migrate phase wires them all to call here instead.
 """
+
 from __future__ import annotations
 
 import json

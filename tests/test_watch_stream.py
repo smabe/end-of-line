@@ -1,4 +1,5 @@
 """Tests for watch.stream_loop — polling loop, cursor, snapshot baseline."""
+
 from __future__ import annotations
 
 import io
@@ -19,8 +20,14 @@ def _evt(type_: str, **fields) -> dict:
     return {"type": type_, "ts": TS, **fields}
 
 
-def _make_state(path: Path, slug: str, *, status: str = "running",
-                claim_phase: str | None = None, events: list | None = None) -> None:
+def _make_state(
+    path: Path,
+    slug: str,
+    *,
+    status: str = "running",
+    claim_phase: str | None = None,
+    events: list | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     claim = None
     if claim_phase:
@@ -62,17 +69,18 @@ class StreamLoopSnapshotTest(CluTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.project = self.tmp_path / "project"
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "my-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "my-plan.state.json"
         _make_state(self.state_path, "my-plan", claim_phase="foundation")
 
     def test_snapshot_baseline_emitted_on_start(self) -> None:
         sink = io.StringIO()
         stream_loop(
             [self.state_path],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=0,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=0,
         )
         out = sink.getvalue()
         self.assertIn("[snapshot]", out)
@@ -86,8 +94,11 @@ class StreamLoopSnapshotTest(CluTestCase):
         sink = io.StringIO()
         stream_loop(
             [state_path],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=0,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=0,
         )
         self.assertIn("active=none", sink.getvalue())
 
@@ -96,9 +107,7 @@ class StreamLoopCursorTest(CluTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.project = self.tmp_path / "project"
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "my-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "my-plan.state.json"
         _make_state(self.state_path, "my-plan", claim_phase="foundation")
 
     def test_new_event_emitted_after_baseline(self) -> None:
@@ -109,8 +118,11 @@ class StreamLoopCursorTest(CluTestCase):
 
         stream_loop(
             [self.state_path],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=inject,
         )
         self.assertIn("completed", sink.getvalue())
@@ -126,8 +138,11 @@ class StreamLoopCursorTest(CluTestCase):
 
         stream_loop(
             [self.state_path],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=2,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=2,
             _before_first_tick=inject,
         )
         lines = [l for l in sink.getvalue().splitlines() if "completed" in l]
@@ -146,8 +161,11 @@ class StreamLoopCursorTest(CluTestCase):
 
         stream_loop(
             [self.state_path],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=inject,
         )
         out = sink.getvalue()
@@ -160,24 +178,29 @@ class StreamLoopVerboseTest(CluTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.project = self.tmp_path / "project"
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "vp.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "vp.state.json"
         _make_state(self.state_path, "vp")
 
     def _inject_lease_extended(self) -> None:
-        _append_event(self.state_path, _evt(
-            st.EVENT_LEASE_EXTENDED,
-            phase="p", extended_by_minutes=30,
-            new_expires="2099-01-01T01:00:00Z",
-        ))
+        _append_event(
+            self.state_path,
+            _evt(
+                st.EVENT_LEASE_EXTENDED,
+                phase="p",
+                extended_by_minutes=30,
+                new_expires="2099-01-01T01:00:00Z",
+            ),
+        )
 
     def test_verbose_only_event_filtered_default(self) -> None:
         sink = io.StringIO()
         stream_loop(
             [self.state_path],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=self._inject_lease_extended,
         )
         self.assertNotIn("lease extended", sink.getvalue())
@@ -186,8 +209,11 @@ class StreamLoopVerboseTest(CluTestCase):
         sink = io.StringIO()
         stream_loop(
             [self.state_path],
-            json_mode=False, verbose=True,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=False,
+            verbose=True,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=self._inject_lease_extended,
         )
         self.assertIn("lease extended", sink.getvalue())
@@ -197,17 +223,18 @@ class StreamLoopJsonModeTest(CluTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.project = self.tmp_path / "project"
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "jp.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "jp.state.json"
         _make_state(self.state_path, "jp")
 
     def test_json_mode_emits_json_per_line(self) -> None:
         sink = io.StringIO()
         stream_loop(
             [self.state_path],
-            json_mode=True, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=True,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=lambda: _append_event(
                 self.state_path, _evt(st.EVENT_PHASE_COMPLETED, phase="x")
             ),
@@ -224,8 +251,11 @@ class StreamLoopJsonModeTest(CluTestCase):
         sink = io.StringIO()
         stream_loop(
             [self.state_path],
-            json_mode=True, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=True,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=lambda: _append_event(
                 self.state_path, _evt(st.EVENT_LEASE_EXPIRED, phase="x")
             ),
@@ -242,8 +272,11 @@ class StreamLoopMissingFileTest(CluTestCase):
         sink = io.StringIO()
         stream_loop(
             [missing],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
         )
         self.assertEqual(sink.getvalue(), "")
 
@@ -258,8 +291,11 @@ class StreamLoopMissingFileTest(CluTestCase):
         sink = io.StringIO()
         stream_loop(
             [state_path],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=delete_it,
         )
         # No exception; path removed from cursors; only snapshot before deletion
@@ -285,8 +321,11 @@ class StreamLoopMultiPlanTest(CluTestCase):
 
         stream_loop(
             [self.path_a, self.path_b],
-            json_mode=False, verbose=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            json_mode=False,
+            verbose=False,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=inject,
         )
         out = sink.getvalue()
@@ -308,8 +347,10 @@ class StreamLoopSigintTest(CluTestCase):
             mock_time.sleep.side_effect = KeyboardInterrupt
             rc = stream_loop(
                 [state_path],
-                json_mode=False, verbose=False,
-                sink=sink, poll_interval=1.0,
+                json_mode=False,
+                verbose=False,
+                sink=sink,
+                poll_interval=1.0,
             )
 
         self.assertEqual(rc, 0)

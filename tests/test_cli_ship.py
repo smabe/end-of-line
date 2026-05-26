@@ -8,6 +8,7 @@ tick so auto_archive_rule fires without waiting for cron.
 Later phases extend with --all-done (phase 4), --as-pr (phase 5-6),
 and ship_mode config default (phase 7).
 """
+
 from __future__ import annotations
 
 import io
@@ -38,7 +39,9 @@ PLAN_BODY = """\
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=check,
+        capture_output=True,
+        text=True,
+        check=check,
     )
 
 
@@ -60,7 +63,8 @@ class ShipBase(unittest.TestCase):
         self.origin = self.parent / "origin.git"
         subprocess.run(
             ["git", "init", "-q", "--bare", str(self.origin)],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         _git(self.project, "remote", "add", "origin", str(self.origin))
         _git(self.project, "push", "-u", "origin", "main")
@@ -79,10 +83,16 @@ class ShipBase(unittest.TestCase):
         _git(self.project, "commit", "-m", f"add {slug} plan")
         _git(self.project, "push", "origin", "main")
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            main([
-                "init", "--project", str(self.project),
-                "--plan", slug, "--worktree",
-            ])
+            main(
+                [
+                    "init",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    slug,
+                    "--worktree",
+                ]
+            )
         return self._state_path(slug)
 
     def _set_done(self, slug: str) -> None:
@@ -236,7 +246,11 @@ class ShipHappyPathTests(ShipBase):
         # The merge-base of main and worker SHA is worker SHA itself
         # (worker is an ancestor of main).
         r = _git(
-            self.project, "merge-base", "--is-ancestor", worker_sha, main_head,
+            self.project,
+            "merge-base",
+            "--is-ancestor",
+            worker_sha,
+            main_head,
             check=False,
         )
         self.assertEqual(r.returncode, 0)
@@ -265,12 +279,12 @@ class ShipHappyPathTests(ShipBase):
             # .resolve() so str(self.project) might not equal what argv
             # carries on macOS (/var → /private/var). Match on the verb
             # + branch instead.
-            if (
-                isinstance(argv, list)
-                and "push" in argv and "origin" in argv and branch in argv
-            ):
+            if isinstance(argv, list) and "push" in argv and "origin" in argv and branch in argv:
                 return subprocess.CompletedProcess(
-                    argv, 1, stdout="", stderr="error: branch deleted upstream\n",
+                    argv,
+                    1,
+                    stdout="",
+                    stderr="error: branch deleted upstream\n",
                 )
             return real_run(*args, **kwargs)
 
@@ -288,7 +302,8 @@ class ShipAsPrPlanTests(ShipBase):
     fetch) bumps local origin/main."""
 
     def _gh_fake(
-        self, *,
+        self,
+        *,
         version_ok: bool = True,
         auth_ok: bool = True,
         pr_create_succeeds: bool = True,
@@ -317,20 +332,30 @@ class ShipAsPrPlanTests(ShipBase):
             if argv[:3] == ["gh", "pr", "create"]:
                 if pr_create_already_open:
                     return subprocess.CompletedProcess(
-                        argv, 1, "",
+                        argv,
+                        1,
+                        "",
                         "a pull request for branch already exists\n",
                     )
                 if pr_create_succeeds:
                     return subprocess.CompletedProcess(
-                        argv, 0,
-                        f"{existing_pr_url}\n", "",
+                        argv,
+                        0,
+                        f"{existing_pr_url}\n",
+                        "",
                     )
                 return subprocess.CompletedProcess(
-                    argv, 1, "", "gh: unexpected error\n",
+                    argv,
+                    1,
+                    "",
+                    "gh: unexpected error\n",
                 )
             if argv[:3] == ["gh", "pr", "view"]:
                 return subprocess.CompletedProcess(
-                    argv, 0, f'{{"url":"{existing_pr_url}"}}\n', "",
+                    argv,
+                    0,
+                    f'{{"url":"{existing_pr_url}"}}\n',
+                    "",
                 )
             return real_run(*args, **kwargs)
 
@@ -444,9 +469,7 @@ class ShipModeResolutionTests(ShipBase):
     `dispatch.ship_mode` when no --direct/--as-pr flag is passed."""
 
     def _write_config(self, mode: str) -> None:
-        (self.project / ".orchestrator.json").write_text(
-            f'{{"dispatch":{{"ship_mode":"{mode}"}}}}'
-        )
+        (self.project / ".orchestrator.json").write_text(f'{{"dispatch":{{"ship_mode":"{mode}"}}}}')
 
     def test_no_flag_no_config_defaults_to_direct(self) -> None:
         # Config absent → DispatchSpec default "direct" → direct
@@ -492,7 +515,8 @@ class ShipAsPrAllDoneTests(ShipBase):
         self._set_done(slug)
 
     def _gh_fake_batch(
-        self, *,
+        self,
+        *,
         version_ok: bool = True,
         auth_ok: bool = True,
         fail_for: set[str] | None = None,
@@ -526,12 +550,17 @@ class ShipAsPrAllDoneTests(ShipBase):
                         break
                 if head in fail_for:
                     return subprocess.CompletedProcess(
-                        argv, 1, "", "gh: simulated failure\n",
+                        argv,
+                        1,
+                        "",
+                        "gh: simulated failure\n",
                     )
                 slug = head.rsplit("/", 1)[-1] if "/" in head else head
                 return subprocess.CompletedProcess(
-                    argv, 0,
-                    f"https://github.com/example/repo/pull/{slug}\n", "",
+                    argv,
+                    0,
+                    f"https://github.com/example/repo/pull/{slug}\n",
+                    "",
                 )
             return real_run(*args, **kwargs)
 
@@ -692,7 +721,11 @@ class ShipAllDoneTests(ShipBase):
         # Both branches are ancestors of main.
         for b in (alpha_branch, beta_branch):
             r = _git(
-                self.project, "merge-base", "--is-ancestor", b, "main",
+                self.project,
+                "merge-base",
+                "--is-ancestor",
+                b,
+                "main",
                 check=False,
             )
             self.assertEqual(r.returncode, 0, f"branch {b} not in main")
@@ -728,7 +761,11 @@ class ShipAllDoneTests(ShipBase):
         self.assertNotEqual(rc, ExitCode.OK)
         beta_branch = self._branch("beta")
         r = _git(
-            self.project, "merge-base", "--is-ancestor", beta_branch, "main",
+            self.project,
+            "merge-base",
+            "--is-ancestor",
+            beta_branch,
+            "main",
             check=False,
         )
         self.assertEqual(r.returncode, 0, "beta should have shipped despite alpha failure")
@@ -746,7 +783,11 @@ class ShipAllDoneTests(ShipBase):
         # Nothing shipped.
         alpha_branch = self._branch("alpha")
         r = _git(
-            self.project, "merge-base", "--is-ancestor", alpha_branch, "main",
+            self.project,
+            "merge-base",
+            "--is-ancestor",
+            alpha_branch,
+            "main",
             check=False,
         )
         self.assertNotEqual(r.returncode, 0)

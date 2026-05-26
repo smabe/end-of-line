@@ -1,4 +1,5 @@
 """Tests for end_of_line.state_locator — find_blocker_for_reply."""
+
 from __future__ import annotations
 
 import json
@@ -36,17 +37,19 @@ def _add_blocker_raw(state_path: Path, options: list[str] | None = None) -> None
     data = json.loads(state_path.read_text())
     opts = options if options is not None else ["yes", "no"]
     blocker_id = f"q-{len(data['blockers']) + 1}"
-    data["blockers"].append({
-        "id": blocker_id,
-        "phase_id": "p1",
-        "type": "blocked_input",
-        "question": "Question?",
-        "options": opts,
-        "context": "",
-        "asked_at": "2026-01-01T00:00:00Z",
-        "answer": None,
-        "answered_at": None,
-    })
+    data["blockers"].append(
+        {
+            "id": blocker_id,
+            "phase_id": "p1",
+            "type": "blocked_input",
+            "question": "Question?",
+            "options": opts,
+            "context": "",
+            "asked_at": "2026-01-01T00:00:00Z",
+            "answer": None,
+            "answered_at": None,
+        }
+    )
     st.save_atomic(state_path, data)
 
 

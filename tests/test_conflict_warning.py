@@ -6,6 +6,7 @@ working tree. Suppression rides on each plan's `in_conflict_with` list;
 the canonical-pair rule (`slug_a < slug_b` emits) keeps it to one
 event + one iMessage per (project, pair) onset.
 """
+
 from __future__ import annotations
 
 import io
@@ -109,16 +110,23 @@ class ConflictWarningTestCase(unittest.TestCase):
         )
         subprocess.run(
             ["git", "-C", str(self.project), "commit", "--allow-empty", "-m", "i"],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         self._init_plan("alpha")
         (self.project / "plans" / "beta.md").write_text(PLAN_BODY)
         err = io.StringIO()
         with redirect_stdout(io.StringIO()), redirect_stderr(err):
-            main([
-                "init", "--project", str(self.project), "--plan", "beta",
-                "--worktree",
-            ])
+            main(
+                [
+                    "init",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "beta",
+                    "--worktree",
+                ]
+            )
         self.assertNotIn("hint:", err.getvalue())
 
     # --- tick-time detection ------------------------------------------

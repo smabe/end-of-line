@@ -6,6 +6,7 @@ Grouping rule: a file's slug is the longest stem `M` in `plans/shipped/`
 such that the file equals `M.md` or starts with `M-`. Each group is
 one `git mv` into `plans/archive/<slug>/`.
 """
+
 from __future__ import annotations
 
 import io
@@ -22,7 +23,9 @@ from tests import isolate_registry
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
 
 
@@ -103,9 +106,7 @@ class TestMigrateArchive(MigrateArchiveBase):
         self.assertEqual(rc, ExitCode.OK)
         self.assertTrue((self.project / "plans" / "archive" / "alpha" / "alpha.md").exists())
         self.assertTrue((self.project / "plans" / "archive" / "beta" / "beta.md").exists())
-        self.assertTrue(
-            (self.project / "plans" / "archive" / "beta" / "beta-phase-1.md").exists()
-        )
+        self.assertTrue((self.project / "plans" / "archive" / "beta" / "beta-phase-1.md").exists())
 
     def test_overlapping_prefix_picks_longest_master(self) -> None:
         # `task-list-nesting.md` and `task-list-blocked.md` are independent
@@ -116,12 +117,14 @@ class TestMigrateArchive(MigrateArchiveBase):
         rc, _, _ = self._run()
         self.assertEqual(rc, ExitCode.OK)
         self.assertTrue(
-            (self.project / "plans" / "archive" / "task-list-nesting"
-             / "task-list-nesting.md").exists()
+            (
+                self.project / "plans" / "archive" / "task-list-nesting" / "task-list-nesting.md"
+            ).exists()
         )
         self.assertTrue(
-            (self.project / "plans" / "archive" / "task-list-blocked"
-             / "task-list-blocked.md").exists()
+            (
+                self.project / "plans" / "archive" / "task-list-blocked" / "task-list-blocked.md"
+            ).exists()
         )
 
     def test_dry_run_previews_without_mutating(self) -> None:
@@ -148,9 +151,7 @@ class TestMigrateArchive(MigrateArchiveBase):
         # No staged or unstaged-tracked changes left (untracked test
         # scaffolding like the seeded `.orchestrator.json` is fine).
         status = _git(self.project, "status", "--porcelain").stdout
-        dirty = [
-            line for line in status.splitlines() if not line.startswith("??")
-        ]
+        dirty = [line for line in status.splitlines() if not line.startswith("??")]
         self.assertEqual(dirty, [], f"unexpected dirty state: {status!r}")
 
 

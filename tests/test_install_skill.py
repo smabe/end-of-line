@@ -9,6 +9,7 @@ installs one. `--force` overrides the no-clobber-non-symlink safety.
 
 HOME is redirected per-test so we never write to the real ~/.claude.
 """
+
 from __future__ import annotations
 
 import io
@@ -39,21 +40,11 @@ class InstallSkillTestBase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.target = self.home / ".claude" / "skills" / "clu-phase" / "SKILL.md"
         self.plan_target = self.home / ".claude" / "skills" / "plan" / "SKILL.md"
-        self.brainstorm_target = (
-            self.home / ".claude" / "skills" / "brainstorm" / "SKILL.md"
-        )
-        self.monitor_target = (
-            self.home / ".claude" / "skills" / "clu-monitor" / "SKILL.md"
-        )
-        self.clu_plan_target = (
-            self.home / ".claude" / "skills" / "clu-plan" / "SKILL.md"
-        )
-        self.bundled_bytes = (
-            files("end_of_line").joinpath("skills/clu-phase/SKILL.md").read_bytes()
-        )
-        self.bundled_plan_bytes = (
-            files("end_of_line").joinpath("skills/plan/SKILL.md").read_bytes()
-        )
+        self.brainstorm_target = self.home / ".claude" / "skills" / "brainstorm" / "SKILL.md"
+        self.monitor_target = self.home / ".claude" / "skills" / "clu-monitor" / "SKILL.md"
+        self.clu_plan_target = self.home / ".claude" / "skills" / "clu-plan" / "SKILL.md"
+        self.bundled_bytes = files("end_of_line").joinpath("skills/clu-phase/SKILL.md").read_bytes()
+        self.bundled_plan_bytes = files("end_of_line").joinpath("skills/plan/SKILL.md").read_bytes()
         self.bundled_brainstorm_bytes = (
             files("end_of_line").joinpath("skills/brainstorm/SKILL.md").read_bytes()
         )
@@ -83,13 +74,16 @@ class FreshInstallTests(InstallSkillTestBase):
         self.assertEqual(self.target.read_bytes(), self.bundled_bytes)
         self.assertEqual(self.plan_target.read_bytes(), self.bundled_plan_bytes)
         self.assertEqual(
-            self.brainstorm_target.read_bytes(), self.bundled_brainstorm_bytes,
+            self.brainstorm_target.read_bytes(),
+            self.bundled_brainstorm_bytes,
         )
         self.assertEqual(
-            self.monitor_target.read_bytes(), self.bundled_monitor_bytes,
+            self.monitor_target.read_bytes(),
+            self.bundled_monitor_bytes,
         )
         self.assertEqual(
-            self.clu_plan_target.read_bytes(), self.bundled_clu_plan_bytes,
+            self.clu_plan_target.read_bytes(),
+            self.bundled_clu_plan_bytes,
         )
         self.assertIn(str(self.target), out)
         self.assertIn(str(self.plan_target), out)
@@ -142,7 +136,8 @@ class OnlyFlagTests(InstallSkillTestBase):
         self.assertFalse(self.monitor_target.exists())
         self.assertFalse(self.clu_plan_target.exists())
         self.assertEqual(
-            self.brainstorm_target.read_bytes(), self.bundled_brainstorm_bytes,
+            self.brainstorm_target.read_bytes(),
+            self.bundled_brainstorm_bytes,
         )
         self.assertIn(str(self.brainstorm_target), out)
 
@@ -155,7 +150,8 @@ class OnlyFlagTests(InstallSkillTestBase):
         self.assertTrue(self.monitor_target.exists())
         self.assertFalse(self.clu_plan_target.exists())
         self.assertEqual(
-            self.monitor_target.read_bytes(), self.bundled_monitor_bytes,
+            self.monitor_target.read_bytes(),
+            self.bundled_monitor_bytes,
         )
         self.assertIn(str(self.monitor_target), out)
 
@@ -168,7 +164,8 @@ class OnlyFlagTests(InstallSkillTestBase):
         self.assertFalse(self.monitor_target.exists())
         self.assertTrue(self.clu_plan_target.exists())
         self.assertEqual(
-            self.clu_plan_target.read_bytes(), self.bundled_clu_plan_bytes,
+            self.clu_plan_target.read_bytes(),
+            self.bundled_clu_plan_bytes,
         )
         self.assertIn(str(self.clu_plan_target), out)
 
@@ -255,6 +252,7 @@ class HardlinkTargetTests(InstallSkillTestBase):
     shared inode, hitting the upstream copy. Force-install must break the
     hardlink instead.
     """
+
     def setUp(self) -> None:
         super().setUp()
         self.target.parent.mkdir(parents=True)
@@ -269,7 +267,8 @@ class HardlinkTargetTests(InstallSkillTestBase):
         self.assertEqual(self.target.read_bytes(), self.bundled_bytes)
         self.assertEqual(self.linked.read_bytes(), b"upstream skill body\n")
         self.assertNotEqual(
-            self.target.stat().st_ino, self.linked.stat().st_ino,
+            self.target.stat().st_ino,
+            self.linked.stat().st_ino,
         )
 
 
@@ -378,9 +377,7 @@ class ClaudeMdNoteTests(InstallSkillTestBase):
         # Start marker without end (or vice versa) is malformed state — bail
         # rather than guess where to insert.
         self.claude_md.parent.mkdir(parents=True, exist_ok=True)
-        self.claude_md.write_text(
-            f"# Personal\n\n{self.NOTE_START}\nno end marker here\n"
-        )
+        self.claude_md.write_text(f"# Personal\n\n{self.NOTE_START}\nno end marker here\n")
         rc, _, err = self._run("--add-claude-md-note")
         self.assertNotEqual(rc, int(ExitCode.OK))
         self.assertIn("malformed", err.lower())
@@ -390,16 +387,20 @@ class ClaudeMdNoteTests(InstallSkillTestBase):
             self._run("--add-claude-md-note", "--no-claude-md-note")
 
     def test_interactive_accept(self):
-        with mock.patch("sys.stdin.isatty", return_value=True), \
-             mock.patch("builtins.input", return_value="y"):
+        with (
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("builtins.input", return_value="y"),
+        ):
             rc, _, _ = self._run()
         self.assertEqual(rc, int(ExitCode.OK))
         self.assertTrue(self.claude_md.exists())
         self.assertIn(self.NOTE_START, self.claude_md.read_text())
 
     def test_interactive_decline(self):
-        with mock.patch("sys.stdin.isatty", return_value=True), \
-             mock.patch("builtins.input", return_value=""):
+        with (
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("builtins.input", return_value=""),
+        ):
             rc, _, _ = self._run()
         self.assertEqual(rc, int(ExitCode.OK))
         self.assertFalse(self.claude_md.exists())

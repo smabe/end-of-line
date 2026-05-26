@@ -1,4 +1,5 @@
 """Host-level plan registry (Day-2 Cliff 2 dependency)."""
+
 from __future__ import annotations
 
 import json

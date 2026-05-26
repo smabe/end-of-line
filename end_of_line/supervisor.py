@@ -13,6 +13,7 @@ Action priority (first match wins):
   9. All phases complete → mark plan done
   10. Idle
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -25,6 +26,7 @@ from typing import Literal
 from . import coolant, inbox, notify, state as st, state_blocker
 from .config import ProjectConfig
 from .plan_parser import parse_sessions_index
+
 
 def _local_now() -> _dt.datetime:
     """Wall-clock local time. Indirection exists so tests can pin the hour."""
@@ -120,7 +122,9 @@ def capture_ps_snapshot() -> str:
     try:
         result = subprocess.run(
             ["ps", "-eo", "pid,ppid,etime,time,command"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
     except (subprocess.SubprocessError, OSError):
         return ""
@@ -163,8 +167,16 @@ def walk_worker_tree(
 
 
 Action = Literal[
-    "dispatch", "idle", "lease_expired", "worker_dead", "escalate",
-    "blocker_resumed", "halt", "plan_done", "error", "stalled",
+    "dispatch",
+    "idle",
+    "lease_expired",
+    "worker_dead",
+    "escalate",
+    "blocker_resumed",
+    "halt",
+    "plan_done",
+    "error",
+    "stalled",
 ]
 
 
@@ -224,8 +236,10 @@ def _detect_stalled(data: dict) -> TickResult | None:
     token = claim.get("claimed_by", "")
     claim["stalled_notified"] = True
     st.append_event(
-        data, st.EVENT_PHASE_STALLED,
-        phase=claim["phase_id"], claimed_by=token,
+        data,
+        st.EVENT_PHASE_STALLED,
+        phase=claim["phase_id"],
+        claimed_by=token,
         age_seconds=round(age, 1),
     )
     return TickResult(
@@ -238,7 +252,8 @@ def _detect_stalled(data: dict) -> TickResult | None:
 
 
 def _emit_stuck_blocker_repings(
-    data: dict, config: ProjectConfig,
+    data: dict,
+    config: ProjectConfig,
     side_notifies: list[tuple[str, str]],
 ) -> None:
     """Re-ping any blocker open ≥30min since asked (or last reping)."""
@@ -254,8 +269,11 @@ def _emit_stuck_blocker_repings(
             except (KeyError, ValueError):
                 age_min = 0
             st.append_event(
-                data, st.EVENT_STUCK_BLOCKER_REPINGED,
-                blocker_id=b["id"], phase=b["phase_id"], age_min=age_min,
+                data,
+                st.EVENT_STUCK_BLOCKER_REPINGED,
+                blocker_id=b["id"],
+                phase=b["phase_id"],
+                age_min=age_min,
             )
             side_notifies.append((kind, body))
             try:
@@ -263,10 +281,7 @@ def _emit_stuck_blocker_repings(
                     type="stuck_blocker",
                     plan_slug=data["plan_slug"],
                     project_root=project_root,
-                    summary=(
-                        f"Blocker {b['id']} on phase {b['phase_id']} "
-                        f"open {age_min}min"
-                    ),
+                    summary=(f"Blocker {b['id']} on phase {b['phase_id']} open {age_min}min"),
                     details={
                         "blocker_id": b["id"],
                         "phase_id": b["phase_id"],
@@ -280,7 +295,8 @@ def _emit_stuck_blocker_repings(
 
 
 def _emit_stalled_claim_notify(
-    data: dict, config: ProjectConfig,
+    data: dict,
+    config: ProjectConfig,
     side_notifies: list[tuple[str, str]],
 ) -> None:
     """One-shot signal on lease-expiry transition while plan is RUNNING.
@@ -307,24 +323,27 @@ def _emit_stalled_claim_notify(
     age_min = int((now - expires).total_seconds() // 60)
     claim["stalled_notified"] = True
     st.append_event(
-        data, st.EVENT_STALLED_CLAIM_NOTIFIED,
-        phase=claim["phase_id"], stalled_min=age_min,
+        data,
+        st.EVENT_STALLED_CLAIM_NOTIFIED,
+        phase=claim["phase_id"],
+        stalled_min=age_min,
     )
-    side_notifies.append((
-        notify.KIND_STALLED_CLAIM,
-        notify.render_stalled_claim(
-            data["plan_slug"], claim["phase_id"], age_min,
-        ),
-    ))
+    side_notifies.append(
+        (
+            notify.KIND_STALLED_CLAIM,
+            notify.render_stalled_claim(
+                data["plan_slug"],
+                claim["phase_id"],
+                age_min,
+            ),
+        )
+    )
     try:
         inbox.write_event(
             type="stalled_claim",
             plan_slug=data["plan_slug"],
             project_root=str(config.project_root.resolve()),
-            summary=(
-                f"Claim on phase {claim['phase_id']} stalled "
-                f"{age_min}min past lease"
-            ),
+            summary=(f"Claim on phase {claim['phase_id']} stalled {age_min}min past lease"),
             details={
                 "phase_id": claim["phase_id"],
                 "stalled_min": age_min,
@@ -336,7 +355,8 @@ def _emit_stalled_claim_notify(
 
 
 def _emit_stuck_tool(
-    data: dict, config: ProjectConfig,
+    data: dict,
+    config: ProjectConfig,
     *,
     ps_output: str | None = None,
 ) -> None:
@@ -399,9 +419,12 @@ def _emit_stuck_tool(
         st.mark_tool_stuck_emitted(claim, d.pid, st.utcnow())
         command_excerpt = d.command[:200]
         st.append_event(
-            data, st.EVENT_TOOL_STUCK,
-            plan=plan_slug, phase=phase_id,
-            worker_pid=pid, descendant_pid=d.pid,
+            data,
+            st.EVENT_TOOL_STUCK,
+            plan=plan_slug,
+            phase=phase_id,
+            worker_pid=pid,
+            descendant_pid=d.pid,
             command=command_excerpt,
             elapsed_seconds=d.elapsed_seconds,
             cpu_seconds=d.cpu_seconds,
@@ -463,7 +486,8 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                     coolant.emit_stop(
                         session_id=claimed_by,
                         agent_id=coolant.format_agent_id(
-                            data["plan_slug"], phase_id,
+                            data["plan_slug"],
+                            phase_id,
                         ),
                         agent_type=coolant.AGENT_TYPE,
                         script_override=config.coolant.script_dir,
@@ -474,8 +498,10 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         cmdline_match=f"/clu-phase {data['plan_slug']} {phase_id}",
                     )
                     st.append_event(
-                        data, st.EVENT_PHASE_ORPHAN_REAPED,
-                        phase=phase_id, pid=pid,
+                        data,
+                        st.EVENT_PHASE_ORPHAN_REAPED,
+                        phase=phase_id,
+                        pid=pid,
                         signaled=reap.signaled,
                         cmdline_mismatch=reap.cmdline_mismatch,
                     )
@@ -489,15 +515,18 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             # as the worker-side half.
             cmdline_match = f"/clu-phase {data['plan_slug']} {phase_id}"
             if pid and not st.claim_worker_alive(
-                claim, cmdline_match=cmdline_match,
+                claim,
+                cmdline_match=cmdline_match,
             ):
                 # Order matters: durable state first (event + release +
                 # coolant), best-effort reap last. If `reap_orphan_pid`
                 # raises (e.g. ps timeout), the claim is already released
                 # and the event is on disk — next tick won't re-fire.
                 st.append_event(
-                    data, st.EVENT_PHASE_WORKER_DEAD,
-                    phase=phase_id, pid=pid,
+                    data,
+                    st.EVENT_PHASE_WORKER_DEAD,
+                    phase=phase_id,
+                    pid=pid,
                 )
                 st.release_claim_and_emit(
                     data,
@@ -508,15 +537,19 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                     st.reap_orphan_pid(pid, cmdline_match=cmdline_match)
                 except Exception:
                     pass
-                return _attach(TickResult(
-                    "worker_dead",
-                    f"phase={phase_id}",
-                    phase_id=phase_id,
-                    token=claimed_by,
-                    notify_body=notify.render_worker_dead(
-                        data["plan_slug"], phase_id, pid,
-                    ),
-                ))
+                return _attach(
+                    TickResult(
+                        "worker_dead",
+                        f"phase={phase_id}",
+                        phase_id=phase_id,
+                        token=claimed_by,
+                        notify_body=notify.render_worker_dead(
+                            data["plan_slug"],
+                            phase_id,
+                            pid,
+                        ),
+                    )
+                )
 
         # Surface stalled claims once. Don't release the claim — the lease
         # owns retry; this event is just the signal the notification adapter
@@ -529,7 +562,8 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         # loud tick.
         if not notify.in_quiet_window(config.notify, _local_now()):
             sla_hours = data["config"].get(
-                "blocked_question_sla_hours", st.DEFAULT_SLA_HOURS,
+                "blocked_question_sla_hours",
+                st.DEFAULT_SLA_HOURS,
             )
             now = st._now_utc()
             for b in st.open_blockers(data):
@@ -541,12 +575,17 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 if age_hours >= sla_hours and data["status"] != st.STATUS_PAUSED:
                     data["status"] = st.STATUS_PAUSED
                     st.append_event(
-                        data, st.EVENT_BLOCKER_SLA_EXCEEDED,
-                        blocker_id=b["id"], age_hours=round(age_hours, 1),
+                        data,
+                        st.EVENT_BLOCKER_SLA_EXCEEDED,
+                        blocker_id=b["id"],
+                        age_hours=round(age_hours, 1),
                     )
-                    return _attach(TickResult(
-                        "escalate", f"blocker={b['id']} age_hours={age_hours:.1f}",
-                    ))
+                    return _attach(
+                        TickResult(
+                            "escalate",
+                            f"blocker={b['id']} age_hours={age_hours:.1f}",
+                        )
+                    )
 
         # Newly-answered blocker → mark consumed (worker sees on next dispatch)
         events, target_status = state_blocker.process_answered_blockers(data)
@@ -565,10 +604,12 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             return _attach(TickResult("idle", f"plan status={data['status']}"))
 
         if claim := data.get("current_claim"):
-            return _attach(TickResult(
-                "idle",
-                f"phase={claim['phase_id']} in_flight lease={claim['lease_expires']}",
-            ))
+            return _attach(
+                TickResult(
+                    "idle",
+                    f"phase={claim['phase_id']} in_flight lease={claim['lease_expires']}",
+                )
+            )
 
         # Any open blocker on this plan pins the lane: plan-file order
         # encodes implicit dependencies between phases, so dispatching the
@@ -576,9 +617,12 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         # "must merge before" constraint. Operator answers + priority-4
         # consume re-opens the lane. (#28)
         if blockers := st.open_blockers(data):
-            return _attach(TickResult(
-                "idle", f"open_blocker={blockers[0]['id']} pins lane",
-            ))
+            return _attach(
+                TickResult(
+                    "idle",
+                    f"open_blocker={blockers[0]['id']} pins lane",
+                )
+            )
 
         plan_path = config.project_root / config.plan_dir / f"{data['plan_slug']}.md"
         phases = parse_sessions_index(plan_path)
@@ -597,30 +641,36 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 # "idle", so notify fires exactly once per transition.
                 data["status"] = st.STATUS_HALTED
                 st.append_event(
-                    data, st.EVENT_PHASE_MAX_ATTEMPTS,
-                    phase=phase.id, attempts=prior_attempts,
+                    data,
+                    st.EVENT_PHASE_MAX_ATTEMPTS,
+                    phase=phase.id,
+                    attempts=prior_attempts,
                 )
-                return _attach(TickResult(
-                    "halt",
-                    f"phase={phase.id} attempts={prior_attempts}",
-                    notify_body=notify.render_halted(
-                        data["plan_slug"], phase.id, prior_attempts,
-                    ),
-                ))
+                return _attach(
+                    TickResult(
+                        "halt",
+                        f"phase={phase.id} attempts={prior_attempts}",
+                        notify_body=notify.render_halted(
+                            data["plan_slug"],
+                            phase.id,
+                            prior_attempts,
+                        ),
+                    )
+                )
             ttl = st.lease_ttl_for_phase(data, phase.id)
             token = st.claim_phase(data, phase.id, ttl)
-            return _attach(TickResult(
-                "dispatch",
-                detail=f"phase={phase.id} token={token}",
-                phase_id=phase.id,
-                token=token,
-            ))
+            return _attach(
+                TickResult(
+                    "dispatch",
+                    detail=f"phase={phase.id} token={token}",
+                    phase_id=phase.id,
+                    token=token,
+                )
+            )
 
         # All phases attempted — but wait for pending spawned tasks.
         if all(p.id in completed for p in phases):
-            pending_tasks = [
-                t for t in data["spawned_tasks"] if t["status"] == "pending"
-            ]
+            pending_tasks = [t for t in data["spawned_tasks"] if t["status"] == "pending"]
             if not pending_tasks:
                 data["status"] = st.STATUS_DONE
                 st.append_event(data, st.EVENT_PLAN_COMPLETED)
@@ -629,15 +679,21 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                     for evt in data["events"]
                     if evt.get("type") == st.EVENT_PHASE_COMPLETED
                 )
-                return _attach(TickResult(
-                    "plan_done",
-                    data["plan_slug"],
-                    notify_body=notify.render_completed(
-                        data["plan_slug"], commit_count,
-                    ),
-                ))
-            return _attach(TickResult(
-                "idle", f"phases done; {len(pending_tasks)} spawned task(s) pending",
-            ))
+                return _attach(
+                    TickResult(
+                        "plan_done",
+                        data["plan_slug"],
+                        notify_body=notify.render_completed(
+                            data["plan_slug"],
+                            commit_count,
+                        ),
+                    )
+                )
+            return _attach(
+                TickResult(
+                    "idle",
+                    f"phases done; {len(pending_tasks)} spawned task(s) pending",
+                )
+            )
 
         return _attach(TickResult("idle", "all phases blocked or none dispatchable"))

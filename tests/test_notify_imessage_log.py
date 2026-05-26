@@ -6,6 +6,7 @@ undebuggable. The fix replaces DEVNULL with an append-mode file handle
 at `$XDG_CONFIG_HOME/clu/imessage.log` (default `~/.config/clu/imessage.log`),
 keeping the fire-and-forget Popen shape (no synchronous wait).
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -58,7 +59,8 @@ class OsascriptSendLogTestCase(CluTestCase):
         # The simulated error landed in the log file.
         log_path = notify_imessage.imessage_log_path()
         self.assertIn(
-            b"simulated osascript failure", log_path.read_bytes(),
+            b"simulated osascript failure",
+            log_path.read_bytes(),
         )
 
     def test_log_file_parent_dir_is_created_lazily(self) -> None:

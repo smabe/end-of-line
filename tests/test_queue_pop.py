@@ -5,6 +5,7 @@ parked state) plus a populated queue, mocks `dispatch_for_tick` so we can
 assert what would have been dispatched without spawning subprocesses, then
 runs `main(["tick-all"])` and inspects the resulting queue / state.
 """
+
 from __future__ import annotations
 
 import io
@@ -75,17 +76,23 @@ class _Base(unittest.TestCase):
         return ProjectConfig(project_root=project).queue_path()
 
     def _enqueue(
-        self, project: Path, slug: str, *, write_plan: bool = True,
+        self,
+        project: Path,
+        slug: str,
+        *,
+        write_plan: bool = True,
     ) -> None:
         if write_plan:
             self._write_plan_file(project, slug)
         with queue.mutate(self._queue_path(project)) as data:
-            data["queue"].append({
-                "slug": slug,
-                "added_at": st.utcnow(),
-                "added_by": "operator",
-                "position_at_add": "tail",
-            })
+            data["queue"].append(
+                {
+                    "slug": slug,
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                }
+            )
 
     def _set_status(self, project: Path, slug: str, status: str) -> None:
         cfg = ProjectConfig(project_root=project)
@@ -106,7 +113,6 @@ class _Base(unittest.TestCase):
 
 
 class QueuePopTestCase(_Base):
-
     def test_pop_dispatches_idle_project_with_pending_queue(self) -> None:
         project = self._make_project("alpha")
         self._enqueue(project, "foo")
@@ -116,7 +122,9 @@ class QueuePopTestCase(_Base):
 
         # registry now has foo + seed; queue is empty; foo state.json exists
         # with EVENT_QUEUE_POPPED as the first event; dispatch was called.
-        slugs = {e.plan_slug for e in registry.entries() if Path(e.project_root).resolve() == project}
+        slugs = {
+            e.plan_slug for e in registry.entries() if Path(e.project_root).resolve() == project
+        }
         self.assertIn("foo", slugs)
         data = self._queue_data(project)
         self.assertEqual(data["queue"], [])
@@ -147,7 +155,9 @@ class QueuePopTestCase(_Base):
 
         data = self._queue_data(project)
         self.assertEqual([e["slug"] for e in data["queue"]], ["foo"])
-        slugs = {e.plan_slug for e in registry.entries() if Path(e.project_root).resolve() == project}
+        slugs = {
+            e.plan_slug for e in registry.entries() if Path(e.project_root).resolve() == project
+        }
         self.assertNotIn("foo", slugs)
         # No dispatch call mentioned foo.
         for c in self.mock_dispatch.call_args_list:
@@ -280,12 +290,14 @@ class QueuePopTestCase(_Base):
         project = self._make_project("alpha")
         # Queue contains slug whose plan file does NOT exist.
         with queue.mutate(self._queue_path(project)) as data:
-            data["queue"].append({
-                "slug": "ghost",
-                "added_at": st.utcnow(),
-                "added_by": "operator",
-                "position_at_add": "tail",
-            })
+            data["queue"].append(
+                {
+                    "slug": "ghost",
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                }
+            )
         sent: list[tuple[str, str]] = []
 
         def fake_send(spec, kind, body, **kw):  # signature: (spec, kind, body)
@@ -309,7 +321,8 @@ class QueuePopTestCase(_Base):
         # Defense against a future PR that accidentally puts QUEUE_SKIPPED
         # in the halt-bypass set — skips MUST defer during quiet hours.
         self.assertNotIn(
-            notify.KIND_QUEUE_SKIPPED, notify.QUIET_HOURS_BYPASS_KINDS,
+            notify.KIND_QUEUE_SKIPPED,
+            notify.QUIET_HOURS_BYPASS_KINDS,
         )
 
     def test_pop_recovers_after_crash_between_state_and_registry(self) -> None:
@@ -320,9 +333,12 @@ class QueuePopTestCase(_Base):
         cfg = ProjectConfig(project_root=project)
         state = st.empty_state("foo", cfg.plan_dir)
         st.append_event(
-            state, st.EVENT_QUEUE_POPPED,
-            slug="foo", added_at=st.utcnow(),
-            added_by="operator", position=1,
+            state,
+            st.EVENT_QUEUE_POPPED,
+            slug="foo",
+            added_at=st.utcnow(),
+            added_by="operator",
+            position=1,
         )
         st.save_atomic(cfg.state_path("foo"), state)
         self._enqueue(project, "foo", write_plan=False)
@@ -335,7 +351,9 @@ class QueuePopTestCase(_Base):
         # than re-popped. This is the correct recovery: the pre-existing
         # state.json IS the popped state, and the operator gets one history
         # entry rather than two pops.
-        slugs = {e.plan_slug for e in registry.entries() if Path(e.project_root).resolve() == project}
+        slugs = {
+            e.plan_slug for e in registry.entries() if Path(e.project_root).resolve() == project
+        }
         self.assertIn("foo", slugs)
         self.assertEqual(self._queue_data(project)["queue"], [])
         # foo's events still have the original EVENT_QUEUE_POPPED (not a duplicate).

@@ -6,6 +6,7 @@ adds an iMessage + inbox surface for that transition so the operator
 finds out about the dead worker instead of silently re-dispatching the
 phase.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -42,12 +43,11 @@ class StalledClaimTestCase(unittest.TestCase):
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         self.cfg = ProjectConfig(
-            project_root=self.project, plan_dir="plans",
+            project_root=self.project,
+            plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command="echo"),
         )
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         self.state_path.parent.mkdir(parents=True)
         with st.locked(self.state_path):
             st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))

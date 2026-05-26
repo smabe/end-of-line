@@ -1,4 +1,5 @@
 """Operator command: `clu extend-lease` bumps a live claim's lease_expires (#29)."""
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -56,9 +57,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
         isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         self.assertEqual(
             main(["init", "--project", str(self.project), "--plan", "test-plan"]),
             0,
@@ -79,17 +78,16 @@ class ExtendLeaseTestCase(unittest.TestCase):
     def _argv(self, minutes: str, *extra: str) -> list[str]:
         return [
             "extend-lease",
-            "--project", str(self.project),
-            "--plan", "test-plan",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
             minutes,
             *extra,
         ]
 
     def _lease_extended_events(self) -> list[dict]:
-        return [
-            e for e in self._read()["events"]
-            if e["type"] == st.EVENT_LEASE_EXTENDED
-        ]
+        return [e for e in self._read()["events"] if e["type"] == st.EVENT_LEASE_EXTENDED]
 
     # ---- happy path -----------------------------------------------------------
 
@@ -112,9 +110,13 @@ class ExtendLeaseTestCase(unittest.TestCase):
 
     def test_extend_lease_happy_path_appends_event(self) -> None:
         now = _dt.datetime.now(_dt.timezone.utc)
-        self._write(lambda d: _stamp_claim(
-            d, phase="A", lease_expires=now + _dt.timedelta(minutes=30),
-        ))
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                phase="A",
+                lease_expires=now + _dt.timedelta(minutes=30),
+            )
+        )
 
         rc = main(self._argv("60"))
         self.assertEqual(rc, 0)
@@ -129,9 +131,12 @@ class ExtendLeaseTestCase(unittest.TestCase):
 
     def test_extend_lease_happy_path_event_new_expires_matches_claim(self) -> None:
         now = _dt.datetime.now(_dt.timezone.utc)
-        self._write(lambda d: _stamp_claim(
-            d, lease_expires=now + _dt.timedelta(minutes=30),
-        ))
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                lease_expires=now + _dt.timedelta(minutes=30),
+            )
+        )
         main(self._argv("45"))
         data = self._read()
         evt = self._lease_extended_events()[0]
@@ -155,9 +160,12 @@ class ExtendLeaseTestCase(unittest.TestCase):
 
     def test_refuses_on_zero_minutes(self) -> None:
         now = _dt.datetime.now(_dt.timezone.utc)
-        self._write(lambda d: _stamp_claim(
-            d, lease_expires=now + _dt.timedelta(minutes=30),
-        ))
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                lease_expires=now + _dt.timedelta(minutes=30),
+            )
+        )
         buf = io.StringIO()
         with redirect_stderr(buf):
             rc = main(self._argv("0"))
@@ -165,9 +173,12 @@ class ExtendLeaseTestCase(unittest.TestCase):
 
     def test_refuses_on_negative_minutes(self) -> None:
         now = _dt.datetime.now(_dt.timezone.utc)
-        self._write(lambda d: _stamp_claim(
-            d, lease_expires=now + _dt.timedelta(minutes=30),
-        ))
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                lease_expires=now + _dt.timedelta(minutes=30),
+            )
+        )
         buf = io.StringIO()
         with redirect_stderr(buf):
             rc = main(self._argv("-10"))

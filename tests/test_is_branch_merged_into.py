@@ -2,6 +2,7 @@
 
 All tests use real git repos in temporary directories.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -25,12 +26,12 @@ def _make_repo() -> Path:
 
 
 class TestIsBranchMergedInto(unittest.TestCase):
-
     def setUp(self) -> None:
         self._dirs: list[str] = []
 
     def tearDown(self) -> None:
         import shutil
+
         for d in self._dirs:
             shutil.rmtree(d, ignore_errors=True)
 

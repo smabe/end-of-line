@@ -4,6 +4,7 @@ All functions take `data: dict` (the plan state data dict) and return
 derived values — events, transitions, rendered bodies. No I/O, no
 st.mutate, no notify.send calls.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -90,22 +91,29 @@ def stuck_blocker_repings(
                     continue
         age_min = int(age_seconds // 60)
         body = render_stuck_blocker(
-            plan_slug, b["id"], b["phase_id"],
-            b["question"], b["options"], age_min,
+            plan_slug,
+            b["id"],
+            b["phase_id"],
+            b["question"],
+            b["options"],
+            age_min,
         )
         results.append((b["id"], KIND_STUCK_BLOCKER, body))
     return results
 
 
 def render_blocker(
-    plan_slug: str, blocker_id: str, phase: str, question: str, options: list[str],
+    plan_slug: str,
+    blocker_id: str,
+    phase: str,
+    question: str,
+    options: list[str],
 ) -> str:
     q = _truncate_at_word(question, _QUESTION_TRUNCATE)
     answer_cmd = f"clu answer --plan {plan_slug} <choice>"
     if options:
         opts_block = "\n".join(
-            f"[{i}] {_truncate_at_word(o, _OPTION_TRUNCATE)}"
-            for i, o in enumerate(options)
+            f"[{i}] {_truncate_at_word(o, _OPTION_TRUNCATE)}" for i, o in enumerate(options)
         )
         middle = f"{q}\n{opts_block}\n\n"
     else:
@@ -122,8 +130,7 @@ def render_blocker(
     n = len(options)
     noun = "option" if n == 1 else "options"
     return (
-        f"❓ {plan_slug}/{blocker_id} [{phase}]\n{q}\n\n"
-        f"{n} {noun}. Run `{answer_cmd}` to answer."
+        f"❓ {plan_slug}/{blocker_id} [{phase}]\n{q}\n\n{n} {noun}. Run `{answer_cmd}` to answer."
     )
 
 
@@ -147,8 +154,12 @@ def render_worker_dead(plan_slug: str, phase: str, pid: int) -> str:
 
 
 def render_stuck_blocker(
-    plan_slug: str, blocker_id: str, phase: str,
-    question: str, options: list[str], age_min: int,
+    plan_slug: str,
+    blocker_id: str,
+    phase: str,
+    question: str,
+    options: list[str],
+    age_min: int,
 ) -> str:
     opts = "\n".join(f"[{i}] {o}" for i, o in enumerate(options))
     return (

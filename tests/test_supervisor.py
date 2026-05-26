@@ -1,4 +1,5 @@
 """Integration-ish tests for the supervisor tick logic."""
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -239,9 +240,7 @@ class SupervisorTestCase(CluTestCase):
             )
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "lease_expired")
-        mock_reap.assert_called_once_with(
-            99999, cmdline_match="/clu-phase test-plan a"
-        )
+        mock_reap.assert_called_once_with(99999, cmdline_match="/clu-phase test-plan a")
         event_types = [e["type"] for e in self._read()["events"]]
         expired_idx = next(i for i, t in enumerate(event_types) if t == st.EVENT_LEASE_EXPIRED)
         reaped_idx = next(i for i, t in enumerate(event_types) if t == st.EVENT_PHASE_ORPHAN_REAPED)
@@ -273,7 +272,9 @@ class SupervisorTestCase(CluTestCase):
     # --- dead-PID detection (priority 2, before stalled-heartbeat) ---
 
     def _claim_with_pid(
-        self, pid: int | None = None, lease_expires: str | None = None,
+        self,
+        pid: int | None = None,
+        lease_expires: str | None = None,
     ) -> None:
         """Claim phase 'a' and stamp PID; optionally pin lease_expires."""
         tick(self.state_path, self.cfg)
@@ -293,15 +294,23 @@ class SupervisorTestCase(CluTestCase):
         original_claim = dict(self._read()["current_claim"])
         original_token = original_claim["claimed_by"]
         reap_return = st.ReapResult(
-            signaled=None, escalated_kill=False, cmdline_mismatch=False,
+            signaled=None,
+            escalated_kill=False,
+            cmdline_mismatch=False,
         )
-        with mock.patch(
-            "end_of_line.state.claim_worker_alive", return_value=False,
-        ) as mock_alive, mock.patch(
-            "end_of_line.state.reap_orphan_pid", return_value=reap_return,
-        ) as mock_reap, mock.patch(
-            "end_of_line.supervisor.coolant.emit_stop",
-        ) as emit:
+        with (
+            mock.patch(
+                "end_of_line.state.claim_worker_alive",
+                return_value=False,
+            ) as mock_alive,
+            mock.patch(
+                "end_of_line.state.reap_orphan_pid",
+                return_value=reap_return,
+            ) as mock_reap,
+            mock.patch(
+                "end_of_line.supervisor.coolant.emit_stop",
+            ) as emit,
+        ):
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "worker_dead")
         self.assertIsNone(self._read()["current_claim"])
@@ -316,7 +325,8 @@ class SupervisorTestCase(CluTestCase):
             "/clu-phase test-plan a",
         )
         mock_reap.assert_called_once_with(
-            original_claim["pid"], cmdline_match="/clu-phase test-plan a",
+            original_claim["pid"],
+            cmdline_match="/clu-phase test-plan a",
         )
         emit.assert_called_once()
         self.assertEqual(emit.call_args.kwargs["session_id"], original_token)
@@ -327,11 +337,14 @@ class SupervisorTestCase(CluTestCase):
 
     def test_live_pid_no_op_falls_through(self) -> None:
         import os as _os
+
         self._claim_with_pid(
-            pid=_os.getpid(), lease_expires="2099-01-01T00:00:00Z",
+            pid=_os.getpid(),
+            lease_expires="2099-01-01T00:00:00Z",
         )
         with mock.patch(
-            "end_of_line.state.claim_worker_alive", return_value=True,
+            "end_of_line.state.claim_worker_alive",
+            return_value=True,
         ):
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "idle")
@@ -357,11 +370,15 @@ class SupervisorTestCase(CluTestCase):
         # reap blocked release, we'd loop forever — every tick would re-detect
         # the same dead PID and crash before releasing.
         self._claim_with_pid(pid=99999, lease_expires="2099-01-01T00:00:00Z")
-        with mock.patch(
-            "end_of_line.state.claim_worker_alive", return_value=False,
-        ), mock.patch(
-            "end_of_line.state.reap_orphan_pid",
-            side_effect=OSError("simulated ps failure"),
+        with (
+            mock.patch(
+                "end_of_line.state.claim_worker_alive",
+                return_value=False,
+            ),
+            mock.patch(
+                "end_of_line.state.reap_orphan_pid",
+                side_effect=OSError("simulated ps failure"),
+            ),
         ):
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "worker_dead")
@@ -374,16 +391,25 @@ class SupervisorTestCase(CluTestCase):
         # — the rule fires the same as for a dead PID. The reap call records
         # the mismatch flag for the audit trail.
         import os as _os
+
         self._claim_with_pid(
-            pid=_os.getpid(), lease_expires="2099-01-01T00:00:00Z",
+            pid=_os.getpid(),
+            lease_expires="2099-01-01T00:00:00Z",
         )
         reap_return = st.ReapResult(
-            signaled=None, escalated_kill=False, cmdline_mismatch=True,
+            signaled=None,
+            escalated_kill=False,
+            cmdline_mismatch=True,
         )
-        with mock.patch(
-            "end_of_line.state.claim_worker_alive", return_value=False,
-        ), mock.patch(
-            "end_of_line.state.reap_orphan_pid", return_value=reap_return,
+        with (
+            mock.patch(
+                "end_of_line.state.claim_worker_alive",
+                return_value=False,
+            ),
+            mock.patch(
+                "end_of_line.state.reap_orphan_pid",
+                return_value=reap_return,
+            ),
         ):
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "worker_dead")
@@ -403,11 +429,17 @@ class SupervisorTestCase(CluTestCase):
         data = self._read()
         original_token = data["current_claim"]["claimed_by"]
         reap_return = st.ReapResult(
-            signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False,
+            signaled="SIGTERM",
+            escalated_kill=False,
+            cmdline_mismatch=False,
         )
-        with mock.patch(
-            "end_of_line.state.reap_orphan_pid", return_value=reap_return,
-        ), mock.patch("end_of_line.supervisor.coolant.emit_stop") as emit:
+        with (
+            mock.patch(
+                "end_of_line.state.reap_orphan_pid",
+                return_value=reap_return,
+            ),
+            mock.patch("end_of_line.supervisor.coolant.emit_stop") as emit,
+        ):
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "lease_expired")
         emit.assert_called_once()

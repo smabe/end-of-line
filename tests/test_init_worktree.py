@@ -5,6 +5,7 @@ Each test sets up a real git repo via `git init` (mirroring the convention
 in `test_worker_callbacks.py`) so the worktree-add subprocess has a real
 target to fork from.
 """
+
 from __future__ import annotations
 
 import io
@@ -34,7 +35,9 @@ PLAN_BODY = """\
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=check,
+        capture_output=True,
+        text=True,
+        check=check,
     )
 
 
@@ -54,9 +57,7 @@ class InitWorktreeTestCase(unittest.TestCase):
         _git(self.project, "config", "user.name", "t")
         _git(self.project, "commit", "--allow-empty", "-m", "init")
         self.head_sha = _git(self.project, "rev-parse", "HEAD").stdout.strip()
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "foo.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "foo.state.json"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -64,10 +65,16 @@ class InitWorktreeTestCase(unittest.TestCase):
     def _init(self, *extra: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main([
-                "init", "--project", str(self.project), "--plan", "foo",
-                *extra,
-            ])
+            rc = main(
+                [
+                    "init",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "foo",
+                    *extra,
+                ]
+            )
         return rc, out.getvalue(), err.getvalue()
 
     # --- happy paths ---------------------------------------------------
@@ -114,11 +121,17 @@ class InitWorktreeTestCase(unittest.TestCase):
         _git(self.project, "checkout", "-q", "-b", "feature")
         _git(self.project, "commit", "--allow-empty", "-m", "feature work")
         feature_sha = _git(
-            self.project, "rev-parse", "HEAD",
+            self.project,
+            "rev-parse",
+            "HEAD",
         ).stdout.strip()
         _git(self.project, "checkout", "-q", "-")
         rc, _stdout, stderr = self._init(
-            "--worktree", "--branch", "myname/foo", "--base-ref", "feature",
+            "--worktree",
+            "--branch",
+            "myname/foo",
+            "--base-ref",
+            "feature",
         )
         self.assertEqual(rc, 0)
         record = st.get_worktree(st.load(self.state_path))
@@ -149,14 +162,19 @@ class InitWorktreeTestCase(unittest.TestCase):
         self.assertFalse(self.state_path.exists())
         # Branch must NOT have been created either.
         branch_rc = _git(
-            self.project, "rev-parse", "--verify", "refs/heads/clu/foo",
+            self.project,
+            "rev-parse",
+            "--verify",
+            "refs/heads/clu/foo",
             check=False,
         ).returncode
         self.assertNotEqual(branch_rc, 0)
 
     def test_refuses_bad_base_ref(self) -> None:
         rc, _stdout, _stderr = self._init(
-            "--worktree", "--base-ref", "no-such-branch",
+            "--worktree",
+            "--base-ref",
+            "no-such-branch",
         )
         self.assertEqual(rc, ExitCode.WORKTREE_SETUP_FAILED)
         self.assertFalse((self.parent / "myrepo-foo").exists())
@@ -182,7 +200,10 @@ class InitWorktreeTestCase(unittest.TestCase):
         self.assertFalse((self.parent / "myrepo-foo").exists())
         # Branch gone.
         branch_rc = _git(
-            self.project, "rev-parse", "--verify", "refs/heads/clu/foo",
+            self.project,
+            "rev-parse",
+            "--verify",
+            "refs/heads/clu/foo",
             check=False,
         ).returncode
         self.assertNotEqual(branch_rc, 0)

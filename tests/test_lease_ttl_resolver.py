@@ -1,4 +1,5 @@
 """Unit tests for state.lease_ttl_for_phase resolver."""
+
 from __future__ import annotations
 
 import unittest

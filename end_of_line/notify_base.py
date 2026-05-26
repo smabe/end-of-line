@@ -4,6 +4,7 @@ Protocols are @runtime_checkable so backends can be verified with isinstance().
 OpenBlocker, Reply, and route_reply live here so Discord inbound can reuse
 them without importing the iMessage-specific modules.
 """
+
 from __future__ import annotations
 
 import re
@@ -50,7 +51,8 @@ class InboundPoller(Protocol):
 
 
 def route_reply(
-    text: str, open_blockers: list[OpenBlocker],
+    text: str,
+    open_blockers: list[OpenBlocker],
 ) -> Reply | None:
     """Return Reply(target, option-index-str) if `text` resolves to a single blocker.
 
@@ -108,19 +110,22 @@ def open_blockers_with_details(
         if data is None:
             continue
         for b in st.open_blockers(data):
-            out.append(BlockerDetail(
-                project_root=Path(row.project_root),
-                plan_slug=row.plan_slug,
-                phase_id=b["phase_id"],
-                blocker_id=b["id"],
-                question=b.get("question", ""),
-                options=tuple(b.get("options", [])),
-            ))
+            out.append(
+                BlockerDetail(
+                    project_root=Path(row.project_root),
+                    plan_slug=row.plan_slug,
+                    phase_id=b["phase_id"],
+                    blocker_id=b["id"],
+                    question=b.get("question", ""),
+                    options=tuple(b.get("options", [])),
+                )
+            )
     return out
 
 
 def _pick_by_last_pinged(
-    open_blockers: list[OpenBlocker], digit: str,
+    open_blockers: list[OpenBlocker],
+    digit: str,
 ) -> OpenBlocker | None:
     """Bare-digit ambiguity → most-recently-pinged plan with the digit in range.
 

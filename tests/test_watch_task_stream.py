@@ -1,4 +1,5 @@
 """Tests for watch.stream_loop task_list_mode — bootstrap ordering + event routing."""
+
 from __future__ import annotations
 
 import io
@@ -18,9 +19,14 @@ def _evt(type_: str, **fields) -> dict:
     return {"type": type_, "ts": TS, **fields}
 
 
-def _make_state(path: Path, slug: str, *, status: str = "running",
-                events: list | None = None,
-                current_claim: dict | None = None) -> None:
+def _make_state(
+    path: Path,
+    slug: str,
+    *,
+    status: str = "running",
+    events: list | None = None,
+    current_claim: dict | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "schema_version": st.SCHEMA_VERSION,
@@ -51,10 +57,7 @@ def _append_event(path: Path, event: dict) -> None:
 
 
 def _write_master(project: Path, slug: str, phases: list[str]) -> None:
-    rows = "\n".join(
-        f"| {ph} | `{slug}-{ph}.md` | scope | 1h |"
-        for ph in phases
-    )
+    rows = "\n".join(f"| {ph} | `{slug}-{ph}.md` | scope | 1h |" for ph in phases)
     content = (
         f"# {slug}\n\n"
         "## Sessions index\n\n"
@@ -70,17 +73,15 @@ def _write_master(project: Path, slug: str, phases: list[str]) -> None:
 def _cfg_loader(project: Path):
     def loader(state_path: Path) -> ProjectConfig:
         return ProjectConfig(project_root=project)
+
     return loader
 
 
 class TaskListStreamTest(CluTestCase):
-
     def setUp(self) -> None:
         super().setUp()
         self.project = self.tmp_path / "project"
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "my-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "my-plan.state.json"
         _make_state(self.state_path, "my-plan")
         _write_master(self.project, "my-plan", ["phase-a", "phase-b"])
 
@@ -89,32 +90,43 @@ class TaskListStreamTest(CluTestCase):
         stream_loop(
             [self.state_path],
             task_list_mode=True,
-            sink=sink, poll_interval=0, max_ticks=0,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=0,
             cfg_loader=_cfg_loader(self.project),
         )
         lines = sink.getvalue().splitlines()
         task_creates = [l for l in lines if l.startswith("TASK_CREATE")]
-        self.assertEqual(len(task_creates), 3,
-                         f"expected parent + 2 phase TASK_CREATEs; got: {lines}")
+        self.assertEqual(
+            len(task_creates), 3, f"expected parent + 2 phase TASK_CREATEs; got: {lines}"
+        )
         snapshot_idx = next(i for i, l in enumerate(lines) if "[snapshot]" in l)
         for i, line in enumerate(lines):
             if line.startswith("TASK_CREATE"):
-                self.assertLess(i, snapshot_idx,
-                    f"TASK_CREATE at index {i} must precede [snapshot] at {snapshot_idx}")
+                self.assertLess(
+                    i,
+                    snapshot_idx,
+                    f"TASK_CREATE at index {i} must precede [snapshot] at {snapshot_idx}",
+                )
 
     def test_task_list_mode_projects_events_as_task_update(self) -> None:
         sink = io.StringIO()
         stream_loop(
             [self.state_path],
             task_list_mode=True,
-            sink=sink, poll_interval=0, max_ticks=1,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             cfg_loader=_cfg_loader(self.project),
             _before_first_tick=lambda: _append_event(
                 self.state_path, _evt(st.EVENT_PHASE_COMPLETED, phase="foundation")
             ),
         )
         out = sink.getvalue()
-        self.assertIn('TASK_UPDATE task=my-plan/foundation parent=my-plan status=completed msg="completed"', out)
+        self.assertIn(
+            'TASK_UPDATE task=my-plan/foundation parent=my-plan status=completed msg="completed"',
+            out,
+        )
 
     def test_task_list_mode_emits_blocked_msg_through_stream(self) -> None:
         """End-to-end: BLOCKED event routed through stream_loop produces
@@ -125,18 +137,23 @@ class TaskListStreamTest(CluTestCase):
         stream_loop(
             [self.state_path],
             task_list_mode=True,
-            sink=sink, poll_interval=0, max_ticks=1,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             cfg_loader=_cfg_loader(self.project),
             _before_first_tick=lambda: _append_event(
                 self.state_path,
-                _evt(st.EVENT_PHASE_BLOCKED, phase="design",
-                     blocker_id="blk-99",
-                     question="Postgres or sqlite?")
+                _evt(
+                    st.EVENT_PHASE_BLOCKED,
+                    phase="design",
+                    blocker_id="blk-99",
+                    question="Postgres or sqlite?",
+                ),
             ),
         )
         out = sink.getvalue()
         self.assertIn(
-            'TASK_UPDATE task=my-plan/design parent=my-plan '
+            "TASK_UPDATE task=my-plan/design parent=my-plan "
             'status=in_progress msg="BLOCKED blk-99 — Postgres or sqlite?"',
             out,
         )
@@ -146,7 +163,9 @@ class TaskListStreamTest(CluTestCase):
         stream_loop(
             [self.state_path],
             task_list_mode=True,
-            sink=sink, poll_interval=0, max_ticks=1,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             cfg_loader=_cfg_loader(self.project),
             _before_first_tick=lambda: _append_event(
                 self.state_path, _evt(st.EVENT_TASK_SPAWNED, phase="p", task="t")
@@ -159,15 +178,20 @@ class TaskListStreamTest(CluTestCase):
         sink = io.StringIO()
         stream_loop(
             [self.state_path],
-            task_list_mode=True, verbose=True,
-            sink=sink, poll_interval=0, max_ticks=1,
+            task_list_mode=True,
+            verbose=True,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             cfg_loader=_cfg_loader(self.project),
             _before_first_tick=lambda: _append_event(
-                self.state_path, _evt(
+                self.state_path,
+                _evt(
                     st.EVENT_LEASE_EXTENDED,
-                    phase="p", extended_by_minutes=30,
+                    phase="p",
+                    extended_by_minutes=30,
                     new_expires="2099-01-01T01:00:00Z",
-                )
+                ),
             ),
         )
         out = sink.getvalue()
@@ -179,7 +203,9 @@ class TaskListStreamTest(CluTestCase):
         stream_loop(
             [self.state_path],
             task_list_mode=False,
-            sink=sink, poll_interval=0, max_ticks=1,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=1,
             _before_first_tick=lambda: _append_event(
                 self.state_path, _evt(st.EVENT_PHASE_COMPLETED, phase="p")
             ),
@@ -198,7 +224,9 @@ class TaskListStreamTest(CluTestCase):
         stream_loop(
             [state_path],
             task_list_mode=True,
-            sink=sink, poll_interval=0, max_ticks=0,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=0,
             cfg_loader=_cfg_loader(project),
         )
         self.assertNotIn("TASK_CREATE", sink.getvalue())
@@ -207,23 +235,27 @@ class TaskListStreamTest(CluTestCase):
         """TASK_CREATE batch → TASK_UPDATE plan → TASK_UPDATE phase → [snapshot]."""
         project = self.tmp_path / "ordering-project"
         state_path = project / "plans" / ".orchestrator" / "ord-plan.state.json"
-        _make_state(state_path, "ord-plan",
-                    current_claim={"phase_id": "phase-a"})
+        _make_state(state_path, "ord-plan", current_claim={"phase_id": "phase-a"})
         _write_master(project, "ord-plan", ["phase-a", "phase-b"])
         sink = io.StringIO()
         stream_loop(
             [state_path],
             task_list_mode=True,
-            sink=sink, poll_interval=0, max_ticks=0,
+            sink=sink,
+            poll_interval=0,
+            max_ticks=0,
             cfg_loader=_cfg_loader(project),
         )
         lines = sink.getvalue().splitlines()
-        create_plan = next(i for i, l in enumerate(lines)
-                           if "TASK_CREATE" in l and "task=ord-plan " in l)
-        update_plan = next(i for i, l in enumerate(lines)
-                           if "TASK_UPDATE" in l and "task=ord-plan " in l)
-        update_phase = next(i for i, l in enumerate(lines)
-                            if "TASK_UPDATE" in l and "task=ord-plan/phase-a" in l)
+        create_plan = next(
+            i for i, l in enumerate(lines) if "TASK_CREATE" in l and "task=ord-plan " in l
+        )
+        update_plan = next(
+            i for i, l in enumerate(lines) if "TASK_UPDATE" in l and "task=ord-plan " in l
+        )
+        update_phase = next(
+            i for i, l in enumerate(lines) if "TASK_UPDATE" in l and "task=ord-plan/phase-a" in l
+        )
         snapshot = next(i for i, l in enumerate(lines) if "[snapshot]" in l)
         self.assertLess(create_plan, update_plan)
         self.assertLess(update_plan, update_phase)

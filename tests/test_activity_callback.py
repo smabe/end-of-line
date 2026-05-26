@@ -4,6 +4,7 @@ Wired as Claude Code PreToolUse / PostToolUse hooks for the Bash tool, they
 stamp `current_claim.active_tool_started_at` so the supervisor's stuck-tool
 detector can scope to descendants spawned during the active tool call.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -32,17 +33,23 @@ class ActivityCallbackTestCase(CluTestCase):
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         subprocess.run(["git", "init", "-q"], cwd=self.project, check=True)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
         with st.mutate(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def _argv(self, *extra: str) -> list[str]:
         return [
-            "activity", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", self.token, *extra,
+            "activity",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "a",
+            "--token",
+            self.token,
+            *extra,
         ]
 
     def test_start_bash_stamps_active_marker(self) -> None:
@@ -66,9 +73,15 @@ class ActivityCallbackTestCase(CluTestCase):
         # from a subagent racing with the parent) just slide the window
         # forward — last start wins, no error.
         from unittest.mock import patch
-        with patch.object(st, "utcnow", side_effect=[
-            "2026-05-22T10:00:00Z", "2026-05-22T10:00:05Z",
-        ]):
+
+        with patch.object(
+            st,
+            "utcnow",
+            side_effect=[
+                "2026-05-22T10:00:00Z",
+                "2026-05-22T10:00:05Z",
+            ],
+        ):
             main(self._argv("--start-bash"))
             first = st.load(self.state_path)["current_claim"]["active_tool_started_at"]
             main(self._argv("--start-bash"))
@@ -86,8 +99,15 @@ class ActivityCallbackTestCase(CluTestCase):
 
     def test_wrong_token_rejected(self) -> None:
         bad = [
-            "activity", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", "session-wrong00000000",
+            "activity",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "a",
+            "--token",
+            "session-wrong00000000",
             "--start-bash",
         ]
         rc = main(bad)
@@ -97,8 +117,16 @@ class ActivityCallbackTestCase(CluTestCase):
 
     def test_wrong_phase_rejected(self) -> None:
         bad = [
-            "activity", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "b", "--token", self.token, "--start-bash",
+            "activity",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "b",
+            "--token",
+            self.token,
+            "--start-bash",
         ]
         rc = main(bad)
         self.assertNotEqual(rc, 0)
@@ -108,10 +136,19 @@ class ActivityCallbackTestCase(CluTestCase):
     def test_no_action_flag_rejected(self) -> None:
         # The subcommand needs one of --start-bash / --end-bash; neither
         # passed should exit non-zero rather than silently no-op.
-        rc = main([
-            "activity", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", self.token,
-        ])
+        rc = main(
+            [
+                "activity",
+                "--project",
+                str(self.project),
+                "--plan",
+                "test-plan",
+                "--phase",
+                "a",
+                "--token",
+                self.token,
+            ]
+        )
         self.assertNotEqual(rc, 0)
 
     def test_drops_silently_on_lock_contention(self) -> None:
@@ -121,19 +158,25 @@ class ActivityCallbackTestCase(CluTestCase):
         # exits 0 on lock-timeout; the marker just stays whatever it was.
         import fcntl
         import os
+
         lock_path = self.state_path.with_name(self.state_path.name + ".lock")
         # Hold the lock from a subprocess so flock contention is real
         # (BSD flock is per-file; another FD in the same process is enough
         # on macOS but subprocess is safer across platforms).
         import subprocess as _sp
+
         holder = _sp.Popen(
-            ["python3", "-c",
-             "import fcntl,os,sys,time;"
-             f"fd=os.open(r'{lock_path}',os.O_RDWR|os.O_CREAT,0o600);"
-             "fcntl.flock(fd,fcntl.LOCK_EX);"
-             "sys.stdout.write('locked\\n');sys.stdout.flush();"
-             "time.sleep(5)"],
-            stdout=_sp.PIPE, text=True,
+            [
+                "python3",
+                "-c",
+                "import fcntl,os,sys,time;"
+                f"fd=os.open(r'{lock_path}',os.O_RDWR|os.O_CREAT,0o600);"
+                "fcntl.flock(fd,fcntl.LOCK_EX);"
+                "sys.stdout.write('locked\\n');sys.stdout.flush();"
+                "time.sleep(5)",
+            ],
+            stdout=_sp.PIPE,
+            text=True,
         )
         try:
             assert holder.stdout is not None

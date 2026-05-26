@@ -3,6 +3,7 @@
 Covers the four new flags (--token, --plan, --phase, --reason) on
 `clu queue add` and the runtime checks that guard worker-only combos.
 """
+
 from __future__ import annotations
 
 import io
@@ -56,11 +57,17 @@ class WorkerModeGateTestCase(unittest.TestCase):
     def test_token_alone_rejected_missing_plan_phase(self) -> None:
         """--token without --plan and --phase must exit GENERIC."""
         _write_plan(self.project, "foo")
-        rc, err = _stderr([
-            "queue", "add", "foo",
-            "--token", "T",
-            "--project", str(self.project),
-        ])
+        rc, err = _stderr(
+            [
+                "queue",
+                "add",
+                "foo",
+                "--token",
+                "T",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.GENERIC)
         self.assertIn("--plan", err)
         self.assertIn("--phase", err)
@@ -68,14 +75,22 @@ class WorkerModeGateTestCase(unittest.TestCase):
     def test_token_with_front_rejected(self) -> None:
         """--front is operator-only; combine with --token must exit GENERIC."""
         _write_plan(self.project, "foo")
-        rc, err = _stderr([
-            "queue", "add", "foo",
-            "--token", "T",
-            "--plan", "X",
-            "--phase", "Y",
-            "--front",
-            "--project", str(self.project),
-        ])
+        rc, err = _stderr(
+            [
+                "queue",
+                "add",
+                "foo",
+                "--token",
+                "T",
+                "--plan",
+                "X",
+                "--phase",
+                "Y",
+                "--front",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.GENERIC)
         self.assertIn("--front", err)
 
@@ -83,46 +98,74 @@ class WorkerModeGateTestCase(unittest.TestCase):
         """Worker mode accepts exactly one slug; two must exit GENERIC."""
         _write_plan(self.project, "foo")
         _write_plan(self.project, "bar")
-        rc, err = _stderr([
-            "queue", "add", "foo", "bar",
-            "--token", "T",
-            "--plan", "X",
-            "--phase", "Y",
-            "--project", str(self.project),
-        ])
+        rc, err = _stderr(
+            [
+                "queue",
+                "add",
+                "foo",
+                "bar",
+                "--token",
+                "T",
+                "--plan",
+                "X",
+                "--phase",
+                "Y",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.GENERIC)
         self.assertIn("single slug", err)
 
     def test_token_combo_passes_parse_layer(self) -> None:
         """Valid worker-mode args reach dispatch (fails on missing source state)."""
         _write_plan(self.project, "foo")
-        rc, err = _stderr([
-            "queue", "add", "foo",
-            "--token", "T",
-            "--plan", "source-plan",
-            "--phase", "phase-a",
-            "--project", str(self.project),
-        ])
+        rc, err = _stderr(
+            [
+                "queue",
+                "add",
+                "foo",
+                "--token",
+                "T",
+                "--plan",
+                "source-plan",
+                "--phase",
+                "phase-a",
+                "--project",
+                str(self.project),
+            ]
+        )
         # No state.json for source-plan → UNKNOWN_TASK, proving we're past argparse.
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
 
     def test_operator_mode_unchanged(self) -> None:
         """Operator add without --token still returns OK (regression guard)."""
         _write_plan(self.project, "new-plan")
-        rc = main([
-            "queue", "add", "new-plan",
-            "--project", str(self.project),
-        ])
+        rc = main(
+            [
+                "queue",
+                "add",
+                "new-plan",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.OK)
 
     def test_reason_accepted_in_operator_mode(self) -> None:
         """--reason sets the reason field on the queue entry."""
         _write_plan(self.project, "my-plan")
-        rc = main([
-            "queue", "add", "my-plan",
-            "--reason", "follow-up",
-            "--project", str(self.project),
-        ])
+        rc = main(
+            [
+                "queue",
+                "add",
+                "my-plan",
+                "--reason",
+                "follow-up",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.OK)
         cfg = ProjectConfig(project_root=self.project)
         data = queue.load(cfg.queue_path())
@@ -132,11 +175,18 @@ class WorkerModeGateTestCase(unittest.TestCase):
     def test_plan_phase_without_token_rejected(self) -> None:
         """--plan/--phase without --token (worker fields in operator context) must exit GENERIC."""
         _write_plan(self.project, "foo")
-        rc, err = _stderr([
-            "queue", "add", "foo",
-            "--plan", "X",
-            "--phase", "Y",
-            "--project", str(self.project),
-        ])
+        rc, err = _stderr(
+            [
+                "queue",
+                "add",
+                "foo",
+                "--plan",
+                "X",
+                "--phase",
+                "Y",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.GENERIC)
         self.assertIn("--token", err)

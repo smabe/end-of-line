@@ -6,6 +6,7 @@ fast-fail check (0.5s after spawn) catches shell exit-127 / immediate
 crashes and releases the claim so the next tick can retry instead of
 waiting 30 minutes for the lease to expire silently.
 """
+
 from __future__ import annotations
 
 import json
@@ -40,21 +41,27 @@ REPAIR_RC_TIMEOUT = -1
 
 # Suggested schema_json bundle to pass into the repair worker prompt.
 # Stays here (not config) because it has to track queue.SCHEMA_VERSION.
-_REPAIR_SCHEMA_HINT = json.dumps({
-    "schema_version": 1,
-    "queue": [{
-        "slug": "<plan-slug>",
-        "added_at": "<iso8601-utc>",
-        "added_by": "operator",
-        "position_at_add": "tail|front",
-    }],
-    "history": [{
-        "slug": "<plan-slug>",
-        "added_at": "<iso8601-utc>",
-        "ended_at": "<iso8601-utc>",
-        "outcome": "abandoned|removed|absorbed",
-    }],
-})
+_REPAIR_SCHEMA_HINT = json.dumps(
+    {
+        "schema_version": 1,
+        "queue": [
+            {
+                "slug": "<plan-slug>",
+                "added_at": "<iso8601-utc>",
+                "added_by": "operator",
+                "position_at_add": "tail|front",
+            }
+        ],
+        "history": [
+            {
+                "slug": "<plan-slug>",
+                "added_at": "<iso8601-utc>",
+                "ended_at": "<iso8601-utc>",
+                "outcome": "abandoned|removed|absorbed",
+            }
+        ],
+    }
+)
 
 # Exceptions that are recoverable in dispatch fallback paths.
 _DISPATCH_FALLBACK_ERRORS = (OSError, json.JSONDecodeError, st.SchemaVersionMismatch)
@@ -68,7 +75,8 @@ _SYSTEMIC_TAIL_LINES = 50
 # matters — first match wins, so put the most specific (rc-gated) one
 # first.
 _RATE_LIMIT_RE = re.compile(
-    r"(rate[\s_-]?limit|RateLimitError)", re.IGNORECASE,
+    r"(rate[\s_-]?limit|RateLimitError)",
+    re.IGNORECASE,
 )
 _AUTH_FAILURE_RE = re.compile(
     r"(401\s+Unauthorized|AuthenticationError|invalid\s+api\s+key)",
@@ -96,7 +104,7 @@ def resolved_model(cmd_tmpl: str) -> str | None:
         if tok == _MODEL_FLAG and i + 1 < len(tokens):
             return tokens[i + 1]
         if tok.startswith(_MODEL_FLAG_EQ):
-            return tok[len(_MODEL_FLAG_EQ):]
+            return tok[len(_MODEL_FLAG_EQ) :]
     return None
 
 
@@ -149,7 +157,8 @@ def dispatch_for_tick(
     cmd_tmpl = cfg.dispatch.command
     if not cmd_tmpl:
         _release_with_failure(
-            state_file, result,
+            state_file,
+            result,
             reason="no dispatch.command in .orchestrator.json",
         )
         return False
@@ -171,7 +180,11 @@ def dispatch_for_tick(
 
     if result.worktree:
         _maybe_write_attempt_context(
-            state_file, log_dir, plan_slug, result.phase_id, result.worktree,
+            state_file,
+            log_dir,
+            plan_slug,
+            result.phase_id,
+            result.worktree,
         )
 
     # Worktree-bearing plans run with cwd pointing at the worktree dir;
@@ -183,7 +196,9 @@ def dispatch_for_tick(
         # Popen-time race ("vanished") in stderr forensics; everything
         # else funnels through one path so the two cases can't drift.
         _pause_for_missing_worktree(
-            state_file, result, cfg,
+            state_file,
+            result,
+            cfg,
             plan_slug=plan_slug,
             worktree_path=result.worktree["path"],
         )
@@ -225,7 +240,8 @@ def dispatch_for_tick(
         # the same release-and-record path as a fast-fail rc so one
         # broken plan can't poison the cadence.
         _release_with_failure(
-            state_file, result,
+            state_file,
+            result,
             reason=f"Popen FileNotFoundError: {exc}",
         )
         print(
@@ -242,8 +258,12 @@ def dispatch_for_tick(
         signature = _match_systemic_signature(log_path, rc=rc)
         if signature is not None:
             _pause_for_systemic_failure(
-                state_file, result, cfg,
-                plan_slug=plan_slug, signature=signature, log_path=log_path,
+                state_file,
+                result,
+                cfg,
+                plan_slug=plan_slug,
+                signature=signature,
+                log_path=log_path,
             )
             print(
                 f"dispatch: systemic-failure {signature} rc={rc}, log={log_path}",
@@ -251,9 +271,9 @@ def dispatch_for_tick(
             )
             return False
         _release_with_failure(
-            state_file, result,
-            reason=f"worker exited rc={rc} within {_FAST_FAIL_WAIT_SEC}s "
-                   f"(see {log_path})",
+            state_file,
+            result,
+            reason=f"worker exited rc={rc} within {_FAST_FAIL_WAIT_SEC}s (see {log_path})",
         )
         print(
             f"dispatch: fast-fail rc={rc}, log={log_path}",
@@ -317,7 +337,10 @@ def dispatch_repair_worker(
 
     with open(log_path, "ab") as log_fh:
         proc = subprocess.Popen(
-            cmd, stdout=log_fh, stderr=subprocess.STDOUT, **popen_kwargs,
+            cmd,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            **popen_kwargs,
         )
 
     try:
@@ -354,7 +377,8 @@ def _run_git_safe(cwd: str, args: list[str]) -> str | None:
     try:
         result = subprocess.run(
             ["git", "-C", cwd, *args],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             timeout=_PREV_ATTEMPT_TIMEOUT_SEC,
         )
         return result.stdout if result.returncode == 0 else None
@@ -483,7 +507,8 @@ def worktree_alive(path: Path) -> bool:
         return False
     check = subprocess.run(
         ["git", "-C", str(path), "rev-parse", "--git-dir"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return check.returncode == 0
 
@@ -510,7 +535,8 @@ def _pause_and_halt(
     try:
         with st.mutate(state_file) as data:
             st.append_event(
-                data, event_type,
+                data,
+                event_type,
                 phase=result.phase_id,
                 token=result.token,
                 **event_kwargs,
@@ -544,7 +570,9 @@ def _pause_for_missing_worktree(
     worktree_path: str,
 ) -> None:
     _pause_and_halt(
-        state_file, result, cfg,
+        state_file,
+        result,
+        cfg,
         event_type=st.EVENT_WORKTREE_MISSING,
         event_kwargs={"worktree_path": worktree_path},
         notify_body=notify.render_worktree_missing(plan_slug, worktree_path),
@@ -562,11 +590,15 @@ def _pause_for_systemic_failure(
     log_path: Path,
 ) -> None:
     _pause_and_halt(
-        state_file, result, cfg,
+        state_file,
+        result,
+        cfg,
         event_type=st.EVENT_SYSTEMIC_FAILURE,
         event_kwargs={"signature": signature, "log_path": str(log_path)},
         notify_body=notify.render_systemic_failure(
-            plan_slug, result.phase_id or "", signature,
+            plan_slug,
+            result.phase_id or "",
+            signature,
         ),
         log_label="systemic_failure",
     )
@@ -577,8 +609,11 @@ def _release_with_failure(state_file: Path, result: TickResult, *, reason: str) 
     try:
         with st.mutate(state_file) as data:
             st.append_event(
-                data, st.EVENT_DISPATCH_FAILED,
-                phase=result.phase_id, token=result.token, reason=reason,
+                data,
+                st.EVENT_DISPATCH_FAILED,
+                phase=result.phase_id,
+                token=result.token,
+                reason=reason,
             )
             try:
                 st.release_claim(

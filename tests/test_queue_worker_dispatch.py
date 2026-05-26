@@ -3,6 +3,7 @@
 Covers happy path, claim-mismatch, wrong-phase, no-live-claim,
 unknown-source-plan, and token-not-in-queue cases.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -64,14 +65,23 @@ class WorkerDispatchTestCase(unittest.TestCase):
     def test_worker_add_happy_path(self) -> None:
         _seed_source_plan(self.project, "feature-b", "c-extract", _TOKEN)
         _write_plan(self.project, "feature-c")
-        rc, out, _ = self._run([
-            "queue", "add", "feature-c",
-            "--token", _TOKEN,
-            "--plan", "feature-b",
-            "--phase", "c-extract",
-            "--reason", "chained follow-up",
-            "--project", str(self.project),
-        ])
+        rc, out, _ = self._run(
+            [
+                "queue",
+                "add",
+                "feature-c",
+                "--token",
+                _TOKEN,
+                "--plan",
+                "feature-b",
+                "--phase",
+                "c-extract",
+                "--reason",
+                "chained follow-up",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.OK)
         data = queue.load(self.queue_path)
         self.assertEqual(len(data["queue"]), 1)
@@ -93,13 +103,21 @@ class WorkerDispatchTestCase(unittest.TestCase):
     def test_worker_add_no_reason_still_works(self) -> None:
         _seed_source_plan(self.project, "feature-b", "c-extract", _TOKEN)
         _write_plan(self.project, "feature-c")
-        rc, _, _ = self._run([
-            "queue", "add", "feature-c",
-            "--token", _TOKEN,
-            "--plan", "feature-b",
-            "--phase", "c-extract",
-            "--project", str(self.project),
-        ])
+        rc, _, _ = self._run(
+            [
+                "queue",
+                "add",
+                "feature-c",
+                "--token",
+                _TOKEN,
+                "--plan",
+                "feature-b",
+                "--phase",
+                "c-extract",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.OK)
         entry = queue.load(self.queue_path)["queue"][0]
         self.assertIsNone(entry["reason"])
@@ -111,13 +129,21 @@ class WorkerDispatchTestCase(unittest.TestCase):
     def test_worker_add_token_fingerprint_is_sha256_prefix(self) -> None:
         _seed_source_plan(self.project, "feature-b", "c-extract", _TOKEN)
         _write_plan(self.project, "feature-c")
-        self._run([
-            "queue", "add", "feature-c",
-            "--token", _TOKEN,
-            "--plan", "feature-b",
-            "--phase", "c-extract",
-            "--project", str(self.project),
-        ])
+        self._run(
+            [
+                "queue",
+                "add",
+                "feature-c",
+                "--token",
+                _TOKEN,
+                "--plan",
+                "feature-b",
+                "--phase",
+                "c-extract",
+                "--project",
+                str(self.project),
+            ]
+        )
         entry = queue.load(self.queue_path)["queue"][0]
         expected_fp = hashlib.sha256(_TOKEN.encode()).hexdigest()[:8]
         self.assertEqual(entry["source_token_fp"], expected_fp)
@@ -125,13 +151,21 @@ class WorkerDispatchTestCase(unittest.TestCase):
     def test_worker_add_claim_mismatch(self) -> None:
         _seed_source_plan(self.project, "feature-b", "c-extract", _TOKEN)
         _write_plan(self.project, "feature-c")
-        rc, _, _ = self._run([
-            "queue", "add", "feature-c",
-            "--token", "wrong-token",
-            "--plan", "feature-b",
-            "--phase", "c-extract",
-            "--project", str(self.project),
-        ])
+        rc, _, _ = self._run(
+            [
+                "queue",
+                "add",
+                "feature-c",
+                "--token",
+                "wrong-token",
+                "--plan",
+                "feature-b",
+                "--phase",
+                "c-extract",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
         self.assertFalse(self.queue_path.exists())
         state_data = st.load(self.cfg.state_path("feature-b"))
@@ -141,13 +175,21 @@ class WorkerDispatchTestCase(unittest.TestCase):
     def test_worker_add_wrong_phase(self) -> None:
         _seed_source_plan(self.project, "feature-b", "c-extract", _TOKEN)
         _write_plan(self.project, "feature-c")
-        rc, _, _ = self._run([
-            "queue", "add", "feature-c",
-            "--token", _TOKEN,
-            "--plan", "feature-b",
-            "--phase", "wrong-phase",
-            "--project", str(self.project),
-        ])
+        rc, _, _ = self._run(
+            [
+                "queue",
+                "add",
+                "feature-c",
+                "--token",
+                _TOKEN,
+                "--plan",
+                "feature-b",
+                "--phase",
+                "wrong-phase",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
         self.assertFalse(self.queue_path.exists())
         state_data = st.load(self.cfg.state_path("feature-b"))
@@ -162,38 +204,62 @@ class WorkerDispatchTestCase(unittest.TestCase):
         data = st.empty_state("feature-b", "plans")
         st.save_atomic(state_path, data)
         _write_plan(self.project, "feature-c")
-        rc, _, _ = self._run([
-            "queue", "add", "feature-c",
-            "--token", _TOKEN,
-            "--plan", "feature-b",
-            "--phase", "c-extract",
-            "--project", str(self.project),
-        ])
+        rc, _, _ = self._run(
+            [
+                "queue",
+                "add",
+                "feature-c",
+                "--token",
+                _TOKEN,
+                "--plan",
+                "feature-b",
+                "--phase",
+                "c-extract",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
         self.assertFalse(self.queue_path.exists())
 
     def test_worker_add_unknown_source_plan(self) -> None:
         _write_plan(self.project, "feature-c")
         registry.register(self.project, "feature-c")
-        rc, _, _ = self._run([
-            "queue", "add", "feature-c",
-            "--token", _TOKEN,
-            "--plan", "no-state-plan",
-            "--phase", "c-extract",
-            "--project", str(self.project),
-        ])
+        rc, _, _ = self._run(
+            [
+                "queue",
+                "add",
+                "feature-c",
+                "--token",
+                _TOKEN,
+                "--plan",
+                "no-state-plan",
+                "--phase",
+                "c-extract",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
         self.assertFalse(self.queue_path.exists())
 
     def test_worker_add_raw_token_not_in_queue(self) -> None:
         _seed_source_plan(self.project, "feature-b", "c-extract", _TOKEN)
         _write_plan(self.project, "feature-c")
-        self._run([
-            "queue", "add", "feature-c",
-            "--token", _TOKEN,
-            "--plan", "feature-b",
-            "--phase", "c-extract",
-            "--project", str(self.project),
-        ])
+        self._run(
+            [
+                "queue",
+                "add",
+                "feature-c",
+                "--token",
+                _TOKEN,
+                "--plan",
+                "feature-b",
+                "--phase",
+                "c-extract",
+                "--project",
+                str(self.project),
+            ]
+        )
         raw_bytes = self.queue_path.read_bytes()
         self.assertNotIn(_TOKEN.encode(), raw_bytes)

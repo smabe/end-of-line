@@ -1,6 +1,7 @@
 """`clu init` config knobs — lease_ttl_minutes, stalled_heartbeat_minutes,
 max_attempts_per_phase flags and their validation.
 """
+
 from __future__ import annotations
 
 import io
@@ -33,9 +34,7 @@ class InitConfigKnobsTestCase(unittest.TestCase):
         isolate_registry(self, Path(self._tmp.name))
         (self.project / "plans").mkdir()
         (self.project / "plans" / "foo.md").write_text(PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "foo.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "foo.state.json"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -43,10 +42,16 @@ class InitConfigKnobsTestCase(unittest.TestCase):
     def _init(self, *extra: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main([
-                "init", "--project", str(self.project), "--plan", "foo",
-                *extra,
-            ])
+            rc = main(
+                [
+                    "init",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "foo",
+                    *extra,
+                ]
+            )
         return rc, out.getvalue(), err.getvalue()
 
     # --- happy paths -------------------------------------------------------
@@ -101,14 +106,10 @@ class InitPerPhaseLeaseTestCase(unittest.TestCase):
         self, slug: str, plan_body: str, *, extra: tuple[str, ...] = ()
     ) -> tuple[int, dict]:
         (self.project / "plans" / f"{slug}.md").write_text(plan_body)
-        state_path = (
-            self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
-        )
+        state_path = self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main(
-                ["init", "--project", str(self.project), "--plan", slug, *extra]
-            )
+            rc = main(["init", "--project", str(self.project), "--plan", slug, *extra])
         data = st.load(state_path) if rc == 0 else {}
         return rc, data
 
@@ -151,9 +152,8 @@ class InitPerPhaseLeaseTestCase(unittest.TestCase):
     # lease_ttl_scale=1.0 in config, Effort `2h` → 120min × 1.0 = 120
     def test_init_respects_lease_ttl_scale_override(self) -> None:
         import json as _json
-        (self.project / ".orchestrator.json").write_text(
-            _json.dumps({"lease_ttl_scale": 1.0})
-        )
+
+        (self.project / ".orchestrator.json").write_text(_json.dumps({"lease_ttl_scale": 1.0}))
         rc, data = self._init_plan("effort-p4", self._plan_body("effort-p4", "2h"))
         self.assertEqual(rc, 0)
         phase = self._phase(data, "phase-a")

@@ -7,6 +7,7 @@ DM channel.id is cached in discord_state.json (keyed by user_id) to
 avoid a round-trip on every send. Blocker message_id is persisted on
 the plan's state.json for later Reply-UI correlation (phase discord-in).
 """
+
 from __future__ import annotations
 
 import json

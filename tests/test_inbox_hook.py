@@ -8,6 +8,7 @@ surfaced event processed.
 Tests invoke the script as a subprocess to exercise the full headless
 boundary — stdin payload + stdout JSON shape + filesystem side effects.
 """
+
 from __future__ import annotations
 
 import json
@@ -27,20 +28,31 @@ from tests import isolate_monitor_marker
 
 
 def _run_hook(
-    *, cwd: Path, xdg: Path, stdin_payload: str = "{}",
+    *,
+    cwd: Path,
+    xdg: Path,
+    stdin_payload: str = "{}",
     timeout: float = 5.0,
 ) -> tuple[int, str, str, float]:
     """Run the hook as a subprocess from `cwd` with `XDG_CONFIG_HOME=xdg`."""
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = str(xdg)
-    env["PYTHONPATH"] = str(
-        Path(__file__).resolve().parent.parent,
-    ) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(
+            Path(__file__).resolve().parent.parent,
+        )
+        + os.pathsep
+        + env.get("PYTHONPATH", "")
+    )
     start = time.time()
     proc = subprocess.run(
         [sys.executable, "-m", "end_of_line.hooks.clu_inbox_surface"],
-        cwd=str(cwd), env=env, input=stdin_payload,
-        capture_output=True, text=True, timeout=timeout,
+        cwd=str(cwd),
+        env=env,
+        input=stdin_payload,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     elapsed = time.time() - start
     return proc.returncode, proc.stdout, proc.stderr, elapsed
@@ -65,17 +77,23 @@ class HookSurfacingTests(HookTestBase):
 
     def test_hook_surfaces_events_for_current_project(self) -> None:
         inbox.write_event(
-            type="halted", plan_slug="foo", project_root=str(self.proj),
+            type="halted",
+            plan_slug="foo",
+            project_root=str(self.proj),
             summary="proj-a event 1",
         )
         inbox.write_event(
-            type="blocked", plan_slug="foo", project_root=str(self.proj),
+            type="blocked",
+            plan_slug="foo",
+            project_root=str(self.proj),
             summary="proj-a event 2",
         )
         other = self.tmp / "proj-b"
         other.mkdir()
         inbox.write_event(
-            type="halted", plan_slug="bar", project_root=str(other),
+            type="halted",
+            plan_slug="bar",
+            project_root=str(other),
             summary="proj-b event",
         )
 
@@ -93,11 +111,15 @@ class HookSurfacingTests(HookTestBase):
 
     def test_hook_marks_surfaced_events_processed(self) -> None:
         inbox.write_event(
-            type="halted", plan_slug="foo", project_root=str(self.proj),
+            type="halted",
+            plan_slug="foo",
+            project_root=str(self.proj),
             summary="event 1",
         )
         inbox.write_event(
-            type="blocked", plan_slug="foo", project_root=str(self.proj),
+            type="blocked",
+            plan_slug="foo",
+            project_root=str(self.proj),
             summary="event 2",
         )
         rc, _, _, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
@@ -110,8 +132,10 @@ class HookSurfacingTests(HookTestBase):
     def test_hook_caps_at_20_events_with_footer(self) -> None:
         for i in range(25):
             inbox.write_event(
-                type="halted", plan_slug="foo",
-                project_root=str(self.proj), summary=f"event {i:02d}",
+                type="halted",
+                plan_slug="foo",
+                project_root=str(self.proj),
+                summary=f"event {i:02d}",
             )
         rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)
@@ -127,7 +151,8 @@ class HookSurfacingTests(HookTestBase):
         huge = "X" * 2000
         for i in range(20):
             inbox.write_event(
-                type="halted", plan_slug="foo",
+                type="halted",
+                plan_slug="foo",
                 project_root=str(self.proj),
                 summary=f"{i:02d} {huge}",
             )
@@ -142,8 +167,10 @@ class HookSurfacingTests(HookTestBase):
         non_repo = self.tmp / "no-repo"
         non_repo.mkdir()
         inbox.write_event(
-            type="halted", plan_slug="foo",
-            project_root=str(non_repo), summary="cwd fallback",
+            type="halted",
+            plan_slug="foo",
+            project_root=str(non_repo),
+            summary="cwd fallback",
         )
         rc, out, err, _ = _run_hook(cwd=non_repo, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)
@@ -153,8 +180,10 @@ class HookSurfacingTests(HookTestBase):
 
     def test_hook_exits_zero_on_corrupt_event_file(self) -> None:
         inbox.write_event(
-            type="halted", plan_slug="foo",
-            project_root=str(self.proj), summary="ok",
+            type="halted",
+            plan_slug="foo",
+            project_root=str(self.proj),
+            summary="ok",
         )
         # Corrupt a sibling file.
         root = inbox.inbox_root()
@@ -168,8 +197,10 @@ class HookSurfacingTests(HookTestBase):
     def test_hook_under_500ms_with_50_events(self) -> None:
         for i in range(50):
             inbox.write_event(
-                type="halted", plan_slug="foo",
-                project_root=str(self.proj), summary=f"event {i}",
+                type="halted",
+                plan_slug="foo",
+                project_root=str(self.proj),
+                summary=f"event {i}",
             )
         # CI buffer: 2s. Local typical: <500ms. The mandate is "comfortably
         # under the latency budget"; if this trips on slow CI, raise the
@@ -182,7 +213,10 @@ class BlockerSurfacingTests(HookTestBase):
     """Tests for the active-blocker section emitted by the hook."""
 
     def _seed_plan(
-        self, project: Path, slug: str, blockers: list[dict],
+        self,
+        project: Path,
+        slug: str,
+        blockers: list[dict],
     ) -> None:
         """Write state file with given blockers and register the plan."""
         sp = project / "plans" / ".orchestrator" / f"{slug}.state.json"
@@ -194,26 +228,37 @@ class BlockerSurfacingTests(HookTestBase):
         registry.register(project, slug)
 
     def _open_blocker(
-        self, bid: str, phase: str = "p1",
+        self,
+        bid: str,
+        phase: str = "p1",
         question: str = "Which approach?",
         options: list[str] | None = None,
     ) -> dict:
         return {
-            "id": bid, "phase_id": phase, "type": st.BLOCKER_INPUT,
+            "id": bid,
+            "phase_id": phase,
+            "type": st.BLOCKER_INPUT,
             "question": question,
             "options": options or ["Option A", "Option B"],
             "context": "",
-            "asked_at": st.utcnow(), "answer": None, "answered_at": None,
+            "asked_at": st.utcnow(),
+            "answer": None,
+            "answered_at": None,
         }
 
     def test_hook_surfaces_active_blocker(self) -> None:
-        self._seed_plan(self.proj, "my-plan", [
-            self._open_blocker(
-                "q-1", phase="impl",
-                question="Which database?",
-                options=["SQLite", "PostgreSQL"],
-            )
-        ])
+        self._seed_plan(
+            self.proj,
+            "my-plan",
+            [
+                self._open_blocker(
+                    "q-1",
+                    phase="impl",
+                    question="Which database?",
+                    options=["SQLite", "PostgreSQL"],
+                )
+            ],
+        )
         rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)
         payload = json.loads(out)
@@ -230,8 +275,10 @@ class BlockerSurfacingTests(HookTestBase):
     def test_hook_omits_blockers_section_when_none_open(self) -> None:
         # Write an inbox event so the hook produces output we can inspect.
         inbox.write_event(
-            type="halted", plan_slug="my-plan",
-            project_root=str(self.proj), summary="plan halted",
+            type="halted",
+            plan_slug="my-plan",
+            project_root=str(self.proj),
+            summary="plan halted",
         )
         # No BLOCKED plans registered — section must be absent.
         rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
@@ -241,14 +288,16 @@ class BlockerSurfacingTests(HookTestBase):
         self.assertNotIn("## Active blockers", ctx)
 
     def test_hook_surfaces_multiple_blockers_across_plans(self) -> None:
-        self._seed_plan(self.proj, "plan-a", [
-            self._open_blocker("q-1", question="Question A?",
-                               options=["Yes", "No"])
-        ])
-        self._seed_plan(self.proj, "plan-b", [
-            self._open_blocker("q-2", question="Question B?",
-                               options=["Fast", "Slow"])
-        ])
+        self._seed_plan(
+            self.proj,
+            "plan-a",
+            [self._open_blocker("q-1", question="Question A?", options=["Yes", "No"])],
+        )
+        self._seed_plan(
+            self.proj,
+            "plan-b",
+            [self._open_blocker("q-2", question="Question B?", options=["Fast", "Slow"])],
+        )
         rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)
         payload = json.loads(out)
@@ -261,12 +310,10 @@ class BlockerSurfacingTests(HookTestBase):
     def test_hook_scopes_blockers_to_current_project(self) -> None:
         proj_b = self.tmp / "proj-b"
         proj_b.mkdir()
-        self._seed_plan(self.proj, "plan-a", [
-            self._open_blocker("q-1", question="Proj A question?")
-        ])
-        self._seed_plan(proj_b, "plan-b", [
-            self._open_blocker("q-2", question="Proj B question?")
-        ])
+        self._seed_plan(
+            self.proj, "plan-a", [self._open_blocker("q-1", question="Proj A question?")]
+        )
+        self._seed_plan(proj_b, "plan-b", [self._open_blocker("q-2", question="Proj B question?")])
         rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)
         payload = json.loads(out)
@@ -277,9 +324,9 @@ class BlockerSurfacingTests(HookTestBase):
     def test_hook_caps_blockers_at_10(self) -> None:
         for i in range(12):
             slug = f"plan-{i:02d}"
-            self._seed_plan(self.proj, slug, [
-                self._open_blocker(f"q-{i}", question=f"Question {i}?")
-            ])
+            self._seed_plan(
+                self.proj, slug, [self._open_blocker(f"q-{i}", question=f"Question {i}?")]
+            )
         rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)
         payload = json.loads(out)
@@ -291,13 +338,18 @@ class BlockerSurfacingTests(HookTestBase):
     def test_open_blockers_with_details_includes_question(self) -> None:
         proj = self.tmp / "proj-unit"
         proj.mkdir()
-        self._seed_plan(proj, "test-plan", [
-            self._open_blocker(
-                "q-1", phase="build",
-                question="Pick an option",
-                options=["Alpha", "Beta", "Gamma"],
-            )
-        ])
+        self._seed_plan(
+            proj,
+            "test-plan",
+            [
+                self._open_blocker(
+                    "q-1",
+                    phase="build",
+                    question="Pick an option",
+                    options=["Alpha", "Beta", "Gamma"],
+                )
+            ],
+        )
         entries = registry.entries()
         result = open_blockers_with_details(entries, proj)
         self.assertEqual(len(result), 1)

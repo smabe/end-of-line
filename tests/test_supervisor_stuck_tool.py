@@ -5,6 +5,7 @@ that have been alive long enough with low enough CPU usage to be considered
 wedged. P2 is the pure walker; P3 is the threshold + dedup + emit logic
 wired into the supervisor tick.
 """
+
 from __future__ import annotations
 
 import unittest
@@ -84,8 +85,10 @@ class ParsePsOutputTestCase(unittest.TestCase):
         self.assertIn("claude --print", worker.command)
 
     def test_ignores_malformed_lines(self) -> None:
-        raw = PS_SAMPLE_HEADER + "\nthis is not a valid ps line\n" + (
-            "12345     1   00:30        0:00.10 /bin/sleep 30\n"
+        raw = (
+            PS_SAMPLE_HEADER
+            + "\nthis is not a valid ps line\n"
+            + ("12345     1   00:30        0:00.10 /bin/sleep 30\n")
         )
         procs = _parse_ps_output(raw)
         self.assertEqual(len(procs), 1)
@@ -335,12 +338,18 @@ class EmitStuckToolActiveMarkerTestCase(CluTestCase):
         data = _empty_data_with_claim()
         data["current_claim"]["active_tool_started_at"] = utcnow_minus(605)
         cfg = _config_with_thresholds()
-        raw = PS_SAMPLE_HEADER + "\n" + "\n".join([
-            "78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools",
-            "79750 78233   12:00        0:00.10 bun run --cwd /Users/smabe/.claude/plugins/cache/claude-plugins-official/imessage start",
-            "79755 78233   11:50        0:00.10 npm exec stitch-mcp",
-            "81681 78233   10:00        0:00.50 /usr/bin/xcodebuild test -project HealthDash.xcodeproj",
-        ])
+        raw = (
+            PS_SAMPLE_HEADER
+            + "\n"
+            + "\n".join(
+                [
+                    "78233     1   12:28        0:30.50 claude --print /clu-phase plan-x ai-tools",
+                    "79750 78233   12:00        0:00.10 bun run --cwd /Users/smabe/.claude/plugins/cache/claude-plugins-official/imessage start",
+                    "79755 78233   11:50        0:00.10 npm exec stitch-mcp",
+                    "81681 78233   10:00        0:00.50 /usr/bin/xcodebuild test -project HealthDash.xcodeproj",
+                ]
+            )
+        )
         _emit_stuck_tool(data, cfg, ps_output=raw)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(len(events), 1)
@@ -355,27 +364,33 @@ class EmitStuckToolActiveMarkerTestCase(CluTestCase):
 class WatchFormatterTestCase(unittest.TestCase):
     def test_formatter_registered_for_tool_stuck(self) -> None:
         from end_of_line import watch
+
         self.assertIn(st.EVENT_TOOL_STUCK, watch._FORMATTERS)
 
     def test_event_visible_by_default(self) -> None:
         # Stuck-tool events are actionable; they belong in the default stream
         # (not the verbose-only band like lease_expired).
         from end_of_line import watch
+
         self.assertIn(st.EVENT_TOOL_STUCK, watch._DEFAULT_VISIBLE)
         self.assertNotIn(st.EVENT_TOOL_STUCK, watch._VERBOSE_ONLY)
 
     def test_formatter_includes_phase_pid_elapsed(self) -> None:
         from end_of_line import watch
+
         fmt = watch._FORMATTERS[st.EVENT_TOOL_STUCK]
-        rendered = fmt("plan-x", {
-            "type": st.EVENT_TOOL_STUCK,
-            "phase": "ai-tools",
-            "worker_pid": 78233,
-            "descendant_pid": 81681,
-            "command": "/usr/bin/xcodebuild test -project HealthDash.xcodeproj",
-            "elapsed_seconds": 600,
-            "cpu_seconds": 0,
-        })
+        rendered = fmt(
+            "plan-x",
+            {
+                "type": st.EVENT_TOOL_STUCK,
+                "phase": "ai-tools",
+                "worker_pid": 78233,
+                "descendant_pid": 81681,
+                "command": "/usr/bin/xcodebuild test -project HealthDash.xcodeproj",
+                "elapsed_seconds": 600,
+                "cpu_seconds": 0,
+            },
+        )
         # The operator should be able to identify the wedged subprocess at a
         # glance without expanding the JSON payload.
         self.assertIn("plan-x/ai-tools", rendered)
@@ -411,6 +426,7 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
 
     def _register(self, project: Path, slug: str = "plan-x") -> None:
         from end_of_line import registry
+
         cfg_path = project / "plans" / f"{slug}.md"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(
@@ -493,7 +509,8 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
             with redirect_stdout(io.StringIO()):
                 _print_stuck_tool_health(cfg)  # ps_output=None → live ps
         self.assertEqual(
-            len(ps_calls), 1,
+            len(ps_calls),
+            1,
             f"expected 1 ps call shared across plans, got {len(ps_calls)}",
         )
 

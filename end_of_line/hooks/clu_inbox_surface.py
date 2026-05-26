@@ -10,6 +10,7 @@ on the operator's screen as a stderr line, which is louder than the
 inbox event itself. The exception is logged to `~/.config/clu/inbox_hook.log`
 for diagnosis.
 """
+
 from __future__ import annotations
 
 import json
@@ -126,8 +127,7 @@ def _has_event_type(events: Iterable[dict], type_: str) -> bool:
 
 def _wedge_sections(events: list[dict]) -> list[str]:
     """Return the instruction blocks whose event class is present."""
-    return [block for type_, block in WEDGE_INSTRUCTION_BLOCKS
-            if _has_event_type(events, type_)]
+    return [block for type_, block in WEDGE_INSTRUCTION_BLOCKS if _has_event_type(events, type_)]
 
 
 def _log_path() -> Path:
@@ -146,7 +146,9 @@ def _resolve_project_root() -> str:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
@@ -177,10 +179,7 @@ def _build_context(events: Iterable[dict]) -> str:
     lines = ["clu inbox (unprocessed):"]
     lines.extend(_format_event(e) for e in capped)
     if truncated_count > 0:
-        lines.append(
-            f"  (+ {truncated_count} older events — run `clu inbox` "
-            "to see all)"
-        )
+        lines.append(f"  (+ {truncated_count} older events — run `clu inbox` to see all)")
     out = "\n".join(lines)
     if len(out) > MAX_CONTEXT_CHARS:
         footer = "\n  (truncated)"
@@ -196,19 +195,18 @@ def _build_blockers_section(blockers: list[BlockerDetail]) -> str:
     parts = []
     for b in capped:
         opts = "\n".join(f"  [{i}] {opt}" for i, opt in enumerate(b.options))
-        parts.append(BLOCKER_TEMPLATE.format(
-            slug=b.plan_slug,
-            phase=b.phase_id,
-            blocker_id=b.blocker_id,
-            question=b.question,
-            options_list=opts,
-        ))
+        parts.append(
+            BLOCKER_TEMPLATE.format(
+                slug=b.plan_slug,
+                phase=b.phase_id,
+                blocker_id=b.blocker_id,
+                question=b.question,
+                options_list=opts,
+            )
+        )
     body = "\n".join(parts)
     if overflow > 0:
-        body += (
-            f"\n... +{overflow} more open blockers — "
-            "see `clu list` for the full set."
-        )
+        body += f"\n... +{overflow} more open blockers — see `clu list` for the full set."
     return SECTION_HEADER + body + INSTRUCTION
 
 

@@ -1,4 +1,5 @@
 """Tests for watch.project_event_task — task-list protocol projector."""
+
 import unittest
 
 from end_of_line import state as st
@@ -10,7 +11,6 @@ def _evt(type_, **fields):
 
 
 class PerEventCoverageTest(unittest.TestCase):
-
     def test_phase_started_emits_task_update_in_progress(self):
         out = project_event_task(
             _evt(st.EVENT_PHASE_STARTED, phase="foundation", claimed_by="sess-x"),
@@ -40,8 +40,12 @@ class PerEventCoverageTest(unittest.TestCase):
 
     def test_phase_blocked_includes_blocker_id_in_msg(self):
         out = project_event_task(
-            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-42",
-                 question="Postgres or sqlite?"),
+            _evt(
+                st.EVENT_PHASE_BLOCKED,
+                phase="design",
+                blocker_id="blk-42",
+                question="Postgres or sqlite?",
+            ),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -59,8 +63,7 @@ class PerEventCoverageTest(unittest.TestCase):
 
     def test_systemic_failure_emits_in_progress_with_signature(self):
         out = project_event_task(
-            _evt(st.EVENT_SYSTEMIC_FAILURE, signature="OOMKilled",
-                 log_path="/tmp/x.log"),
+            _evt(st.EVENT_SYSTEMIC_FAILURE, signature="OOMKilled", log_path="/tmp/x.log"),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -111,14 +114,17 @@ class FullLineShapeTest(unittest.TestCase):
 
     def test_phase_blocked_full_line_shape(self):
         out = project_event_task(
-            _evt(st.EVENT_PHASE_BLOCKED, phase="design",
-                 blocker_id="blk-42",
-                 question="Postgres or sqlite?"),
+            _evt(
+                st.EVENT_PHASE_BLOCKED,
+                phase="design",
+                blocker_id="blk-42",
+                question="Postgres or sqlite?",
+            ),
             "my-plan",
         )
         self.assertEqual(
             out,
-            'TASK_UPDATE task=my-plan/design parent=my-plan '
+            "TASK_UPDATE task=my-plan/design parent=my-plan "
             'status=in_progress msg="BLOCKED blk-42 — Postgres or sqlite?"',
         )
 
@@ -129,45 +135,45 @@ class FullLineShapeTest(unittest.TestCase):
         )
         self.assertEqual(
             out,
-            'TASK_UPDATE task=my-plan/build parent=my-plan '
+            "TASK_UPDATE task=my-plan/build parent=my-plan "
             'status=in_progress msg="HALTED (max attempts on build)"',
         )
 
     def test_systemic_failure_full_line_shape(self):
         out = project_event_task(
-            _evt(st.EVENT_SYSTEMIC_FAILURE, signature="OOMKilled",
-                 phase="impl", log_path="/tmp/x.log"),
+            _evt(
+                st.EVENT_SYSTEMIC_FAILURE,
+                signature="OOMKilled",
+                phase="impl",
+                log_path="/tmp/x.log",
+            ),
             "my-plan",
         )
         self.assertEqual(
             out,
-            'TASK_UPDATE task=my-plan/impl parent=my-plan '
+            "TASK_UPDATE task=my-plan/impl parent=my-plan "
             'status=in_progress msg="SYSTEMIC FAILURE — OOMKilled"',
         )
 
 
 class FilteredEventsTest(unittest.TestCase):
-
     def test_task_spawned_returns_none(self):
         out = project_event_task(
-            _evt(st.EVENT_TASK_SPAWNED, task="task-1", source="gh",
-                 spawned_by_phase="impl"),
+            _evt(st.EVENT_TASK_SPAWNED, task="task-1", source="gh", spawned_by_phase="impl"),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_worktree_attached_returns_none_default(self):
         out = project_event_task(
-            _evt(st.EVENT_WORKTREE_ATTACHED, path="/tmp/wt", branch="clu/foo",
-                 base_ref="abc"),
+            _evt(st.EVENT_WORKTREE_ATTACHED, path="/tmp/wt", branch="clu/foo", base_ref="abc"),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_worktree_attached_returns_in_progress_with_verbose(self):
         out = project_event_task(
-            _evt(st.EVENT_WORKTREE_ATTACHED, path="/tmp/wt", branch="clu/foo",
-                 base_ref="abc"),
+            _evt(st.EVENT_WORKTREE_ATTACHED, path="/tmp/wt", branch="clu/foo", base_ref="abc"),
             "my-plan",
             verbose=True,
         )
@@ -187,11 +193,14 @@ class FilteredEventsTest(unittest.TestCase):
 
 
 class MsgEscapingTest(unittest.TestCase):
-
     def test_msg_with_quotes_escaped(self):
         out = project_event_task(
-            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1",
-                 question='Use "postgres" or sqlite?'),
+            _evt(
+                st.EVENT_PHASE_BLOCKED,
+                phase="design",
+                blocker_id="blk-1",
+                question='Use "postgres" or sqlite?',
+            ),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -200,8 +209,12 @@ class MsgEscapingTest(unittest.TestCase):
 
     def test_msg_with_backslash_escaped(self):
         out = project_event_task(
-            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1",
-                 question="path\\to\\file"),
+            _evt(
+                st.EVENT_PHASE_BLOCKED,
+                phase="design",
+                blocker_id="blk-1",
+                question="path\\to\\file",
+            ),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -209,12 +222,10 @@ class MsgEscapingTest(unittest.TestCase):
 
 
 class MsgTruncationTest(unittest.TestCase):
-
     def test_long_question_truncated_to_100_chars(self):
         long_q = "X" * 120
         out = project_event_task(
-            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1",
-                 question=long_q),
+            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1", question=long_q),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -232,8 +243,7 @@ class MsgTruncationTest(unittest.TestCase):
 
     def test_empty_question_ok(self):
         out = project_event_task(
-            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1",
-                 question=""),
+            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1", question=""),
             "my-plan",
         )
         self.assertIsNotNone(out)

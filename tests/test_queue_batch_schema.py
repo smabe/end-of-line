@@ -5,6 +5,7 @@ additive `batch_id` field: operator stamping, null default, slug validation,
 worker rejection, queue-pop propagation to plan state, absorbed-path history
 preservation, and empty_state baseline.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -48,11 +49,19 @@ class QueueBatchSchemaTestCase(CluTestCase):
         _write_plan(self.project, "plan-a")
         _write_plan(self.project, "plan-b")
         _write_plan(self.project, "plan-c")
-        rc = main([
-            "queue", "add", "plan-a", "plan-b", "plan-c",
-            "--batch", "my-batch",
-            "--project", str(self.project),
-        ])
+        rc = main(
+            [
+                "queue",
+                "add",
+                "plan-a",
+                "plan-b",
+                "plan-c",
+                "--batch",
+                "my-batch",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.OK)
         entries = queue.load(self.queue_path)["queue"]
         self.assertEqual(len(entries), 3)
@@ -70,25 +79,40 @@ class QueueBatchSchemaTestCase(CluTestCase):
     def test_queue_add_invalid_batch_slug_rejects(self) -> None:
         _bootstrap(self.project)
         _write_plan(self.project, "plan-a")
-        rc = main([
-            "queue", "add", "plan-a",
-            "--batch", "BAD_SLUG",
-            "--project", str(self.project),
-        ])
+        rc = main(
+            [
+                "queue",
+                "add",
+                "plan-a",
+                "--batch",
+                "BAD_SLUG",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.INVALID_SLUG)
 
     def test_worker_queue_add_rejects_batch_flag(self) -> None:
         _bootstrap(self.project)
         _write_plan(self.project, "child-plan")
 
-        rc = main([
-            "queue", "add", "child-plan",
-            "--token", "some-token",
-            "--plan", "parent-plan",
-            "--phase", "some-phase",
-            "--batch", "my-batch",
-            "--project", str(self.project),
-        ])
+        rc = main(
+            [
+                "queue",
+                "add",
+                "child-plan",
+                "--token",
+                "some-token",
+                "--plan",
+                "parent-plan",
+                "--phase",
+                "some-phase",
+                "--batch",
+                "my-batch",
+                "--project",
+                str(self.project),
+            ]
+        )
         self.assertEqual(rc, ExitCode.GENERIC)
         # Queue must be unchanged — no entries added before the rejection.
         if self.queue_path.exists():
@@ -99,17 +123,19 @@ class QueueBatchSchemaTestCase(CluTestCase):
         _write_plan(self.project, "batched-plan")
 
         with queue.mutate(self.queue_path) as data:
-            data["queue"].append({
-                "slug": "batched-plan",
-                "added_at": st.utcnow(),
-                "added_by": "operator",
-                "position_at_add": "tail",
-                "source_plan": None,
-                "source_phase": None,
-                "source_token_fp": None,
-                "reason": None,
-                "batch_id": "my-batch",
-            })
+            data["queue"].append(
+                {
+                    "slug": "batched-plan",
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                    "source_plan": None,
+                    "source_phase": None,
+                    "source_token_fp": None,
+                    "reason": None,
+                    "batch_id": "my-batch",
+                }
+            )
 
         cfg = load_project_config(self.project)
         state_path = cfg.state_path("batched-plan")
@@ -133,23 +159,27 @@ class QueueBatchSchemaTestCase(CluTestCase):
         st.save_atomic(state_path, fresh)
 
         with queue.mutate(self.queue_path) as data:
-            data["queue"].append({
-                "slug": "absorbed-plan",
-                "added_at": st.utcnow(),
-                "added_by": "operator",
-                "position_at_add": "tail",
-                "source_plan": None,
-                "source_phase": None,
-                "source_token_fp": None,
-                "reason": None,
-                "batch_id": "absorbed-batch",
-            })
+            data["queue"].append(
+                {
+                    "slug": "absorbed-plan",
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                    "source_plan": None,
+                    "source_phase": None,
+                    "source_token_fp": None,
+                    "reason": None,
+                    "batch_id": "absorbed-batch",
+                }
+            )
 
-        plans = [ProjectPlan(
-            slug="absorbed-plan",
-            state=fresh,
-            state_path=state_path,
-        )]
+        plans = [
+            ProjectPlan(
+                slug="absorbed-plan",
+                state=fresh,
+                state_path=state_path,
+            )
+        ]
         result = queue_advancement_rule(self.project, plans)
         self.assertIsNotNone(result)
         data = queue.load(self.queue_path)

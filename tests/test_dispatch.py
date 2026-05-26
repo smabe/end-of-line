@@ -1,4 +1,5 @@
 """Tests for dispatch failure visibility (fix 7)."""
+
 from __future__ import annotations
 
 import json
@@ -49,8 +50,11 @@ class DispatchTestCase(CluTestCase):
 
     def _result(self, *, worktree: dict | None = None) -> TickResult:
         return TickResult(
-            action="dispatch", detail="", phase_id="a",
-            token=self.token, worktree=worktree,
+            action="dispatch",
+            detail="",
+            phase_id="a",
+            token=self.token,
+            worktree=worktree,
         )
 
     def test_missing_command_releases_claim(self) -> None:
@@ -114,10 +118,14 @@ class DispatchTestCase(CluTestCase):
         """
         sentinel = self.project / sentinel_name
         cfg = self._cfg(
-            f'sh -c \'{payload.format(s=sentinel)}\'', path=path,
+            f"sh -c '{payload.format(s=sentinel)}'",
+            path=path,
         )
         dispatch_for_tick(
-            self._result(worktree=worktree), cfg, "t", self.state_path,
+            self._result(worktree=worktree),
+            cfg,
+            "t",
+            self.state_path,
         )
         deadline = time.time() + 5.0
         while time.time() < deadline:
@@ -125,7 +133,8 @@ class DispatchTestCase(CluTestCase):
                 break
             time.sleep(0.05)
         self.assertTrue(
-            sentinel.exists(), f"sentinel {sentinel_name} never written",
+            sentinel.exists(),
+            f"sentinel {sentinel_name} never written",
         )
         return sentinel.read_text()
 
@@ -181,14 +190,17 @@ class DispatchTestCase(CluTestCase):
         # a primary repo or a worktree.
         wt = Path(tempfile.mkdtemp(prefix="wt-sibling-"))
         subprocess.run(
-            ["git", "-C", str(wt), "init", "-q"], check=True,
+            ["git", "-C", str(wt), "init", "-q"],
+            check=True,
         )
         try:
-            cwd = self._capture_cwd(worktree={
-                "path": str(wt),
-                "branch": "clu/t",
-                "base_ref": "0" * 40,
-            })
+            cwd = self._capture_cwd(
+                worktree={
+                    "path": str(wt),
+                    "branch": "clu/t",
+                    "base_ref": "0" * 40,
+                }
+            )
             self.assertEqual(Path(cwd).resolve(), wt.resolve())
         finally:
             shutil.rmtree(wt)
@@ -202,11 +214,13 @@ class DispatchTestCase(CluTestCase):
         missing = self.project.parent / "this-was-removed"
         # Intentionally don't mkdir; the path doesn't exist on disk.
         cfg = self._cfg("echo should-not-spawn")
-        result = self._result(worktree={
-            "path": str(missing),
-            "branch": "clu/t",
-            "base_ref": "0" * 40,
-        })
+        result = self._result(
+            worktree={
+                "path": str(missing),
+                "branch": "clu/t",
+                "base_ref": "0" * 40,
+            }
+        )
         ok = dispatch_for_tick(result, cfg, "t", self.state_path)
         self.assertFalse(ok)
         data = json.loads(self.state_path.read_text())
@@ -225,11 +239,13 @@ class DispatchTestCase(CluTestCase):
         wt = Path(tempfile.mkdtemp(prefix="wt-not-git-"))
         try:
             cfg = self._cfg("echo should-not-spawn")
-            result = self._result(worktree={
-                "path": str(wt),
-                "branch": "clu/t",
-                "base_ref": "0" * 40,
-            })
+            result = self._result(
+                worktree={
+                    "path": str(wt),
+                    "branch": "clu/t",
+                    "base_ref": "0" * 40,
+                }
+            )
             ok = dispatch_for_tick(result, cfg, "t", self.state_path)
             self.assertFalse(ok)
             data = json.loads(self.state_path.read_text())
@@ -300,7 +316,10 @@ class DispatchTestCase(CluTestCase):
         ):
             with mock.patch("end_of_line.dispatch.coolant.emit_start") as emit:
                 ok = dispatch_for_tick(
-                    self._result(), cfg, "t", self.state_path,
+                    self._result(),
+                    cfg,
+                    "t",
+                    self.state_path,
                 )
         self.assertFalse(ok)
         emit.assert_not_called()

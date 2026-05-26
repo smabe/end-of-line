@@ -5,6 +5,7 @@ When `quality.verify_required: false` is set in `.orchestrator.json`,
 gate is unaffected (still refuses on large diffs without a simplify
 stamp). An audit event records the policy bypass per-phase.
 """
+
 from __future__ import annotations
 
 import io
@@ -42,7 +43,9 @@ def _write_config(project: Path, *, quality: dict | None = None) -> None:
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(cwd), *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -58,9 +61,7 @@ class VerifyOptOutTestCase(unittest.TestCase):
         _git("config", "user.name", "t", cwd=self.project)
         _git("commit", "--allow-empty", "-m", "base", cwd=self.project)
         self.base_sha = _git("rev-parse", "HEAD", cwd=self.project)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -68,7 +69,8 @@ class VerifyOptOutTestCase(unittest.TestCase):
     def _init(self, *, quality: dict | None = None) -> None:
         _write_config(self.project, quality=quality)
         self.assertEqual(
-            main(["init", "--project", str(self.project), "--plan", "test-plan"]), 0,
+            main(["init", "--project", str(self.project), "--plan", "test-plan"]),
+            0,
         )
 
     def _claim(self, phase: str = "phase-a") -> str:
@@ -90,8 +92,15 @@ class VerifyOptOutTestCase(unittest.TestCase):
         self._init()
         token = self._claim()
         argv = [
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "phase-a", "--token", token,
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "phase-a",
+            "--token",
+            token,
         ]
         with redirect_stderr(io.StringIO()) as buf:
             rc = main(argv)
@@ -104,8 +113,15 @@ class VerifyOptOutTestCase(unittest.TestCase):
         self._init(quality={"verify_required": False})
         token = self._claim()
         argv = [
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "phase-a", "--token", token,
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "phase-a",
+            "--token",
+            token,
         ]
         rc = main(argv)
         self.assertEqual(rc, 0)
@@ -114,8 +130,15 @@ class VerifyOptOutTestCase(unittest.TestCase):
         self._init(quality={"verify_required": False})
         token = self._claim()
         argv = [
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "phase-a", "--token", token,
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "phase-a",
+            "--token",
+            token,
         ]
         self.assertEqual(main(argv), 0)
         events = self._events_of_type("verify_policy_skipped")
@@ -129,8 +152,15 @@ class VerifyOptOutTestCase(unittest.TestCase):
         self._init(quality={"verify_required": False})
         token = self._claim()
         argv = [
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "phase-a", "--token", token,
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "phase-a",
+            "--token",
+            token,
         ]
         self.assertEqual(main(argv), 0)
         self.assertEqual(self._events_of_type("operator_skip_verify"), [])
@@ -146,8 +176,15 @@ class VerifyOptOutTestCase(unittest.TestCase):
         _git("add", "x.txt", cwd=self.project)
         _git("commit", "-m", "big", cwd=self.project)
         argv = [
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "phase-a", "--token", token,
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "phase-a",
+            "--token",
+            token,
         ]
         with redirect_stderr(io.StringIO()) as buf:
             rc = main(argv)
@@ -160,8 +197,16 @@ class VerifyOptOutTestCase(unittest.TestCase):
         self._init()  # default verify_required=True
         token = self._claim()
         argv = [
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "phase-a", "--token", token, "--skip-verify",
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "phase-a",
+            "--token",
+            token,
+            "--skip-verify",
         ]
         self.assertEqual(main(argv), 0)
         self.assertEqual(len(self._events_of_type("operator_skip_verify")), 1)
@@ -172,8 +217,16 @@ class VerifyOptOutTestCase(unittest.TestCase):
         self._init(quality={"verify_required": False})
         token = self._claim()
         argv = [
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "phase-a", "--token", token, "--skip-verify",
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "phase-a",
+            "--token",
+            token,
+            "--skip-verify",
         ]
         self.assertEqual(main(argv), 0)
         self.assertEqual(len(self._events_of_type("operator_skip_verify")), 1)
@@ -183,18 +236,21 @@ class VerifyOptOutTestCase(unittest.TestCase):
 
     def test_verify_required_defaults_to_true(self) -> None:
         from end_of_line.config import load_project_config
+
         _write_config(self.project)
         cfg = load_project_config(self.project)
         self.assertTrue(cfg.quality.verify_required)
 
     def test_verify_required_explicit_false(self) -> None:
         from end_of_line.config import load_project_config
+
         _write_config(self.project, quality={"verify_required": False})
         cfg = load_project_config(self.project)
         self.assertFalse(cfg.quality.verify_required)
 
     def test_verify_required_non_bool_rejected(self) -> None:
         from end_of_line.config import load_project_config, ConfigError
+
         _write_config(self.project, quality={"verify_required": "false"})  # string, not bool
         with self.assertRaises(ConfigError):
             load_project_config(self.project)

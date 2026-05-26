@@ -1,4 +1,5 @@
 """Tests for end_of_line.cross_plan_rules: runner, registry, and loader."""
+
 from __future__ import annotations
 
 import json
@@ -41,6 +42,7 @@ class CrossPlanRulesTestCase(CluTestCase):
 # ---------------------------------------------------------------------------
 # Runner tests
 # ---------------------------------------------------------------------------
+
 
 class TestRunRulesEmptyRegistry(CrossPlanRulesTestCase):
     def test_run_rules_empty_registry_returns_none(self) -> None:
@@ -100,6 +102,7 @@ class TestRunRulesStableOrder(CrossPlanRulesTestCase):
             def rule(project_root: Path, plans: list) -> RuleResult | None:
                 order.append(n)
                 return None
+
             return rule
 
         for i in range(5):
@@ -148,6 +151,7 @@ class TestRunnerDoesNotTakeStateLocks(CrossPlanRulesTestCase):
 # ---------------------------------------------------------------------------
 # Loader tests
 # ---------------------------------------------------------------------------
+
 
 class TestLoadPlansForProject(CrossPlanRulesTestCase):
     def setUp(self) -> None:

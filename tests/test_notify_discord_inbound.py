@@ -1,4 +1,5 @@
 """Discord inbound poller — DiscordInboundPoller tests."""
+
 from __future__ import annotations
 
 import io
@@ -20,6 +21,7 @@ from tests import CluTestCase
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_resp(data: dict | list):
     """Context-manager mock whose .read() yields JSON bytes."""
     resp = mock.MagicMock()
@@ -37,7 +39,9 @@ def _make_429(retry_after_header: str | None = None):
     return urllib.error.HTTPError("https://example.com", 429, "Too Many Requests", headers, None)
 
 
-def _msg(msg_id: str, content: str, author_id: str = "USER", message_reference: dict | None = None) -> dict:
+def _msg(
+    msg_id: str, content: str, author_id: str = "USER", message_reference: dict | None = None
+) -> dict:
     m: dict = {"id": msg_id, "content": content, "author": {"id": author_id}}
     if message_reference is not None:
         m["message_reference"] = message_reference
@@ -73,6 +77,7 @@ def _make_registry_loader(entries: list[registry.PlanEntry]):
 # Base
 # ---------------------------------------------------------------------------
 
+
 class DiscordInboundPollerBase(CluTestCase):
     def setUp(self):
         super().setUp()
@@ -84,6 +89,7 @@ class DiscordInboundPollerBase(CluTestCase):
 
     def _poller(self, registry_loader=None, **kw):
         from end_of_line.notify_discord_inbound import DiscordInboundPoller
+
         return DiscordInboundPoller(
             bot_token="T",
             user_id="U",
@@ -96,14 +102,17 @@ class DiscordInboundPollerBase(CluTestCase):
 
     def _urlopen_for_messages(self, messages: list[dict]):
         """Side-effect that serves the DM-channel messages GET."""
+
         def _side_effect(req, timeout=None):
             return _make_resp(messages)
+
         return _side_effect
 
 
 # ---------------------------------------------------------------------------
 # Poll mechanics
 # ---------------------------------------------------------------------------
+
 
 class PollMechanicsTestCase(DiscordInboundPollerBase):
     def test_poll_fetches_messages_after_cursor(self):
@@ -138,13 +147,14 @@ class PollMechanicsTestCase(DiscordInboundPollerBase):
 
         project_root, blocker_id = _create_project_with_blocker(self.tmp_path, "pp")
         entry = registry.PlanEntry(
-            project_root=str(project_root), plan_slug="pp",
+            project_root=str(project_root),
+            plan_slug="pp",
             registered_at="2026-01-01T00:00:00Z",
         )
         # Two messages: one from the bot (should be filtered), one from USER ("1" → routes).
         messages = [
-            _msg("msg-1", "1", author_id="BOT"),   # filtered — bot's own
-            _msg("msg-2", "1", author_id="USER"),   # should dispatch
+            _msg("msg-1", "1", author_id="BOT"),  # filtered — bot's own
+            _msg("msg-2", "1", author_id="USER"),  # should dispatch
         ]
 
         p = self._poller(registry_loader=_make_registry_loader([entry]))
@@ -175,15 +185,20 @@ class PollMechanicsTestCase(DiscordInboundPollerBase):
 # Reply correlation
 # ---------------------------------------------------------------------------
 
+
 class ReplyCorrelationTestCase(DiscordInboundPollerBase):
     def test_reply_with_message_reference_routes_by_metadata(self):
         # Blocker has notify_metadata.discord.message_id = "discord-msg-99".
         project_root, blocker_id = _create_project_with_blocker(
-            self.tmp_path, "plan-a",
-            notify_metadata={"discord": {"channel_id": self.dm_channel_id, "message_id": "discord-msg-99"}},
+            self.tmp_path,
+            "plan-a",
+            notify_metadata={
+                "discord": {"channel_id": self.dm_channel_id, "message_id": "discord-msg-99"}
+            },
         )
         entry = registry.PlanEntry(
-            project_root=str(project_root), plan_slug="plan-a",
+            project_root=str(project_root),
+            plan_slug="plan-a",
             registered_at="2026-01-01T00:00:00Z",
         )
         messages = [_msg("msg-1", "A", message_reference={"message_id": "discord-msg-99"})]
@@ -204,7 +219,8 @@ class ReplyCorrelationTestCase(DiscordInboundPollerBase):
         # Bare "1" with one open blocker routes via route_reply().
         project_root, blocker_id = _create_project_with_blocker(self.tmp_path, "plan-b")
         entry = registry.PlanEntry(
-            project_root=str(project_root), plan_slug="plan-b",
+            project_root=str(project_root),
+            plan_slug="plan-b",
             registered_at="2026-01-01T00:00:00Z",
         )
         messages = [_msg("msg-1", "1")]  # no message_reference
@@ -237,6 +253,7 @@ class ReplyCorrelationTestCase(DiscordInboundPollerBase):
 # Rate-limit
 # ---------------------------------------------------------------------------
 
+
 class RateLimitTestCase(DiscordInboundPollerBase):
     def test_poll_handles_rate_limit_429(self):
         messages = [_msg("msg-5", "1")]
@@ -262,6 +279,7 @@ class RateLimitTestCase(DiscordInboundPollerBase):
 # DM channel resolution
 # ---------------------------------------------------------------------------
 
+
 class DMChannelResolutionTestCase(DiscordInboundPollerBase):
     def test_dm_channel_resolved_at_startup(self):
         # No pre-seeded state_path — poller must call POST /users/@me/channels.
@@ -276,6 +294,7 @@ class DMChannelResolutionTestCase(DiscordInboundPollerBase):
             return _make_resp([])
 
         from end_of_line.notify_discord_inbound import DiscordInboundPoller
+
         p = DiscordInboundPoller(
             bot_token="T",
             user_id="U",
@@ -294,8 +313,11 @@ class DMChannelResolutionTestCase(DiscordInboundPollerBase):
 
     def test_discord_inbound_poller_is_inbound_poller(self):
         from end_of_line.notify_discord_inbound import DiscordInboundPoller
+
         p = DiscordInboundPoller(
-            "T", "U", "BOT",
+            "T",
+            "U",
+            "BOT",
             cursor_path=self.cursor_path,
             state_path=self.state_path,
         )

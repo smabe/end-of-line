@@ -1,4 +1,5 @@
 """End-to-end round-trip test: worker blocks → operator answers → supervisor re-dispatches."""
+
 from __future__ import annotations
 
 import unittest
@@ -27,10 +28,21 @@ class BlockerRoundTripTestCase(GitProjectTestCase):
 
     def test_blocker_round_trip_re_dispatches_with_answer(self) -> None:
         # Worker blocks — claim released, blocker recorded.
-        rc = main(self._argv(
-            "block", "--phase", "foundation", "--token", self.token,
-            "--question", "go?", "--option", "A", "--option", "B",
-        ))
+        rc = main(
+            self._argv(
+                "block",
+                "--phase",
+                "foundation",
+                "--token",
+                self.token,
+                "--question",
+                "go?",
+                "--option",
+                "A",
+                "--option",
+                "B",
+            )
+        )
         self.assertEqual(rc, 0)
         data = st.load(self.state_path)
         self.assertEqual(len(data["blockers"]), 1)
@@ -39,9 +51,14 @@ class BlockerRoundTripTestCase(GitProjectTestCase):
         # Operator answers via index "0" → resolves to option text "A".
         # Post-plan-locator: cmd_answer takes just the answer index;
         # state_locator resolves which blocker via --plan.
-        rc = main([
-            "answer", "--plan", "test-plan", "0",
-        ])
+        rc = main(
+            [
+                "answer",
+                "--plan",
+                "test-plan",
+                "0",
+            ]
+        )
         self.assertEqual(rc, 0)
         data = st.load(self.state_path)
         self.assertEqual(data["blockers"][0]["answer"], "A")

@@ -3,6 +3,7 @@
 Phase auto-archive-rule of auto-archive-on-merge: a rule that fires when
 a STATUS_DONE plan's worktree branch has been merged into origin/main.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,6 +25,7 @@ from tests import CluTestCase, git as _git, make_git_project as _make_git_projec
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_done_plan_with_worktree(
     project: Path,
@@ -59,6 +61,7 @@ def _make_tracked_plan_file(project: Path, slug: str) -> None:
 # base
 # ---------------------------------------------------------------------------
 
+
 class _AutoArchiveRuleBase(CluTestCase):
     """Isolates _RULES and registers only auto_archive_rule per test."""
 
@@ -67,6 +70,7 @@ class _AutoArchiveRuleBase(CluTestCase):
         self._rules_snapshot = list(cross_plan_rules._RULES)
         cross_plan_rules._RULES.clear()
         from end_of_line.cross_plan_rules import auto_archive_rule  # noqa: PLC0415
+
         register_rule(auto_archive_rule)
 
     def tearDown(self) -> None:
@@ -77,6 +81,7 @@ class _AutoArchiveRuleBase(CluTestCase):
 # ---------------------------------------------------------------------------
 # skipped cases (no real git needed)
 # ---------------------------------------------------------------------------
+
 
 class TestAutoArchiveRuleSkipped(_AutoArchiveRuleBase):
     def setUp(self) -> None:
@@ -133,6 +138,7 @@ class TestAutoArchiveRuleSkipped(_AutoArchiveRuleBase):
 # fires + idempotent + ordering (real git project)
 # ---------------------------------------------------------------------------
 
+
 class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
     def setUp(self) -> None:
         super().setUp()
@@ -156,9 +162,7 @@ class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
         self.assertTrue(call_kwargs.get("unregister"))
         # Plan file moved to archive/<slug>/
         self.assertFalse((self.project / "plans" / "alpha.md").exists())
-        self.assertTrue(
-            (self.project / "plans" / "archive" / "alpha" / "alpha.md").exists()
-        )
+        self.assertTrue((self.project / "plans" / "archive" / "alpha" / "alpha.md").exists())
         # Registry entry pruned
         entries = registry.entries_for_project(self.project)
         self.assertFalse(any(e.plan_slug == "alpha" for e in entries))
@@ -226,14 +230,16 @@ class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
         # left in the index. Untracked files (state dirs) are fine.
         diff = subprocess.run(
             ["git", "-C", str(self.project), "diff", "--cached", "--quiet"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
-        self.assertEqual(diff.returncode, 0,
-                         "expected no staged changes after auto-archive")
+        self.assertEqual(diff.returncode, 0, "expected no staged changes after auto-archive")
         # HEAD commit message mentions auto-archive of this slug.
         msg = subprocess.run(
             ["git", "-C", str(self.project), "log", "-1", "--format=%s"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         self.assertIn("auto-archive", msg.lower())
         self.assertIn("alpha", msg)
@@ -252,9 +258,7 @@ class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
         self.assertIsNotNone(result)
         # Only alpha (first in list) archived
         self.assertFalse((self.project / "plans" / "alpha.md").exists())
-        self.assertTrue(
-            (self.project / "plans" / "archive" / "alpha" / "alpha.md").exists()
-        )
+        self.assertTrue((self.project / "plans" / "archive" / "alpha" / "alpha.md").exists())
         self.assertTrue((self.project / "plans" / "beta.md").exists())
         # alpha registry entry pruned, beta still present
         slugs = {e.plan_slug for e in registry.entries_for_project(self.project)}

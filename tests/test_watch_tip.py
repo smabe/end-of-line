@@ -1,4 +1,5 @@
 """Tests for clu-watch tip emission on `clu init` and `clu queue add`."""
+
 from __future__ import annotations
 
 import io
@@ -58,7 +59,11 @@ class WatchTipTestCase(unittest.TestCase):
 
     def test_clu_init_prints_watch_tip(self) -> None:
         rc, out = self._run(
-            "init", "--project", str(self.project), "--plan", "foo",
+            "init",
+            "--project",
+            str(self.project),
+            "--plan",
+            "foo",
             "--no-claude-md",
         )
         self.assertEqual(rc, 0)
@@ -66,8 +71,13 @@ class WatchTipTestCase(unittest.TestCase):
 
     def test_clu_init_quiet_suppresses_watch_tip(self) -> None:
         rc, out = self._run(
-            "init", "--project", str(self.project), "--plan", "foo",
-            "--no-claude-md", "--quiet",
+            "init",
+            "--project",
+            str(self.project),
+            "--plan",
+            "foo",
+            "--no-claude-md",
+            "--quiet",
         )
         self.assertEqual(rc, 0)
         self.assertNotIn(_WATCH_TIP_PLAN, out)
@@ -85,7 +95,12 @@ class WatchTipTestCase(unittest.TestCase):
     def test_clu_queue_add_quiet_suppresses_watch_tip(self) -> None:
         _write_plan(self.project, "bar")
         rc, out = self._run(
-            "queue", "add", "bar", "--project", str(self.project), "--quiet",
+            "queue",
+            "add",
+            "bar",
+            "--project",
+            str(self.project),
+            "--quiet",
         )
         self.assertEqual(rc, 0)
         self.assertNotIn(_WATCH_TIP_ALL, out)
@@ -98,8 +113,13 @@ class WatchTipTestCase(unittest.TestCase):
         """Both watch + monitor tips coexist; monitor tip behaviour unchanged."""
         with mock.patch("end_of_line.monitor.is_scheduled", return_value=False):
             rc, out = self._run(
-                "init", "--project", str(self.project), "--plan", "foo",
-                "--no-claude-md", tty=True,
+                "init",
+                "--project",
+                str(self.project),
+                "--plan",
+                "foo",
+                "--no-claude-md",
+                tty=True,
             )
         self.assertEqual(rc, 0)
         self.assertIn("/clu-monitor", out)

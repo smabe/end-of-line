@@ -1,5 +1,6 @@
 """Streaming projection of plan state events for AI-agent consumption
 (Claude's Monitor tool). See plans/clu-watch.md."""
+
 from __future__ import annotations
 
 import json
@@ -11,70 +12,82 @@ from typing import Any, Callable, TextIO
 from . import state as st
 from .plan_parser import parse_sessions_index
 
-_DEFAULT_VISIBLE: frozenset[str] = frozenset(filter(None, {
-    st.EVENT_PHASE_STARTED,
-    st.EVENT_PHASE_COMPLETED,
-    st.EVENT_PHASE_BLOCKED,
-    st.EVENT_BLOCKER_ANSWERED,
-    st.EVENT_BLOCKER_CONSUMED,
-    st.EVENT_BLOCKER_SLA_EXCEEDED,
-    st.EVENT_PHASE_MAX_ATTEMPTS,
-    st.EVENT_PHASE_STALLED,
-    st.EVENT_TASK_SPAWNED,
-    st.EVENT_TASK_COMPLETED,
-    st.EVENT_PLAN_COMPLETED,
-    st.EVENT_DISPATCH_FAILED,
-    st.EVENT_SYSTEMIC_FAILURE,
-    st.EVENT_PAUSED,
-    st.EVENT_RESUMED,
-    st.EVENT_RETRY_REQUESTED,
-    st.EVENT_QUEUE_POPPED,
-    st.EVENT_WORKTREE_MISSING,
-    st.EVENT_WORKTREE_CONFLICT_WARNING,
-    # Stuck-tool detection (#67) — actionable, not verbose. The operator
-    # should see wedged subprocesses in the default stream.
-    getattr(st, "EVENT_TOOL_STUCK", None),
-    # Queue v2 — present after queue-worker-callback merged
-    getattr(st, "EVENT_QUEUE_APPENDED", None),
-    getattr(st, "EVENT_QUEUE_REJECTED", None),
-    # Attestation gate refusal (#70) — actionable, the worker is wedged on
-    # a missing/stale verify or simplify stamp.
-    getattr(st, "EVENT_ATTESTATION_REFUSED", None),
-    # Dead-PID detection (#72) — operator-actionable: a worker died, the
-    # claim got released, next tick re-dispatches.
-    getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
-}))
+_DEFAULT_VISIBLE: frozenset[str] = frozenset(
+    filter(
+        None,
+        {
+            st.EVENT_PHASE_STARTED,
+            st.EVENT_PHASE_COMPLETED,
+            st.EVENT_PHASE_BLOCKED,
+            st.EVENT_BLOCKER_ANSWERED,
+            st.EVENT_BLOCKER_CONSUMED,
+            st.EVENT_BLOCKER_SLA_EXCEEDED,
+            st.EVENT_PHASE_MAX_ATTEMPTS,
+            st.EVENT_PHASE_STALLED,
+            st.EVENT_TASK_SPAWNED,
+            st.EVENT_TASK_COMPLETED,
+            st.EVENT_PLAN_COMPLETED,
+            st.EVENT_DISPATCH_FAILED,
+            st.EVENT_SYSTEMIC_FAILURE,
+            st.EVENT_PAUSED,
+            st.EVENT_RESUMED,
+            st.EVENT_RETRY_REQUESTED,
+            st.EVENT_QUEUE_POPPED,
+            st.EVENT_WORKTREE_MISSING,
+            st.EVENT_WORKTREE_CONFLICT_WARNING,
+            # Stuck-tool detection (#67) — actionable, not verbose. The operator
+            # should see wedged subprocesses in the default stream.
+            getattr(st, "EVENT_TOOL_STUCK", None),
+            # Queue v2 — present after queue-worker-callback merged
+            getattr(st, "EVENT_QUEUE_APPENDED", None),
+            getattr(st, "EVENT_QUEUE_REJECTED", None),
+            # Attestation gate refusal (#70) — actionable, the worker is wedged on
+            # a missing/stale verify or simplify stamp.
+            getattr(st, "EVENT_ATTESTATION_REFUSED", None),
+            # Dead-PID detection (#72) — operator-actionable: a worker died, the
+            # claim got released, next tick re-dispatches.
+            getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
+        },
+    )
+)
 
-_VERBOSE_ONLY: frozenset[str] = frozenset({
-    st.EVENT_LEASE_EXPIRED,
-    st.EVENT_LEASE_EXTENDED,
-    st.EVENT_PHASE_ORPHAN_REAPED,
-    st.EVENT_CLAIM_FORCE_RELEASED,
-    st.EVENT_ATTEMPTS_RESET,
-    st.EVENT_STUCK_BLOCKER_REPINGED,
-    st.EVENT_STALLED_CLAIM_NOTIFIED,
-    st.EVENT_WORKTREE_ATTACHED,
-    st.EVENT_WORKTREE_CLEANED,
-    st.EVENT_WORKTREE_RETAINED_AHEAD,
-})
+_VERBOSE_ONLY: frozenset[str] = frozenset(
+    {
+        st.EVENT_LEASE_EXPIRED,
+        st.EVENT_LEASE_EXTENDED,
+        st.EVENT_PHASE_ORPHAN_REAPED,
+        st.EVENT_CLAIM_FORCE_RELEASED,
+        st.EVENT_ATTEMPTS_RESET,
+        st.EVENT_STUCK_BLOCKER_REPINGED,
+        st.EVENT_STALLED_CLAIM_NOTIFIED,
+        st.EVENT_WORKTREE_ATTACHED,
+        st.EVENT_WORKTREE_CLEANED,
+        st.EVENT_WORKTREE_RETAINED_AHEAD,
+    }
+)
 
 # Operator-dashboard (#70) filter — the cross-plan-worth-interrupting set.
 # Under `clu watch --operator`, only these events render; the _VERBOSE_ONLY
 # gate is bypassed (stalled_claim_notified is operator-relevant even when
 # the normal verbose check would hide it).
-_OPERATOR_VISIBLE: frozenset[str] = frozenset(filter(None, {
-    getattr(st, "EVENT_TOOL_STUCK", None),
-    st.EVENT_PHASE_BLOCKED,
-    getattr(st, "EVENT_ATTESTATION_REFUSED", None),
-    st.EVENT_STALLED_CLAIM_NOTIFIED,
-    getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
-}))
+_OPERATOR_VISIBLE: frozenset[str] = frozenset(
+    filter(
+        None,
+        {
+            getattr(st, "EVENT_TOOL_STUCK", None),
+            st.EVENT_PHASE_BLOCKED,
+            getattr(st, "EVENT_ATTESTATION_REFUSED", None),
+            st.EVENT_STALLED_CLAIM_NOTIFIED,
+            getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
+        },
+    )
+)
 
 
 def _trunc(s: str | None, n: int = 100) -> str:
     if not s:
         return ""
-    return s if len(s) <= n else s[:n - 1] + "…"
+    return s if len(s) <= n else s[: n - 1] + "…"
 
 
 def _phase_prefix(slug: str, e: dict[str, Any]) -> str:
@@ -97,9 +110,7 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
     st.EVENT_PHASE_STARTED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: started (attempt {e.get('attempts', 1)})"
     ),
-    st.EVENT_PHASE_COMPLETED: lambda slug, e: (
-        f"{_phase_prefix(slug, e)}: completed"
-    ),
+    st.EVENT_PHASE_COMPLETED: lambda slug, e: f"{_phase_prefix(slug, e)}: completed",
     st.EVENT_PHASE_BLOCKED: _fmt_blocked,
     st.EVENT_BLOCKER_ANSWERED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: answer received for "
@@ -109,27 +120,21 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
         f"{slug}: blocker {e.get('blocker_id', '?')} consumed — phase resuming"
     ),
     st.EVENT_BLOCKER_SLA_EXCEEDED: lambda slug, e: (
-        f"{slug}: blocker {e.get('blocker_id', '?')} SLA exceeded "
-        f"({e.get('age_hours', '?')}h)"
+        f"{slug}: blocker {e.get('blocker_id', '?')} SLA exceeded ({e.get('age_hours', '?')}h)"
     ),
     st.EVENT_PHASE_MAX_ATTEMPTS: lambda slug, e: (
-        f"{_phase_prefix(slug, e)}: HALTED max attempts "
-        f"({e.get('attempts', '?')})"
+        f"{_phase_prefix(slug, e)}: HALTED max attempts ({e.get('attempts', '?')})"
     ),
     st.EVENT_PHASE_STALLED: lambda slug, e: (
-        f"{_phase_prefix(slug, e)}: stalled "
-        f"({e.get('age_seconds', '?')}s since last heartbeat)"
+        f"{_phase_prefix(slug, e)}: stalled ({e.get('age_seconds', '?')}s since last heartbeat)"
     ),
     st.EVENT_TASK_SPAWNED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: spawned task {e.get('task', '?')}"
     ),
-    st.EVENT_TASK_COMPLETED: lambda slug, e: (
-        f"{slug}: task {e.get('task', '?')} done"
-    ),
+    st.EVENT_TASK_COMPLETED: lambda slug, e: f"{slug}: task {e.get('task', '?')} done",
     st.EVENT_PLAN_COMPLETED: lambda slug, e: f"{slug}: PLAN DONE",
     st.EVENT_DISPATCH_FAILED: lambda slug, e: (
-        f"{_phase_prefix(slug, e)}: dispatch failed — "
-        f"{_trunc(e.get('reason'))}"
+        f"{_phase_prefix(slug, e)}: dispatch failed — {_trunc(e.get('reason'))}"
     ),
     st.EVENT_SYSTEMIC_FAILURE: lambda slug, e: (
         f"{slug}: SYSTEMIC FAILURE — {_trunc(e.get('signature'))}"
@@ -138,12 +143,9 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
         f"{slug}: paused" + (f" ({_trunc(e.get('reason'))})" if e.get("reason") else "")
     ),
     st.EVENT_RESUMED: lambda slug, e: f"{slug}: resumed",
-    st.EVENT_RETRY_REQUESTED: lambda slug, e: (
-        f"{_phase_prefix(slug, e)}: retry requested"
-    ),
+    st.EVENT_RETRY_REQUESTED: lambda slug, e: f"{_phase_prefix(slug, e)}: retry requested",
     st.EVENT_QUEUE_POPPED: lambda slug, e: (
-        f"{slug}: popped {e.get('slug', '?')} from queue "
-        f"(by {e.get('added_by', '?')})"
+        f"{slug}: popped {e.get('slug', '?')} from queue (by {e.get('added_by', '?')})"
     ),
     st.EVENT_WORKTREE_MISSING: lambda slug, e: (
         f"{slug}: WORKTREE MISSING — {e.get('worktree_path', '?')}"
@@ -153,9 +155,7 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
         f"— both plans share project without isolated worktrees"
     ),
     # Verbose-only
-    st.EVENT_LEASE_EXPIRED: lambda slug, e: (
-        f"{_phase_prefix(slug, e)}: lease expired"
-    ),
+    st.EVENT_LEASE_EXPIRED: lambda slug, e: f"{_phase_prefix(slug, e)}: lease expired",
     st.EVENT_PHASE_ORPHAN_REAPED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: orphan reaped "
         f"pid={e.get('pid', '?')} signaled={e.get('signaled', '?')}"
@@ -165,12 +165,9 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
         f"{e.get('extended_by_minutes', '?')}min → {e.get('new_expires', '?')}"
     ),
     st.EVENT_CLAIM_FORCE_RELEASED: lambda slug, e: (
-        f"{_phase_prefix(slug, e)}: claim force-released"
-        + (" (forced)" if e.get("forced") else "")
+        f"{_phase_prefix(slug, e)}: claim force-released" + (" (forced)" if e.get("forced") else "")
     ),
-    st.EVENT_ATTEMPTS_RESET: lambda slug, e: (
-        f"{_phase_prefix(slug, e)}: attempts reset"
-    ),
+    st.EVENT_ATTEMPTS_RESET: lambda slug, e: f"{_phase_prefix(slug, e)}: attempts reset",
     st.EVENT_STUCK_BLOCKER_REPINGED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: blocker {e.get('blocker_id', '?')} "
         f"re-pinged ({e.get('age_min', '?')}min open)"
@@ -180,12 +177,10 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
         f"({e.get('stalled_min', '?')}min past lease)"
     ),
     st.EVENT_WORKTREE_ATTACHED: lambda slug, e: (
-        f"{slug}: worktree attached at {e.get('path', '?')} "
-        f"(branch {e.get('branch', '?')})"
+        f"{slug}: worktree attached at {e.get('path', '?')} (branch {e.get('branch', '?')})"
     ),
     st.EVENT_WORKTREE_CLEANED: lambda slug, e: (
-        f"{slug}: worktree cleaned — {e.get('path', '?')} "
-        f"(trigger={e.get('trigger', '?')})"
+        f"{slug}: worktree cleaned — {e.get('path', '?')} (trigger={e.get('trigger', '?')})"
     ),
     st.EVENT_WORKTREE_RETAINED_AHEAD: lambda slug, e: (
         f"{slug}: worktree retained (branch ahead) — {e.get('path', '?')}"
@@ -208,8 +203,7 @@ _Q_APPENDED = getattr(st, "EVENT_QUEUE_APPENDED", None)
 _Q_REJECTED = getattr(st, "EVENT_QUEUE_REJECTED", None)
 if _Q_APPENDED:
     _FORMATTERS[_Q_APPENDED] = lambda slug, e: (
-        f"{slug}: queued {e.get('slug', '?')} from phase "
-        f"{e.get('source_phase', '?')}"
+        f"{slug}: queued {e.get('slug', '?')} from phase {e.get('source_phase', '?')}"
     )
 if _Q_REJECTED:
     _FORMATTERS[_Q_REJECTED] = lambda slug, e: (
@@ -230,6 +224,7 @@ if _WORKER_DEAD:
 # Attestation-refused formatter (#70 dashboard) — splice in when defined.
 _ATTEST_REFUSED = getattr(st, "EVENT_ATTESTATION_REFUSED", None)
 if _ATTEST_REFUSED:
+
     def _fmt_attest_refused(slug: str, e: dict[str, Any]) -> str:
         gate = e.get("gate", "?")
         stamped = e.get("stamped_at") or "never"
@@ -239,6 +234,7 @@ if _ATTEST_REFUSED:
             f"{_phase_prefix(slug, e)}: ATTESTATION REFUSED ({gate} gate) "
             f"stamped={stamped_short} head={head}"
         )
+
     _FORMATTERS[_ATTEST_REFUSED] = _fmt_attest_refused
 
 
@@ -269,9 +265,13 @@ _TASK_VERBOSE_STATUS_MAP: dict[str, str] = {
 }
 
 # Events where task_id is the plan slug alone (no /phase segment)
-_PLAN_SCOPED_EVENTS: frozenset[str] = frozenset({
-    st.EVENT_PLAN_COMPLETED, st.EVENT_PAUSED, st.EVENT_RESUMED,
-})
+_PLAN_SCOPED_EVENTS: frozenset[str] = frozenset(
+    {
+        st.EVENT_PLAN_COMPLETED,
+        st.EVENT_PAUSED,
+        st.EVENT_RESUMED,
+    }
+)
 
 
 def _escape_msg(s: str) -> str:
@@ -373,22 +373,34 @@ def bootstrap_task_list(
         plan_path = cfg.project_root / cfg.plan_dir / f"{slug}.md"
         if not plan_path.exists():
             continue
-        print(_task_line("TASK_CREATE", slug, status="pending"),
-              file=sink, flush=True)
+        print(_task_line("TASK_CREATE", slug, status="pending"), file=sink, flush=True)
         for phase in parse_sessions_index(plan_path):
-            print(_task_line("TASK_CREATE", f"{slug}/{phase.id}",
-                             parent=slug, status="pending"),
-                  file=sink, flush=True)
+            print(
+                _task_line("TASK_CREATE", f"{slug}/{phase.id}", parent=slug, status="pending"),
+                file=sink,
+                flush=True,
+            )
         claim = data.get("current_claim")
         if claim and data.get("status") == "running":
             phase_id = claim["phase_id"]
-            print(_task_line("TASK_UPDATE", slug, status="in_progress",
-                             msg="bootstrap: plan running"),
-                  file=sink, flush=True)
-            print(_task_line("TASK_UPDATE", f"{slug}/{phase_id}",
-                             parent=slug, status="in_progress",
-                             msg="bootstrap: already active"),
-                  file=sink, flush=True)
+            print(
+                _task_line(
+                    "TASK_UPDATE", slug, status="in_progress", msg="bootstrap: plan running"
+                ),
+                file=sink,
+                flush=True,
+            )
+            print(
+                _task_line(
+                    "TASK_UPDATE",
+                    f"{slug}/{phase_id}",
+                    parent=slug,
+                    status="in_progress",
+                    msg="bootstrap: already active",
+                ),
+                file=sink,
+                flush=True,
+            )
 
 
 def _snapshot_line(slug: str, data: dict) -> str:
@@ -437,6 +449,7 @@ def stream_loop(
     if task_list_mode:
         if cfg_loader is None:
             from .cli import load_project_config  # lazy — cli imports watch, avoid cycle
+
             cfg_loader = lambda sp: load_project_config(_state_path_to_project(sp))
         bootstrap_task_list(list(cursors.keys()), cfg_loader, sink)
 
@@ -460,17 +473,19 @@ def stream_loop(
                     continue
                 events = data.get("events", [])
                 slug = _slug_for_path(path)
-                for evt in events[cursors[path]:]:
+                for evt in events[cursors[path] :]:
                     if task_list_mode:
                         line_or_none = project_event_task(evt, slug, verbose=verbose)
                     else:
-                        line_or_none = project_event(evt, slug, verbose=verbose,
-                                                     operator=operator)
+                        line_or_none = project_event(evt, slug, verbose=verbose, operator=operator)
                     if line_or_none is None:
                         continue
                     if json_mode:
-                        print(json.dumps({"ts": evt.get("ts"), "slug": slug, "event": evt}),
-                              file=sink, flush=True)
+                        print(
+                            json.dumps({"ts": evt.get("ts"), "slug": slug, "event": evt}),
+                            file=sink,
+                            flush=True,
+                        )
                     else:
                         print(line_or_none, file=sink, flush=True)
                 cursors[path] = len(events)

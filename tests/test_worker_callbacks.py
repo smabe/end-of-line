@@ -1,4 +1,5 @@
 """Token validation + SHA quality gate for worker-side CLI commands."""
+
 from __future__ import annotations
 
 import json
@@ -36,11 +37,14 @@ class WorkerCallbackTestCase(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.project), "config", "user.name", "t"], check=True)
         subprocess.run(
             ["git", "-C", str(self.project), "commit", "--allow-empty", "-m", "init"],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         self.sha = subprocess.run(
             ["git", "-C", str(self.project), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         # Init clu state + claim phase a
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
@@ -56,26 +60,51 @@ class WorkerCallbackTestCase(unittest.TestCase):
 
     def test_complete_requires_matching_token(self) -> None:
         rc = self._run(
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", "session-deadbeefdeadbeef",
-            "--commit", self.sha,
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "a",
+            "--token",
+            "session-deadbeefdeadbeef",
+            "--commit",
+            self.sha,
         )
         self.assertEqual(rc, 4)
 
     def test_complete_rejects_unknown_sha(self) -> None:
         rc = self._run(
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", self.token,
-            "--commit", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "a",
+            "--token",
+            self.token,
+            "--commit",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         )
         self.assertEqual(rc, 3)
 
     def test_complete_succeeds_with_valid_token_and_sha(self) -> None:
         rc = self._run(
-            "complete", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", self.token,
-            "--commit", self.sha,
-            "--skip-verify", "--skip-simplify",
+            "complete",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "a",
+            "--token",
+            self.token,
+            "--commit",
+            self.sha,
+            "--skip-verify",
+            "--skip-simplify",
         )
         self.assertEqual(rc, 0)
         data = st.load(self.state_path)
@@ -84,9 +113,19 @@ class WorkerCallbackTestCase(unittest.TestCase):
 
     def test_block_requires_matching_token(self) -> None:
         rc = self._run(
-            "block", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", "session-wrong0000000000ff",
-            "--question", "huh?", "--option", "A",
+            "block",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "a",
+            "--token",
+            "session-wrong0000000000ff",
+            "--question",
+            "huh?",
+            "--option",
+            "A",
         )
         self.assertEqual(rc, 4)
         data = st.load(self.state_path)
@@ -96,9 +135,21 @@ class WorkerCallbackTestCase(unittest.TestCase):
 
     def test_block_succeeds_with_token(self) -> None:
         rc = self._run(
-            "block", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", self.token,
-            "--question", "huh?", "--option", "A", "--option", "B",
+            "block",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "a",
+            "--token",
+            self.token,
+            "--question",
+            "huh?",
+            "--option",
+            "A",
+            "--option",
+            "B",
         )
         self.assertEqual(rc, 0)
         data = st.load(self.state_path)
@@ -107,9 +158,17 @@ class WorkerCallbackTestCase(unittest.TestCase):
 
     def test_spawn_requires_matching_token(self) -> None:
         rc = self._run(
-            "spawn", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", "session-bogusbogusbogus0",
-            "--title", "cleanup",
+            "spawn",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            "a",
+            "--token",
+            "session-bogusbogusbogus0",
+            "--title",
+            "cleanup",
         )
         self.assertEqual(rc, 4)
 

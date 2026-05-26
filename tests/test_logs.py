@@ -1,4 +1,5 @@
 """Tests for `clu logs <plan>` — tail the most recent worker log."""
+
 from __future__ import annotations
 
 import io
@@ -32,9 +33,7 @@ class LogsTestCase(unittest.TestCase):
         isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         self.logs_dir = self.state_path.parent / "logs"
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
@@ -45,8 +44,10 @@ class LogsTestCase(unittest.TestCase):
     def _argv(self, *extra: str) -> list[str]:
         return [
             "logs",
-            "--project", str(self.project),
-            "--plan", "test-plan",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
             *extra,
         ]
 
@@ -99,7 +100,9 @@ class LogsTestCase(unittest.TestCase):
     def test_active_claim_wins_over_newer_file(self) -> None:
         # Claim's log_path always wins, even if a newer file exists in the dir.
         claim_log = self._write_log(
-            "a.session-xyz.log", "claim-content\n", mtime=1000.0,
+            "a.session-xyz.log",
+            "claim-content\n",
+            mtime=1000.0,
         )
         self._write_log("a.newer.log", "fallback-content\n", mtime=9999.0)
         self._stamp_claim(claim_log)

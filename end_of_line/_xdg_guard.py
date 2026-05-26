@@ -5,6 +5,7 @@ class that forgets to subclass CluTestCase hard-fails instead of silently
 leaking ghost state into the operator's real inbox / registry / monitor
 marker.
 """
+
 from __future__ import annotations
 import os
 from pathlib import Path

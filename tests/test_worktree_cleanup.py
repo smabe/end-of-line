@@ -12,6 +12,7 @@ Fixture wires up a bare origin remote so the reachable / ahead branches
 can both be exercised against real git state. The no-origin case is
 already covered by `tests/test_worktree_gc.py` (which doesn't configure
 a remote and expects pre-#34 behavior to be preserved)."""
+
 from __future__ import annotations
 
 import io
@@ -53,7 +54,9 @@ PLAN_BODY_ONE_PHASE_TMPL = """\
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
 
 
@@ -74,7 +77,8 @@ class WorktreeCleanupBase(unittest.TestCase):
         self.origin = self.parent / "origin.git"
         subprocess.run(
             ["git", "init", "-q", "--bare", str(self.origin)],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         _git(self.project, "remote", "add", "origin", str(self.origin))
         _git(self.project, "push", "-u", "origin", "main")
@@ -87,7 +91,11 @@ class WorktreeCleanupBase(unittest.TestCase):
         return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
 
     def _init_plan(
-        self, slug: str, body_tmpl: str = PLAN_BODY_TWO_PHASES_TMPL, *, worktree: bool = True,
+        self,
+        slug: str,
+        body_tmpl: str = PLAN_BODY_TWO_PHASES_TMPL,
+        *,
+        worktree: bool = True,
     ) -> Path:
         plan_md = self.project / "plans" / f"{slug}.md"
         plan_md.write_text(body_tmpl.format(slug=slug))
@@ -120,11 +128,21 @@ class WorktreeCleanupBase(unittest.TestCase):
     def _complete(self, slug: str, phase: str, token: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main([
-                "complete", "--project", str(self.project), "--plan", slug,
-                "--phase", phase, "--token", token,
-                "--skip-verify", "--skip-simplify",
-            ])
+            rc = main(
+                [
+                    "complete",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    slug,
+                    "--phase",
+                    phase,
+                    "--token",
+                    token,
+                    "--skip-verify",
+                    "--skip-simplify",
+                ]
+            )
         return rc, err.getvalue()
 
     def _add_ahead_commit(self, slug: str) -> None:
@@ -252,9 +270,15 @@ class CmdWorktreeGcUpstreamTests(WorktreeCleanupBase):
     def _gc(self, *extra: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main([
-                "worktree", "gc", "--project", str(self.project), *extra,
-            ])
+            rc = main(
+                [
+                    "worktree",
+                    "gc",
+                    "--project",
+                    str(self.project),
+                    *extra,
+                ]
+            )
         return rc, out.getvalue(), err.getvalue()
 
     def test_gc_retains_branch_ahead_of_origin(self) -> None:
@@ -288,9 +312,7 @@ class CmdArchivePlanMoveTests(WorktreeCleanupBase):
         rc, _, _ = self._archive("alpha")
         self.assertEqual(rc, 0)
         self.assertFalse((self.project / "plans" / "alpha.md").exists())
-        self.assertTrue(
-            (self.project / "plans" / "archive" / "alpha" / "alpha.md").exists()
-        )
+        self.assertTrue((self.project / "plans" / "archive" / "alpha" / "alpha.md").exists())
 
     def test_creates_archive_dir_if_missing(self) -> None:
         self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
@@ -355,11 +377,13 @@ class CmdArchiveAtomicCommitTests(WorktreeCleanupBase):
         rc, _, _ = self._archive("alpha")
         self.assertEqual(rc, 0)
         self.assertEqual(
-            self._staged_or_modified(), "",
+            self._staged_or_modified(),
+            "",
             "expected no staged/modified files after archive; got footgun state",
         )
         self.assertEqual(
-            self._commit_count(), before + 1,
+            self._commit_count(),
+            before + 1,
             "expected exactly one new commit for the archive move",
         )
 
@@ -387,7 +411,8 @@ class CmdArchiveAtomicCommitTests(WorktreeCleanupBase):
         rc, _, _ = self._archive("alpha")
         self.assertEqual(rc, 0)
         self.assertEqual(
-            self._commit_count(), before,
+            self._commit_count(),
+            before,
             "expected no extra commit when nothing moved",
         )
 

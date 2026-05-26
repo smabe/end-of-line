@@ -1,4 +1,5 @@
 """Tests for `clu answer` — including the CWD-default for --project (#43)."""
+
 from __future__ import annotations
 
 import io
@@ -31,9 +32,7 @@ class AnswerCwdDefaultTestCase(unittest.TestCase):
         isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
         with st.mutate(self.state_path) as d:
@@ -60,8 +59,10 @@ class AnswerCwdDefaultTestCase(unittest.TestCase):
     def test_answer_with_explicit_project_still_works(self) -> None:
         """Explicit --project accepted (backward compat); locator uses registry."""
         rc, out, _ = self._run(
-            "--project", str(self.project),
-            "--plan", "test-plan",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
             "0",
         )
         self.assertEqual(rc, ExitCode.OK)

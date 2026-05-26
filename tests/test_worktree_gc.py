@@ -4,6 +4,7 @@ Each test sets up a real git repo + one or more `clu init --worktree`
 plans so `git worktree remove` has a real target. The scope filter is
 status-at-list-time (then re-checked at action-time).
 """
+
 from __future__ import annotations
 
 import io
@@ -32,7 +33,9 @@ PLAN_BODY = """\
 def _git(repo: Path, *args: str, **kw) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=kw.pop("check", True),
+        capture_output=True,
+        text=True,
+        check=kw.pop("check", True),
         **kw,
     )
 
@@ -56,10 +59,16 @@ class WorktreeGcTestCase(unittest.TestCase):
     def _init_plan(self, slug: str) -> Path:
         (self.project / "plans" / f"{slug}.md").write_text(PLAN_BODY)
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            main([
-                "init", "--project", str(self.project), "--plan", slug,
-                "--worktree",
-            ])
+            main(
+                [
+                    "init",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    slug,
+                    "--worktree",
+                ]
+            )
         return self._state_path(slug)
 
     def _state_path(self, slug: str) -> Path:
@@ -140,7 +149,10 @@ class WorktreeGcTestCase(unittest.TestCase):
         self.assertFalse(wt_path.exists())
         # Branch still present (no --delete-branch).
         branch_rc = _git(
-            self.project, "rev-parse", "--verify", "refs/heads/clu/alpha",
+            self.project,
+            "rev-parse",
+            "--verify",
+            "refs/heads/clu/alpha",
             check=False,
         ).returncode
         self.assertEqual(branch_rc, 0)
@@ -152,7 +164,10 @@ class WorktreeGcTestCase(unittest.TestCase):
         rc, _stdout, _ = self._gc("--confirm", "--delete-branch")
         self.assertEqual(rc, 0)
         branch_rc = _git(
-            self.project, "rev-parse", "--verify", "refs/heads/clu/alpha",
+            self.project,
+            "rev-parse",
+            "--verify",
+            "refs/heads/clu/alpha",
             check=False,
         ).returncode
         self.assertNotEqual(branch_rc, 0)

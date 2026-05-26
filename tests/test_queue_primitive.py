@@ -4,6 +4,7 @@ The state.locked_json extraction has its own tests in test_state.py. These
 tests focus on the new queue.py module and the per-project queue_path()
 helper.
 """
+
 from __future__ import annotations
 
 import json

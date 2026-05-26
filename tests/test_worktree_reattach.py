@@ -6,6 +6,7 @@ relies on isn't silently broken by reattach. Does not touch status —
 operator runs `clu resume` separately if the plan was paused by
 EVENT_WORKTREE_MISSING.
 """
+
 from __future__ import annotations
 
 import io
@@ -34,7 +35,8 @@ PLAN_BODY = """\
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, check=True,
+        capture_output=True,
+        check=True,
     )
 
 
@@ -57,17 +59,22 @@ class WorktreeReattachTestCase(unittest.TestCase):
     def _init_plan(self, slug: str) -> Path:
         (self.project / "plans" / f"{slug}.md").write_text(PLAN_BODY)
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            main([
-                "init", "--project", str(self.project), "--plan", slug,
-                "--worktree",
-            ])
+            main(
+                [
+                    "init",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    slug,
+                    "--worktree",
+                ]
+            )
         return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
 
     def _reattach(self, *extra: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main(["worktree", "reattach", "--project",
-                       str(self.project), *extra])
+            rc = main(["worktree", "reattach", "--project", str(self.project), *extra])
         return rc, out.getvalue(), err.getvalue()
 
     def test_happy_path_rewrites_state_worktree_path(self) -> None:
@@ -78,7 +85,10 @@ class WorktreeReattachTestCase(unittest.TestCase):
         _git(self.project, "worktree", "add", "-b", "clu/alpha-2", str(new_path))
 
         rc, stdout, _ = self._reattach(
-            "--plan", "alpha", "--path", str(new_path),
+            "--plan",
+            "alpha",
+            "--path",
+            str(new_path),
         )
         self.assertEqual(rc, 0)
         record = st.get_worktree(st.load(state_path))
@@ -92,7 +102,10 @@ class WorktreeReattachTestCase(unittest.TestCase):
         self._init_plan("alpha")
         missing = self.parent / "this-dir-is-gone"
         rc, _stdout, _stderr = self._reattach(
-            "--plan", "alpha", "--path", str(missing),
+            "--plan",
+            "alpha",
+            "--path",
+            str(missing),
         )
         self.assertEqual(rc, ExitCode.GENERIC)
 
@@ -101,7 +114,10 @@ class WorktreeReattachTestCase(unittest.TestCase):
         not_a_repo = self.parent / "plain-dir"
         not_a_repo.mkdir()
         rc, _stdout, _stderr = self._reattach(
-            "--plan", "alpha", "--path", str(not_a_repo),
+            "--plan",
+            "alpha",
+            "--path",
+            str(not_a_repo),
         )
         self.assertEqual(rc, ExitCode.GENERIC)
 
@@ -113,13 +129,19 @@ class WorktreeReattachTestCase(unittest.TestCase):
         new_path = self.parent / "wt-attempt"
         _git(self.project, "worktree", "add", str(new_path), "-b", "ad-hoc")
         rc, _stdout, _stderr = self._reattach(
-            "--plan", "alpha", "--path", str(new_path),
+            "--plan",
+            "alpha",
+            "--path",
+            str(new_path),
         )
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
 
     def test_refuses_unknown_plan(self) -> None:
         rc, _stdout, _stderr = self._reattach(
-            "--plan", "nonexistent", "--path", str(self.project),
+            "--plan",
+            "nonexistent",
+            "--path",
+            str(self.project),
         )
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
 
@@ -132,7 +154,10 @@ class WorktreeReattachTestCase(unittest.TestCase):
         new_path = self.parent / "myrepo-alpha-relocated"
         _git(self.project, "worktree", "add", "-b", "clu/alpha-2", str(new_path))
         rc, _stdout, _stderr = self._reattach(
-            "--plan", "alpha", "--path", str(new_path),
+            "--plan",
+            "alpha",
+            "--path",
+            str(new_path),
         )
         self.assertEqual(rc, 0)
         # Status unchanged.

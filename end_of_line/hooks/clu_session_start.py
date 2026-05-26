@@ -16,6 +16,7 @@ Failure semantics mirror `clu_inbox_surface.py`: exit 0 on any
 exception (the hook can't be allowed to crash the session start),
 log to `~/.config/clu/session_start_hook.log` for diagnosis.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,9 +37,9 @@ INSTRUCTION = (
     "(prior Monitors survive `/clear` and `/compact` per #69 findings):\n\n"
     "```\n"
     "Monitor(\n"
-    "    command=\"clu watch --all --operator\",\n"
+    '    command="clu watch --all --operator",\n'
     "    persistent=True,\n"
-    "    description=\"clu operator dashboard\",\n"
+    '    description="clu operator dashboard",\n'
     ")\n"
     "```\n\n"
     "Wedge events stream as they happen. The operator-approval "
@@ -57,14 +58,14 @@ TASK_LIST_PROTOCOL_INSTRUCTION = (
     "lines at startup, one per plan + phase. The parent line (`task=<slug>`, "
     "no `parent=` field) is the plan itself. Child lines (`task=<slug>/<phase>`) "
     "carry `parent=<slug>`.\n"
-    "- `TASK_UPDATE task=<id> [parent=<slug>] status=<state> msg=\"<one-liner>\"` "
+    '- `TASK_UPDATE task=<id> [parent=<slug>] status=<state> msg="<one-liner>"` '
     "— fired on state transitions. `parent=` present on phase-scoped events, "
     "absent on plan-scoped events.\n\n"
     "**On TASK_CREATE bootstrap batch:** call `TaskCreate` with all tasks at "
     "`status=pending`. Signal hierarchy in `subject`:\n"
     "- Parent (`task=<slug>`, no `parent=`): `subject = <slug>`\n"
     "- Child (`task=<slug>/<phase>`, with `parent=<slug>`): "
-    "`subject = \"└ <phase>\"` — U+2514 box-drawing char + space + phase id.\n\n"
+    '`subject = "└ <phase>"` — U+2514 box-drawing char + space + phase id.\n\n'
     "**On each TASK_UPDATE:** call `TaskUpdate` matching by `task=`. "
     "**Do NOT re-set subject** — only update `status` and `description`. "
     "Re-setting the subject strips the `└ ` glyph and visually un-nests the tree.\n\n"
@@ -85,6 +86,7 @@ def _active_plans_for_cwd() -> list[str]:
     """
     try:
         from end_of_line import registry, state as st  # local — avoid module-load cost
+
         cwd = Path(os.getcwd()).resolve()
         slugs: list[str] = []
         for entry in registry.entries_for_project(cwd):
@@ -111,10 +113,10 @@ def _per_plan_arming_block(slugs: list[str]) -> str:
         blocks.append(
             "```\n"
             "Monitor(\n"
-            f"    command=\"clu watch --project . --plan {slug} --task-list\",\n"
+            f'    command="clu watch --project . --plan {slug} --task-list",\n'
             "    persistent=True,\n"
             "    timeout_ms=3600000,\n"
-            f"    description=\"clu {slug} phase progress\",\n"
+            f'    description="clu {slug} phase progress",\n'
             ")\n"
             "```\n"
         )

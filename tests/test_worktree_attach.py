@@ -8,6 +8,7 @@ where three plans had been init'd without `--worktree` but the operator
 had built their worktrees by hand — neither `init --worktree` (refuses:
 state exists) nor `reattach` (refuses: no worktree record) covered the
 retrofit case (#25)."""
+
 from __future__ import annotations
 
 import io
@@ -36,7 +37,8 @@ PLAN_BODY = """\
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, check=True,
+        capture_output=True,
+        check=True,
     )
 
 
@@ -65,10 +67,16 @@ class WorktreeAttachTestCase(unittest.TestCase):
     def _init_plan_with_worktree(self, slug: str) -> Path:
         (self.project / "plans" / f"{slug}.md").write_text(PLAN_BODY)
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            main([
-                "init", "--project", str(self.project), "--plan", slug,
-                "--worktree",
-            ])
+            main(
+                [
+                    "init",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    slug,
+                    "--worktree",
+                ]
+            )
         return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
 
     def _make_worktree(self, name: str, branch: str) -> Path:
@@ -79,8 +87,7 @@ class WorktreeAttachTestCase(unittest.TestCase):
     def _attach(self, *extra: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main(["worktree", "attach", "--project",
-                       str(self.project), *extra])
+            rc = main(["worktree", "attach", "--project", str(self.project), *extra])
         return rc, out.getvalue(), err.getvalue()
 
     def test_happy_path_writes_record_with_autodetected_branch_and_sha(self) -> None:
@@ -90,7 +97,9 @@ class WorktreeAttachTestCase(unittest.TestCase):
         wt_path = self._make_worktree("myrepo-alpha-wt", "feature/alpha")
         head_sha = subprocess.run(
             ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
 
         rc, stdout, _ = self._attach("--plan", "alpha", "--path", str(wt_path))
@@ -117,7 +126,10 @@ class WorktreeAttachTestCase(unittest.TestCase):
         self._init_plan_with_worktree("alpha")
         new_wt = self._make_worktree("myrepo-alpha-second-wt", "feature/alpha2")
         rc, _stdout, stderr = self._attach(
-            "--plan", "alpha", "--path", str(new_wt),
+            "--plan",
+            "alpha",
+            "--path",
+            str(new_wt),
         )
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
         self.assertIn("reattach", stderr.lower())
@@ -126,7 +138,10 @@ class WorktreeAttachTestCase(unittest.TestCase):
         self._init_plan_no_worktree("alpha")
         missing = self.parent / "nope"
         rc, _stdout, _stderr = self._attach(
-            "--plan", "alpha", "--path", str(missing),
+            "--plan",
+            "alpha",
+            "--path",
+            str(missing),
         )
         self.assertEqual(rc, ExitCode.GENERIC)
 
@@ -135,13 +150,19 @@ class WorktreeAttachTestCase(unittest.TestCase):
         plain = self.parent / "plain-dir"
         plain.mkdir()
         rc, _stdout, _stderr = self._attach(
-            "--plan", "alpha", "--path", str(plain),
+            "--plan",
+            "alpha",
+            "--path",
+            str(plain),
         )
         self.assertEqual(rc, ExitCode.GENERIC)
 
     def test_refuses_unknown_plan(self) -> None:
         rc, _stdout, _stderr = self._attach(
-            "--plan", "nonexistent", "--path", str(self.project),
+            "--plan",
+            "nonexistent",
+            "--path",
+            str(self.project),
         )
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
 
@@ -153,7 +174,10 @@ class WorktreeAttachTestCase(unittest.TestCase):
         # Detach HEAD inside the worktree.
         _git(wt_path, "checkout", "--detach", "HEAD")
         rc, _stdout, stderr = self._attach(
-            "--plan", "alpha", "--path", str(wt_path),
+            "--plan",
+            "alpha",
+            "--path",
+            str(wt_path),
         )
         self.assertEqual(rc, ExitCode.GENERIC)
         self.assertIn("detached", stderr.lower())
@@ -164,7 +188,10 @@ class WorktreeAttachTestCase(unittest.TestCase):
             data["status"] = st.STATUS_PAUSED
         wt_path = self._make_worktree("myrepo-alpha-wt", "feature/alpha")
         rc, _stdout, _stderr = self._attach(
-            "--plan", "alpha", "--path", str(wt_path),
+            "--plan",
+            "alpha",
+            "--path",
+            str(wt_path),
         )
         self.assertEqual(rc, 0)
         self.assertEqual(st.load(state_path)["status"], st.STATUS_PAUSED)

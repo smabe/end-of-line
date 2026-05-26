@@ -1,4 +1,5 @@
 """Protocol-extraction tests — Notifier, InboundPoller, route_reply in notify_base."""
+
 from __future__ import annotations
 
 import unittest

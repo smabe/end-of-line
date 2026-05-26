@@ -9,6 +9,7 @@ unless `--force` is passed. The new EVENT_CLAIM_FORCE_RELEASED event
 distinguishes operator recovery from automatic lease expiry in the
 audit log.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -60,10 +61,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
             st.save_atomic(self.state_path, data)
 
     def _force_release_events(self) -> list[dict]:
-        return [
-            e for e in self._read()["events"]
-            if e["type"] == st.EVENT_CLAIM_FORCE_RELEASED
-        ]
+        return [e for e in self._read()["events"] if e["type"] == st.EVENT_CLAIM_FORCE_RELEASED]
 
     # ---- paused-plan release (allowed, no --force needed) ---------------------
 
@@ -71,6 +69,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
         def setup(d: dict) -> None:
             d["status"] = st.STATUS_PAUSED
             _stamp_claim(d, heartbeat_age_seconds=10)
+
         self._write(setup)
         rc = main(self._argv("release-claim"))
         self.assertEqual(rc, 0)
@@ -80,6 +79,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
         def setup(d: dict) -> None:
             d["status"] = st.STATUS_PAUSED
             _stamp_claim(d, phase="A", token="session-abc", heartbeat_age_seconds=10)
+
         self._write(setup)
         rc = main(self._argv("release-claim"))
         self.assertEqual(rc, 0)
@@ -94,6 +94,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
         def setup(d: dict) -> None:
             d["status"] = st.STATUS_PAUSED
             _stamp_claim(d, heartbeat_age_seconds=10)
+
         self._write(setup)
         main(self._argv("release-claim"))
         self.assertEqual(self._read()["status"], st.STATUS_PAUSED)
@@ -187,14 +188,25 @@ class ReleaseClaimTestCase(GitProjectTestCase):
         # Regression: if the operator --forces while a worker is genuinely
         # alive, a subsequent `clu complete` callback must fail cleanly with
         # CLAIM_MISMATCH rather than crash on a None claim.
-        self._write(lambda d: _stamp_claim(
-            d, phase="A", token="session-abc", heartbeat_age_seconds=30,
-        ))
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                phase="A",
+                token="session-abc",
+                heartbeat_age_seconds=30,
+            )
+        )
         self.assertEqual(main(self._argv("release-claim", "--force")), 0)
         with redirect_stderr(io.StringIO()):
-            rc = main(self._argv(
-                "complete", "--token", "session-abc", "--phase", "A",
-            ))
+            rc = main(
+                self._argv(
+                    "complete",
+                    "--token",
+                    "session-abc",
+                    "--phase",
+                    "A",
+                )
+            )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
 
     # ---- --reset-attempts flag -------------------------------------------------
@@ -250,18 +262,23 @@ class ReleaseClaimTestCase(GitProjectTestCase):
     # ---- orphan reap on release (closes #63) ----------------------------------
 
     def _orphan_reaped_events(self) -> list[dict]:
-        return [
-            e for e in self._read()["events"]
-            if e["type"] == st.EVENT_PHASE_ORPHAN_REAPED
-        ]
+        return [e for e in self._read()["events"] if e["type"] == st.EVENT_PHASE_ORPHAN_REAPED]
 
     def test_release_claim_reaps_pid_when_present(self) -> None:
         from unittest.mock import patch
-        self._write(lambda d: _stamp_claim(
-            d, phase="A", heartbeat_age_seconds=30, pid=99999,
-        ))
+
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                phase="A",
+                heartbeat_age_seconds=30,
+                pid=99999,
+            )
+        )
         fake_result = st.ReapResult(
-            signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False,
+            signaled="SIGTERM",
+            escalated_kill=False,
+            cmdline_mismatch=False,
         )
         with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result) as mock:
             rc = main(self._argv("release-claim", "--force"))
@@ -273,6 +290,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
 
     def test_release_claim_no_pid_skips_reap(self) -> None:
         from unittest.mock import patch
+
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=30))
         with patch("end_of_line.state.reap_orphan_pid") as mock:
             rc = main(self._argv("release-claim", "--force"))
@@ -282,11 +300,18 @@ class ReleaseClaimTestCase(GitProjectTestCase):
 
     def test_release_claim_event_ordering(self) -> None:
         from unittest.mock import patch
-        self._write(lambda d: _stamp_claim(
-            d, heartbeat_age_seconds=30, pid=99999,
-        ))
+
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                heartbeat_age_seconds=30,
+                pid=99999,
+            )
+        )
         fake_result = st.ReapResult(
-            signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False,
+            signaled="SIGTERM",
+            escalated_kill=False,
+            cmdline_mismatch=False,
         )
         with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
             main(self._argv("release-claim", "--force"))
@@ -298,11 +323,19 @@ class ReleaseClaimTestCase(GitProjectTestCase):
 
     def test_release_claim_records_signaled_in_event(self) -> None:
         from unittest.mock import patch
-        self._write(lambda d: _stamp_claim(
-            d, phase="A", heartbeat_age_seconds=30, pid=99999,
-        ))
+
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                phase="A",
+                heartbeat_age_seconds=30,
+                pid=99999,
+            )
+        )
         fake_result = st.ReapResult(
-            signaled="SIGTERM+SIGKILL", escalated_kill=True, cmdline_mismatch=False,
+            signaled="SIGTERM+SIGKILL",
+            escalated_kill=True,
+            cmdline_mismatch=False,
         )
         with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
             main(self._argv("release-claim", "--force"))
@@ -314,11 +347,18 @@ class ReleaseClaimTestCase(GitProjectTestCase):
 
     def test_release_claim_cmdline_mismatch_recorded(self) -> None:
         from unittest.mock import patch
-        self._write(lambda d: _stamp_claim(
-            d, heartbeat_age_seconds=30, pid=99999,
-        ))
+
+        self._write(
+            lambda d: _stamp_claim(
+                d,
+                heartbeat_age_seconds=30,
+                pid=99999,
+            )
+        )
         fake_result = st.ReapResult(
-            signaled=None, escalated_kill=False, cmdline_mismatch=True,
+            signaled=None,
+            escalated_kill=False,
+            cmdline_mismatch=True,
         )
         with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
             main(self._argv("release-claim", "--force"))

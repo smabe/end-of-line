@@ -4,6 +4,7 @@ Pending → history transition with outcome=removed; rejection paths for
 invalid slugs, slugs not in the pending queue, and slugs whose only
 relationship to the project is the registry (i.e. currently running).
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -90,6 +91,7 @@ class QueueRemoveTestCase(unittest.TestCase):
         self.queue_path.write_text("{not valid json")
         import io
         from contextlib import redirect_stderr
+
         err = io.StringIO()
         with redirect_stderr(err):
             rc = main(["queue", "remove", "foo", "--project", str(self.project)])

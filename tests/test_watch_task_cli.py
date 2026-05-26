@@ -1,4 +1,5 @@
 """Tests for `clu watch --task-list` — flag, mutex validation, and pass-through."""
+
 from __future__ import annotations
 
 import io
@@ -47,20 +48,32 @@ class TaskListMutexTest(CluTestCase):
         _init_plan(self.project, "foo")
         err = io.StringIO()
         with redirect_stderr(err):
-            rc = main([
-                "watch", "--task-list", "--json",
-                "--project", str(self.project), "--plan", "foo",
-            ])
+            rc = main(
+                [
+                    "watch",
+                    "--task-list",
+                    "--json",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "foo",
+                ]
+            )
         self.assertEqual(rc, int(ExitCode.GENERIC))
         self.assertIn("mutually exclusive", err.getvalue())
 
     def test_task_list_with_all_accepted(self) -> None:
         _init_plan(self.project, "foo")
         with _mock_loop():
-            rc = main([
-                "watch", "--task-list", "--all",
-                "--project", str(self.project),
-            ])
+            rc = main(
+                [
+                    "watch",
+                    "--task-list",
+                    "--all",
+                    "--project",
+                    str(self.project),
+                ]
+            )
         self.assertNotEqual(rc, int(ExitCode.GENERIC))
 
 
@@ -75,10 +88,16 @@ class TaskListPassThroughTest(CluTestCase):
     def test_task_list_alone_passes_validation(self) -> None:
         _init_plan(self.project, "myplan")
         with _mock_loop() as m:
-            rc = main([
-                "watch", "--task-list",
-                "--project", str(self.project), "--plan", "myplan",
-            ])
+            rc = main(
+                [
+                    "watch",
+                    "--task-list",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "myplan",
+                ]
+            )
         self.assertEqual(rc, 0)
         self.assertTrue(m.call_args.kwargs.get("task_list_mode"))
 
@@ -88,10 +107,16 @@ class TaskListPassThroughTest(CluTestCase):
         (self.project / "plans" / "no-master.md").unlink()
         out = io.StringIO()
         with _mock_loop(), redirect_stdout(out):
-            rc = main([
-                "watch", "--task-list",
-                "--project", str(self.project), "--plan", "no-master",
-            ])
+            rc = main(
+                [
+                    "watch",
+                    "--task-list",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "no-master",
+                ]
+            )
         self.assertEqual(rc, 0)
         self.assertNotIn("TASK_CREATE", out.getvalue())
 

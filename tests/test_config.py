@@ -1,4 +1,5 @@
 """Round-trip tests for end_of_line.config.load_project_config."""
+
 from __future__ import annotations
 
 import json
@@ -28,7 +29,6 @@ class _ConfigTestBase(unittest.TestCase):
 
 
 class LoadProjectConfigTests(_ConfigTestBase):
-
     def test_missing_file_returns_defaults(self) -> None:
         cfg = load_project_config(self.root)
         self.assertEqual(cfg.dispatch, DispatchSpec())
@@ -97,12 +97,14 @@ class LoadProjectConfigTests(_ConfigTestBase):
         self.assertEqual(cfg.dispatch.path, f"{first}:/bar:{third}")
 
     def test_dispatch_command_and_path_together(self) -> None:
-        self._write({
-            "dispatch": {
-                "command": "claude --print {plan_slug}",
-                "path": "/usr/local/bin:/usr/bin",
+        self._write(
+            {
+                "dispatch": {
+                    "command": "claude --print {plan_slug}",
+                    "path": "/usr/local/bin:/usr/bin",
+                }
             }
-        })
+        )
         cfg = load_project_config(self.root)
         self.assertEqual(cfg.dispatch.command, "claude --print {plan_slug}")
         self.assertEqual(cfg.dispatch.path, "/usr/local/bin:/usr/bin")
@@ -187,7 +189,9 @@ class QualityFieldTests(_ConfigTestBase):
         self.assertEqual(cfg.quality.simplify_threshold, {"files": 3, "lines": 50})
 
     def test_resolved_verify_command_prefers_quality_block(self) -> None:
-        self._write({"test_command": "fallback-cmd", "quality": {"verify_command": "preferred-cmd"}})
+        self._write(
+            {"test_command": "fallback-cmd", "quality": {"verify_command": "preferred-cmd"}}
+        )
         cfg = load_project_config(self.root)
         self.assertEqual(cfg.resolved_verify_command(), "preferred-cmd")
 

@@ -3,6 +3,7 @@
 Covers membership in BUNDLED_SKILLS, package-data shipping, frontmatter
 validity, and install-skill integration.
 """
+
 from __future__ import annotations
 
 import io
@@ -22,24 +23,14 @@ class CluReplyBundledTests(unittest.TestCase):
         self.assertIn("clu-reply", BUNDLED_SKILLS)
 
     def test_clu_reply_skill_file_ships_with_package(self):
-        text = (
-            files("end_of_line")
-            .joinpath("skills/clu-reply/SKILL.md")
-            .read_text()
-        )
+        text = files("end_of_line").joinpath("skills/clu-reply/SKILL.md").read_text()
         self.assertTrue(text.strip())
 
     def test_clu_reply_skill_frontmatter_valid(self):
-        text = (
-            files("end_of_line")
-            .joinpath("skills/clu-reply/SKILL.md")
-            .read_text()
-        )
+        text = files("end_of_line").joinpath("skills/clu-reply/SKILL.md").read_text()
         # Frontmatter sits between the first two '---\n' delimiters.
         parts = text.split("---\n", 2)
-        self.assertGreaterEqual(
-            len(parts), 3, "SKILL.md missing frontmatter delimiters"
-        )
+        self.assertGreaterEqual(len(parts), 3, "SKILL.md missing frontmatter delimiters")
         fm: dict[str, str] = {}
         for line in parts[1].splitlines():
             if ":" in line and not line.startswith(" "):

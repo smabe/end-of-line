@@ -16,6 +16,7 @@ headless Claude repair worker. The worker's output runs through
 slug-preservation is verified by clu's regex-extracted backup slugs,
 NOT by trusting the worker's prompt.
 """
+
 from __future__ import annotations
 
 import json
@@ -82,23 +83,23 @@ def best_effort_extract_history_slugs(data: bytes) -> set[str]:
     in_str = False
     escape = False
     while i < len(data) and depth > 0:
-        c = data[i:i+1]
+        c = data[i : i + 1]
         if escape:
             escape = False
         elif in_str:
-            if c == b'\\':
+            if c == b"\\":
                 escape = True
             elif c == b'"':
                 in_str = False
         else:
             if c == b'"':
                 in_str = True
-            elif c == b'[':
+            elif c == b"[":
                 depth += 1
-            elif c == b']':
+            elif c == b"]":
                 depth -= 1
         i += 1
-    history_bytes = data[start:i-1]
+    history_bytes = data[start : i - 1]
     return {m.decode("utf-8", errors="replace") for m in _SLUG_RE.findall(history_bytes)}
 
 
@@ -129,9 +130,7 @@ def validate_repair(backup_bytes: bytes, repaired_path: Path) -> ValidationResul
     except (json.JSONDecodeError, st.SchemaVersionMismatch) as exc:
         return ValidationResult(False, f"still unparseable: {exc}")
 
-    if not isinstance(repaired.get("queue"), list) or not isinstance(
-        repaired.get("history"), list
-    ):
+    if not isinstance(repaired.get("queue"), list) or not isinstance(repaired.get("history"), list):
         return ValidationResult(False, "repaired file missing queue/history arrays")
 
     backup_all = best_effort_extract_slugs(backup_bytes)
@@ -141,16 +140,12 @@ def validate_repair(backup_bytes: bytes, repaired_path: Path) -> ValidationResul
     repaired_queue_slugs = {e.get("slug") for e in repaired["queue"]}
     missing_pending = backup_pending - repaired_queue_slugs
     if missing_pending:
-        return ValidationResult(
-            False, f"would drop slugs: {sorted(missing_pending)}"
-        )
+        return ValidationResult(False, f"would drop slugs: {sorted(missing_pending)}")
 
     repaired_history_slugs = {e.get("slug") for e in repaired["history"]}
     missing_history = backup_history - repaired_history_slugs
     if missing_history:
-        return ValidationResult(
-            False, f"history entries removed: {sorted(missing_history)}"
-        )
+        return ValidationResult(False, f"history entries removed: {sorted(missing_history)}")
 
     return ValidationResult(True)
 

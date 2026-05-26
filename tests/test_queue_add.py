@@ -4,6 +4,7 @@ All six exit paths plus --front, history-only re-add, running-slug re-add,
 entry shape, and symlink path-resolution. Uses `isolate_queue` (registry +
 per-project tmp paths) so the host registry is never touched.
 """
+
 from __future__ import annotations
 
 import os
@@ -162,6 +163,7 @@ class QueueAddTestCase(unittest.TestCase):
         self.queue_path.write_text("{not valid json")
         import io
         from contextlib import redirect_stderr
+
         err = io.StringIO()
         with redirect_stderr(err):
             rc = main(["queue", "add", "foo", "--project", str(self.project)])
@@ -189,6 +191,7 @@ class QueueAddTestCase(unittest.TestCase):
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
         import io
         from contextlib import redirect_stdout, redirect_stderr
+
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             rc = main(argv)
@@ -198,9 +201,7 @@ class QueueAddTestCase(unittest.TestCase):
         _bootstrap(self.project)
         for s in ("a", "b", "c"):
             _write_plan(self.project, s)
-        rc, out, _ = self._run(
-            ["queue", "add", "a", "b", "c", "--project", str(self.project)]
-        )
+        rc, out, _ = self._run(["queue", "add", "a", "b", "c", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
         self.assertEqual(slugs, ["a", "b", "c"])
@@ -212,9 +213,7 @@ class QueueAddTestCase(unittest.TestCase):
     def test_add_single_slug_unchanged_output(self) -> None:
         _bootstrap(self.project)
         _write_plan(self.project, "foo")
-        rc, out, _ = self._run(
-            ["queue", "add", "foo", "--project", str(self.project)]
-        )
+        rc, out, _ = self._run(["queue", "add", "foo", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         # Single arg: exactly one position line, NO batch total line.
         self.assertIn("queued at position 1", out)
@@ -226,8 +225,7 @@ class QueueAddTestCase(unittest.TestCase):
         _write_plan(self.project, "a")
         _write_plan(self.project, "c")
         rc, _, err = self._run(
-            ["queue", "add", "a", "INVALID-SLUG", "c",
-             "--project", str(self.project)]
+            ["queue", "add", "a", "INVALID-SLUG", "c", "--project", str(self.project)]
         )
         self.assertEqual(rc, ExitCode.INVALID_SLUG)
         self.assertIn("INVALID-SLUG", err)
@@ -240,8 +238,7 @@ class QueueAddTestCase(unittest.TestCase):
         _write_plan(self.project, "a")
         _write_plan(self.project, "c")
         rc, _, err = self._run(
-            ["queue", "add", "a", "missing", "c",
-             "--project", str(self.project)]
+            ["queue", "add", "a", "missing", "c", "--project", str(self.project)]
         )
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
         self.assertIn("missing", err)
@@ -252,9 +249,7 @@ class QueueAddTestCase(unittest.TestCase):
         _bootstrap(self.project)
         _write_plan(self.project, "a")
         _write_plan(self.project, "b")
-        rc, _, err = self._run(
-            ["queue", "add", "a", "b", "a", "--project", str(self.project)]
-        )
+        rc, _, err = self._run(["queue", "add", "a", "b", "a", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
         self.assertIn("duplicate slug 'a' in batch", err)
         if self.queue_path.exists():
@@ -266,8 +261,7 @@ class QueueAddTestCase(unittest.TestCase):
             _write_plan(self.project, s)
         main(["queue", "add", "foo", "--project", str(self.project)])
         rc, _, err = self._run(
-            ["queue", "add", "bar", "foo", "baz",
-             "--project", str(self.project)]
+            ["queue", "add", "bar", "foo", "baz", "--project", str(self.project)]
         )
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
         self.assertIn("'foo'", err)
@@ -282,8 +276,7 @@ class QueueAddTestCase(unittest.TestCase):
         main(["queue", "add", "x", "--project", str(self.project)])
         main(["queue", "add", "y", "--project", str(self.project)])
         rc, _, _ = self._run(
-            ["queue", "add", "a", "b", "c", "--front",
-             "--project", str(self.project)]
+            ["queue", "add", "a", "b", "c", "--front", "--project", str(self.project)]
         )
         self.assertEqual(rc, ExitCode.OK)
         slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
@@ -291,14 +284,13 @@ class QueueAddTestCase(unittest.TestCase):
 
     def test_add_multiple_dispatched_under_single_lock(self) -> None:
         from unittest import mock
+
         _bootstrap(self.project)
         for s in ("a", "b", "c"):
             _write_plan(self.project, s)
         real_mutate = queue.mutate
         with mock.patch.object(queue, "mutate", wraps=real_mutate) as spy:
-            rc = main(
-                ["queue", "add", "a", "b", "c", "--project", str(self.project)]
-            )
+            rc = main(["queue", "add", "a", "b", "c", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         # One mutate call covers the whole batch.
         self.assertEqual(spy.call_count, 1)

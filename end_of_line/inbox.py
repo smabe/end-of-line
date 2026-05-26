@@ -11,6 +11,7 @@ Filenames carry an 8-char random hex suffix — collision-free under
 concurrent writes from supervisor + worker callbacks without a global
 counter.
 """
+
 from __future__ import annotations
 
 import json
@@ -38,11 +39,7 @@ def _processed_root(inbox_dir: Path) -> Path:
 
 
 def _is_event_file(p: Path) -> bool:
-    return (
-        not p.is_dir()
-        and not p.name.startswith(".")
-        and p.name.endswith(".json")
-    )
+    return not p.is_dir() and not p.name.startswith(".") and p.name.endswith(".json")
 
 
 def write_event(
@@ -131,11 +128,9 @@ def mark_processed(event_id: str, inbox: Path | None = None) -> None:
 
 
 def list_for_project(
-    project_root: str, inbox: Path | None = None,
+    project_root: str,
+    inbox: Path | None = None,
 ) -> list[dict]:
     """Return unprocessed events whose `project_root` matches `project_root`."""
     target = str(Path(project_root).resolve())
-    return [
-        e for e in read_unprocessed(inbox)
-        if e.get("project_root") == target
-    ]
+    return [e for e in read_unprocessed(inbox) if e.get("project_root") == target]

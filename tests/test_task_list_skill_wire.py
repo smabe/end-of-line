@@ -1,10 +1,10 @@
 """Tests for the clu-plan SKILL.md --task-list auto-arm and parse rules."""
+
 import pathlib
 import unittest
 
 _SKILL_PATH = (
-    pathlib.Path(__file__).parent.parent
-    / "end_of_line" / "skills" / "clu-plan" / "SKILL.md"
+    pathlib.Path(__file__).parent.parent / "end_of_line" / "skills" / "clu-plan" / "SKILL.md"
 )
 
 

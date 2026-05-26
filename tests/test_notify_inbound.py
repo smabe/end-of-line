@@ -1,4 +1,5 @@
 """Inbound iMessage poller tests."""
+
 from __future__ import annotations
 
 import json
@@ -31,13 +32,8 @@ def _make_chat_db(path: Path, rows: list[dict]) -> None:
         "is_from_me INTEGER, text TEXT, date INTEGER DEFAULT 0, "
         "attributedBody BLOB, associated_message_type INTEGER DEFAULT 0)"
     )
-    conn.execute(
-        "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT)"
-    )
-    conn.execute(
-        "CREATE TABLE chat_message_join "
-        "(chat_id INTEGER, message_id INTEGER)"
-    )
+    conn.execute("CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT)")
+    conn.execute("CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER)")
     chat_rowids: dict[str, int] = {}
     for row in rows:
         rowid = row["rowid"]
@@ -97,15 +93,21 @@ def _make_attributed_body(text: str) -> bytes:
     )
     START = b"\x01\x2b"
     utf8 = text.encode("utf-8")
-    return HEADER + CLASS_FILLER + START + _encode_typedstream_length(len(utf8)) + utf8 + b"\x86\x84"
+    return (
+        HEADER + CLASS_FILLER + START + _encode_typedstream_length(len(utf8)) + utf8 + b"\x86\x84"
+    )
 
 
-def _ob(slug: str, *, blocker_id: str = "q-1", options: int = 2,
-        root: str | Path = "/p", ts: str = "") -> OpenBlocker:
+def _ob(
+    slug: str, *, blocker_id: str = "q-1", options: int = 2, root: str | Path = "/p", ts: str = ""
+) -> OpenBlocker:
     """Factory keeps tests readable as OpenBlocker grows fields."""
     return OpenBlocker(
-        project_root=Path(root), plan_slug=slug, blocker_id=blocker_id,
-        options_count=options, last_notified_at=ts,
+        project_root=Path(root),
+        plan_slug=slug,
+        blocker_id=blocker_id,
+        options_count=options,
+        last_notified_at=ts,
     )
 
 
@@ -227,7 +229,9 @@ class PollOnceTestCase(unittest.TestCase):
                 return LocatorResult(variant="NOT_FOUND")
             target, answer = match
             state_path = (
-                Path(target.project_root) / "plans" / ".orchestrator"
+                Path(target.project_root)
+                / "plans"
+                / ".orchestrator"
                 / f"{target.plan_slug}.state.json"
             )
             return LocatorResult(
@@ -237,13 +241,15 @@ class PollOnceTestCase(unittest.TestCase):
                 answer_index=int(answer),
                 project_root=Path(target.project_root),
             )
+
         return locator
 
     def _poll(self, conn, last, *, blockers, shell_answer_fn=None, **kw) -> int:
         kw.setdefault("tick_spawner", self._tick)
         kw.setdefault("self_chat_id", DEFAULT_CHAT_ID)
         return notify_inbound.poll_once(
-            conn, last,
+            conn,
+            last,
             _locator_fn=kw.pop("_locator_fn", self._mock_locator(blockers)),
             shell_answer_fn=shell_answer_fn or self._shell_answer,
             **kw,
@@ -251,16 +257,18 @@ class PollOnceTestCase(unittest.TestCase):
 
     def _state_path(self, target: OpenBlocker) -> Path:
         return (
-            Path(target.project_root) / "plans" / ".orchestrator"
-            / f"{target.plan_slug}.state.json"
+            Path(target.project_root) / "plans" / ".orchestrator" / f"{target.plan_slug}.state.json"
         )
 
     def test_dispatches_matched_inbound_only(self) -> None:
-        _make_chat_db(self.db_path, [
-            {"rowid": 10, "is_from_me": 0, "text": "0"},
-            {"rowid": 11, "is_from_me": 1, "text": "ignore"},
-            {"rowid": 12, "is_from_me": 0, "text": "lol"},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {"rowid": 10, "is_from_me": 0, "text": "0"},
+                {"rowid": 11, "is_from_me": 1, "text": "ignore"},
+                {"rowid": 12, "is_from_me": 0, "text": "lol"},
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
@@ -278,9 +286,12 @@ class PollOnceTestCase(unittest.TestCase):
         self.assertEqual(self.dispatched, [(self._state_path(target), "q-1", 0)])
 
     def test_other_chat_dropped_by_scope(self) -> None:
-        _make_chat_db(self.db_path, [
-            {"rowid": 1, "is_from_me": 0, "text": "0", "chat_id": "+15559999999"},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {"rowid": 1, "is_from_me": 0, "text": "0", "chat_id": "+15559999999"},
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
@@ -298,10 +309,13 @@ class PollOnceTestCase(unittest.TestCase):
         self.assertEqual(self.dispatched, [])
 
     def test_skips_already_seen(self) -> None:
-        _make_chat_db(self.db_path, [
-            {"rowid": 1, "is_from_me": 0, "text": "0"},
-            {"rowid": 2, "is_from_me": 0, "text": "0"},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {"rowid": 1, "is_from_me": 0, "text": "0"},
+                {"rowid": 2, "is_from_me": 0, "text": "0"},
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 1, blockers=[target])
@@ -328,9 +342,13 @@ class PollOnceTestCase(unittest.TestCase):
         # `.orchestrator.json` with `inbound_auto_tick: false` wins over default.
         proj = self.tmp / "proj"
         proj.mkdir()
-        (proj / ".orchestrator.json").write_text(json.dumps({
-            "notify": {"inbound_auto_tick": False},
-        }))
+        (proj / ".orchestrator.json").write_text(
+            json.dumps(
+                {
+                    "notify": {"inbound_auto_tick": False},
+                }
+            )
+        )
         _make_chat_db(self.db_path, [{"rowid": 1, "is_from_me": 0, "text": "0"}])
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
@@ -342,10 +360,13 @@ class PollOnceTestCase(unittest.TestCase):
         # answer write failed → raise → no auto-tick (stale state guard).
         proj = self.tmp / "proj"
         proj.mkdir()
-        _make_chat_db(self.db_path, [
-            {"rowid": 1, "is_from_me": 0, "text": "0"},
-            {"rowid": 2, "is_from_me": 0, "text": "hey"},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {"rowid": 1, "is_from_me": 0, "text": "0"},
+                {"rowid": 2, "is_from_me": 0, "text": "hey"},
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
 
@@ -360,10 +381,13 @@ class PollOnceTestCase(unittest.TestCase):
         # Auto-tick is fire-and-forget; an OSError from Popen must be swallowed.
         proj = self.tmp / "proj"
         proj.mkdir()
-        _make_chat_db(self.db_path, [
-            {"rowid": 1, "is_from_me": 0, "text": "0"},
-            {"rowid": 2, "is_from_me": 0, "text": "0"},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {"rowid": 1, "is_from_me": 0, "text": "0"},
+                {"rowid": 2, "is_from_me": 0, "text": "0"},
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root=proj)
 
@@ -377,10 +401,17 @@ class PollOnceTestCase(unittest.TestCase):
     def test_attributed_body_routes_when_text_null(self) -> None:
         # The shipped #45 regression: modern macOS rows have text=NULL and
         # body in attributedBody. poll_once must decode and route them.
-        _make_chat_db(self.db_path, [
-            {"rowid": 1, "is_from_me": 1, "text": None,
-             "attributed_body": _make_attributed_body("0")},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {
+                    "rowid": 1,
+                    "is_from_me": 1,
+                    "text": None,
+                    "attributed_body": _make_attributed_body("0"),
+                },
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
@@ -390,10 +421,17 @@ class PollOnceTestCase(unittest.TestCase):
     def test_text_wins_when_both_populated(self) -> None:
         # Older rows (pre-macOS-10.13) populate `text`; some carry both. If
         # text is set, prefer it over decoding — fast path, no parse risk.
-        _make_chat_db(self.db_path, [
-            {"rowid": 1, "is_from_me": 1, "text": "0",
-             "attributed_body": _make_attributed_body("999")},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {
+                    "rowid": 1,
+                    "is_from_me": 1,
+                    "text": "0",
+                    "attributed_body": _make_attributed_body("999"),
+                },
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
@@ -405,10 +443,17 @@ class PollOnceTestCase(unittest.TestCase):
         # iMessage stickers / inline images encode as U+FFFC and nothing else.
         # poll_once strips U+FFFC, sees empty body, skips the row — cursor
         # still advances so the row can't re-fire on a future blocker.
-        _make_chat_db(self.db_path, [
-            {"rowid": 5, "is_from_me": 1, "text": None,
-             "attributed_body": _make_attributed_body("￼")},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {
+                    "rowid": 5,
+                    "is_from_me": 1,
+                    "text": None,
+                    "attributed_body": _make_attributed_body("￼"),
+                },
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = self._poll(conn, 0, blockers=[target])
@@ -419,14 +464,25 @@ class PollOnceTestCase(unittest.TestCase):
         # Reactions ("Liked", "Loved", etc.) have associated_message_type
         # 2000-3999 and a decodable attributedBody, but they're rendered
         # placeholders, not operator input. SQL filters them before decode.
-        _make_chat_db(self.db_path, [
-            {"rowid": 1, "is_from_me": 1, "text": None,
-             "attributed_body": _make_attributed_body("0"),
-             "assoc_type": 2000},  # "Liked"
-            {"rowid": 2, "is_from_me": 1, "text": None,
-             "attributed_body": _make_attributed_body("1"),
-             "assoc_type": 0},  # real reply
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {
+                    "rowid": 1,
+                    "is_from_me": 1,
+                    "text": None,
+                    "attributed_body": _make_attributed_body("0"),
+                    "assoc_type": 2000,
+                },  # "Liked"
+                {
+                    "rowid": 2,
+                    "is_from_me": 1,
+                    "text": None,
+                    "attributed_body": _make_attributed_body("1"),
+                    "assoc_type": 0,
+                },  # real reply
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", options=2, root="/p")
         last = self._poll(conn, 0, blockers=[target])
@@ -448,16 +504,19 @@ def _make_resolver_db(path: Path, chats: list[dict]) -> None:
         "service_name TEXT, room_name TEXT, is_archived INTEGER)"
     )
     conn.execute("CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT)")
-    conn.execute(
-        "CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER)"
-    )
+    conn.execute("CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER)")
     handle_ids: dict[str, int] = {}
     for i, spec in enumerate(chats, start=1):
         conn.execute(
             "INSERT INTO chat (ROWID, chat_identifier, service_name, "
             "room_name, is_archived) VALUES (?, ?, ?, ?, ?)",
-            (i, spec["chat_identifier"], spec.get("service_name", "iMessage"),
-             spec.get("room_name"), int(spec.get("is_archived", 0))),
+            (
+                i,
+                spec["chat_identifier"],
+                spec.get("service_name", "iMessage"),
+                spec.get("room_name"),
+                int(spec.get("is_archived", 0)),
+            ),
         )
         for handle in spec["participants"]:
             if handle not in handle_ids:
@@ -491,80 +550,111 @@ class ResolveSelfChatIdTestCase(unittest.TestCase):
         _make_resolver_db(self.db_path, [])
         conn = self._open()
         resolved = notify_inbound._resolve_self_chat_id(
-            conn, operator_handle="+15551234567", override="explicit-id",
+            conn,
+            operator_handle="+15551234567",
+            override="explicit-id",
         )
         self.assertEqual(resolved, "explicit-id")
 
     def test_single_self_chat_candidate(self) -> None:
-        _make_resolver_db(self.db_path, [
-            {"chat_identifier": "+15551234567",
-             "participants": ["+15551234567"]},
-        ])
+        _make_resolver_db(
+            self.db_path,
+            [
+                {"chat_identifier": "+15551234567", "participants": ["+15551234567"]},
+            ],
+        )
         resolved = notify_inbound._resolve_self_chat_id(
-            self._open(), operator_handle="+15551234567",
+            self._open(),
+            operator_handle="+15551234567",
         )
         self.assertEqual(resolved, "+15551234567")
 
     def test_no_candidate_raises(self) -> None:
-        _make_resolver_db(self.db_path, [
-            {"chat_identifier": "chat-group",
-             "participants": ["+15551234567", "+15559999999"],
-             "room_name": "group"},  # group chat — excluded
-        ])
+        _make_resolver_db(
+            self.db_path,
+            [
+                {
+                    "chat_identifier": "chat-group",
+                    "participants": ["+15551234567", "+15559999999"],
+                    "room_name": "group",
+                },  # group chat — excluded
+            ],
+        )
         with self.assertRaises(notify_inbound.SelfChatLookupError) as ctx:
             notify_inbound._resolve_self_chat_id(
-                self._open(), operator_handle="+15551234567",
+                self._open(),
+                operator_handle="+15551234567",
             )
         self.assertIn("self_chat_id", str(ctx.exception))
 
     def test_multiple_candidates_raises_with_override_hint(self) -> None:
         # Two distinct self-chat rows for the same handle (can happen when
         # iCloud sync resurfaces a stale thread alongside the live one).
-        _make_resolver_db(self.db_path, [
-            {"chat_identifier": "+15551234567",
-             "participants": ["+15551234567"]},
-            {"chat_identifier": "+15551234567",
-             "participants": ["+15551234567"]},
-        ])
+        _make_resolver_db(
+            self.db_path,
+            [
+                {"chat_identifier": "+15551234567", "participants": ["+15551234567"]},
+                {"chat_identifier": "+15551234567", "participants": ["+15551234567"]},
+            ],
+        )
         with self.assertRaises(notify_inbound.SelfChatLookupError) as ctx:
             notify_inbound._resolve_self_chat_id(
-                self._open(), operator_handle="+15551234567",
+                self._open(),
+                operator_handle="+15551234567",
             )
         self.assertIn("self_chat_id", str(ctx.exception))
 
     def test_group_chat_excluded(self) -> None:
-        _make_resolver_db(self.db_path, [
-            {"chat_identifier": "+15551234567",
-             "participants": ["+15551234567"]},
-            {"chat_identifier": "chat-group",
-             "participants": ["+15551234567", "+15559999999"],
-             "room_name": "group"},
-        ])
+        _make_resolver_db(
+            self.db_path,
+            [
+                {"chat_identifier": "+15551234567", "participants": ["+15551234567"]},
+                {
+                    "chat_identifier": "chat-group",
+                    "participants": ["+15551234567", "+15559999999"],
+                    "room_name": "group",
+                },
+            ],
+        )
         resolved = notify_inbound._resolve_self_chat_id(
-            self._open(), operator_handle="+15551234567",
+            self._open(),
+            operator_handle="+15551234567",
         )
         self.assertEqual(resolved, "+15551234567")
 
     def test_archived_chat_excluded(self) -> None:
-        _make_resolver_db(self.db_path, [
-            {"chat_identifier": "+15551234567",
-             "participants": ["+15551234567"]},
-            {"chat_identifier": "+15551234567",
-             "participants": ["+15551234567"], "is_archived": 1},
-        ])
+        _make_resolver_db(
+            self.db_path,
+            [
+                {"chat_identifier": "+15551234567", "participants": ["+15551234567"]},
+                {
+                    "chat_identifier": "+15551234567",
+                    "participants": ["+15551234567"],
+                    "is_archived": 1,
+                },
+            ],
+        )
         resolved = notify_inbound._resolve_self_chat_id(
-            self._open(), operator_handle="+15551234567",
+            self._open(),
+            operator_handle="+15551234567",
         )
         self.assertEqual(resolved, "+15551234567")
 
     def test_sms_service_excluded(self) -> None:
-        _make_resolver_db(self.db_path, [
-            {"chat_identifier": "+15551234567",
-             "participants": ["+15551234567"], "service_name": "SMS"},
-        ])
+        _make_resolver_db(
+            self.db_path,
+            [
+                {
+                    "chat_identifier": "+15551234567",
+                    "participants": ["+15551234567"],
+                    "service_name": "SMS",
+                },
+            ],
+        )
         with self.assertRaises(notify_inbound.SelfChatLookupError):
             notify_inbound._resolve_self_chat_id(
-                self._open(), operator_handle="+15551234567",
+                self._open(),
+                operator_handle="+15551234567",
             )
 
 
@@ -580,13 +670,13 @@ class InboundStateTestCase(unittest.TestCase):
 
     def _read(self) -> dict:
         return notify_inbound.read_inbound_state(
-            self.state_path, legacy_path=self.legacy_path,
+            self.state_path,
+            legacy_path=self.legacy_path,
         )
 
     def test_missing_file_returns_empty_defaults(self) -> None:
         data = self._read()
-        self.assertEqual(data["schema_version"],
-                         notify_inbound.INBOUND_STATE_SCHEMA_VERSION)
+        self.assertEqual(data["schema_version"], notify_inbound.INBOUND_STATE_SCHEMA_VERSION)
         self.assertEqual(data["last_inbound_rowid"], 0)
         self.assertEqual(data["outbound_rowids"], {})
 
@@ -612,9 +702,7 @@ class InboundStateTestCase(unittest.TestCase):
         self.assertEqual(self._read()["last_inbound_rowid"], 0)
 
     def test_schema_mismatch_returns_defaults(self) -> None:
-        self.state_path.write_text(json.dumps(
-            {"schema_version": 999, "last_inbound_rowid": 50}
-        ))
+        self.state_path.write_text(json.dumps({"schema_version": 999, "last_inbound_rowid": 50}))
         self.assertEqual(self._read()["last_inbound_rowid"], 0)
 
 
@@ -631,16 +719,27 @@ class OutboundPendingTestCase(unittest.TestCase):
     def test_append_then_drain_resolves_floor(self) -> None:
         sent_at = 1_000_000_000.0
         date_ns = notify_inbound.unix_to_chatdb_ns(sent_at + 1)
-        _make_chat_db(self.db_path, [
-            {"rowid": 7, "is_from_me": 1, "text": "BLOCKED: pick framework",
-             "date_ns": date_ns},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {
+                    "rowid": 7,
+                    "is_from_me": 1,
+                    "text": "BLOCKED: pick framework",
+                    "date_ns": date_ns,
+                },
+            ],
+        )
         notify_inbound.append_outbound_mark(
-            DEFAULT_CHAT_ID, sent_at, path=self.pending_path,
+            DEFAULT_CHAT_ID,
+            sent_at,
+            path=self.pending_path,
         )
         conn = notify_inbound.open_chat_db(self.db_path)
         floors = notify_inbound.drain_outbound_marks(
-            conn, path=self.pending_path, now=sent_at + 5,
+            conn,
+            path=self.pending_path,
+            now=sent_at + 5,
         )
         self.assertEqual(floors, {DEFAULT_CHAT_ID: 7})
         # Mark should be drained.
@@ -652,11 +751,15 @@ class OutboundPendingTestCase(unittest.TestCase):
         sent_at = 1_000_000_000.0
         _make_chat_db(self.db_path, [])  # no rows yet
         notify_inbound.append_outbound_mark(
-            DEFAULT_CHAT_ID, sent_at, path=self.pending_path,
+            DEFAULT_CHAT_ID,
+            sent_at,
+            path=self.pending_path,
         )
         conn = notify_inbound.open_chat_db(self.db_path)
         floors = notify_inbound.drain_outbound_marks(
-            conn, path=self.pending_path, now=sent_at + 5,
+            conn,
+            path=self.pending_path,
+            now=sent_at + 5,
         )
         self.assertEqual(floors, {})
         remaining = json.loads(self.pending_path.read_text())["marks"]
@@ -668,11 +771,14 @@ class OutboundPendingTestCase(unittest.TestCase):
         sent_at = 1_000_000_000.0
         _make_chat_db(self.db_path, [])
         notify_inbound.append_outbound_mark(
-            DEFAULT_CHAT_ID, sent_at, path=self.pending_path,
+            DEFAULT_CHAT_ID,
+            sent_at,
+            path=self.pending_path,
         )
         conn = notify_inbound.open_chat_db(self.db_path)
         notify_inbound.drain_outbound_marks(
-            conn, path=self.pending_path,
+            conn,
+            path=self.pending_path,
             now=sent_at + notify_inbound.OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS + 1,
         )
         remaining = json.loads(self.pending_path.read_text())["marks"]
@@ -682,7 +788,9 @@ class OutboundPendingTestCase(unittest.TestCase):
         _make_chat_db(self.db_path, [])
         conn = notify_inbound.open_chat_db(self.db_path)
         floors = notify_inbound.drain_outbound_marks(
-            conn, path=self.pending_path, now=0,
+            conn,
+            path=self.pending_path,
+            now=0,
         )
         self.assertEqual(floors, {})
 
@@ -714,26 +822,36 @@ class PollOnceFloorTestCase(unittest.TestCase):
                 return LocatorResult(variant="NOT_FOUND")
             target, answer = match
             sp = (
-                Path(target.project_root) / "plans" / ".orchestrator"
+                Path(target.project_root)
+                / "plans"
+                / ".orchestrator"
                 / f"{target.plan_slug}.state.json"
             )
             return LocatorResult(
-                variant="FOUND", state_path=sp, blocker_id=target.blocker_id,
-                answer_index=int(answer), project_root=Path(target.project_root),
+                variant="FOUND",
+                state_path=sp,
+                blocker_id=target.blocker_id,
+                answer_index=int(answer),
+                project_root=Path(target.project_root),
             )
+
         return locator
 
     def test_clu_own_row_skipped_when_below_floor(self) -> None:
         # Row 5: clu's outbound (is_from_me=1, multi-line text). Floor=5.
         # Row 7: operator's reply (is_from_me=1, "1"). Above floor → routes.
-        _make_chat_db(self.db_path, [
-            {"rowid": 5, "is_from_me": 1, "text": "BLOCKED:\n[0] FastAPI\n[1] Flask"},
-            {"rowid": 7, "is_from_me": 1, "text": "1"},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {"rowid": 5, "is_from_me": 1, "text": "BLOCKED:\n[0] FastAPI\n[1] Flask"},
+                {"rowid": 7, "is_from_me": 1, "text": "1"},
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = notify_inbound.poll_once(
-            conn, 0,
+            conn,
+            0,
             self_chat_id=DEFAULT_CHAT_ID,
             outbound_floor=5,
             shell_answer_fn=self._shell_answer,
@@ -753,7 +871,8 @@ class PollOnceFloorTestCase(unittest.TestCase):
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         notify_inbound.poll_once(
-            conn, 0,
+            conn,
+            0,
             self_chat_id=DEFAULT_CHAT_ID,
             outbound_floor=10,
             shell_answer_fn=self._shell_answer,
@@ -767,16 +886,28 @@ class PollOnceFloorTestCase(unittest.TestCase):
         # clu-sent attributedBody row burns CPU through the decoder.
         # Row 5: clu's own outbound (is_from_me=1, body via attributedBody).
         # Row 7: operator's reply, also is_from_me=1, above floor → routes.
-        _make_chat_db(self.db_path, [
-            {"rowid": 5, "is_from_me": 1, "text": None,
-             "attributed_body": _make_attributed_body("BLOCKED:\n[0] FastAPI\n[1] Flask")},
-            {"rowid": 7, "is_from_me": 1, "text": None,
-             "attributed_body": _make_attributed_body("1")},
-        ])
+        _make_chat_db(
+            self.db_path,
+            [
+                {
+                    "rowid": 5,
+                    "is_from_me": 1,
+                    "text": None,
+                    "attributed_body": _make_attributed_body("BLOCKED:\n[0] FastAPI\n[1] Flask"),
+                },
+                {
+                    "rowid": 7,
+                    "is_from_me": 1,
+                    "text": None,
+                    "attributed_body": _make_attributed_body("1"),
+                },
+            ],
+        )
         conn = notify_inbound.open_chat_db(self.db_path)
         target = _ob("plan-a", blocker_id="q-1", root="/p")
         last = notify_inbound.poll_once(
-            conn, 0,
+            conn,
+            0,
             self_chat_id=DEFAULT_CHAT_ID,
             outbound_floor=5,
             shell_answer_fn=self._shell_answer,
@@ -800,37 +931,49 @@ class ImessageChannelFromRegistryTestCase(unittest.TestCase):
     def _make_project(self, slug: str, channels: list[dict] | None) -> Path:
         project = self.tmp / slug
         (project / "plans").mkdir(parents=True)
-        (project / ".orchestrator.json").write_text(json.dumps({
-            "plan_dir": "plans",
-            "dispatch": {"kind": "shell", "command": "echo {phase_id}"},
-            "notify": {"channels": channels} if channels else {},
-        }))
+        (project / ".orchestrator.json").write_text(
+            json.dumps(
+                {
+                    "plan_dir": "plans",
+                    "dispatch": {"kind": "shell", "command": "echo {phase_id}"},
+                    "notify": {"channels": channels} if channels else {},
+                }
+            )
+        )
         return project
 
     def test_no_registered_projects_returns_none(self) -> None:
         self.assertIsNone(notify_inbound.imessage_channel_from_registry())
 
     def test_imessage_channel_returns_to_handle(self) -> None:
-        project = self._make_project("p", [
-            {"kind": "imessage", "to": "+15551234567"},
-        ])
+        project = self._make_project(
+            "p",
+            [
+                {"kind": "imessage", "to": "+15551234567"},
+            ],
+        )
         registry.register(project, "p")
         result = notify_inbound.imessage_channel_from_registry()
         self.assertEqual(result, ("+15551234567", None))
 
     def test_self_chat_id_override_returned(self) -> None:
-        project = self._make_project("p", [
-            {"kind": "imessage", "to": "+15551234567",
-             "self_chat_id": "+15551234567"},
-        ])
+        project = self._make_project(
+            "p",
+            [
+                {"kind": "imessage", "to": "+15551234567", "self_chat_id": "+15551234567"},
+            ],
+        )
         registry.register(project, "p")
         result = notify_inbound.imessage_channel_from_registry()
         self.assertEqual(result, ("+15551234567", "+15551234567"))
 
     def test_disabled_channel_skipped(self) -> None:
-        project = self._make_project("p", [
-            {"kind": "imessage", "to": "+1", "enabled": False},
-        ])
+        project = self._make_project(
+            "p",
+            [
+                {"kind": "imessage", "to": "+1", "enabled": False},
+            ],
+        )
         registry.register(project, "p")
         self.assertIsNone(notify_inbound.imessage_channel_from_registry())
 

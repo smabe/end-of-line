@@ -1,4 +1,5 @@
 """Tests for operator-side lifecycle commands: pause / resume / retry."""
+
 from __future__ import annotations
 
 import io
@@ -30,9 +31,7 @@ class LifecycleTestCase(CluTestCase):
         self.project = self.tmp_path
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
 
@@ -107,6 +106,7 @@ class LifecycleTestCase(CluTestCase):
 
     def _halt_plan_on_phase_a(self) -> None:
         """Simulate the supervisor halting phase 'a' after max attempts."""
+
         def mut(d: dict) -> None:
             d["status"] = st.STATUS_HALTED
             d["config"]["max_attempts_per_phase"] = 2
@@ -115,15 +115,20 @@ class LifecycleTestCase(CluTestCase):
             st.append_event(d, st.EVENT_PHASE_STARTED, phase="a", claimed_by="y")
             st.append_event(d, st.EVENT_LEASE_EXPIRED, phase="a")
             st.append_event(
-                d, st.EVENT_PHASE_MAX_ATTEMPTS, phase="a", attempts=2,
+                d,
+                st.EVENT_PHASE_MAX_ATTEMPTS,
+                phase="a",
+                attempts=2,
             )
+
         self._write(mut)
 
     def test_retry_clears_attempts_and_resumes(self) -> None:
         self._halt_plan_on_phase_a()
         # Sanity: attempts_for_phase counts both before reset.
         self.assertEqual(
-            st.attempts_for_phase(self._read(), "a"), 2,
+            st.attempts_for_phase(self._read(), "a"),
+            2,
         )
         rc = main(self._argv("retry"))
         self.assertEqual(rc, 0)
@@ -132,9 +137,7 @@ class LifecycleTestCase(CluTestCase):
         # After retry, attempts_for_phase should not count phase_starteds
         # that happened before the retry-reset point.
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
-        evts = [
-            e for e in data["events"] if e["type"] == st.EVENT_RETRY_REQUESTED
-        ]
+        evts = [e for e in data["events"] if e["type"] == st.EVENT_RETRY_REQUESTED]
         self.assertEqual(len(evts), 1)
         self.assertEqual(evts[0]["phase"], "a")
 
@@ -168,15 +171,17 @@ class LifecycleTestCase(CluTestCase):
     def test_retry_explicit_phase_overrides_last_halt(self) -> None:
         # Two halts; explicit --phase points at the older one.
         self._halt_plan_on_phase_a()
-        self._write(lambda d: st.append_event(
-            d, st.EVENT_PHASE_MAX_ATTEMPTS, phase="b", attempts=2,
-        ))
+        self._write(
+            lambda d: st.append_event(
+                d,
+                st.EVENT_PHASE_MAX_ATTEMPTS,
+                phase="b",
+                attempts=2,
+            )
+        )
         rc = main(self._argv("retry", "--phase", "a"))
         self.assertEqual(rc, 0)
-        evts = [
-            e for e in self._read()["events"]
-            if e["type"] == st.EVENT_RETRY_REQUESTED
-        ]
+        evts = [e for e in self._read()["events"] if e["type"] == st.EVENT_RETRY_REQUESTED]
         self.assertEqual([e["phase"] for e in evts], ["a"])
 
     # ---- status reason ---------------------------------------------------
@@ -208,9 +213,12 @@ class LifecycleTestCase(CluTestCase):
             st.add_blocker(d, "a", "Q?", ["X"], "ctx")
             blocker_id = d["blockers"][-1]["id"]
             st.append_event(
-                d, st.EVENT_BLOCKER_SLA_EXCEEDED,
-                blocker_id=blocker_id, age_hours=25.3,
+                d,
+                st.EVENT_BLOCKER_SLA_EXCEEDED,
+                blocker_id=blocker_id,
+                age_hours=25.3,
             )
+
         self._write(mut)
         out = self._status_output()
         self.assertIn("Reason:", out)
@@ -242,11 +250,14 @@ class LifecycleTestCase(CluTestCase):
             st.add_blocker(d, "a", "Q?", ["X"], "ctx")
             blocker_id = d["blockers"][-1]["id"]
             st.append_event(
-                d, st.EVENT_BLOCKER_SLA_EXCEEDED,
-                blocker_id=blocker_id, age_hours=25.0,
+                d,
+                st.EVENT_BLOCKER_SLA_EXCEEDED,
+                blocker_id=blocker_id,
+                age_hours=25.0,
             )
             # Status stays running so cmd_pause actually emits EVENT_PAUSED
             # rather than short-circuiting on the "already paused" branch.
+
         self._write(mut)
         rc = main(self._argv("pause", "--reason", "operator override"))
         self.assertEqual(rc, 0)

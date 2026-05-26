@@ -4,6 +4,7 @@ Verifies the literal contains a syntactically correct `clu answer` invocation.
 The actual CLI signature (cmd_answer argparse) has no `blocker_id` positional —
 only `--plan SLUG` and `<answer>`.
 """
+
 from __future__ import annotations
 
 import unittest

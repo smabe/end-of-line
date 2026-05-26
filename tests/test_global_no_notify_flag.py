@@ -1,6 +1,7 @@
 """`clu --no-notify` global flag — suppresses outbound transport without
 affecting inbox writes or clu-watch.
 """
+
 from __future__ import annotations
 
 import io
@@ -42,9 +43,7 @@ class GlobalNoNotifyFlagTestCase(unittest.TestCase):
     # --- notify module suppress logic ---------------------------------------
 
     def test_global_no_notify_short_circuits_dispatch(self) -> None:
-        spec = NotifySpec(channels=(
-            ChannelSpec(kind="imessage", params={"to": "+1"}),
-        ))
+        spec = NotifySpec(channels=(ChannelSpec(kind="imessage", params={"to": "+1"}),))
         mock_cls = mock.MagicMock()
         mock_notifier = mock.MagicMock()
         mock_cls.from_spec.return_value = mock_notifier
@@ -64,16 +63,16 @@ class GlobalNoNotifyFlagTestCase(unittest.TestCase):
             inbox_calls.append(kwargs)
             return "evt-1"
 
-        spec = NotifySpec(channels=(
-            ChannelSpec(kind="imessage", params={"to": "+1"}),
-        ))
+        spec = NotifySpec(channels=(ChannelSpec(kind="imessage", params={"to": "+1"}),))
         mock_cls = mock.MagicMock()
         mock_cls.from_spec.return_value.send.return_value = None
 
         notify.set_global_suppress(True)
         with mock.patch.dict(notify._NOTIFIER_REGISTRY, {"imessage": mock_cls}):
             result = notify.notify(
-                spec, notify.KIND_BLOCKER, "body",
+                spec,
+                notify.KIND_BLOCKER,
+                "body",
                 plan_slug="my-plan",
                 project_root="/tmp/proj",
                 inbox_writer=fake_writer,

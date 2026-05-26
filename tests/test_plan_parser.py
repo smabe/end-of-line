@@ -1,4 +1,5 @@
 """Unit tests for end_of_line.plan_parser."""
+
 from __future__ import annotations
 
 import tempfile

@@ -1,4 +1,5 @@
 """Tests for `clu blockers list|show` — read-only blocker inspection."""
+
 from __future__ import annotations
 
 import io
@@ -31,9 +32,7 @@ class BlockersTestCase(unittest.TestCase):
         isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
 

@@ -5,6 +5,7 @@ Every mutation is wrapped in a file lock; every write is tmp+fsync+rename.
 The event log is append-only — projection from events can rebuild any
 derived field if state ever gets corrupted.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -38,9 +39,7 @@ class InvalidSlug(ValueError):
 def validate_slug(slug: str, *, kind: str = "slug") -> None:
     """Reject anything that isn't a safe path component."""
     if not isinstance(slug, str) or not _SLUG_RE.match(slug):
-        raise InvalidSlug(
-            f"invalid {kind} {slug!r}: must match {_SLUG_RE.pattern}"
-        )
+        raise InvalidSlug(f"invalid {kind} {slug!r}: must match {_SLUG_RE.pattern}")
 
 
 def is_branch_merged_into(
@@ -57,8 +56,13 @@ def is_branch_merged_into(
     try:
         result = subprocess.run(
             [
-                "git", "-C", str(project_root), "merge-base",
-                "--is-ancestor", branch, base_ref,
+                "git",
+                "-C",
+                str(project_root),
+                "merge-base",
+                "--is-ancestor",
+                branch,
+                base_ref,
             ],
             capture_output=True,
             text=True,
@@ -73,8 +77,7 @@ def local_branch_exists(project_root: Path, branch: str) -> bool:
     """Return True iff `branch` exists as a local ref in `project_root`."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(project_root), "rev-parse", "--verify",
-             f"refs/heads/{branch}"],
+            ["git", "-C", str(project_root), "rev-parse", "--verify", f"refs/heads/{branch}"],
             capture_output=True,
             timeout=10,
         )
@@ -111,16 +114,12 @@ STATUS_PAUSED = "paused"
 STATUS_HALTED = "halted"
 STATUS_HALTED_REPLAN = "halted_for_replan"
 STATUS_DONE = "done"
-TERMINAL_STATUSES = frozenset(
-    {STATUS_PAUSED, STATUS_HALTED, STATUS_HALTED_REPLAN, STATUS_DONE}
-)
+TERMINAL_STATUSES = frozenset({STATUS_PAUSED, STATUS_HALTED, STATUS_HALTED_REPLAN, STATUS_DONE})
 # `clu worktree gc` eligibility — terminal minus paused. Paused plans may
 # resume and need their worktree intact; done/halted plans won't (operator
 # uses `clu retry` only on halted, which the gc action-time re-check
 # blocks).
-GC_ELIGIBLE_STATUSES = frozenset(
-    {STATUS_DONE, STATUS_HALTED, STATUS_HALTED_REPLAN}
-)
+GC_ELIGIBLE_STATUSES = frozenset({STATUS_DONE, STATUS_HALTED, STATUS_HALTED_REPLAN})
 # Display-only labels — fleet view derives these instead of storing them.
 STATUS_STALLED = "stalled"
 STATUS_MISSING = "missing"
@@ -397,7 +396,9 @@ class LockTimeout(RuntimeError):
 
 @contextmanager
 def locked(
-    state_path: Path, *, timeout_seconds: float | None = None,
+    state_path: Path,
+    *,
+    timeout_seconds: float | None = None,
 ) -> Iterator[None]:
     """Serialize read-modify-write across processes via a sibling lock file.
 
@@ -416,6 +417,7 @@ def locked(
             fcntl.flock(fd, fcntl.LOCK_EX)
         else:
             import time as _time
+
             deadline = _time.monotonic() + timeout_seconds
             while True:
                 try:
@@ -476,8 +478,7 @@ def load(state_path: Path, *, expected_version: int = SCHEMA_VERSION) -> dict:
     actual = data.get("schema_version")
     if actual != expected_version:
         raise SchemaVersionMismatch(
-            f"{state_path} has schema_version={actual!r}, "
-            f"clu expects {expected_version}"
+            f"{state_path} has schema_version={actual!r}, clu expects {expected_version}"
         )
     return data
 
@@ -534,7 +535,9 @@ def stalled_threshold_for_phase(data: dict, phase_id: str) -> int:
 
 
 def claim_is_stalled(
-    data: dict, claim: dict, now: _dt.datetime | None = None,
+    data: dict,
+    claim: dict,
+    now: _dt.datetime | None = None,
 ) -> bool:
     """`is_claim_stalled` paired with `stalled_threshold_for_phase`.
 
@@ -544,7 +547,9 @@ def claim_is_stalled(
     / release-claim helpers) just need the boolean.
     """
     return is_claim_stalled(
-        claim, stalled_threshold_for_phase(data, claim["phase_id"]), now=now,
+        claim,
+        stalled_threshold_for_phase(data, claim["phase_id"]),
+        now=now,
     )
 
 
@@ -564,7 +569,8 @@ def release_if_expired(data: dict) -> bool:
     if expires > _now_utc():
         return False
     append_event(
-        data, EVENT_LEASE_EXPIRED,
+        data,
+        EVENT_LEASE_EXPIRED,
         phase=claim["phase_id"],
         claimed_by=claim.get("claimed_by"),
     )
@@ -589,10 +595,14 @@ def claim_phase(
 
     token = claimed_by or f"session-{uuid.uuid4().hex[:_TOKEN_LEN]}"
     expires = _now_utc() + _dt.timedelta(minutes=lease_minutes)
-    attempts = sum(
-        1 for evt in data["events"]
-        if evt.get("type") == EVENT_PHASE_STARTED and evt.get("phase") == phase_id
-    ) + 1
+    attempts = (
+        sum(
+            1
+            for evt in data["events"]
+            if evt.get("type") == EVENT_PHASE_STARTED and evt.get("phase") == phase_id
+        )
+        + 1
+    )
     started = utcnow()
     data["current_claim"] = {
         "phase_id": phase_id,
@@ -617,13 +627,11 @@ def assert_claim_match(data: dict, expected_token: str, expected_phase: str) -> 
         raise ClaimMismatch("no active claim")
     if claim.get("claimed_by") != expected_token:
         raise ClaimMismatch(
-            f"token mismatch: claim is {claim.get('claimed_by')!r}, "
-            f"got {expected_token!r}"
+            f"token mismatch: claim is {claim.get('claimed_by')!r}, got {expected_token!r}"
         )
     if claim.get("phase_id") != expected_phase:
         raise ClaimMismatch(
-            f"phase mismatch: claim is {claim.get('phase_id')!r}, "
-            f"got {expected_phase!r}"
+            f"phase mismatch: claim is {claim.get('phase_id')!r}, got {expected_phase!r}"
         )
 
 
@@ -653,7 +661,9 @@ def heartbeat_age_seconds(claim: dict, now: _dt.datetime | None = None) -> float
 
 
 def is_claim_stalled(
-    claim: dict, threshold_minutes: int, now: _dt.datetime | None = None,
+    claim: dict,
+    threshold_minutes: int,
+    now: _dt.datetime | None = None,
 ) -> bool:
     age = heartbeat_age_seconds(claim, now)
     if age is None:
@@ -677,9 +687,7 @@ def release_claim(
         data["current_claim"] = None
         return
     if expected_token is None or expected_phase is None:
-        raise ValueError(
-            "release_claim: expected_token and expected_phase must be passed together"
-        )
+        raise ValueError("release_claim: expected_token and expected_phase must be passed together")
     assert_claim_match(data, expected_token, expected_phase)
     data["current_claim"] = None
 
@@ -706,7 +714,9 @@ def release_claim_and_emit(
     snapshot_phase = claim.get("phase_id") if claim else None
     snapshot_token = claim.get("claimed_by") if claim else None
     release_claim(
-        data, expected_token=expected_token, expected_phase=expected_phase,
+        data,
+        expected_token=expected_token,
+        expected_phase=expected_phase,
     )
     if not coolant_enabled:
         return
@@ -830,20 +840,25 @@ def add_blocker(
     blocker_type: str = BLOCKER_INPUT,
 ) -> str:
     blocker_id = f"q-{len(data['blockers']) + 1}"
-    data["blockers"].append({
-        "id": blocker_id,
-        "phase_id": phase_id,
-        "type": blocker_type,
-        "question": question,
-        "options": list(options),
-        "context": context,
-        "asked_at": utcnow(),
-        "answer": None,
-        "answered_at": None,
-    })
+    data["blockers"].append(
+        {
+            "id": blocker_id,
+            "phase_id": phase_id,
+            "type": blocker_type,
+            "question": question,
+            "options": list(options),
+            "context": context,
+            "asked_at": utcnow(),
+            "answer": None,
+            "answered_at": None,
+        }
+    )
     append_event(
-        data, EVENT_PHASE_BLOCKED,
-        phase=phase_id, blocker_id=blocker_id, question=question,
+        data,
+        EVENT_PHASE_BLOCKED,
+        phase=phase_id,
+        blocker_id=blocker_id,
+        question=question,
     )
     return blocker_id
 
@@ -854,8 +869,10 @@ def answer_blocker(data: dict, blocker_id: str, answer: str) -> None:
             b["answer"] = answer
             b["answered_at"] = utcnow()
             append_event(
-                data, EVENT_BLOCKER_ANSWERED,
-                blocker_id=blocker_id, answer=answer,
+                data,
+                EVENT_BLOCKER_ANSWERED,
+                blocker_id=blocker_id,
+                answer=answer,
             )
             return
     raise KeyError(f"no unanswered blocker {blocker_id}")
@@ -912,7 +929,10 @@ def phase_has_open_blocker(data: dict, phase_id: str) -> bool:
 
 
 def latest_event(
-    data: dict, event_type: str, *, phase: str | None = None,
+    data: dict,
+    event_type: str,
+    *,
+    phase: str | None = None,
 ) -> dict | None:
     """Most recent event of `event_type`, optionally constrained by phase.
 
@@ -950,13 +970,14 @@ def attempts_for_phase(data: dict, phase_id: str) -> int:
             floor = i
     systemic_tokens = {
         evt.get("token")
-        for evt in data["events"][floor + 1:]
+        for evt in data["events"][floor + 1 :]
         if evt.get("type") == EVENT_SYSTEMIC_FAILURE
         and evt.get("phase") == phase_id
         and evt.get("token")
     }
     return sum(
-        1 for evt in data["events"][floor + 1:]
+        1
+        for evt in data["events"][floor + 1 :]
         if evt.get("type") == EVENT_PHASE_STARTED
         and evt.get("phase") == phase_id
         and evt.get("claimed_by") not in systemic_tokens
@@ -992,10 +1013,7 @@ def status_reason(data: dict) -> str | None:
             if evt["type"] == EVENT_PAUSED:
                 reason = evt.get("reason") or ""
                 return f"operator pause: {reason}" if reason else "operator pause"
-            return (
-                f"SLA exceeded — blocker {evt['blocker_id']} "
-                f"age {evt['age_hours']}h"
-            )
+            return f"SLA exceeded — blocker {evt['blocker_id']} age {evt['age_hours']}h"
         return None
     if status == STATUS_HALTED:
         evt = latest_event(data, EVENT_PHASE_MAX_ATTEMPTS)

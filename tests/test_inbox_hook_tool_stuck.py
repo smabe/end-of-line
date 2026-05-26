@@ -6,6 +6,7 @@ investigate-then-recommend instruction block teaching the primary
 session what to do — investigate autonomously, propose a kill plan,
 await operator approval before any destructive action.
 """
+
 from __future__ import annotations
 
 import json
@@ -23,18 +24,29 @@ from tests import isolate_monitor_marker
 
 
 def _run_hook(
-    *, cwd: Path, xdg: Path, stdin_payload: str = "{}",
+    *,
+    cwd: Path,
+    xdg: Path,
+    stdin_payload: str = "{}",
     timeout: float = 5.0,
 ) -> tuple[int, str, str]:
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = str(xdg)
-    env["PYTHONPATH"] = str(
-        Path(__file__).resolve().parent.parent,
-    ) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(
+            Path(__file__).resolve().parent.parent,
+        )
+        + os.pathsep
+        + env.get("PYTHONPATH", "")
+    )
     proc = subprocess.run(
         [sys.executable, "-m", "end_of_line.hooks.clu_inbox_surface"],
-        cwd=str(cwd), env=env, input=stdin_payload,
-        capture_output=True, text=True, timeout=timeout,
+        cwd=str(cwd),
+        env=env,
+        input=stdin_payload,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -55,8 +67,7 @@ class ToolStuckHookTestCase(unittest.TestCase):
             plan_slug="plan-x",
             project_root=str(self.proj),
             summary=(
-                "Worker on plan-x/ai-tools stuck in subprocess for 600s "
-                "(/usr/bin/xcodebuild test)"
+                "Worker on plan-x/ai-tools stuck in subprocess for 600s (/usr/bin/xcodebuild test)"
             ),
             details={
                 "phase_id": "ai-tools",
@@ -88,9 +99,7 @@ class ToolStuckHookTestCase(unittest.TestCase):
         self.assertIn("recommend", lowered)
         # Explicit no-auto-intervention guard.
         self.assertTrue(
-            "operator-approval" in lowered
-            or "operator approval" in lowered
-            or "do not" in lowered,
+            "operator-approval" in lowered or "operator approval" in lowered or "do not" in lowered,
             f"missing operator-approval guard in:\n{ctx}",
         )
 
@@ -98,7 +107,8 @@ class ToolStuckHookTestCase(unittest.TestCase):
         # An inbox with only blocker / halted events must NOT include the
         # tool_stuck instruction block.
         inbox.write_event(
-            type="halted", plan_slug="foo",
+            type="halted",
+            plan_slug="foo",
             project_root=str(self.proj),
             summary="just a halt",
         )

@@ -1,5 +1,6 @@
 """Tests for the SessionStart hook script (#70 cold-start arming) and
 its CLI install/uninstall path."""
+
 from __future__ import annotations
 
 import io
@@ -26,14 +27,17 @@ class SessionStartHookScriptTest(unittest.TestCase):
     """The hook script itself — invoked by Claude Code on session start."""
 
     def test_main_emits_hook_specific_output(self) -> None:
-        with mock.patch.object(sys, "stdin", io.StringIO("")), \
-             mock.patch.object(sys, "stdout", io.StringIO()) as out:
+        with (
+            mock.patch.object(sys, "stdin", io.StringIO("")),
+            mock.patch.object(sys, "stdout", io.StringIO()) as out,
+        ):
             rc = clu_session_start.main()
         self.assertEqual(rc, 0)
         payload = json.loads(out.getvalue())
         self.assertIn("hookSpecificOutput", payload)
         self.assertEqual(
-            payload["hookSpecificOutput"]["hookEventName"], "SessionStart",
+            payload["hookSpecificOutput"]["hookEventName"],
+            "SessionStart",
         )
         ctx = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("clu operator dashboard", ctx)
@@ -48,8 +52,10 @@ class SessionStartHookScriptTest(unittest.TestCase):
     def test_main_returns_zero_on_stdin_failure(self) -> None:
         bad_stdin = mock.MagicMock()
         bad_stdin.read.side_effect = IOError("pipe closed")
-        with mock.patch.object(sys, "stdin", bad_stdin), \
-             mock.patch.object(sys, "stdout", io.StringIO()):
+        with (
+            mock.patch.object(sys, "stdin", bad_stdin),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+        ):
             # Hook must never propagate errors — Claude Code would surface
             # them as session-start failures.
             rc = clu_session_start.main()
@@ -58,9 +64,11 @@ class SessionStartHookScriptTest(unittest.TestCase):
     def test_main_pops_clu_test_mode_env(self) -> None:
         # Inherited CLU_TEST_MODE must not false-trip the XDG guard inside
         # the hook process if the hook ever calls into clu state code.
-        with mock.patch.dict(os.environ, {"CLU_TEST_MODE": "1"}), \
-             mock.patch.object(sys, "stdin", io.StringIO("")), \
-             mock.patch.object(sys, "stdout", io.StringIO()):
+        with (
+            mock.patch.dict(os.environ, {"CLU_TEST_MODE": "1"}),
+            mock.patch.object(sys, "stdin", io.StringIO("")),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+        ):
             clu_session_start.main()
         # Side effect: CLU_TEST_MODE should be popped from the hook's env.
         self.assertNotIn("CLU_TEST_MODE", os.environ)
@@ -76,8 +84,7 @@ class SessionStartInstallTestBase(unittest.TestCase):
         self.home = Path(self.tmp.name)
         self.patcher_env = mock.patch.dict(
             os.environ,
-            {"HOME": str(self.home),
-             "XDG_CONFIG_HOME": str(self.home / ".config")},
+            {"HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config")},
         )
         self.patcher_env.start()
         self.addCleanup(self.patcher_env.stop)
@@ -152,8 +159,9 @@ class InstallSessionStartFlagTests(SessionStartInstallTestBase):
         ups_before = self._hooks_block().get("UserPromptSubmit", [])
         self._install("--session-start")
         hooks_after = self._hooks_block()
-        self.assertEqual(len(hooks_after["UserPromptSubmit"]),
-                         len(ups_before), "UPS entry should not duplicate")
+        self.assertEqual(
+            len(hooks_after["UserPromptSubmit"]), len(ups_before), "UPS entry should not duplicate"
+        )
         self.assertIn("SessionStart", hooks_after)
 
     def test_uninstall_removes_session_start_entry(self) -> None:
@@ -171,14 +179,17 @@ class InstallSessionStartFlagTests(SessionStartInstallTestBase):
         # Operator already has a SessionStart hook (their own work).
         # Install --session-start must not clobber it.
         self.settings.parent.mkdir(parents=True, exist_ok=True)
-        self.settings.write_text(json.dumps({
-            "hooks": {
-                "SessionStart": [
-                    {"hooks": [{"type": "command",
-                                "command": "/usr/bin/my-other-hook"}]}
-                ]
-            }
-        }))
+        self.settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [
+                            {"hooks": [{"type": "command", "command": "/usr/bin/my-other-hook"}]}
+                        ]
+                    }
+                }
+            )
+        )
         rc, _, _ = self._install("--session-start")
         self.assertEqual(rc, int(ExitCode.OK))
         ss = self._hooks_block().get("SessionStart", [])
@@ -200,18 +211,14 @@ class SessionStartActivePlansTest(unittest.TestCase):
         self._project = self._base / "project"
         self._project.mkdir()
         (self._project / "plans" / ".orchestrator").mkdir(parents=True)
-        self._xdg_patch = mock.patch.dict(
-            os.environ, {"XDG_CONFIG_HOME": str(self._base)}
-        )
+        self._xdg_patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self._base)})
         self._xdg_patch.start()
         self.addCleanup(self._xdg_patch.stop)
 
     def _register_plan(self, slug: str, status: str = st.STATUS_RUNNING) -> None:
         """Register a plan in the CWD project and write a proper state file."""
         registry.register(self._project, slug)
-        state_path = (
-            self._project / "plans" / ".orchestrator" / f"{slug}.state.json"
-        )
+        state_path = self._project / "plans" / ".orchestrator" / f"{slug}.state.json"
         data = st.empty_state(slug, "plans")
         data["status"] = status
         st.save_atomic(state_path, data)
@@ -219,9 +226,11 @@ class SessionStartActivePlansTest(unittest.TestCase):
     def _run_hook(self) -> tuple[int, str]:
         """Run the hook with os.getcwd() patched to the test project dir."""
         out = io.StringIO()
-        with mock.patch.object(os, "getcwd", return_value=str(self._project.resolve())), \
-             mock.patch.object(sys, "stdin", io.StringIO("")), \
-             mock.patch.object(sys, "stdout", out):
+        with (
+            mock.patch.object(os, "getcwd", return_value=str(self._project.resolve())),
+            mock.patch.object(sys, "stdin", io.StringIO("")),
+            mock.patch.object(sys, "stdout", out),
+        ):
             rc = clu_session_start.main()
         payload = json.loads(out.getvalue())
         return rc, payload["hookSpecificOutput"]["additionalContext"]
@@ -275,9 +284,7 @@ class SessionStartActivePlansTest(unittest.TestCase):
 
     def test_corrupt_state_tolerated(self) -> None:
         registry.register(self._project, "corrupt-plan")
-        state_path = (
-            self._project / "plans" / ".orchestrator" / "corrupt-plan.state.json"
-        )
+        state_path = self._project / "plans" / ".orchestrator" / "corrupt-plan.state.json"
         state_path.write_text("{not valid json")
         rc, ctx = self._run_hook()
         self.assertEqual(rc, 0)

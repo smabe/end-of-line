@@ -2,6 +2,7 @@
 
 Covers the default-bump phase of lease-reliability (#58 part 3/3).
 """
+
 from __future__ import annotations
 
 import io
@@ -27,13 +28,11 @@ _PLAN = """\
 
 
 class DefaultLeaseTTLConstantTestCase(unittest.TestCase):
-
     def test_default_lease_ttl_is_60(self) -> None:
         self.assertEqual(DEFAULT_LEASE_TTL_MIN, 60)
 
 
 class DefaultLeaseTTLInitTestCase(unittest.TestCase):
-
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)

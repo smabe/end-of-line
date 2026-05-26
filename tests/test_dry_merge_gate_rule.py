@@ -3,6 +3,7 @@
 Phase 3 of dry-merge-gate: registers a rule that fires when ≥2 sibling
 plans in the same batch_id are STATUS_DONE with live worktree records.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -27,6 +28,7 @@ from tests import CluTestCase, git as _git, make_git_project as _make_git_projec
 # helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_branch(repo: Path, branch: str, filename: str, content: str) -> str:
     """Create branch with one file commit; return the branch HEAD SHA."""
     _git(repo, "checkout", "-b", branch)
@@ -35,7 +37,9 @@ def _make_branch(repo: Path, branch: str, filename: str, content: str) -> str:
     _git(repo, "commit", "-m", f"add {filename}")
     sha = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     _git(repo, "checkout", "main")
     return sha
@@ -67,6 +71,7 @@ def _make_done_plan(
 # base
 # ---------------------------------------------------------------------------
 
+
 class _GateRuleBase(CluTestCase):
     """Isolates _RULES and registers only dry_merge_gate_rule per test."""
 
@@ -75,6 +80,7 @@ class _GateRuleBase(CluTestCase):
         self._rules_snapshot = list(cross_plan_rules._RULES)
         cross_plan_rules._RULES.clear()
         from end_of_line.cross_plan_rules import dry_merge_gate_rule  # noqa: PLC0415
+
         register_rule(dry_merge_gate_rule)
 
     def tearDown(self) -> None:
@@ -85,6 +91,7 @@ class _GateRuleBase(CluTestCase):
 # ---------------------------------------------------------------------------
 # skipped cases (no git needed)
 # ---------------------------------------------------------------------------
+
 
 class TestGateSkipped(_GateRuleBase):
     def setUp(self) -> None:
@@ -114,6 +121,7 @@ class TestGateSkipped(_GateRuleBase):
 # ---------------------------------------------------------------------------
 # integration cases (real git repo)
 # ---------------------------------------------------------------------------
+
 
 class TestGateIntegration(_GateRuleBase):
     def setUp(self) -> None:
@@ -166,7 +174,9 @@ class TestGateIntegration(_GateRuleBase):
         data_b = st.load(pb.state_path)
         self.assertEqual(data_a["gate_result"]["outcome"], "textual_conflict")
         self.assertIn("follow_up_plan", data_a["gate_result"])
-        self.assertEqual(data_a["gate_result"]["follow_up_plan"], data_b["gate_result"]["follow_up_plan"])
+        self.assertEqual(
+            data_a["gate_result"]["follow_up_plan"], data_b["gate_result"]["follow_up_plan"]
+        )
 
         kinds = [k for k, _ in result.notifies]  # type: ignore[union-attr]
         self.assertIn(notify.KIND_GATE_DIRTY, kinds)

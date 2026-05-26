@@ -5,6 +5,7 @@ worktree to validate the markdown shape. One integration test wires it
 through `dispatch_for_tick` to assert the sidecar file lands where the
 worker skill expects it.
 """
+
 from __future__ import annotations
 
 import json
@@ -42,6 +43,7 @@ PLAN = """\
 def _mock_git_run(status: str, diff: str, log: str, *, rc: int = 0):
     """Build a side-effect for mock.patch on subprocess.run that returns
     different results based on which git subcommand is invoked."""
+
     def _side(args, **kwargs):
         # args is the ["git", "-C", path, <subcmd>, ...] list
         sub = args[3] if len(args) > 3 else ""
@@ -57,6 +59,7 @@ def _mock_git_run(status: str, diff: str, log: str, *, rc: int = 0):
         cp.stdout = out
         cp.returncode = rc
         return cp
+
     return _side
 
 
@@ -69,8 +72,10 @@ class PrevAttemptContextTestCase(unittest.TestCase):
             side_effect=_mock_git_run("", "", ""),
         ):
             md = _prev_attempt_context(
-                worktree_path="/tmp/wt", base_ref="abc1234",
-                phase_id="schema", attempt=2,
+                worktree_path="/tmp/wt",
+                base_ref="abc1234",
+                phase_id="schema",
+                attempt=2,
                 termination_reason="lease expired (worker didn't callback in time)",
             )
         self.assertIn("attempt 2", md)
@@ -82,8 +87,11 @@ class PrevAttemptContextTestCase(unittest.TestCase):
             side_effect=_mock_git_run("", "", ""),
         ):
             md = _prev_attempt_context(
-                worktree_path="/tmp/wt", base_ref="abc1234",
-                phase_id="schema", attempt=2, termination_reason=None,
+                worktree_path="/tmp/wt",
+                base_ref="abc1234",
+                phase_id="schema",
+                attempt=2,
+                termination_reason=None,
             )
         self.assertIn("Worktree is clean", md)
         self.assertIn("No commits landed by prior attempts", md)
@@ -96,8 +104,11 @@ class PrevAttemptContextTestCase(unittest.TestCase):
             side_effect=_mock_git_run(status, diff, ""),
         ):
             md = _prev_attempt_context(
-                worktree_path="/tmp/wt", base_ref="abc1234",
-                phase_id="schema", attempt=2, termination_reason=None,
+                worktree_path="/tmp/wt",
+                base_ref="abc1234",
+                phase_id="schema",
+                attempt=2,
+                termination_reason=None,
             )
         self.assertIn("foo.py", md)
         self.assertIn("Uncommitted changes", md)
@@ -111,8 +122,11 @@ class PrevAttemptContextTestCase(unittest.TestCase):
             side_effect=_mock_git_run("", "", log),
         ):
             md = _prev_attempt_context(
-                worktree_path="/tmp/wt", base_ref="zzz0000",
-                phase_id="schema", attempt=3, termination_reason=None,
+                worktree_path="/tmp/wt",
+                base_ref="zzz0000",
+                phase_id="schema",
+                attempt=3,
+                termination_reason=None,
             )
         self.assertIn("Commits landed by prior attempts", md)
         self.assertIn("partial work", md)
@@ -121,12 +135,17 @@ class PrevAttemptContextTestCase(unittest.TestCase):
     def test_git_failure_graceful_degradation(self) -> None:
         def _side(args, **kwargs):
             raise subprocess.TimeoutExpired(cmd=args, timeout=5)
+
         with mock.patch(
-            "end_of_line.dispatch.subprocess.run", side_effect=_side,
+            "end_of_line.dispatch.subprocess.run",
+            side_effect=_side,
         ):
             md = _prev_attempt_context(
-                worktree_path="/tmp/wt", base_ref="abc1234",
-                phase_id="schema", attempt=2, termination_reason=None,
+                worktree_path="/tmp/wt",
+                base_ref="abc1234",
+                phase_id="schema",
+                attempt=2,
+                termination_reason=None,
             )
         self.assertIn("git status unavailable", md)
         self.assertIn("commit log unavailable", md)
@@ -138,8 +157,11 @@ class PrevAttemptContextTestCase(unittest.TestCase):
             side_effect=_mock_git_run(" M foo.py\n", "", ""),
         ):
             md = _prev_attempt_context(
-                worktree_path="/tmp/wt", base_ref="abc1234",
-                phase_id="schema", attempt=2, termination_reason=None,
+                worktree_path="/tmp/wt",
+                base_ref="abc1234",
+                phase_id="schema",
+                attempt=2,
+                termination_reason=None,
             )
         self.assertIn("reset --hard abc1234", md)
 
@@ -154,7 +176,10 @@ class WriteContextFileTestCase(unittest.TestCase):
 
     def test_write_creates_log_dir_and_file(self) -> None:
         path = _write_prev_attempt_context(
-            self.log_dir, "myplan", "schema", "hello\n",
+            self.log_dir,
+            "myplan",
+            "schema",
+            "hello\n",
         )
         self.assertTrue(path.exists())
         self.assertEqual(path.read_text(), "hello\n")
@@ -165,7 +190,10 @@ class WriteContextFileTestCase(unittest.TestCase):
         existing = self.log_dir / "attempt-context.myplan.schema.md"
         existing.write_text("stale content")
         path = _write_prev_attempt_context(
-            self.log_dir, "myplan", "schema", "fresh\n",
+            self.log_dir,
+            "myplan",
+            "schema",
+            "fresh\n",
         )
         self.assertEqual(path.read_text(), "fresh\n")
 
@@ -173,9 +201,7 @@ class WriteContextFileTestCase(unittest.TestCase):
         self.log_dir.mkdir()
         (self.log_dir / "attempt-context.myplan.schema.md").write_text("x")
         _delete_stale_attempt_context(self.log_dir, "myplan", "schema")
-        self.assertFalse(
-            (self.log_dir / "attempt-context.myplan.schema.md").exists()
-        )
+        self.assertFalse((self.log_dir / "attempt-context.myplan.schema.md").exists())
 
     def test_delete_stale_when_file_absent_is_noop(self) -> None:
         # Should not raise.
@@ -187,25 +213,31 @@ class LastTerminationReasonTestCase(unittest.TestCase):
         self.assertIsNone(_last_termination_reason({"events": []}, "schema"))
 
     def test_returns_none_when_no_matching_phase(self) -> None:
-        data = {"events": [
-            {"type": "lease_expired", "phase": "other"},
-        ]}
+        data = {
+            "events": [
+                {"type": "lease_expired", "phase": "other"},
+            ]
+        }
         self.assertIsNone(_last_termination_reason(data, "schema"))
 
     def test_returns_reason_for_lease_expired(self) -> None:
-        data = {"events": [
-            {"type": "phase_started", "phase": "schema"},
-            {"type": "lease_expired", "phase": "schema"},
-        ]}
+        data = {
+            "events": [
+                {"type": "phase_started", "phase": "schema"},
+                {"type": "lease_expired", "phase": "schema"},
+            ]
+        }
         reason = _last_termination_reason(data, "schema")
         self.assertIsNotNone(reason)
         self.assertIn("lease expired", reason)
 
     def test_returns_most_recent_when_multiple(self) -> None:
-        data = {"events": [
-            {"type": "lease_expired", "phase": "schema"},
-            {"type": "claim_force_released", "phase": "schema"},
-        ]}
+        data = {
+            "events": [
+                {"type": "lease_expired", "phase": "schema"},
+                {"type": "claim_force_released", "phase": "schema"},
+            ]
+        }
         reason = _last_termination_reason(data, "schema")
         self.assertIn("force-released", reason)
 
@@ -227,14 +259,18 @@ class DispatchIntegrationTestCase(CluTestCase):
 
     def _cfg(self, cmd: str = "true") -> ProjectConfig:
         return ProjectConfig(
-            project_root=self.project, plan_dir="plans",
+            project_root=self.project,
+            plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command=cmd, path=""),
         )
 
     def _result(self, *, worktree: dict | None = None) -> TickResult:
         return TickResult(
-            action="dispatch", detail="", phase_id="a",
-            token=self.token, worktree=worktree,
+            action="dispatch",
+            detail="",
+            phase_id="a",
+            token=self.token,
+            worktree=worktree,
         )
 
     def _bump_attempts_to(self, n: int) -> None:

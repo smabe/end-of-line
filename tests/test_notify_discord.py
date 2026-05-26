@@ -1,4 +1,5 @@
 """Discord outbound backend — DiscordNotifier tests."""
+
 from __future__ import annotations
 
 import io
@@ -19,6 +20,7 @@ from tests import CluTestCase
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_429(retry_after_header: str | None = None, retry_after_body: float | None = None):
     headers = mock.MagicMock()
@@ -44,6 +46,7 @@ def _mock_resp(data: dict):
 # Basic
 # ---------------------------------------------------------------------------
 
+
 class DiscordNotifierBasicTestCase(CluTestCase):
     def test_discord_notifier_kind_name(self):
         n = DiscordNotifier("T", "U", state_path=self.tmp_path / "d.json")
@@ -63,6 +66,7 @@ class DiscordNotifierBasicTestCase(CluTestCase):
 # ---------------------------------------------------------------------------
 # Send behaviour
 # ---------------------------------------------------------------------------
+
 
 class DiscordNotifierSendTestCase(CluTestCase):
     def setUp(self):
@@ -166,7 +170,8 @@ class DiscordNotifierSendTestCase(CluTestCase):
             return _mock_resp({"id": "msg-42"})
 
         notifier = DiscordNotifier(
-            "T", "U",
+            "T",
+            "U",
             state_path=self.discord_state,
             state_root=state_dir,
         )

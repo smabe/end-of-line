@@ -6,6 +6,7 @@ mutate window. `--dry-run` prints without mutating. Entries with
 malformed `.orchestrator.json` are surfaced as "skipped" and NOT
 auto-removed (operator decides).
 """
+
 from __future__ import annotations
 
 import io
@@ -121,8 +122,12 @@ class UnregisterAllArchivedTestCase(unittest.TestCase):
         _register_with_plan(project, "anything")
 
         rc, _, err = _run(
-            "unregister", "--all-archived",
-            "--project", str(project), "--plan", "anything",
+            "unregister",
+            "--all-archived",
+            "--project",
+            str(project),
+            "--plan",
+            "anything",
         )
 
         self.assertEqual(rc, ExitCode.GENERIC)
@@ -137,7 +142,11 @@ class UnregisterAllArchivedTestCase(unittest.TestCase):
         _register_with_plan(project, "drop-me")
 
         rc, out, _ = _run(
-            "unregister", "--project", str(project), "--plan", "drop-me",
+            "unregister",
+            "--project",
+            str(project),
+            "--plan",
+            "drop-me",
         )
 
         self.assertEqual(rc, ExitCode.OK)

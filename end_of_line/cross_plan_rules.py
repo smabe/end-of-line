@@ -4,6 +4,7 @@ See docs/adr/0002-one-tick-one-action.md — this module enforces
 the "at most one effect per project per cron interval" invariant
 across plans, paralleling supervisor.tick's per-plan chain.
 """
+
 from __future__ import annotations
 
 import json
@@ -70,9 +71,13 @@ def load_plans_for_project(project_root: Path, cfg: ProjectConfig) -> list[Proje
     return plans
 
 
-_FREEZE_STATUSES: frozenset[str] = frozenset({
-    st.STATUS_HALTED, st.STATUS_HALTED_REPLAN, st.STATUS_PAUSED,
-})
+_FREEZE_STATUSES: frozenset[str] = frozenset(
+    {
+        st.STATUS_HALTED,
+        st.STATUS_HALTED_REPLAN,
+        st.STATUS_PAUSED,
+    }
+)
 
 _QUEUE_LOAD_ERRORS = (json.JSONDecodeError, st.SchemaVersionMismatch, KeyError, OSError)
 
@@ -94,7 +99,8 @@ def _apply(result: RuleResult) -> None:
 
 
 def queue_advancement_rule(
-    project_root: Path, plans: list[ProjectPlan],
+    project_root: Path,
+    plans: list[ProjectPlan],
 ) -> RuleResult | None:
     """Busy-gate / freeze / absorb / abandon / pop chain for the project queue.
 
@@ -105,7 +111,8 @@ def queue_advancement_rule(
     """
     # Deferred to avoid circular import — cli imports cross_plan_rules.
     from end_of_line.cli import (  # noqa: PLC0415
-        _handle_corrupt_queue, _tick_one_plan,
+        _handle_corrupt_queue,
+        _tick_one_plan,
     )
 
     cfg = load_project_config(project_root)
@@ -154,11 +161,13 @@ def queue_advancement_rule(
             if not data["queue"] or data["queue"][0]["slug"] != slug:
                 return None
             entry = data["queue"].pop(0)
-            data["history"].append({
-                **entry,
-                "ended_at": st.utcnow(),
-                "outcome": "absorbed",
-            })
+            data["history"].append(
+                {
+                    **entry,
+                    "ended_at": st.utcnow(),
+                    "outcome": "absorbed",
+                }
+            )
         return RuleResult(events_per_plan={}, rule_name="queue_advancement")
 
     plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
@@ -167,18 +176,22 @@ def queue_advancement_rule(
             if not data["queue"] or data["queue"][0]["slug"] != slug:
                 return None
             entry = data["queue"].pop(0)
-            data["history"].append({
-                **entry,
-                "ended_at": st.utcnow(),
-                "outcome": "abandoned",
-            })
+            data["history"].append(
+                {
+                    **entry,
+                    "ended_at": st.utcnow(),
+                    "outcome": "abandoned",
+                }
+            )
         return RuleResult(
             events_per_plan={},
             rule_name="queue_advancement",
-            notifies=[(
-                notify.KIND_QUEUE_SKIPPED,
-                notify.render_queue_skipped(slug, reason="plan file missing"),
-            )],
+            notifies=[
+                (
+                    notify.KIND_QUEUE_SKIPPED,
+                    notify.render_queue_skipped(slug, reason="plan file missing"),
+                )
+            ],
         )
 
     # Normal pop: state-create → registry.register → queue.pop, all under
@@ -192,7 +205,8 @@ def queue_advancement_rule(
                 if head.get("batch_id"):
                     fresh["batch_id"] = head["batch_id"]
                 st.append_event(
-                    fresh, st.EVENT_QUEUE_POPPED,
+                    fresh,
+                    st.EVENT_QUEUE_POPPED,
                     slug=slug,
                     added_at=head.get("added_at"),
                     added_by=head.get("added_by", "operator"),
@@ -208,7 +222,8 @@ def queue_advancement_rule(
 
 
 def worktree_conflict_rule(
-    project_root: Path, plans: list[ProjectPlan],
+    project_root: Path,
+    plans: list[ProjectPlan],
 ) -> RuleResult | None:
     """Detect conflicting active-without-worktree plan pairs; update in_conflict_with.
 
@@ -217,8 +232,7 @@ def worktree_conflict_rule(
     (lexicographically-smaller slug). Returns None when nothing changed.
     """
     conflicting = {
-        p.slug for p in plans
-        if not st.get_worktree(p.state) and _is_plan_active(p.state)
+        p.slug for p in plans if not st.get_worktree(p.state) and _is_plan_active(p.state)
     }
 
     events_per_plan: dict[Path, list[dict]] = {}
@@ -234,14 +248,18 @@ def worktree_conflict_rule(
         plan_events: list[dict] = []
         for other in sorted(target_set - existing):
             if p.slug < other:
-                plan_events.append({
-                    "type": st.EVENT_WORKTREE_CONFLICT_WARNING,
-                    "kwargs": {"other_slug": other},
-                })
-                notifies.append((
-                    notify.KIND_HALTED,
-                    notify.render_worktree_conflict(project_root, p.slug, other),
-                ))
+                plan_events.append(
+                    {
+                        "type": st.EVENT_WORKTREE_CONFLICT_WARNING,
+                        "kwargs": {"other_slug": other},
+                    }
+                )
+                notifies.append(
+                    (
+                        notify.KIND_HALTED,
+                        notify.render_worktree_conflict(project_root, p.slug, other),
+                    )
+                )
         if plan_events:
             events_per_plan[p.state_path] = plan_events
 
@@ -262,7 +280,8 @@ register_rule(worktree_conflict_rule)
 def _git_rev_parse(project_root: Path, branch: str) -> str:
     r = subprocess.run(
         ["git", "-C", str(project_root), "rev-parse", branch],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         raise subprocess.CalledProcessError(r.returncode, r.args, r.stdout, r.stderr)
@@ -304,9 +323,8 @@ def _write_followup_plan_pair(
         f"| fix | `{sub_slug}.md` | Resolve conflicts and fix failing tests | 1h |\n"
     )
 
-    conflict_files_str = (
-        ", ".join(f"`{f}`" for f in result.conflict_files)
-        or ("the failing tests" if result.outcome == "suite_failed" else "the conflicting files")
+    conflict_files_str = ", ".join(f"`{f}`" for f in result.conflict_files) or (
+        "the failing tests" if result.outcome == "suite_failed" else "the conflicting files"
     )
     sub_path.write_text(
         f"# {sub_slug} — fix conflicts for batch {batch_id}\n\n"
@@ -317,7 +335,8 @@ def _write_followup_plan_pair(
 
 
 def dry_merge_gate_rule(
-    project_root: Path, plans: list[ProjectPlan],
+    project_root: Path,
+    plans: list[ProjectPlan],
 ) -> RuleResult | None:
     """Fire when ≥2 sibling DONE plans share a batch_id and have live worktrees.
 
@@ -352,7 +371,9 @@ def dry_merge_gate_rule(
             except subprocess.CalledProcessError:
                 log.warning(
                     "dry_merge_gate: branch %s not found in %s, skipping %s",
-                    branch, project_root, p.slug,
+                    branch,
+                    project_root,
+                    p.slug,
                 )
 
         if len(live_pairs) < 2:
@@ -363,10 +384,7 @@ def dry_merge_gate_rule(
         sha_key = "|".join(sorted(sha for _, _, sha in live_pairs))
 
         # Idempotency: same SHA set → skip
-        if any(
-            p.state.get("gate_result", {}).get("sha_key") == sha_key
-            for p in live_group
-        ):
+        if any(p.state.get("gate_result", {}).get("sha_key") == sha_key for p in live_group):
             continue
 
         test_cmd = getattr(cfg, "test_command", None)
@@ -391,19 +409,23 @@ def dry_merge_gate_rule(
         if result.outcome == "clean":
             for p in live_group:
                 field_updates[p.state_path] = {"gate_result": gate_result_base}
-            notifies.append((
-                notify.KIND_GATE_CLEAN,
-                notify.render_gate_clean(bid, [p.slug for p in live_group]),
-            ))
+            notifies.append(
+                (
+                    notify.KIND_GATE_CLEAN,
+                    notify.render_gate_clean(bid, [p.slug for p in live_group]),
+                )
+            )
         else:
             fu_master, _ = _write_followup_plan_pair(cfg, bid, ts, result, live_group)
             gr = {**gate_result_base, "follow_up_plan": fu_master.name}
             for p in live_group:
                 field_updates[p.state_path] = {"gate_result": gr}
-            notifies.append((
-                notify.KIND_GATE_DIRTY,
-                notify.render_gate_dirty(bid, result.outcome, str(fu_master)),
-            ))
+            notifies.append(
+                (
+                    notify.KIND_GATE_DIRTY,
+                    notify.render_gate_dirty(bid, result.outcome, str(fu_master)),
+                )
+            )
 
         return RuleResult(
             events_per_plan={},
@@ -419,7 +441,8 @@ register_rule(dry_merge_gate_rule)
 
 
 def ready_to_ship_rule(
-    project_root: Path, plans: list[ProjectPlan],
+    project_root: Path,
+    plans: list[ProjectPlan],
 ) -> RuleResult | None:
     """Surface KIND_READY_TO_SHIP when DONE plans have unmerged
     worktree branches and no in-flight ship_pending stamp
@@ -452,7 +475,8 @@ def ready_to_ship_rule(
             continue
         r = subprocess.run(
             ["git", "-C", str(project_root), "rev-parse", "--verify", branch],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if r.returncode != 0:
             continue
@@ -468,16 +492,17 @@ def ready_to_ship_rule(
     mode = cfg.dispatch.ship_mode
     slugs = [e[0].slug for e in eligible]
     field_updates = {
-        p.state_path: {"ready_to_ship_announced": {"branch_sha": sha}}
-        for p, _, sha in eligible
+        p.state_path: {"ready_to_ship_announced": {"branch_sha": sha}} for p, _, sha in eligible
     }
     return RuleResult(
         events_per_plan={},
         rule_name="ready_to_ship",
-        notifies=[(
-            notify.KIND_READY_TO_SHIP,
-            notify.render_ready_to_ship(slugs, mode),
-        )],
+        notifies=[
+            (
+                notify.KIND_READY_TO_SHIP,
+                notify.render_ready_to_ship(slugs, mode),
+            )
+        ],
         field_updates_per_plan=field_updates,
     )
 
@@ -486,7 +511,8 @@ register_rule(ready_to_ship_rule)
 
 
 def auto_archive_rule(
-    project_root: Path, plans: list[ProjectPlan],
+    project_root: Path,
+    plans: list[ProjectPlan],
 ) -> RuleResult | None:
     """Archive the first STATUS_DONE plan whose worktree branch is merged into origin/main.
 
@@ -513,16 +539,19 @@ def auto_archive_rule(
         except Exception as exc:
             log.warning(
                 "auto_archive_rule: %s archive failed — %s",
-                p.slug, exc,
+                p.slug,
+                exc,
             )
             continue
         return RuleResult(
             events_per_plan={},
             rule_name="auto_archive",
-            notifies=[(
-                notify.KIND_PLAN_AUTO_ARCHIVED,
-                notify.render_plan_auto_archived(p.slug, branch),
-            )],
+            notifies=[
+                (
+                    notify.KIND_PLAN_AUTO_ARCHIVED,
+                    notify.render_plan_auto_archived(p.slug, branch),
+                )
+            ],
         )
     return None
 

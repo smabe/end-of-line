@@ -19,6 +19,7 @@ Contract (verified against coolant `scripts/common.sh`):
     OSError. Coolant's own counter floors at 0 so a leaked +1 doesn't
     compound.
 """
+
 from __future__ import annotations
 
 import json
@@ -46,25 +47,35 @@ def format_agent_id(plan_slug: str, phase_id: str) -> str:
 
 
 def emit_start(
-    *, session_id: str, agent_id: str, agent_type: str,
+    *,
+    session_id: str,
+    agent_id: str,
+    agent_type: str,
     script_override: str | None = None,
 ) -> None:
     """Emit a SubagentStart-equivalent event to coolant. Never raises."""
     _emit(
         script_name=_SCRIPT_START,
-        session_id=session_id, agent_id=agent_id, agent_type=agent_type,
+        session_id=session_id,
+        agent_id=agent_id,
+        agent_type=agent_type,
         script_override=script_override,
     )
 
 
 def emit_stop(
-    *, session_id: str, agent_id: str, agent_type: str,
+    *,
+    session_id: str,
+    agent_id: str,
+    agent_type: str,
     script_override: str | None = None,
 ) -> None:
     """Emit a SubagentStop-equivalent event to coolant. Never raises."""
     _emit(
         script_name=_SCRIPT_STOP,
-        session_id=session_id, agent_id=agent_id, agent_type=agent_type,
+        session_id=session_id,
+        agent_id=agent_id,
+        agent_type=agent_type,
         script_override=script_override,
     )
 
@@ -84,7 +95,11 @@ def resolve_script_dir(override: str | None = None) -> Path | None:
 
 
 def _emit(
-    *, script_name: str, session_id: str, agent_id: str, agent_type: str,
+    *,
+    script_name: str,
+    session_id: str,
+    agent_id: str,
+    agent_type: str,
     script_override: str | None = None,
 ) -> None:
     if not session_id or not agent_id:
@@ -94,11 +109,13 @@ def _emit(
     script_dir = resolve_script_dir(override=script_override)
     if script_dir is None:
         return
-    payload = json.dumps({
-        "session_id": session_id,
-        "agent_id": agent_id,
-        "agent_type": agent_type,
-    })
+    payload = json.dumps(
+        {
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "agent_type": agent_type,
+        }
+    )
     try:
         subprocess.run(
             [str(script_dir / script_name)],
@@ -127,8 +144,7 @@ def _marketplace_glob() -> Path | None:
     if not plugin_root.is_dir():
         return None
     candidates = [
-        p / "scripts" for p in plugin_root.iterdir()
-        if p.is_dir() and (p / "scripts").is_dir()
+        p / "scripts" for p in plugin_root.iterdir() if p.is_dir() and (p / "scripts").is_dir()
     ]
     if not candidates:
         return None

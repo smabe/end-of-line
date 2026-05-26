@@ -9,6 +9,7 @@ Invoke as `python3 -m end_of_line.activity_hook --start-bash ...`. The
 full `clu activity ...` CLI still works for backward compat; both
 delegate to `state.stamp_activity_marker`.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,8 +64,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         st.stamp_activity_marker(
             state_path,
-            token=args.token, phase=args.phase,
-            action=action, timeout_seconds=2.0,
+            token=args.token,
+            phase=args.phase,
+            action=action,
+            timeout_seconds=2.0,
         )
     except st.ClaimMismatch as exc:
         # Stale token (claim released, phase advanced, supervisor reaped).

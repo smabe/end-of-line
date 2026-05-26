@@ -4,6 +4,7 @@ Covers the empty path, status projection from the host registry, the
 head-freeze marker, missing-plan-file rendering, the optional failure
 history section, and the dispatch shape for the no-subcommand form.
 """
+
 from __future__ import annotations
 
 import io
@@ -147,16 +148,20 @@ class QueueListTestCase(unittest.TestCase):
         _bootstrap(self.project)
         self.queue_path.parent.mkdir(parents=True, exist_ok=True)
         with queue.mutate(self.queue_path) as data:
-            data["history"].append({
-                "slug": "alpha",
-                "outcome": "abandoned",
-                "ended_at": st.utcnow(),
-            })
-            data["history"].append({
-                "slug": "beta",
-                "outcome": "removed",
-                "ended_at": st.utcnow(),
-            })
+            data["history"].append(
+                {
+                    "slug": "alpha",
+                    "outcome": "abandoned",
+                    "ended_at": st.utcnow(),
+                }
+            )
+            data["history"].append(
+                {
+                    "slug": "beta",
+                    "outcome": "removed",
+                    "ended_at": st.utcnow(),
+                }
+            )
         rc, out = self._run(["queue", "list", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("Recent failures:", out)
@@ -192,6 +197,7 @@ class QueueListTestCase(unittest.TestCase):
         self.queue_path.parent.mkdir(parents=True, exist_ok=True)
         self.queue_path.write_text("{not valid json")
         from contextlib import redirect_stderr
+
         err = io.StringIO()
         with redirect_stderr(err):
             rc = main(["queue", "list", "--project", str(self.project)])
@@ -207,6 +213,7 @@ class QueueListTestCase(unittest.TestCase):
         backup = self.queue_path.with_name(self.queue_path.name + ".corrupt-20260101T000000Z")
         backup.write_text("{}")
         from contextlib import redirect_stderr
+
         err = io.StringIO()
         with redirect_stderr(err):
             rc = main(["queue", "list", "--project", str(self.project)])
@@ -217,6 +224,7 @@ class QueueListTestCase(unittest.TestCase):
         self.queue_path.parent.mkdir(parents=True, exist_ok=True)
         self.queue_path.write_text("garbage")
         from contextlib import redirect_stderr
+
         err = io.StringIO()
         with redirect_stderr(err):
             rc = main(["queue", "list", "--project", str(self.project)])

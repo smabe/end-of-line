@@ -6,6 +6,7 @@ inspects the per-token log for known systemic-failure signatures
 a distinct event + a halt-bypass iMessage, and the attempt is not
 counted against the phase — the phase isn't at fault.
 """
+
 from __future__ import annotations
 
 import json
@@ -99,9 +100,13 @@ class MatchSignatureTestCase(unittest.TestCase):
         # Signature sits in line 4990 of 5000. Helper must still find it
         # because only the tail is inspected, but the head must NOT be the
         # cause of a false miss — write the signature ONLY in the tail.
-        lines = ["benign log line\n"] * 4990 + [
-            "anthropic.RateLimitError: throttled\n",
-        ] + ["more benign\n"] * 9
+        lines = (
+            ["benign log line\n"] * 4990
+            + [
+                "anthropic.RateLimitError: throttled\n",
+            ]
+            + ["more benign\n"] * 9
+        )
         path = self._write("".join(lines))
         self.assertEqual(_match_systemic_signature(path, rc=1), "rate_limit")
 
@@ -121,11 +126,7 @@ class MatchSignatureTestCase(unittest.TestCase):
     def test_first_match_wins(self) -> None:
         # All three patterns present — order is missing_binary, rate_limit,
         # auth_failure. With rc=127, missing_binary wins.
-        path = self._write(
-            "bash: claude: command not found\n"
-            "rate limit hit\n"
-            "401 Unauthorized\n"
-        )
+        path = self._write("bash: claude: command not found\nrate limit hit\n401 Unauthorized\n")
         self.assertEqual(_match_systemic_signature(path, rc=127), "missing_binary")
 
 
@@ -148,7 +149,8 @@ class _SystemicFixture(CluTestCase):
         self.log_path = self.log_dir / f"a.{self.token}.log"
         self.sent: list[tuple[str, str]] = []
         patcher = mock.patch.object(
-            notify_imessage, "_osascript_send",
+            notify_imessage,
+            "_osascript_send",
             side_effect=lambda to, body: self.sent.append((to, body)),
         )
         patcher.start()
@@ -167,7 +169,10 @@ class _SystemicFixture(CluTestCase):
 
     def _result(self) -> TickResult:
         return TickResult(
-            action="dispatch", detail="", phase_id="a", token=self.token,
+            action="dispatch",
+            detail="",
+            phase_id="a",
+            token=self.token,
         )
 
     def _seed_log(self, body: str) -> None:
@@ -291,7 +296,8 @@ class MultiPlanIndependenceTestCase(CluTestCase):
         main(["init", "--project", str(self.project), "--plan", "t2"])
         self.sent: list[tuple[str, str]] = []
         patcher = mock.patch.object(
-            notify_imessage, "_osascript_send",
+            notify_imessage,
+            "_osascript_send",
             side_effect=lambda to, body: self.sent.append((to, body)),
         )
         patcher.start()
@@ -302,7 +308,8 @@ class MultiPlanIndependenceTestCase(CluTestCase):
 
     def _cfg(self, cmd: str) -> ProjectConfig:
         return ProjectConfig(
-            project_root=self.project, plan_dir="plans",
+            project_root=self.project,
+            plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command=cmd),
             notify=NotifySpec.imessage_only("+15550000000"),
         )
@@ -318,7 +325,10 @@ class MultiPlanIndependenceTestCase(CluTestCase):
                 f"sh -c 'echo \"rate limit hit\" >> {log}; exit 1'",
             )
             result = TickResult(
-                action="dispatch", detail="", phase_id="a", token=token,
+                action="dispatch",
+                detail="",
+                phase_id="a",
+                token=token,
             )
             dispatch_for_tick(result, cfg, slug, sp)
 
@@ -326,7 +336,9 @@ class MultiPlanIndependenceTestCase(CluTestCase):
             sp = self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
             data = json.loads(sp.read_text())
             self.assertEqual(
-                data["status"], st.STATUS_PAUSED, f"{slug} should be paused",
+                data["status"],
+                st.STATUS_PAUSED,
+                f"{slug} should be paused",
             )
             evt = _systemic_event(data)
             self.assertIsNotNone(evt, f"{slug} should have a systemic event")

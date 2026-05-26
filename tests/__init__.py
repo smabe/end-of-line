@@ -1,4 +1,5 @@
 """Shared test helpers."""
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -21,16 +22,14 @@ def utcnow_minus(seconds: int) -> str:
     Used to seed `current_claim.active_tool_started_at` and other
     "N seconds ago" timestamps in tests without freezing the clock.
     """
-    return (
-        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=seconds)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=seconds)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 def plan_body(*sessions: str) -> str:
     """Build a PLAN_BODY markdown string with the given session ids."""
-    rows = "\n".join(
-        f"| {s} | `test-plan-{s.lower()}.md` | thing | 1h |" for s in sessions
-    )
+    rows = "\n".join(f"| {s} | `test-plan-{s.lower()}.md` | thing | 1h |" for s in sessions)
     return (
         "# Test plan\n\n"
         "## Sessions index\n\n"
@@ -74,17 +73,20 @@ class CluTestCase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp_path = Path(tmp.name)
         isolate_registry(self, self.tmp_path)
-        patcher = mock.patch.dict(os.environ, {
-            "CLU_TEST_MODE": "1",
-            # Empty CLU_COOLANT_SCRIPT_DIR + redirected COOLANT_* keep tests
-            # off any real coolant install on the dev machine. Tests that
-            # exercise coolant resolution override these explicitly.
-            "CLU_COOLANT_SCRIPT_DIR": "",
-            "COOLANT_COUNTER": str(self.tmp_path / "coolant.count"),
-            "COOLANT_EVENTS": str(self.tmp_path / "coolant.events.jsonl"),
-            "COOLANT_LOG": str(self.tmp_path / "coolant.log"),
-            "COOLANT_LOCKFILE": str(self.tmp_path / "coolant.lock"),
-        })
+        patcher = mock.patch.dict(
+            os.environ,
+            {
+                "CLU_TEST_MODE": "1",
+                # Empty CLU_COOLANT_SCRIPT_DIR + redirected COOLANT_* keep tests
+                # off any real coolant install on the dev machine. Tests that
+                # exercise coolant resolution override these explicitly.
+                "CLU_COOLANT_SCRIPT_DIR": "",
+                "COOLANT_COUNTER": str(self.tmp_path / "coolant.count"),
+                "COOLANT_EVENTS": str(self.tmp_path / "coolant.events.jsonl"),
+                "COOLANT_LOG": str(self.tmp_path / "coolant.log"),
+                "COOLANT_LOCKFILE": str(self.tmp_path / "coolant.lock"),
+            },
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -97,7 +99,8 @@ def isolate_registry(testcase: unittest.TestCase, tmp_path: Path) -> None:
     creating tmp_path; the patch auto-restores via addCleanup.
     """
     patcher = mock.patch.dict(
-        os.environ, {"XDG_CONFIG_HOME": str(tmp_path)},
+        os.environ,
+        {"XDG_CONFIG_HOME": str(tmp_path)},
     )
     patcher.start()
     testcase.addCleanup(patcher.stop)
@@ -118,7 +121,9 @@ def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
     """Run a git command inside `repo`. Use in tests that need real git repos."""
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=check,
+        capture_output=True,
+        text=True,
+        check=check,
     )
 
 
@@ -140,7 +145,9 @@ def make_git_project(base: Path, *, subdir: str = "myrepo") -> Path:
 
 
 def make_worktree(
-    project: Path, *, branch: str = "clu/p",
+    project: Path,
+    *,
+    branch: str = "clu/p",
 ) -> tuple["tempfile.TemporaryDirectory[str]", Path, str]:
     """Create a linked git worktree with one empty commit on a new branch.
 
@@ -179,15 +186,18 @@ class GitProjectTestCase(CluTestCase):
             (self.project / "plans").mkdir()
             self.sha = ""
         (self.project / "plans" / "test-plan.md").write_text(self.PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         rc = cli_main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
 
     def _argv(self, cmd: str, *extra: str) -> list[str]:
         return [
-            cmd, "--project", str(self.project), "--plan", "test-plan", *extra,
+            cmd,
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            *extra,
         ]
 
     def _claim(self, phase: str = "a") -> str:

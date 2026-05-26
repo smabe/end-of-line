@@ -5,6 +5,7 @@ deprecation alias). `cmd_validate` is the shared validate path used
 by both `clu ship --direct --check` and `clu ship --as-pr --check`
 in clu-ship.md.
 """
+
 from __future__ import annotations
 
 import io
@@ -98,8 +99,7 @@ class ValidateBranchesTests(CluTestCase):
 
     def test_no_suite_flag_skips_test_command(self) -> None:
         (self.project / CONFIG_FILENAME).write_text(
-            '{"dispatch":{"command":"echo hi"},'
-            ' "test_command":"python3 -m unittest"}'
+            '{"dispatch":{"command":"echo hi"}, "test_command":"python3 -m unittest"}'
         )
         with mock.patch("end_of_line.dry_merge.attempt_merge") as m:
             m.return_value = _CLEAN
@@ -109,8 +109,7 @@ class ValidateBranchesTests(CluTestCase):
 
     def test_with_suite_passes_test_command(self) -> None:
         (self.project / CONFIG_FILENAME).write_text(
-            '{"dispatch":{"command":"echo hi"},'
-            ' "test_command":"python3 -m unittest"}'
+            '{"dispatch":{"command":"echo hi"}, "test_command":"python3 -m unittest"}'
         )
         with mock.patch("end_of_line.dry_merge.attempt_merge") as m:
             m.return_value = _CLEAN

@@ -15,6 +15,7 @@ JSON", "schema mismatch", and v1 markers the same way — no exception,
 returns None/False — so callers can branch on a single "do we need to
 install?" predicate without exception handling.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,7 +34,8 @@ class MarkerPathTests(unittest.TestCase):
     def test_marker_path_respects_xdg_config_home(self) -> None:
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/tmp/xdg"}):
             self.assertEqual(
-                monitor.marker_path(), Path("/tmp/xdg") / "clu" / "monitor.json",
+                monitor.marker_path(),
+                Path("/tmp/xdg") / "clu" / "monitor.json",
             )
 
     def test_marker_path_defaults_to_home_dotconfig(self) -> None:
@@ -56,7 +58,8 @@ class MarkerLifecycleTests(unittest.TestCase):
 
     def _record(self) -> None:
         monitor.record_hook_installed(
-            "/abs/hook.py", "/home/x/.claude/settings.json",
+            "/abs/hook.py",
+            "/home/x/.claude/settings.json",
         )
 
     def test_is_scheduled_returns_false_when_absent(self) -> None:
@@ -74,12 +77,16 @@ class MarkerLifecycleTests(unittest.TestCase):
 
     def test_is_scheduled_returns_false_when_schema_mismatch(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({
-            "schema_version": 999,
-            "hook_installed_at": "2026-05-12T00:00:00Z",
-            "hook_path": "/x",
-            "settings_json_path": "/y",
-        }))
+        self.path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 999,
+                    "hook_installed_at": "2026-05-12T00:00:00Z",
+                    "hook_path": "/x",
+                    "settings_json_path": "/y",
+                }
+            )
+        )
         self.assertFalse(monitor.is_scheduled())
 
     def test_record_hook_installed_writes_marker(self) -> None:

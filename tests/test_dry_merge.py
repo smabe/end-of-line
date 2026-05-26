@@ -4,6 +4,7 @@ All tests use real git repos in temporary directories.
 The cmd_answer regression test reproduces the canonical 2026-05-18
 incident: textual-merge succeeds but suite fails on a renamed function.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -18,6 +19,7 @@ from tests import git as _git
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_tmp_repo() -> Path:
     """Create a minimal git repo in a temp dir.
@@ -59,6 +61,7 @@ def _no_scratch_worktrees(repo: Path) -> bool:
 # ---------------------------------------------------------------------------
 # test cases
 # ---------------------------------------------------------------------------
+
 
 class _DryMergeTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -127,7 +130,8 @@ class AttemptMergeCmdAnswerRegressionTest(_DryMergeTestCase):
         # Set up shared baseline: src/util.py with old function signature
         (repo / "src").mkdir()
         _commit_file(
-            repo, "src/util.py",
+            repo,
+            "src/util.py",
             "def foo(blocker_id, idx):\n    return f'{blocker_id}-{idx}'\n",
             "add util.foo",
         )
@@ -135,7 +139,8 @@ class AttemptMergeCmdAnswerRegressionTest(_DryMergeTestCase):
         (repo / "tests").mkdir()
         _commit_file(repo, "tests/__init__.py", "", "tests init")
         _commit_file(
-            repo, "tests/test_baseline.py",
+            repo,
+            "tests/test_baseline.py",
             (
                 "import unittest\n"
                 "from src.util import foo\n\n"
@@ -150,12 +155,14 @@ class AttemptMergeCmdAnswerRegressionTest(_DryMergeTestCase):
         # Branch A: rename function signature (update existing test to match)
         _branch(repo, "branch-a")
         _commit_file(
-            repo, "src/util.py",
+            repo,
+            "src/util.py",
             "def foo(answer, *, plan=None):\n    return f'{answer}-{plan}'\n",
             "branch-a: rename foo signature",
         )
         _commit_file(
-            repo, "tests/test_baseline.py",
+            repo,
+            "tests/test_baseline.py",
             (
                 "import unittest\n"
                 "from src.util import foo\n\n"
@@ -169,7 +176,8 @@ class AttemptMergeCmdAnswerRegressionTest(_DryMergeTestCase):
         # Branch B: add a NEW test file calling OLD signature (no overlap with A)
         _branch(repo, "branch-b")
         _commit_file(
-            repo, "tests/test_b.py",
+            repo,
+            "tests/test_b.py",
             (
                 "import unittest\n"
                 "from src.util import foo\n\n"
@@ -181,7 +189,9 @@ class AttemptMergeCmdAnswerRegressionTest(_DryMergeTestCase):
         _checkout(repo, "main")
 
         result = attempt_merge(
-            repo, base_sha, ["branch-a", "branch-b"],
+            repo,
+            base_sha,
+            ["branch-a", "branch-b"],
             "python3 -m unittest discover -s tests -t .",
         )
 
@@ -237,7 +247,9 @@ class AttemptMergeTimeoutTest(_DryMergeTestCase):
         base_sha = _git(repo, "rev-parse", "main").stdout.strip()
 
         result = attempt_merge(
-            repo, base_sha, ["branch-a"],
+            repo,
+            base_sha,
+            ["branch-a"],
             "sleep 5",
             timeout=1,
         )

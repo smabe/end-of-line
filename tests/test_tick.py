@@ -5,6 +5,7 @@ flag spawned the worker. That produced a phantom-claim footgun for
 manual ticks (a 30-min lease block on cron). The flip inverts the
 default: `clu tick` dispatches; `--dry-tick` is the explicit opt-out.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,10 +38,14 @@ class TickDefaultDispatchTestCase(unittest.TestCase):
         isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        (self.project / ".orchestrator.json").write_text(json.dumps({
-            "plan_dir": "plans",
-            "dispatch": {"kind": "shell", "command": "true"},
-        }))
+        (self.project / ".orchestrator.json").write_text(
+            json.dumps(
+                {
+                    "plan_dir": "plans",
+                    "dispatch": {"kind": "shell", "command": "true"},
+                }
+            )
+        )
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
 
@@ -51,15 +56,19 @@ class TickDefaultDispatchTestCase(unittest.TestCase):
         return ["tick", "--project", str(self.project), "--plan", "test-plan", *extra]
 
     def test_tick_default_dispatches(self) -> None:
-        with mock.patch("end_of_line.dispatch.dispatch_for_tick") as mocked, \
-                redirect_stdout(StringIO()):
+        with (
+            mock.patch("end_of_line.dispatch.dispatch_for_tick") as mocked,
+            redirect_stdout(StringIO()),
+        ):
             rc = main(self._argv())
         self.assertTrue(mocked.called)
         self.assertEqual(rc, ExitCode.OK)
 
     def test_tick_dry_tick_skips_dispatch(self) -> None:
-        with mock.patch("end_of_line.dispatch.dispatch_for_tick") as mocked, \
-                redirect_stdout(StringIO()):
+        with (
+            mock.patch("end_of_line.dispatch.dispatch_for_tick") as mocked,
+            redirect_stdout(StringIO()),
+        ):
             rc = main(self._argv("--dry-tick"))
         self.assertFalse(mocked.called)
         self.assertEqual(rc, ExitCode.OK)
@@ -94,10 +103,14 @@ class TickProjectScopedTestCase(unittest.TestCase):
         (self.project / "plans").mkdir()
         (self.project / "plans" / "plan-a.md").write_text(PLAN_BODY)
         (self.project / "plans" / "plan-b.md").write_text(PLAN_BODY_B)
-        (self.project / ".orchestrator.json").write_text(json.dumps({
-            "plan_dir": "plans",
-            "dispatch": {"kind": "shell", "command": "true"},
-        }))
+        (self.project / ".orchestrator.json").write_text(
+            json.dumps(
+                {
+                    "plan_dir": "plans",
+                    "dispatch": {"kind": "shell", "command": "true"},
+                }
+            )
+        )
         rc = main(["init", "--project", str(self.project), "--plan", "plan-a"])
         self.assertEqual(rc, 0)
         rc = main(["init", "--project", str(self.project), "--plan", "plan-b"])
@@ -107,17 +120,18 @@ class TickProjectScopedTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_project_tick_ticks_every_registered_plan(self) -> None:
-        with mock.patch("end_of_line.cli._tick_one_plan") as mocked, \
-                redirect_stdout(StringIO()):
+        with mock.patch("end_of_line.cli._tick_one_plan") as mocked, redirect_stdout(StringIO()):
             rc = main(["tick", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         slugs = sorted(call.args[0] for call in mocked.call_args_list)
         self.assertEqual(slugs, ["plan-a", "plan-b"])
 
     def test_project_tick_runs_cross_plan_chain(self) -> None:
-        with mock.patch("end_of_line.cross_plan_rules.run_rules") as mocked, \
-                mock.patch("end_of_line.cli._tick_one_plan"), \
-                redirect_stdout(StringIO()):
+        with (
+            mock.patch("end_of_line.cross_plan_rules.run_rules") as mocked,
+            mock.patch("end_of_line.cli._tick_one_plan"),
+            redirect_stdout(StringIO()),
+        ):
             rc = main(["tick", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         self.assertTrue(mocked.called)
@@ -127,25 +141,33 @@ class TickProjectScopedTestCase(unittest.TestCase):
         other.mkdir(parents=True)
         (other / "plans").mkdir()
         (other / "plans" / "plan-c.md").write_text(PLAN_BODY)
-        (other / ".orchestrator.json").write_text(json.dumps({
-            "plan_dir": "plans",
-            "dispatch": {"kind": "shell", "command": "true"},
-        }))
+        (other / ".orchestrator.json").write_text(
+            json.dumps(
+                {
+                    "plan_dir": "plans",
+                    "dispatch": {"kind": "shell", "command": "true"},
+                }
+            )
+        )
         rc = main(["init", "--project", str(other), "--plan", "plan-c"])
         self.assertEqual(rc, 0)
-        with mock.patch("end_of_line.cli._tick_one_plan") as mocked, \
-                redirect_stdout(StringIO()):
+        with mock.patch("end_of_line.cli._tick_one_plan") as mocked, redirect_stdout(StringIO()):
             rc = main(["tick", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         slugs = sorted(call.args[0] for call in mocked.call_args_list)
         self.assertEqual(slugs, ["plan-a", "plan-b"])
 
     def test_plan_scoped_still_works(self) -> None:
-        with mock.patch("end_of_line.cli._tick_one_plan") as mocked, \
-                redirect_stdout(StringIO()):
-            rc = main([
-                "tick", "--project", str(self.project), "--plan", "plan-a",
-            ])
+        with mock.patch("end_of_line.cli._tick_one_plan") as mocked, redirect_stdout(StringIO()):
+            rc = main(
+                [
+                    "tick",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "plan-a",
+                ]
+            )
         self.assertEqual(rc, ExitCode.OK)
         self.assertEqual(len(mocked.call_args_list), 1)
         self.assertEqual(mocked.call_args_list[0].args[0], "plan-a")

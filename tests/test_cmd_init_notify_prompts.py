@@ -3,6 +3,7 @@
 Tests for --no-notify-prompt flag and interactive iMessage/Discord prompts
 added in the notify-multi-channel docs phase.
 """
+
 from __future__ import annotations
 
 import io
@@ -44,11 +45,17 @@ class InitNotifyPromptsTestCase(unittest.TestCase):
     def _init(self, *extra: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main([
-                "init", "--project", str(self.project), "--plan", "foo",
-                "--no-claude-md",  # avoid CLAUDE.md prompt interference
-                *extra,
-            ])
+            rc = main(
+                [
+                    "init",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "foo",
+                    "--no-claude-md",  # avoid CLAUDE.md prompt interference
+                    *extra,
+                ]
+            )
         return rc, out.getvalue(), err.getvalue()
 
     # --- flag recognition --------------------------------------------------

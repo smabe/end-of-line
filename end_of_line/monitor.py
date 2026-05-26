@@ -20,6 +20,7 @@ markers all surface as `None` / `False` so callers can branch on a
 single "do we need to install?" predicate. The marker is advisory,
 never load-bearing.
 """
+
 from __future__ import annotations
 
 import os
@@ -63,7 +64,10 @@ def is_scheduled(path: Path | None = None) -> bool:
 
 
 def record_hook_installed(
-    hook_path: str, settings_json_path: str, *, path: Path | None = None,
+    hook_path: str,
+    settings_json_path: str,
+    *,
+    path: Path | None = None,
 ) -> None:
     """Stamp the v2 marker. Atomically overwrites any prior v1 marker.
 
@@ -77,7 +81,9 @@ def record_hook_installed(
     if path.exists() and load_marker(path) is None:
         path.unlink()
     with st.locked_json(
-        path, expected_version=SCHEMA_VERSION, empty=_empty,
+        path,
+        expected_version=SCHEMA_VERSION,
+        empty=_empty,
     ) as data:
         data["hook_installed_at"] = st.utcnow()
         data["hook_path"] = hook_path
@@ -85,7 +91,9 @@ def record_hook_installed(
 
 
 def record_session_start_installed(
-    session_start_hook_path: str, *, path: Path | None = None,
+    session_start_hook_path: str,
+    *,
+    path: Path | None = None,
 ) -> None:
     """Stamp the SessionStart hook path onto the existing v2 marker (#70).
 
@@ -98,7 +106,9 @@ def record_session_start_installed(
     if path.exists() and load_marker(path) is None:
         path.unlink()
     with st.locked_json(
-        path, expected_version=SCHEMA_VERSION, empty=_empty,
+        path,
+        expected_version=SCHEMA_VERSION,
+        empty=_empty,
     ) as data:
         data["session_start_hook_path"] = session_start_hook_path
         # Stamp install-time too, so the operator can audit when the

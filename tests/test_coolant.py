@@ -9,6 +9,7 @@ Coverage:
     timeout=2, check=False, and the stdin JSON has the expected shape.
   - TimeoutExpired and FileNotFoundError are swallowed (fire-and-forget).
 """
+
 from __future__ import annotations
 
 import json
@@ -37,9 +38,7 @@ class TestResolveScriptDir(CluTestCase):
             self.assertEqual(coolant.resolve_script_dir(), scripts)
 
     def test_env_var_pointing_at_missing_dir_returns_none(self):
-        with mock.patch.dict(
-            os.environ, {"CLU_COOLANT_SCRIPT_DIR": str(self.tmp_path / "nope")}
-        ):
+        with mock.patch.dict(os.environ, {"CLU_COOLANT_SCRIPT_DIR": str(self.tmp_path / "nope")}):
             with mock.patch.object(coolant, "_marketplace_glob", return_value=None):
                 self.assertIsNone(coolant.resolve_script_dir())
 
@@ -67,9 +66,7 @@ class TestResolveScriptDir(CluTestCase):
         override_scripts = self.tmp_path / "override-scripts"
         _write_fake_scripts(env_scripts)
         _write_fake_scripts(override_scripts)
-        with mock.patch.dict(
-            os.environ, {"CLU_COOLANT_SCRIPT_DIR": str(env_scripts)}
-        ):
+        with mock.patch.dict(os.environ, {"CLU_COOLANT_SCRIPT_DIR": str(env_scripts)}):
             self.assertEqual(
                 coolant.resolve_script_dir(override=str(override_scripts)),
                 override_scripts,
@@ -84,17 +81,13 @@ class TestMarketplaceGlob(CluTestCase):
         for v in ("0.1.0", "0.2.0", "0.1.5"):
             (cache_root / v / "scripts").mkdir(parents=True)
             _write_fake_scripts(cache_root / v / "scripts")
-        with mock.patch.object(
-            coolant, "_plugin_cache_root", return_value=self.tmp_path / "cache"
-        ):
+        with mock.patch.object(coolant, "_plugin_cache_root", return_value=self.tmp_path / "cache"):
             result = coolant._marketplace_glob()
             self.assertIsNotNone(result)
             self.assertEqual(result.parent.name, "0.2.0")
 
     def test_returns_none_when_cache_root_missing(self):
-        with mock.patch.object(
-            coolant, "_plugin_cache_root", return_value=self.tmp_path / "nope"
-        ):
+        with mock.patch.object(coolant, "_plugin_cache_root", return_value=self.tmp_path / "nope"):
             self.assertIsNone(coolant._marketplace_glob())
 
 
@@ -105,7 +98,9 @@ class TestEmitStartShortCircuit(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir") as resolver:
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_start(
-                    session_id="", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
                 resolver.assert_not_called()
                 run.assert_not_called()
@@ -114,7 +109,9 @@ class TestEmitStartShortCircuit(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir") as resolver:
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_start(
-                    session_id="tok", agent_id="", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="",
+                    agent_type="clu-worker",
                 )
                 resolver.assert_not_called()
                 run.assert_not_called()
@@ -123,7 +120,9 @@ class TestEmitStartShortCircuit(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir", return_value=None):
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_start(
-                    session_id="tok", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
                 run.assert_not_called()
 
@@ -141,7 +140,9 @@ class TestEmitStartSubprocess(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir", return_value=scripts):
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_start(
-                    session_id="tok", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
                 run.assert_called_once()
                 call = run.call_args
@@ -156,46 +157,61 @@ class TestEmitStartSubprocess(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir", return_value=scripts):
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_start(
-                    session_id="tok-abc", agent_id="clu-foo-bar",
+                    session_id="tok-abc",
+                    agent_id="clu-foo-bar",
                     agent_type="clu-worker",
                 )
                 payload = json.loads(run.call_args.kwargs["input"])
-                self.assertEqual(payload, {
-                    "session_id": "tok-abc",
-                    "agent_id": "clu-foo-bar",
-                    "agent_type": "clu-worker",
-                })
+                self.assertEqual(
+                    payload,
+                    {
+                        "session_id": "tok-abc",
+                        "agent_id": "clu-foo-bar",
+                        "agent_type": "clu-worker",
+                    },
+                )
 
     def test_swallows_timeout(self):
         scripts = self._resolved()
         with mock.patch.object(coolant, "resolve_script_dir", return_value=scripts):
             with mock.patch.object(
-                subprocess, "run",
+                subprocess,
+                "run",
                 side_effect=subprocess.TimeoutExpired(cmd="x", timeout=2),
             ):
                 # Must not raise.
                 coolant.emit_start(
-                    session_id="tok", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
 
     def test_swallows_file_not_found(self):
         scripts = self._resolved()
         with mock.patch.object(coolant, "resolve_script_dir", return_value=scripts):
             with mock.patch.object(
-                subprocess, "run", side_effect=FileNotFoundError(2, "no such file"),
+                subprocess,
+                "run",
+                side_effect=FileNotFoundError(2, "no such file"),
             ):
                 coolant.emit_start(
-                    session_id="tok", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
 
     def test_swallows_generic_oserror(self):
         scripts = self._resolved()
         with mock.patch.object(coolant, "resolve_script_dir", return_value=scripts):
             with mock.patch.object(
-                subprocess, "run", side_effect=OSError("boom"),
+                subprocess,
+                "run",
+                side_effect=OSError("boom"),
             ):
                 coolant.emit_start(
-                    session_id="tok", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
 
 
@@ -211,7 +227,9 @@ class TestEmitStop(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir") as resolver:
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_stop(
-                    session_id="", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
                 resolver.assert_not_called()
                 run.assert_not_called()
@@ -220,7 +238,9 @@ class TestEmitStop(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir") as resolver:
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_stop(
-                    session_id="tok", agent_id="", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="",
+                    agent_type="clu-worker",
                 )
                 resolver.assert_not_called()
                 run.assert_not_called()
@@ -230,7 +250,9 @@ class TestEmitStop(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir", return_value=scripts):
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_stop(
-                    session_id="tok", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
                 run.assert_called_once()
                 call = run.call_args
@@ -245,31 +267,40 @@ class TestEmitStop(CluTestCase):
         with mock.patch.object(coolant, "resolve_script_dir", return_value=scripts):
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_stop(
-                    session_id="tok-xyz", agent_id="clu-zap-2",
+                    session_id="tok-xyz",
+                    agent_id="clu-zap-2",
                     agent_type="clu-worker",
                 )
                 payload = json.loads(run.call_args.kwargs["input"])
-                self.assertEqual(payload, {
-                    "session_id": "tok-xyz",
-                    "agent_id": "clu-zap-2",
-                    "agent_type": "clu-worker",
-                })
+                self.assertEqual(
+                    payload,
+                    {
+                        "session_id": "tok-xyz",
+                        "agent_id": "clu-zap-2",
+                        "agent_type": "clu-worker",
+                    },
+                )
 
     def test_swallows_timeout(self):
         scripts = self._resolved()
         with mock.patch.object(coolant, "resolve_script_dir", return_value=scripts):
             with mock.patch.object(
-                subprocess, "run",
+                subprocess,
+                "run",
                 side_effect=subprocess.TimeoutExpired(cmd="x", timeout=2),
             ):
                 coolant.emit_stop(
-                    session_id="tok", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
 
     def test_no_script_dir_no_ops(self):
         with mock.patch.object(coolant, "resolve_script_dir", return_value=None):
             with mock.patch.object(subprocess, "run") as run:
                 coolant.emit_stop(
-                    session_id="tok", agent_id="clu-p-1", agent_type="clu-worker",
+                    session_id="tok",
+                    agent_id="clu-p-1",
+                    agent_type="clu-worker",
                 )
                 run.assert_not_called()

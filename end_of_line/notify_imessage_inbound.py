@@ -3,6 +3,7 @@
 All iMessage-specific inbound logic lives here. notify_inbound.py is a thin
 shim that re-exports this module's surface and provides the __main__ entry.
 """
+
 from __future__ import annotations
 
 import json
@@ -56,6 +57,7 @@ def unix_to_chatdb_ns(unix_seconds: float) -> int:
     helper — passing raw `time.time()` lands rows 31 years in the past.
     """
     return int((unix_seconds - APPLE_EPOCH_OFFSET_SECONDS) * 1_000_000_000)
+
 
 Dispatcher = Callable[[OpenBlocker, str], None]
 OpenBlockersFn = Callable[[], list[OpenBlocker]]
@@ -117,9 +119,14 @@ def _cli_dispatch(target: OpenBlocker, answer: str) -> None:
     bad `clu answer` can't tank the poller."""
     subprocess.run(
         [
-            sys.executable, "-m", "end_of_line.cli", "answer",
-            "--project", str(target.project_root),
-            "--plan", target.plan_slug,
+            sys.executable,
+            "-m",
+            "end_of_line.cli",
+            "answer",
+            "--project",
+            str(target.project_root),
+            "--plan",
+            target.plan_slug,
             answer,
         ],
         check=True,
@@ -132,9 +139,14 @@ def _spawn_tick(project_root: Path, plan_slug: str) -> None:
     the next cron firing. Mirrors `dispatch.py`'s Popen pattern."""
     subprocess.Popen(
         [
-            sys.executable, "-m", "end_of_line.cli", "tick",
-            "--project", str(project_root),
-            "--plan", plan_slug,
+            sys.executable,
+            "-m",
+            "end_of_line.cli",
+            "tick",
+            "--project",
+            str(project_root),
+            "--plan",
+            plan_slug,
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -199,14 +211,14 @@ def _decode_attributed_body(blob: bytes | None) -> str | None:
     elif head == 0x81:
         if cur + 2 > len(blob):
             return None
-        length = int.from_bytes(blob[cur:cur + 2], "little")
+        length = int.from_bytes(blob[cur : cur + 2], "little")
         cur += 2
     else:
         return None
     if cur + length > len(blob):
         return None
     try:
-        return blob[cur:cur + length].decode("utf-8")
+        return blob[cur : cur + length].decode("utf-8")
     except UnicodeDecodeError:
         return None
 
@@ -287,10 +299,7 @@ def poll_once(
             continue
         if result.project_root and not _auto_tick_enabled(result.project_root):
             continue
-        plan_slug = (
-            result.state_path.name.removesuffix(".state.json")
-            if result.state_path else ""
-        )
+        plan_slug = result.state_path.name.removesuffix(".state.json") if result.state_path else ""
         try:
             tick_spawner(result.project_root, plan_slug)
         except Exception as exc:
@@ -511,7 +520,8 @@ class IMessageInboundPoller:
         last_rowid = self._state["last_inbound_rowid"]
         floor = self._state["outbound_rowids"].get(self._self_chat_id, 0)
         new_last = poll_once(
-            self._conn, last_rowid,
+            self._conn,
+            last_rowid,
             self_chat_id=self._self_chat_id,
             outbound_floor=floor,
             entries_fn=self._registry_loader,

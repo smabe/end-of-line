@@ -7,6 +7,7 @@ The gate refuses with STATUS_TRANSITION when:
 Operator can bypass each gate independently with --skip-verify / --skip-simplify.
 Each bypass emits an audit event.
 """
+
 from __future__ import annotations
 
 import io
@@ -25,7 +26,9 @@ from tests import GitProjectTestCase, plan_body, write_config
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(cwd), *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -68,9 +71,16 @@ class CompleteRefusalTestCase(GitProjectTestCase):
     def _complete(self, token: str, *extra: str) -> tuple[int, str]:
         buf = io.StringIO()
         with redirect_stderr(buf):
-            rc = main(self._argv(
-                "complete", "--phase", "phase-a", "--token", token, *extra,
-            ))
+            rc = main(
+                self._argv(
+                    "complete",
+                    "--phase",
+                    "phase-a",
+                    "--token",
+                    token,
+                    *extra,
+                )
+            )
         return rc, buf.getvalue()
 
     def _claim_is_live(self) -> bool:
@@ -221,16 +231,23 @@ class CompleteRefusalTestCase(GitProjectTestCase):
             self._stamp_verify(self.sha)
             self._stamp_simplify(self.sha)
             rc, err = self._complete(token)
-            self.assertEqual(rc, ExitCode.STATUS_TRANSITION,
-                             "complete must refuse when stamps reference canonical HEAD "
-                             "but worktree has advanced")
+            self.assertEqual(
+                rc,
+                ExitCode.STATUS_TRANSITION,
+                "complete must refuse when stamps reference canonical HEAD "
+                "but worktree has advanced",
+            )
             self.assertTrue(self._claim_is_live(), "claim must stay live on refusal")
             events = self._events_of_type(st.EVENT_ATTESTATION_REFUSED)
             self.assertEqual(len(events), 1, "refusal must emit one event")
-            self.assertEqual(events[0]["head_sha"], wt_sha,
-                             "event must record worktree HEAD, not canonical")
-            self.assertEqual(events[0]["stamped_at"], self.sha,
-                             "event must record the stale canonical stamp under lock")
+            self.assertEqual(
+                events[0]["head_sha"], wt_sha, "event must record worktree HEAD, not canonical"
+            )
+            self.assertEqual(
+                events[0]["stamped_at"],
+                self.sha,
+                "event must record the stale canonical stamp under lock",
+            )
         finally:
             wt_tmp.cleanup()
 

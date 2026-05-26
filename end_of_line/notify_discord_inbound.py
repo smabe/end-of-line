@@ -9,6 +9,7 @@ blockers via two paths:
 Mirrors notify_imessage_inbound.py shape; runs as a standalone daemon via
 __main__ or a LaunchAgent / systemd unit.
 """
+
 from __future__ import annotations
 
 import json
@@ -133,9 +134,7 @@ class DiscordInboundPoller:
             if target:
                 return Reply(target=target, answer=msg["content"].strip())
         # Text grammar fallback: use the shared locator.
-        result = state_locator.find_blocker_for_reply(
-            self._registry_loader(), msg["content"]
-        )
+        result = state_locator.find_blocker_for_reply(self._registry_loader(), msg["content"])
         if result.variant != "FOUND":
             return None
         plan_slug = result.state_path.name.removesuffix(".state.json")

@@ -10,6 +10,7 @@ Covers:
 - done slug (in history) → STATUS_TRANSITION
 - missing plan file → UNKNOWN_TASK + EVENT_QUEUE_REJECTED
 """
+
 from __future__ import annotations
 
 import io
@@ -62,13 +63,21 @@ def _worker_add(
     old_out, old_err = sys.stdout, sys.stderr
     sys.stdout, sys.stderr = out, err
     try:
-        rc = main([
-            "queue", "add", slug,
-            "--token", token,
-            "--plan", source_plan,
-            "--phase", phase,
-            "--project", str(project),
-        ])
+        rc = main(
+            [
+                "queue",
+                "add",
+                slug,
+                "--token",
+                token,
+                "--plan",
+                source_plan,
+                "--phase",
+                phase,
+                "--project",
+                str(project),
+            ]
+        )
     finally:
         sys.stdout, sys.stderr = old_out, old_err
     return rc, out.getvalue(), err.getvalue()
@@ -119,10 +128,12 @@ class WorkerGatesTestCase(unittest.TestCase):
             _write_plan(self.project, slug)
         with queue.mutate(self.queue_path) as qdata:
             qdata["history"].append(_source_tagged_entry("hist-target"))
-            qdata["queue"].extend([
-                _source_tagged_entry("q-target-1"),
-                _source_tagged_entry("q-target-2"),
-            ])
+            qdata["queue"].extend(
+                [
+                    _source_tagged_entry("q-target-1"),
+                    _source_tagged_entry("q-target-2"),
+                ]
+            )
         rc, _, _ = _worker_add(self.project, "q-target-3")
         self.assertEqual(rc, ExitCode.QUEUE_CAP)
         rejected = self._rejected_events()
@@ -144,9 +155,7 @@ class WorkerGatesTestCase(unittest.TestCase):
 
         for i in range(1, 4):
             _write_plan(self.project, f"target-d-{i}")
-            rc, _, _ = _worker_add(
-                self.project, f"target-d-{i}", phase="d-extract", token=d_token
-            )
+            rc, _, _ = _worker_add(self.project, f"target-d-{i}", phase="d-extract", token=d_token)
             self.assertEqual(rc, ExitCode.OK, f"expected d-extract add #{i} to succeed")
 
     def test_cap_doesnt_count_operator_entries(self) -> None:
@@ -155,16 +164,18 @@ class WorkerGatesTestCase(unittest.TestCase):
             _write_plan(self.project, f"op-target-{i}")
         with queue.mutate(self.queue_path) as qdata:
             for i in range(1, 6):
-                qdata["queue"].append({
-                    "slug": f"op-target-{i}",
-                    "added_at": st.utcnow(),
-                    "added_by": "operator",
-                    "position_at_add": "tail",
-                    "source_plan": None,
-                    "source_phase": None,
-                    "source_token_fp": None,
-                    "reason": None,
-                })
+                qdata["queue"].append(
+                    {
+                        "slug": f"op-target-{i}",
+                        "added_at": st.utcnow(),
+                        "added_by": "operator",
+                        "position_at_add": "tail",
+                        "source_plan": None,
+                        "source_phase": None,
+                        "source_token_fp": None,
+                        "reason": None,
+                    }
+                )
         # Worker cap counter is still 0; all 3 adds should succeed.
         for i in range(1, 4):
             _write_plan(self.project, f"worker-target-{i}")

@@ -1,4 +1,5 @@
 """Tests for watch.project_event — pure event projector."""
+
 import unittest
 import importlib
 
@@ -14,15 +15,11 @@ class DefaultVisibleEventsTest(unittest.TestCase):
     # --- phase-scoped events ---
 
     def test_phase_started(self):
-        out = project_event(
-            _evt(st.EVENT_PHASE_STARTED, phase="foundation", attempts=1), "my-plan"
-        )
+        out = project_event(_evt(st.EVENT_PHASE_STARTED, phase="foundation", attempts=1), "my-plan")
         self.assertEqual(out, "my-plan/foundation: started (attempt 1)")
 
     def test_phase_started_attempt_2(self):
-        out = project_event(
-            _evt(st.EVENT_PHASE_STARTED, phase="foundation", attempts=2), "my-plan"
-        )
+        out = project_event(_evt(st.EVENT_PHASE_STARTED, phase="foundation", attempts=2), "my-plan")
         self.assertEqual(out, "my-plan/foundation: started (attempt 2)")
 
     def test_phase_started_missing_attempts_defaults_to_1(self):
@@ -52,8 +49,12 @@ class DefaultVisibleEventsTest(unittest.TestCase):
 
     def test_phase_blocked_with_question(self):
         out = project_event(
-            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1",
-                 question="Use postgres or sqlite?"),
+            _evt(
+                st.EVENT_PHASE_BLOCKED,
+                phase="design",
+                blocker_id="blk-1",
+                question="Use postgres or sqlite?",
+            ),
             "my-plan",
         )
         self.assertIn("blk-1", out)
@@ -62,8 +63,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
     def test_phase_blocked_truncates_long_question(self):
         long_q = "A" * 120
         out = project_event(
-            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1",
-                 question=long_q),
+            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1", question=long_q),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -83,9 +83,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
         self.assertIn("postgres", out)
 
     def test_blocker_consumed(self):
-        out = project_event(
-            _evt(st.EVENT_BLOCKER_CONSUMED, blocker_id="blk-1"), "my-plan"
-        )
+        out = project_event(_evt(st.EVENT_BLOCKER_CONSUMED, blocker_id="blk-1"), "my-plan")
         self.assertIsNotNone(out)
         self.assertIn("blk-1", out)
 
@@ -98,16 +96,13 @@ class DefaultVisibleEventsTest(unittest.TestCase):
         self.assertIn("blk-1", out)
 
     def test_phase_max_attempts(self):
-        out = project_event(
-            _evt(st.EVENT_PHASE_MAX_ATTEMPTS, phase="build", attempts=3), "my-plan"
-        )
+        out = project_event(_evt(st.EVENT_PHASE_MAX_ATTEMPTS, phase="build", attempts=3), "my-plan")
         self.assertIsNotNone(out)
         self.assertIn("build", out)
 
     def test_phase_stalled(self):
         out = project_event(
-            _evt(st.EVENT_PHASE_STALLED, phase="build", claimed_by="sess-abc",
-                 age_seconds=660.0),
+            _evt(st.EVENT_PHASE_STALLED, phase="build", claimed_by="sess-abc", age_seconds=660.0),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -115,8 +110,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
 
     def test_task_spawned(self):
         out = project_event(
-            _evt(st.EVENT_TASK_SPAWNED, task="task-1", source="gh",
-                 spawned_by_phase="impl"),
+            _evt(st.EVENT_TASK_SPAWNED, task="task-1", source="gh", spawned_by_phase="impl"),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -132,8 +126,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
 
     def test_dispatch_failed(self):
         out = project_event(
-            _evt(st.EVENT_DISPATCH_FAILED, phase="impl", token="sess-x",
-                 reason="binary not found"),
+            _evt(st.EVENT_DISPATCH_FAILED, phase="impl", token="sess-x", reason="binary not found"),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -156,9 +149,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
         self.assertIn("other-plan", out)
 
     def test_retry_requested(self):
-        out = project_event(
-            _evt(st.EVENT_RETRY_REQUESTED, phase="impl"), "my-plan"
-        )
+        out = project_event(_evt(st.EVENT_RETRY_REQUESTED, phase="impl"), "my-plan")
         self.assertIsNotNone(out)
         self.assertIn("impl", out)
 
@@ -189,8 +180,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
 
     def test_queue_popped(self):
         out = project_event(
-            _evt(st.EVENT_QUEUE_POPPED, slug="next-plan", added_by="operator",
-                 position=1),
+            _evt(st.EVENT_QUEUE_POPPED, slug="next-plan", added_by="operator", position=1),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -198,8 +188,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
 
     def test_queue_appended(self):
         out = project_event(
-            _evt(st.EVENT_QUEUE_APPENDED, slug="follow-up", source_phase="impl",
-                 token_fp="abc123"),
+            _evt(st.EVENT_QUEUE_APPENDED, slug="follow-up", source_phase="impl", token_fp="abc123"),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -207,8 +196,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
 
     def test_queue_rejected(self):
         out = project_event(
-            _evt(st.EVENT_QUEUE_REJECTED, slug="follow-up", source_phase="impl",
-                 reason="cap"),
+            _evt(st.EVENT_QUEUE_REJECTED, slug="follow-up", source_phase="impl", reason="cap"),
             "my-plan",
         )
         self.assertIsNotNone(out)
@@ -216,7 +204,6 @@ class DefaultVisibleEventsTest(unittest.TestCase):
 
 
 class VerboseOnlyEventsTest(unittest.TestCase):
-
     def test_lease_expired_filtered_default(self):
         out = project_event(
             _evt(st.EVENT_LEASE_EXPIRED, phase="impl", claimed_by="sess-abc"),
@@ -227,68 +214,89 @@ class VerboseOnlyEventsTest(unittest.TestCase):
     def test_lease_expired_shown_with_verbose(self):
         out = project_event(
             _evt(st.EVENT_LEASE_EXPIRED, phase="impl", claimed_by="sess-abc"),
-            "my-plan", verbose=True,
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
     def test_lease_extended_filtered_default(self):
         out = project_event(
-            _evt(st.EVENT_LEASE_EXTENDED, phase="impl", extended_by_minutes=15,
-                 new_expires="2026-05-17T11:00:00Z", operator=True),
+            _evt(
+                st.EVENT_LEASE_EXTENDED,
+                phase="impl",
+                extended_by_minutes=15,
+                new_expires="2026-05-17T11:00:00Z",
+                operator=True,
+            ),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_lease_extended_shown_with_verbose(self):
         out = project_event(
-            _evt(st.EVENT_LEASE_EXTENDED, phase="impl", extended_by_minutes=15,
-                 new_expires="2026-05-17T11:00:00Z", operator=True),
-            "my-plan", verbose=True,
+            _evt(
+                st.EVENT_LEASE_EXTENDED,
+                phase="impl",
+                extended_by_minutes=15,
+                new_expires="2026-05-17T11:00:00Z",
+                operator=True,
+            ),
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
     def test_claim_force_released_filtered_default(self):
         out = project_event(
-            _evt(st.EVENT_CLAIM_FORCE_RELEASED, phase="impl", token="sess-x",
-                 forced=True, released_by_operator=True),
+            _evt(
+                st.EVENT_CLAIM_FORCE_RELEASED,
+                phase="impl",
+                token="sess-x",
+                forced=True,
+                released_by_operator=True,
+            ),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_claim_force_released_shown_with_verbose(self):
         out = project_event(
-            _evt(st.EVENT_CLAIM_FORCE_RELEASED, phase="impl", token="sess-x",
-                 forced=True, released_by_operator=True),
-            "my-plan", verbose=True,
+            _evt(
+                st.EVENT_CLAIM_FORCE_RELEASED,
+                phase="impl",
+                token="sess-x",
+                forced=True,
+                released_by_operator=True,
+            ),
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
     def test_attempts_reset_filtered_default(self):
-        out = project_event(
-            _evt(st.EVENT_ATTEMPTS_RESET, phase="impl", operator=True), "my-plan"
-        )
+        out = project_event(_evt(st.EVENT_ATTEMPTS_RESET, phase="impl", operator=True), "my-plan")
         self.assertIsNone(out)
 
     def test_attempts_reset_shown_with_verbose(self):
         out = project_event(
             _evt(st.EVENT_ATTEMPTS_RESET, phase="impl", operator=True),
-            "my-plan", verbose=True,
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
     def test_stuck_blocker_repinged_filtered_default(self):
         out = project_event(
-            _evt(st.EVENT_STUCK_BLOCKER_REPINGED, blocker_id="blk-1",
-                 phase="impl", age_min=45),
+            _evt(st.EVENT_STUCK_BLOCKER_REPINGED, blocker_id="blk-1", phase="impl", age_min=45),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_stuck_blocker_repinged_shown_with_verbose(self):
         out = project_event(
-            _evt(st.EVENT_STUCK_BLOCKER_REPINGED, blocker_id="blk-1",
-                 phase="impl", age_min=45),
-            "my-plan", verbose=True,
+            _evt(st.EVENT_STUCK_BLOCKER_REPINGED, blocker_id="blk-1", phase="impl", age_min=45),
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
@@ -302,65 +310,90 @@ class VerboseOnlyEventsTest(unittest.TestCase):
     def test_stalled_claim_notified_shown_with_verbose(self):
         out = project_event(
             _evt(st.EVENT_STALLED_CLAIM_NOTIFIED, phase="impl", stalled_min=12),
-            "my-plan", verbose=True,
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
     def test_worktree_attached_filtered_default(self):
         out = project_event(
-            _evt(st.EVENT_WORKTREE_ATTACHED, path="/tmp/wt", branch="clu/foo",
-                 base_ref="abc"),
+            _evt(st.EVENT_WORKTREE_ATTACHED, path="/tmp/wt", branch="clu/foo", base_ref="abc"),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_worktree_attached_shown_with_verbose(self):
         out = project_event(
-            _evt(st.EVENT_WORKTREE_ATTACHED, path="/tmp/wt", branch="clu/foo",
-                 base_ref="abc"),
-            "my-plan", verbose=True,
+            _evt(st.EVENT_WORKTREE_ATTACHED, path="/tmp/wt", branch="clu/foo", base_ref="abc"),
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
     def test_worktree_cleaned_filtered_default(self):
         out = project_event(
-            _evt(st.EVENT_WORKTREE_CLEANED, path="/tmp/wt", branch="clu/foo",
-                 worktree_removed=True, branch_removed=True,
-                 worktree_error=None, branch_error=None, trigger="complete"),
+            _evt(
+                st.EVENT_WORKTREE_CLEANED,
+                path="/tmp/wt",
+                branch="clu/foo",
+                worktree_removed=True,
+                branch_removed=True,
+                worktree_error=None,
+                branch_error=None,
+                trigger="complete",
+            ),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_worktree_cleaned_shown_with_verbose(self):
         out = project_event(
-            _evt(st.EVENT_WORKTREE_CLEANED, path="/tmp/wt", branch="clu/foo",
-                 worktree_removed=True, branch_removed=True,
-                 worktree_error=None, branch_error=None, trigger="complete"),
-            "my-plan", verbose=True,
+            _evt(
+                st.EVENT_WORKTREE_CLEANED,
+                path="/tmp/wt",
+                branch="clu/foo",
+                worktree_removed=True,
+                branch_removed=True,
+                worktree_error=None,
+                branch_error=None,
+                trigger="complete",
+            ),
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
     def test_worktree_retained_ahead_filtered_default(self):
         out = project_event(
-            _evt(st.EVENT_WORKTREE_RETAINED_AHEAD, path="/tmp/wt",
-                 branch="clu/foo", reason="ahead", ahead_commits=["abc"],
-                 trigger="gc"),
+            _evt(
+                st.EVENT_WORKTREE_RETAINED_AHEAD,
+                path="/tmp/wt",
+                branch="clu/foo",
+                reason="ahead",
+                ahead_commits=["abc"],
+                trigger="gc",
+            ),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_worktree_retained_ahead_shown_with_verbose(self):
         out = project_event(
-            _evt(st.EVENT_WORKTREE_RETAINED_AHEAD, path="/tmp/wt",
-                 branch="clu/foo", reason="ahead", ahead_commits=["abc"],
-                 trigger="gc"),
-            "my-plan", verbose=True,
+            _evt(
+                st.EVENT_WORKTREE_RETAINED_AHEAD,
+                path="/tmp/wt",
+                branch="clu/foo",
+                reason="ahead",
+                ahead_commits=["abc"],
+                trigger="gc",
+            ),
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
 
 
 class EdgeCasesTest(unittest.TestCase):
-
     def test_unknown_event_type_returns_none(self):
         out = project_event(_evt("garbage_event_xyz"), "my-plan")
         self.assertIsNone(out)
@@ -371,24 +404,20 @@ class EdgeCasesTest(unittest.TestCase):
 
     def test_minimal_event_phase_started(self):
         # Only type + ts — no phase, no attempts
-        out = project_event({"type": st.EVENT_PHASE_STARTED, "ts": "2026-01-01T00:00:00Z"},
-                            "p")
+        out = project_event({"type": st.EVENT_PHASE_STARTED, "ts": "2026-01-01T00:00:00Z"}, "p")
         self.assertIsNotNone(out)
         self.assertIn("attempt 1", out)
 
     def test_minimal_event_phase_completed(self):
-        out = project_event({"type": st.EVENT_PHASE_COMPLETED, "ts": "2026-01-01T00:00:00Z"},
-                            "p")
+        out = project_event({"type": st.EVENT_PHASE_COMPLETED, "ts": "2026-01-01T00:00:00Z"}, "p")
         self.assertIsNotNone(out)
 
     def test_minimal_event_phase_blocked(self):
-        out = project_event({"type": st.EVENT_PHASE_BLOCKED, "ts": "2026-01-01T00:00:00Z"},
-                            "p")
+        out = project_event({"type": st.EVENT_PHASE_BLOCKED, "ts": "2026-01-01T00:00:00Z"}, "p")
         self.assertIsNotNone(out)
 
     def test_minimal_event_plan_completed(self):
-        out = project_event({"type": st.EVENT_PLAN_COMPLETED, "ts": "2026-01-01T00:00:00Z"},
-                            "p")
+        out = project_event({"type": st.EVENT_PLAN_COMPLETED, "ts": "2026-01-01T00:00:00Z"}, "p")
         self.assertIsNotNone(out)
 
     def test_minimal_event_paused(self):
@@ -410,31 +439,40 @@ class EdgeCasesTest(unittest.TestCase):
 
     def test_systemic_failure(self):
         out = project_event(
-            _evt(st.EVENT_SYSTEMIC_FAILURE, signature="OOMKilled",
-                 log_path="/tmp/x.log"),
+            _evt(st.EVENT_SYSTEMIC_FAILURE, signature="OOMKilled", log_path="/tmp/x.log"),
             "my-plan",
         )
         self.assertIsNotNone(out)
         self.assertIn("OOMKilled", out)
 
     def test_systemic_failure_minimal(self):
-        out = project_event({"type": st.EVENT_SYSTEMIC_FAILURE, "ts": "2026-01-01T00:00:00Z"},
-                            "p")
+        out = project_event({"type": st.EVENT_SYSTEMIC_FAILURE, "ts": "2026-01-01T00:00:00Z"}, "p")
         self.assertIsNotNone(out)
 
     def test_orphan_reaped_filtered_default(self):
         out = project_event(
-            _evt(st.EVENT_PHASE_ORPHAN_REAPED, phase="impl", pid=12345,
-                 signaled="SIGTERM", cmdline_mismatch=False),
+            _evt(
+                st.EVENT_PHASE_ORPHAN_REAPED,
+                phase="impl",
+                pid=12345,
+                signaled="SIGTERM",
+                cmdline_mismatch=False,
+            ),
             "my-plan",
         )
         self.assertIsNone(out)
 
     def test_orphan_reaped_shown_with_verbose(self):
         out = project_event(
-            _evt(st.EVENT_PHASE_ORPHAN_REAPED, phase="impl", pid=12345,
-                 signaled="SIGTERM", cmdline_mismatch=False),
-            "my-plan", verbose=True,
+            _evt(
+                st.EVENT_PHASE_ORPHAN_REAPED,
+                phase="impl",
+                pid=12345,
+                signaled="SIGTERM",
+                cmdline_mismatch=False,
+            ),
+            "my-plan",
+            verbose=True,
         )
         self.assertIsNotNone(out)
         self.assertIn("orphan reaped", out)

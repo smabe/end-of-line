@@ -6,6 +6,7 @@ Worker-enqueued entries get an annotation block under their table row:
 
 Operator entries render unchanged (v1 shape, no annotation).
 """
+
 from __future__ import annotations
 
 import io
@@ -41,8 +42,9 @@ def _operator_entry(slug: str) -> dict:
     }
 
 
-def _worker_entry(slug: str, source_plan: str, source_phase: str,
-                  reason: str | None = None) -> dict:
+def _worker_entry(
+    slug: str, source_plan: str, source_phase: str, reason: str | None = None
+) -> dict:
     return {
         "slug": slug,
         "added_at": st.utcnow(),
@@ -59,11 +61,14 @@ def _seed_queue(project: Path, entries: list[dict]) -> None:
     cfg = ProjectConfig(project_root=project)
     queue_path = cfg.queue_path()
     queue_path.parent.mkdir(parents=True, exist_ok=True)
-    queue.save_atomic(queue_path, {
-        "schema_version": queue.SCHEMA_VERSION,
-        "queue": entries,
-        "history": [],
-    })
+    queue.save_atomic(
+        queue_path,
+        {
+            "schema_version": queue.SCHEMA_VERSION,
+            "queue": entries,
+            "history": [],
+        },
+    )
 
 
 class WorkerRenderTestCase(unittest.TestCase):
@@ -81,19 +86,26 @@ class WorkerRenderTestCase(unittest.TestCase):
 
     def test_list_worker_entry_shows_source(self) -> None:
         _write_plan(self.project, "feature-c")
-        _seed_queue(self.project, [
-            _worker_entry("feature-c", "feature-b", "c-extract"),
-        ])
+        _seed_queue(
+            self.project,
+            [
+                _worker_entry("feature-c", "feature-b", "c-extract"),
+            ],
+        )
         rc, out = self._run()
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("(from feature-b/c-extract)", out)
 
     def test_list_worker_entry_with_reason_shows_reason(self) -> None:
         _write_plan(self.project, "feature-c")
-        _seed_queue(self.project, [
-            _worker_entry("feature-c", "feature-b", "c-extract",
-                          reason="follow-up test coverage"),
-        ])
+        _seed_queue(
+            self.project,
+            [
+                _worker_entry(
+                    "feature-c", "feature-b", "c-extract", reason="follow-up test coverage"
+                ),
+            ],
+        )
         rc, out = self._run()
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("(from feature-b/c-extract)", out)
@@ -110,12 +122,14 @@ class WorkerRenderTestCase(unittest.TestCase):
     def test_list_mixed_operator_worker_entries(self) -> None:
         for slug in ("plan-a", "plan-b", "plan-c"):
             _write_plan(self.project, slug)
-        _seed_queue(self.project, [
-            _operator_entry("plan-a"),
-            _worker_entry("plan-b", "feature-b", "phase-x"),
-            _worker_entry("plan-c", "feature-b", "phase-y",
-                          reason="chained work"),
-        ])
+        _seed_queue(
+            self.project,
+            [
+                _operator_entry("plan-a"),
+                _worker_entry("plan-b", "feature-b", "phase-x"),
+                _worker_entry("plan-c", "feature-b", "phase-y", reason="chained work"),
+            ],
+        )
         rc, out = self._run()
         self.assertEqual(rc, ExitCode.OK)
         # Three POS rows (1, 2, 3 in table).
@@ -133,10 +147,13 @@ class WorkerRenderTestCase(unittest.TestCase):
     def test_list_with_only_worker_entries_no_regression(self) -> None:
         for slug in ("plan-b", "plan-c"):
             _write_plan(self.project, slug)
-        _seed_queue(self.project, [
-            _worker_entry("plan-b", "src-plan", "phase-1"),
-            _worker_entry("plan-c", "src-plan", "phase-2"),
-        ])
+        _seed_queue(
+            self.project,
+            [
+                _worker_entry("plan-b", "src-plan", "phase-1"),
+                _worker_entry("plan-c", "src-plan", "phase-2"),
+            ],
+        )
         rc, out = self._run()
         self.assertEqual(rc, ExitCode.OK)
         # Header present — no IndexError.

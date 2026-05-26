@@ -9,6 +9,7 @@ Stored at `$XDG_CONFIG_HOME/clu/registry.json` (default `~/.config/clu/`).
 Writes go through the same tmp+fsync+rename + flock primitives as the
 per-plan state files.
 """
+
 from __future__ import annotations
 
 import os
@@ -74,11 +75,15 @@ def register(project_root: Path, plan_slug: str, *, path: Path | None = None) ->
         key = (str(project_root), plan_slug)
         if any((row["project_root"], row["plan_slug"]) == key for row in data["plans"]):
             return False
-        data["plans"].append(asdict(PlanEntry(
-            project_root=str(project_root),
-            plan_slug=plan_slug,
-            registered_at=st.utcnow(),
-        )))
+        data["plans"].append(
+            asdict(
+                PlanEntry(
+                    project_root=str(project_root),
+                    plan_slug=plan_slug,
+                    registered_at=st.utcnow(),
+                )
+            )
+        )
     return True
 
 
@@ -91,6 +96,7 @@ def load_entry_state(entry: PlanEntry) -> dict | None:
     recoverable failure mode; never raises.
     """
     from .config import load_project_config  # local import to avoid cycle
+
     try:
         cfg = load_project_config(Path(entry.project_root))
         state_path = cfg.state_path(entry.plan_slug)
@@ -112,7 +118,8 @@ def unregister(project_root: Path, plan_slug: str, *, path: Path | None = None) 
     with _mutate(target) as data:
         before = len(data["plans"])
         data["plans"] = [
-            row for row in data["plans"]
+            row
+            for row in data["plans"]
             if (row["project_root"], row["plan_slug"]) != (str(project_root), plan_slug)
         ]
         return len(data["plans"]) != before

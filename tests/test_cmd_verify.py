@@ -1,6 +1,7 @@
 """Tests for `clu verify` — runs the configured verify command and stamps
 attestations.verify on success; exits non-zero without stamping on failure.
 """
+
 from __future__ import annotations
 
 import io
@@ -80,10 +81,15 @@ class CmdVerifyTestCase(GitProjectTestCase):
         # Pass a forged token → CLAIM_MISMATCH, no stamp.
         buf = io.StringIO()
         with redirect_stderr(buf):
-            rc = main(self._argv(
-                "verify", "--phase", "phase-a",
-                "--token", "forged-token-xyz",
-            ))
+            rc = main(
+                self._argv(
+                    "verify",
+                    "--phase",
+                    "phase-a",
+                    "--token",
+                    "forged-token-xyz",
+                )
+            )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
         self.assertIsNone(self._attestation())
 
@@ -96,9 +102,15 @@ class CmdVerifyTestCase(GitProjectTestCase):
 
     def test_verify_worker_correct_token_stamps(self) -> None:
         token = self._claim("phase-a")
-        rc = main(self._argv(
-            "verify", "--phase", "phase-a", "--token", token,
-        ))
+        rc = main(
+            self._argv(
+                "verify",
+                "--phase",
+                "phase-a",
+                "--token",
+                token,
+            )
+        )
         self.assertEqual(rc, ExitCode.OK)
         stamp = self._attestation()
         self.assertIsNotNone(stamp)
@@ -111,9 +123,7 @@ class CmdVerifyTestCase(GitProjectTestCase):
         # The stamp's commit_sha must be the pre-run HEAD, not the new one.
         script = self.project / "mid_run_commit.sh"
         script.write_text(
-            "#!/bin/sh\n"
-            f"git -C {self.project} commit --allow-empty -m mid-run\n"
-            "exit 0\n"
+            f"#!/bin/sh\ngit -C {self.project} commit --allow-empty -m mid-run\nexit 0\n"
         )
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
         write_config(self.project, test_command=str(script))
@@ -123,7 +133,9 @@ class CmdVerifyTestCase(GitProjectTestCase):
         self.assertEqual(rc, ExitCode.OK)
         post_sha = subprocess.run(
             ["git", "-C", str(self.project), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         self.assertNotEqual(pre_sha, post_sha, "mid-run commit should have advanced HEAD")
         stamp = self._attestation()
@@ -156,10 +168,7 @@ class CmdVerifyTestCase(GitProjectTestCase):
         self._claim("phase-a")
         rc = main(self._argv("verify", "--phase", "phase-a"))
         self.assertEqual(rc, ExitCode.OK)
-        events = [
-            e for e in self._read()["events"]
-            if e["type"] == st.EVENT_VERIFY_STAMPED
-        ]
+        events = [e for e in self._read()["events"] if e["type"] == st.EVENT_VERIFY_STAMPED]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["commit_sha"], self.sha)
 
@@ -181,8 +190,9 @@ class CmdVerifyTestCase(GitProjectTestCase):
             self.assertEqual(rc, ExitCode.OK)
             stamp = self._attestation()
             self.assertIsNotNone(stamp)
-            self.assertEqual(stamp["commit_sha"], wt_sha,
-                             "stamp must use worktree HEAD, not canonical HEAD")
+            self.assertEqual(
+                stamp["commit_sha"], wt_sha, "stamp must use worktree HEAD, not canonical HEAD"
+            )
         finally:
             wt_tmp.cleanup()
 

@@ -4,6 +4,7 @@ These tests deliberately do NOT inherit CluTestCase — they control the
 env manually so they can exercise both the "guard fires" and "guard is
 silent" branches.
 """
+
 from __future__ import annotations
 
 import os
@@ -58,10 +59,13 @@ class XdgGuardSilentTestCase(unittest.TestCase):
         self.tmp_path = Path(self._tmp.name)
 
     def test_guard_silent_on_isolated_xdg_in_test_mode(self):
-        with mock.patch.dict(os.environ, {
-            "CLU_TEST_MODE": "1",
-            "XDG_CONFIG_HOME": str(self.tmp_path),
-        }):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CLU_TEST_MODE": "1",
+                "XDG_CONFIG_HOME": str(self.tmp_path),
+            },
+        ):
             # Path is not under home — guard is silent, write proceeds.
             inbox.write_event(
                 type="test",

@@ -6,6 +6,7 @@ without dedicated unit tests; the only coverage so far is the
 render_stuck_blocker happy path in test_stuck_blocker.py. This module
 locks down the public surface of render_blocker so future edits don't
 silently break the inbound iMessage reply grammar."""
+
 from __future__ import annotations
 
 import unittest

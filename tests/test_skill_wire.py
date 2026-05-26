@@ -3,6 +3,7 @@
 File-content assertions against the bundled SKILL.md sources. Cheap and durable —
 they catch content drift without behavioral overhead.
 """
+
 from __future__ import annotations
 
 import io
@@ -19,9 +20,7 @@ from end_of_line.cli import main, ExitCode
 
 class CluPlanSkillMonitorTest(unittest.TestCase):
     def test_clu_plan_skill_mentions_monitor_watch(self):
-        content = (
-            files("end_of_line").joinpath("skills/clu-plan/SKILL.md").read_text()
-        )
+        content = files("end_of_line").joinpath("skills/clu-plan/SKILL.md").read_text()
         self.assertIn(
             "clu watch",
             content,
@@ -36,9 +35,7 @@ class CluPlanSkillMonitorTest(unittest.TestCase):
 
 class CluMonitorSkillWatchSiblingTest(unittest.TestCase):
     def test_clu_monitor_skill_mentions_watch_sibling(self):
-        content = (
-            files("end_of_line").joinpath("skills/clu-monitor/SKILL.md").read_text()
-        )
+        content = files("end_of_line").joinpath("skills/clu-monitor/SKILL.md").read_text()
         self.assertIn(
             "clu watch",
             content,

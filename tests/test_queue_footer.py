@@ -6,6 +6,7 @@ registered projects. The footer is hidden when no project has a
 non-empty queue, and surfaces unreadable queue files inline as a
 prompt for the operator to investigate.
 """
+
 from __future__ import annotations
 
 import io
@@ -38,21 +39,29 @@ class FleetFooterTestCase(unittest.TestCase):
         return project
 
     def _write_queue(
-        self, project: Path, slugs: list[str], history: list[dict] | None = None,
+        self,
+        project: Path,
+        slugs: list[str],
+        history: list[dict] | None = None,
     ) -> Path:
         queue_path = ProjectConfig(project_root=project).queue_path()
         queue_path.parent.mkdir(parents=True, exist_ok=True)
-        queue.save_atomic(queue_path, {
-            "schema_version": queue.SCHEMA_VERSION,
-            "queue": [
-                {
-                    "slug": s, "added_at": st.utcnow(),
-                    "added_by": "operator", "position_at_add": "tail",
-                }
-                for s in slugs
-            ],
-            "history": history or [],
-        })
+        queue.save_atomic(
+            queue_path,
+            {
+                "schema_version": queue.SCHEMA_VERSION,
+                "queue": [
+                    {
+                        "slug": s,
+                        "added_at": st.utcnow(),
+                        "added_by": "operator",
+                        "position_at_add": "tail",
+                    }
+                    for s in slugs
+                ],
+                "history": history or [],
+            },
+        )
         return queue_path
 
     def _run(self, argv: list[str]) -> str:

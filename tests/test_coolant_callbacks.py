@@ -6,6 +6,7 @@ file confirms each of the four cli.py callback handlers (`cmd_complete`,
 Patches `end_of_line.state.coolant.emit_stop` and asserts the emit fires
 exactly once with the expected agent_id / session_id.
 """
+
 from __future__ import annotations
 
 import io
@@ -26,18 +27,27 @@ class CoolantCallbacksTestCase(GitProjectTestCase):
         kwargs = emit.call_args.kwargs
         self.assertEqual(kwargs["session_id"], token)
         self.assertEqual(
-            kwargs["agent_id"], coolant.format_agent_id("test-plan", phase),
+            kwargs["agent_id"],
+            coolant.format_agent_id("test-plan", phase),
         )
         self.assertEqual(kwargs["agent_type"], coolant.AGENT_TYPE)
 
     def test_cmd_complete_emits_stop(self) -> None:
         token = self._claim()
         with patch("end_of_line.state.coolant.emit_stop") as emit:
-            rc = main(self._argv(
-                "complete", "--phase", "a", "--token", token,
-                "--commit", self.sha,
-                "--skip-verify", "--skip-simplify",
-            ))
+            rc = main(
+                self._argv(
+                    "complete",
+                    "--phase",
+                    "a",
+                    "--token",
+                    token,
+                    "--commit",
+                    self.sha,
+                    "--skip-verify",
+                    "--skip-simplify",
+                )
+            )
         self.assertEqual(rc, ExitCode.OK)
         self._expect_one_stop_call(emit, token=token)
 
@@ -46,10 +56,21 @@ class CoolantCallbacksTestCase(GitProjectTestCase):
         buf = io.StringIO()
         with patch("end_of_line.state.coolant.emit_stop") as emit:
             with redirect_stderr(buf), redirect_stdout(buf):
-                rc = main(self._argv(
-                    "block", "--phase", "a", "--token", token,
-                    "--question", "stuck?", "--option", "A", "--option", "B",
-                ))
+                rc = main(
+                    self._argv(
+                        "block",
+                        "--phase",
+                        "a",
+                        "--token",
+                        token,
+                        "--question",
+                        "stuck?",
+                        "--option",
+                        "A",
+                        "--option",
+                        "B",
+                    )
+                )
         self.assertEqual(rc, ExitCode.OK)
         self._expect_one_stop_call(emit, token=token)
 
@@ -58,10 +79,17 @@ class CoolantCallbacksTestCase(GitProjectTestCase):
         buf = io.StringIO()
         with patch("end_of_line.state.coolant.emit_stop") as emit:
             with redirect_stderr(buf), redirect_stdout(buf):
-                rc = main(self._argv(
-                    "force-complete", "--phase", "a", "--commit", self.sha,
-                    "--reason", "zombie",
-                ))
+                rc = main(
+                    self._argv(
+                        "force-complete",
+                        "--phase",
+                        "a",
+                        "--commit",
+                        self.sha,
+                        "--reason",
+                        "zombie",
+                    )
+                )
         self.assertEqual(rc, ExitCode.OK)
         self._expect_one_stop_call(emit, token=token)
 

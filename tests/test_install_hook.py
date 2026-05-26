@@ -10,6 +10,7 @@ Idempotency contract: install detects an existing entry by absolute
 hook_path match (the path baked into the entry's `command`), not by
 fuzzy name match. Re-running install is a no-op.
 """
+
 from __future__ import annotations
 
 import io
@@ -32,7 +33,8 @@ class InstallHookTestBase(unittest.TestCase):
         self.home = Path(self.tmp.name)
         # Redirect HOME so settings.json + marker land in tmp.
         self.patcher_home = mock.patch.dict(
-            os.environ, {"HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config")},
+            os.environ,
+            {"HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config")},
         )
         self.patcher_home.start()
         self.addCleanup(self.patcher_home.stop)
@@ -101,16 +103,18 @@ class FormatPreservationTests(InstallHookTestBase):
 
     def test_preserves_nested_array_format(self) -> None:
         # Operator's real-machine style: SessionStart with nested-array.
-        self._seed({
-            "SessionStart": [
-                {
-                    "matcher": "startup",
-                    "hooks": [
-                        {"type": "command", "command": "echo hi", "timeout": 5},
-                    ],
-                },
-            ],
-        })
+        self._seed(
+            {
+                "SessionStart": [
+                    {
+                        "matcher": "startup",
+                        "hooks": [
+                            {"type": "command", "command": "echo hi", "timeout": 5},
+                        ],
+                    },
+                ],
+            }
+        )
         rc, _, err = self._run_install()
         self.assertEqual(rc, int(ExitCode.OK), msg=err)
         entries = self._ups_entries()
@@ -121,9 +125,11 @@ class FormatPreservationTests(InstallHookTestBase):
 
     def test_preserves_flat_array_format(self) -> None:
         # Flat: hook event maps to a list of {type, command} dicts directly.
-        self._seed({
-            "PreToolUse": [{"type": "command", "command": "echo pre"}],
-        })
+        self._seed(
+            {
+                "PreToolUse": [{"type": "command", "command": "echo pre"}],
+            }
+        )
         rc, _, err = self._run_install()
         self.assertEqual(rc, int(ExitCode.OK), msg=err)
         entries = self._ups_entries()
@@ -133,23 +139,31 @@ class FormatPreservationTests(InstallHookTestBase):
         self.assertNotIn("hooks", entries[0])
 
     def test_does_not_clobber_other_user_hooks(self) -> None:
-        self._seed({
-            "SessionStart": [{
-                "hooks": [{"type": "command", "command": "echo ss", "timeout": 5}],
-            }],
-            "PreToolUse": [{
-                "hooks": [{"type": "command", "command": "echo pre", "timeout": 5}],
-            }],
-        })
+        self._seed(
+            {
+                "SessionStart": [
+                    {
+                        "hooks": [{"type": "command", "command": "echo ss", "timeout": 5}],
+                    }
+                ],
+                "PreToolUse": [
+                    {
+                        "hooks": [{"type": "command", "command": "echo pre", "timeout": 5}],
+                    }
+                ],
+            }
+        )
         rc, _, _ = self._run_install()
         self.assertEqual(rc, int(ExitCode.OK))
         data = json.loads(self.settings.read_text())
         # Existing hooks untouched.
         self.assertEqual(
-            data["hooks"]["SessionStart"][0]["hooks"][0]["command"], "echo ss",
+            data["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "echo ss",
         )
         self.assertEqual(
-            data["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo pre",
+            data["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "echo pre",
         )
         # New one added.
         self.assertEqual(len(data["hooks"]["UserPromptSubmit"]), 1)
@@ -168,13 +182,21 @@ class UninstallTests(InstallHookTestBase):
     def test_uninstall_removes_only_our_entry(self) -> None:
         # Seed with a user's own UserPromptSubmit hook first.
         self.settings.parent.mkdir(parents=True, exist_ok=True)
-        self.settings.write_text(json.dumps({
-            "hooks": {
-                "UserPromptSubmit": [
-                    {"hooks": [{"type": "command", "command": "echo theirs", "timeout": 5}]},
-                ],
-            },
-        }))
+        self.settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "hooks": [
+                                    {"type": "command", "command": "echo theirs", "timeout": 5}
+                                ]
+                            },
+                        ],
+                    },
+                }
+            )
+        )
         # Install ours.
         rc, _, _ = self._run_install()
         self.assertEqual(rc, int(ExitCode.OK))
@@ -205,17 +227,22 @@ class UninstallTests(InstallHookTestBase):
     def test_uninstall_when_nothing_installed(self) -> None:
         # settings.json exists but lacks our entry.
         self.settings.parent.mkdir(parents=True, exist_ok=True)
-        self.settings.write_text(json.dumps({
-            "hooks": {
-                "PreToolUse": [{"type": "command", "command": "echo pre"}],
-            },
-        }))
+        self.settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [{"type": "command", "command": "echo pre"}],
+                    },
+                }
+            )
+        )
         rc, out, _ = self._run_uninstall()
         self.assertEqual(rc, int(ExitCode.OK))
         # Other hooks untouched.
         data = json.loads(self.settings.read_text())
         self.assertEqual(
-            data["hooks"]["PreToolUse"][0]["command"], "echo pre",
+            data["hooks"]["PreToolUse"][0]["command"],
+            "echo pre",
         )
 
 

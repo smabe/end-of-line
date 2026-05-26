@@ -1,4 +1,5 @@
 """Tests for multi-channel config schema + auto-migration (phase schema)."""
+
 from __future__ import annotations
 
 import json
@@ -34,9 +35,15 @@ class ChannelsMigrationTestCase(unittest.TestCase):
         self.assertTrue(ch.enabled)
 
     def test_load_native_channels_list_unchanged(self) -> None:
-        self._write({"notify": {"channels": [
-            {"kind": "imessage", "to": "+15550000000"},
-        ]}})
+        self._write(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "imessage", "to": "+15550000000"},
+                    ]
+                }
+            }
+        )
         cfg = load_project_config(self.root)
         self.assertEqual(len(cfg.notify.channels), 1)
         ch = cfg.notify.channels[0]
@@ -54,9 +61,15 @@ class ChannelsMigrationTestCase(unittest.TestCase):
             load_project_config(self.root)
 
     def test_load_accepts_discord_kind_schema_only(self) -> None:
-        self._write({"notify": {"channels": [
-            {"kind": "discord", "bot_token": "x", "user_id": "y"},
-        ]}})
+        self._write(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "discord", "bot_token": "x", "user_id": "y"},
+                    ]
+                }
+            }
+        )
         cfg = load_project_config(self.root)
         self.assertEqual(len(cfg.notify.channels), 1)
         ch = cfg.notify.channels[0]
@@ -65,31 +78,53 @@ class ChannelsMigrationTestCase(unittest.TestCase):
         self.assertEqual(ch.params["user_id"], "y")
 
     def test_load_channel_kinds_filter_defaults_to_none(self) -> None:
-        self._write({"notify": {"channels": [
-            {"kind": "imessage", "to": "+1"},
-        ]}})
+        self._write(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "imessage", "to": "+1"},
+                    ]
+                }
+            }
+        )
         cfg = load_project_config(self.root)
         self.assertIsNone(cfg.notify.channels[0].kinds)
 
     def test_load_channel_enabled_defaults_true(self) -> None:
-        self._write({"notify": {"channels": [
-            {"kind": "imessage", "to": "+1"},
-        ]}})
+        self._write(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "imessage", "to": "+1"},
+                    ]
+                }
+            }
+        )
         cfg = load_project_config(self.root)
         self.assertTrue(cfg.notify.channels[0].enabled)
 
     def test_load_channel_enabled_false_persists(self) -> None:
-        self._write({"notify": {"channels": [
-            {"kind": "imessage", "to": "+1", "enabled": False},
-        ]}})
+        self._write(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "imessage", "to": "+1", "enabled": False},
+                    ]
+                }
+            }
+        )
         cfg = load_project_config(self.root)
         self.assertFalse(cfg.notify.channels[0].enabled)
 
     def test_load_migration_preserves_quiet_hours(self) -> None:
-        self._write({"notify": {
-            "imessage": {"to": "+1"},
-            "quiet_hours": ["22:00", "08:00"],
-        }})
+        self._write(
+            {
+                "notify": {
+                    "imessage": {"to": "+1"},
+                    "quiet_hours": ["22:00", "08:00"],
+                }
+            }
+        )
         cfg = load_project_config(self.root)
         self.assertEqual(len(cfg.notify.channels), 1)
         self.assertEqual(cfg.notify.quiet_hours, ("22:00", "08:00"))

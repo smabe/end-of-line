@@ -1,5 +1,6 @@
 """Tests for `clu prior-blocker` — worker-side helper that detects the
 resume-after-answer case without reinventing inline Python in every shell."""
+
 from __future__ import annotations
 
 import io
@@ -31,9 +32,7 @@ class PriorBlockerTestCase(unittest.TestCase):
         isolate_registry(self, self.project)
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
 
@@ -43,9 +42,12 @@ class PriorBlockerTestCase(unittest.TestCase):
     def _argv(self, phase: str) -> list[str]:
         return [
             "prior-blocker",
-            "--project", str(self.project),
-            "--plan", "test-plan",
-            "--phase", phase,
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
+            "--phase",
+            phase,
         ]
 
     def _mutate(self, mut) -> None:
@@ -64,6 +66,7 @@ class PriorBlockerTestCase(unittest.TestCase):
         def mut(d: dict) -> None:
             st.add_blocker(d, "a", "Q?", ["yes", "no"], "ctx")
             st.answer_blocker(d, d["blockers"][-1]["id"], "yes")
+
         self._mutate(mut)
 
         rc, out, _ = self._run("a")
@@ -73,6 +76,7 @@ class PriorBlockerTestCase(unittest.TestCase):
     def test_unanswered_blocker_exits_nonzero(self) -> None:
         def mut(d: dict) -> None:
             st.add_blocker(d, "a", "Q?", ["yes"], "ctx")
+
         self._mutate(mut)
 
         rc, _, err = self._run("a")
@@ -84,6 +88,7 @@ class PriorBlockerTestCase(unittest.TestCase):
         def mut(d: dict) -> None:
             st.add_blocker(d, "b", "Q?", ["yes"], "ctx")
             st.answer_blocker(d, d["blockers"][-1]["id"], "yes")
+
         self._mutate(mut)
 
         rc, _, err = self._run("a")
@@ -98,6 +103,7 @@ class PriorBlockerTestCase(unittest.TestCase):
             st.answer_blocker(d, d["blockers"][-1]["id"], "one")
             st.add_blocker(d, "a", "Q2?", ["two"], "")
             st.answer_blocker(d, d["blockers"][-1]["id"], "two")
+
         self._mutate(mut)
 
         rc, out, _ = self._run("a")

@@ -5,6 +5,7 @@ don't re-emit on every tick once a wedge is detected. The dedup map lives
 on `current_claim.stuck_tool_emitted_at` and auto-clears when the claim is
 released (release_claim wipes current_claim entirely).
 """
+
 from __future__ import annotations
 
 import unittest
@@ -68,7 +69,9 @@ class StuckToolDedupTestCase(unittest.TestCase):
         data = st.empty_state("plan-x", "/tmp/plan-x")
         data["current_claim"] = self._claim()
         st.mark_tool_stuck_emitted(
-            data["current_claim"], 12345, "2026-05-21T14:05:00Z",
+            data["current_claim"],
+            12345,
+            "2026-05-21T14:05:00Z",
         )
         st.release_claim(data)
         self.assertIsNone(data["current_claim"])

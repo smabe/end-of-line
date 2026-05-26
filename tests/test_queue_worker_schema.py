@@ -1,5 +1,6 @@
 """Phase `foundation` tests: ExitCode.QUEUE_CAP, event constants, config default,
 and queue-entry schema extension for worker-enqueue lineage fields."""
+
 from __future__ import annotations
 
 import json

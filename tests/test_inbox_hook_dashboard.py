@@ -9,6 +9,7 @@ teaching the primary session what to do — investigate autonomously,
 propose a recovery path, await operator approval before destructive
 action.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,18 +26,29 @@ from tests import isolate_monitor_marker
 
 
 def _run_hook(
-    *, cwd: Path, xdg: Path, stdin_payload: str = "{}",
+    *,
+    cwd: Path,
+    xdg: Path,
+    stdin_payload: str = "{}",
     timeout: float = 5.0,
 ) -> tuple[int, str, str]:
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = str(xdg)
-    env["PYTHONPATH"] = str(
-        Path(__file__).resolve().parent.parent,
-    ) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(
+            Path(__file__).resolve().parent.parent,
+        )
+        + os.pathsep
+        + env.get("PYTHONPATH", "")
+    )
     proc = subprocess.run(
         [sys.executable, "-m", "end_of_line.hooks.clu_inbox_surface"],
-        cwd=str(cwd), env=env, input=stdin_payload,
-        capture_output=True, text=True, timeout=timeout,
+        cwd=str(cwd),
+        env=env,
+        input=stdin_payload,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -56,10 +68,7 @@ class _DashboardHookBase(unittest.TestCase):
             type="attestation_refused",
             plan_slug="plan-x",
             project_root=str(self.proj),
-            summary=(
-                "Worker on plan-x/phase-a hit the verify gate "
-                "(stamp missing or stale)"
-            ),
+            summary=("Worker on plan-x/phase-a hit the verify gate (stamp missing or stale)"),
             details={
                 "phase_id": "phase-a",
                 "gate": "verify",
@@ -73,9 +82,7 @@ class _DashboardHookBase(unittest.TestCase):
             type="stalled_claim",
             plan_slug="plan-y",
             project_root=str(self.proj),
-            summary=(
-                "Claim on phase phase-b stalled 12min past lease"
-            ),
+            summary=("Claim on phase phase-b stalled 12min past lease"),
             details={
                 "phase_id": "phase-b",
                 "stalled_min": 12,
@@ -103,8 +110,7 @@ class AttestationRefusedInstructionTest(_DashboardHookBase):
         self.assertIn("investigate", lowered)
         self.assertIn("recommend", lowered)
         self.assertTrue(
-            "operator-approval" in lowered or "operator approval" in lowered
-            or "do not" in lowered,
+            "operator-approval" in lowered or "operator approval" in lowered or "do not" in lowered,
             f"missing operator-approval guard:\n{ctx}",
         )
         # Must name the bypass commands the session shouldn't run unsanctioned.
@@ -115,8 +121,10 @@ class AttestationRefusedInstructionTest(_DashboardHookBase):
 
     def test_no_attestation_refused_no_block(self) -> None:
         inbox.write_event(
-            type="halted", plan_slug="foo",
-            project_root=str(self.proj), summary="just a halt",
+            type="halted",
+            plan_slug="foo",
+            project_root=str(self.proj),
+            summary="just a halt",
         )
         rc, out, err = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)
@@ -150,21 +158,21 @@ class StalledClaimInstructionTest(_DashboardHookBase):
         self.assertIn("investigate", lowered)
         self.assertIn("recommend", lowered)
         self.assertTrue(
-            "operator-approval" in lowered or "operator approval" in lowered
-            or "do not" in lowered,
+            "operator-approval" in lowered or "operator approval" in lowered or "do not" in lowered,
             f"missing operator-approval guard:\n{ctx}",
         )
         # Must name the recovery commands the operator may want gated.
         self.assertTrue(
-            any(cmd in lowered for cmd in
-                ("force-complete", "release-claim", "clu retry")),
+            any(cmd in lowered for cmd in ("force-complete", "release-claim", "clu retry")),
             f"instruction should name recovery commands:\n{ctx}",
         )
 
     def test_no_stalled_claim_no_block(self) -> None:
         inbox.write_event(
-            type="completed", plan_slug="foo",
-            project_root=str(self.proj), summary="done",
+            type="completed",
+            plan_slug="foo",
+            project_root=str(self.proj),
+            summary="done",
         )
         rc, out, err = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)
@@ -177,12 +185,17 @@ class StalledClaimInstructionTest(_DashboardHookBase):
         self._write_attestation_refused()
         self._write_stalled_claim()
         inbox.write_event(
-            type="tool_stuck", plan_slug="plan-z",
+            type="tool_stuck",
+            plan_slug="plan-z",
             project_root=str(self.proj),
             summary="worker stuck",
             details={
-                "phase_id": "phase-c", "worker_pid": 1, "descendant_pid": 2,
-                "command": "x", "elapsed_seconds": 600, "cpu_seconds": 0,
+                "phase_id": "phase-c",
+                "worker_pid": 1,
+                "descendant_pid": 2,
+                "command": "x",
+                "elapsed_seconds": 600,
+                "cpu_seconds": 0,
             },
         )
         rc, out, err = _run_hook(cwd=self.proj, xdg=self.xdg)

@@ -17,6 +17,7 @@ Subcommands (worker-side, called by phase-runner sessions):
 Worker-side commands require `--token` matching the live claim. Tokens come
 from `{token}` in the dispatch command template.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,16 +35,28 @@ import time
 from enum import IntEnum
 from pathlib import Path
 
-from . import coolant, cross_plan_rules, dispatch, dry_merge, fleet, monitor, notify, queue, registry, state as st, state_blocker, state_locator, supervisor, watch
+from . import (
+    coolant,
+    cross_plan_rules,
+    dispatch,
+    dry_merge,
+    fleet,
+    monitor,
+    notify,
+    queue,
+    registry,
+    state as st,
+    state_blocker,
+    state_locator,
+    supervisor,
+    watch,
+)
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
 
-_MONITOR_TIP = (
-    "\n  Tip: run /clu-monitor for background notifications on "
-    "halts and blockers.\n"
-)
+_MONITOR_TIP = "\n  Tip: run /clu-monitor for background notifications on halts and blockers.\n"
 
 
 def _maybe_print_monitor_tip() -> None:
@@ -68,14 +81,14 @@ def _print_worker_model(cfg: ProjectConfig) -> None:
     if model:
         print(f"worker model: {model} (pinned via --model in dispatch.command)")
     else:
-        print(
-            "worker model: resolves via Claude Code settings "
-            "(no --model in dispatch.command)"
-        )
+        print("worker model: resolves via Claude Code settings (no --model in dispatch.command)")
 
 
 def _maybe_print_watch_tip(
-    *, scope: str, slug: str | None = None, quiet: bool = False,
+    *,
+    scope: str,
+    slug: str | None = None,
+    quiet: bool = False,
 ) -> None:
     if quiet:
         return
@@ -135,7 +148,8 @@ def _append_clu_section(claude_md: Path) -> None:
 
 
 def _maybe_handle_claude_md_injection(
-    cfg: ProjectConfig, args: argparse.Namespace,
+    cfg: ProjectConfig,
+    args: argparse.Namespace,
 ) -> None:
     """CLAUDE.md `## clu` injection flow.
 
@@ -180,8 +194,7 @@ def _maybe_handle_claude_md_injection(
     else:
         _write_decline_marker(cfg)
         print(
-            "Skipped. Run `clu init --inject-claude-md` later if you "
-            "change your mind.",
+            "Skipped. Run `clu init --inject-claude-md` later if you change your mind.",
         )
 
 
@@ -195,7 +208,8 @@ def _prompt_yn(question: str, *, default: bool) -> bool:
 
 
 def _maybe_handle_notify_prompts(
-    cfg: "ProjectConfig", args: argparse.Namespace,
+    cfg: "ProjectConfig",
+    args: argparse.Namespace,
 ) -> None:
     """Interactive iMessage/Discord channel setup during `clu init`.
 
@@ -266,12 +280,14 @@ def _translate_claim_mismatch(fn):
     catch ClaimMismatch, call _die. The decorator keeps the command bodies
     focused on the work and forces a uniform exit-code for forged callers.
     """
+
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
         except st.ClaimMismatch as exc:
             return _die(ExitCode.CLAIM_MISMATCH, str(exc))
+
     return wrapper
 
 
@@ -280,9 +296,12 @@ def main(argv: list[str] | None = None) -> int:
         prog="clu", description="End of Line — plan orchestrator (clu CLI)"
     )
     parser.add_argument(
-        "--no-notify", action="store_true", default=False, dest="no_notify",
+        "--no-notify",
+        action="store_true",
+        default=False,
+        dest="no_notify",
         help="Suppress all outbound notify sends for this invocation "
-             "(inbox writes are unaffected). Useful for debugging or dry-runs.",
+        "(inbox writes are unaffected). Useful for debugging or dry-runs.",
     )
     # required=False so bare `clu` falls through to the fleet view — the
     # daily-driver entry point. `clu list` keeps the dumb name+root listing
@@ -291,33 +310,38 @@ def main(argv: list[str] | None = None) -> int:
 
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument(
-            "--project", type=Path, default=None,
+            "--project",
+            type=Path,
+            default=None,
             help="Project root (contains .orchestrator.json). "
-                 "Defaults to the current working directory.",
+            "Defaults to the current working directory.",
         )
         p.add_argument("--plan", required=True, help="Plan slug")
 
     p_tick = sub.add_parser(
         "tick",
         help="Run one supervisor tick (dispatches worker by default; "
-             "use --dry-tick for state mutation only). Omit --plan to "
-             "tick every plan in --project plus its cross-plan chain.",
+        "use --dry-tick for state mutation only). Omit --plan to "
+        "tick every plan in --project plus its cross-plan chain.",
     )
     p_tick.add_argument(
-        "--project", type=Path, default=None,
+        "--project",
+        type=Path,
+        default=None,
         help="Project root (contains .orchestrator.json). "
-             "Defaults to the current working directory.",
+        "Defaults to the current working directory.",
     )
     p_tick.add_argument(
-        "--plan", default=None,
+        "--plan",
+        default=None,
         help="Plan slug. Omit to tick every plan in the project "
-             "and run the cross-plan rule chain (queue advance, "
-             "auto-archive, worktree conflicts).",
+        "and run the cross-plan rule chain (queue advance, "
+        "auto-archive, worktree conflicts).",
     )
     p_tick.add_argument(
-        "--dry-tick", action="store_true",
-        help="Skip worker spawn (state mutation only — debug use). "
-             "Default is to dispatch.",
+        "--dry-tick",
+        action="store_true",
+        help="Skip worker spawn (state mutation only — debug use). Default is to dispatch.",
     )
 
     p_init = sub.add_parser("init", help="Bootstrap orchestrator state for a plan")
@@ -327,57 +351,73 @@ def main(argv: list[str] | None = None) -> int:
     # or force-off; neither → interactive prompt under TTY.
     _claude_md_group = p_init.add_mutually_exclusive_group()
     _claude_md_group.add_argument(
-        "--inject-claude-md", action="store_true",
+        "--inject-claude-md",
+        action="store_true",
         help="Force-append a clu section to project CLAUDE.md (no prompt). "
-             "Idempotent if section already exists.",
+        "Idempotent if section already exists.",
     )
     _claude_md_group.add_argument(
-        "--no-claude-md", action="store_true",
-        help="Skip the CLAUDE.md prompt and write a decline marker so "
-             "future inits don't re-ask.",
+        "--no-claude-md",
+        action="store_true",
+        help="Skip the CLAUDE.md prompt and write a decline marker so future inits don't re-ask.",
     )
     # Worktree flags — opt-in per-plan isolation. `--worktree` alone uses
     # the default path; with a value, treats it as the path. `--branch` and
     # `--base-ref` only take effect with `--worktree`.
     p_init.add_argument(
-        "--worktree", nargs="?", default=False, const=True,
+        "--worktree",
+        nargs="?",
+        default=False,
+        const=True,
         metavar="PATH",
         help="Create a git worktree at PATH (default: "
-             "<project-parent>/<basename>-<slug>) on branch clu/<slug> "
-             "(override with --branch) forked from current HEAD (override "
-             "with --base-ref). Plan dispatch will run with cwd=PATH.",
+        "<project-parent>/<basename>-<slug>) on branch clu/<slug> "
+        "(override with --branch) forked from current HEAD (override "
+        "with --base-ref). Plan dispatch will run with cwd=PATH.",
     )
     p_init.add_argument(
-        "--branch", default=None,
+        "--branch",
+        default=None,
         help="With --worktree: branch name to create (default: clu/<slug>). "
-             "Ignored without --worktree.",
+        "Ignored without --worktree.",
     )
     p_init.add_argument(
-        "--base-ref", default=None, dest="base_ref",
+        "--base-ref",
+        default=None,
+        dest="base_ref",
         help="With --worktree: ref to fork the new branch from "
-             "(default: HEAD). Ignored without --worktree.",
+        "(default: HEAD). Ignored without --worktree.",
     )
     p_init.add_argument(
-        "--lease-ttl-minutes", type=int, default=None,
+        "--lease-ttl-minutes",
+        type=int,
+        default=None,
         dest="lease_ttl_minutes",
         help="Override default lease TTL (minutes). Default: 60.",
     )
     p_init.add_argument(
-        "--stalled-heartbeat-minutes", type=int, default=None,
+        "--stalled-heartbeat-minutes",
+        type=int,
+        default=None,
         dest="stalled_heartbeat_minutes",
         help="Override stall threshold (minutes). Default: derived from lease TTL (max(15, lease_ttl//2)).",
     )
     p_init.add_argument(
-        "--max-attempts-per-phase", type=int, default=None,
+        "--max-attempts-per-phase",
+        type=int,
+        default=None,
         dest="max_attempts_per_phase",
         help="Override max phase attempts. Default: 3.",
     )
     p_init.add_argument(
-        "--quiet", action="store_true",
+        "--quiet",
+        action="store_true",
         help="Suppress post-init tips (useful for scripts).",
     )
     p_init.add_argument(
-        "--no-notify-prompt", action="store_false", dest="notify_prompt",
+        "--no-notify-prompt",
+        action="store_false",
+        dest="notify_prompt",
         help="Skip the interactive notify channel setup prompts.",
     )
     p_init.set_defaults(notify_prompt=True)
@@ -391,30 +431,39 @@ def main(argv: list[str] | None = None) -> int:
     p_archive = sub.add_parser(
         "archive",
         help="Wrap up a finished/paused plan: clean up its worktree + "
-             "branch when commits are upstream-reachable, or retain + "
-             "warn when ahead of origin. Idempotent.",
+        "branch when commits are upstream-reachable, or retain + "
+        "warn when ahead of origin. Idempotent.",
     )
     p_archive.add_argument(
-        "--project", type=Path, required=True, help="Project root.",
+        "--project",
+        type=Path,
+        required=True,
+        help="Project root.",
     )
     p_archive.add_argument(
-        "--plan", required=True, help="Plan slug.",
+        "--plan",
+        required=True,
+        help="Plan slug.",
     )
 
     p_migrate_archive = sub.add_parser(
         "migrate-archive",
         help="One-shot migration from the pre-#65 flat layout "
-             "(`plans/shipped/<file>.md`) to the nested layout "
-             "(`plans/archive/<slug>/<file>.md`). Groups by longest-"
-             "prefix master, `git mv`s each group, removes the empty "
-             "`plans/shipped/` directory, and commits the renames. "
-             "Idempotent (no-op when `plans/shipped/` is absent).",
+        "(`plans/shipped/<file>.md`) to the nested layout "
+        "(`plans/archive/<slug>/<file>.md`). Groups by longest-"
+        "prefix master, `git mv`s each group, removes the empty "
+        "`plans/shipped/` directory, and commits the renames. "
+        "Idempotent (no-op when `plans/shipped/` is absent).",
     )
     p_migrate_archive.add_argument(
-        "--project", type=Path, required=True, help="Project root.",
+        "--project",
+        type=Path,
+        required=True,
+        help="Project root.",
     )
     p_migrate_archive.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Preview the grouping without moving any files.",
     )
 
@@ -434,94 +483,103 @@ def main(argv: list[str] | None = None) -> int:
             help="Comma-separated branch names; overrides --batch resolution.",
         )
         p.add_argument(
-            "--no-suite", action="store_true",
+            "--no-suite",
+            action="store_true",
             help="Textual-merge only — skip test_command even when configured.",
         )
         p.add_argument(
-            "--base-ref", default="main",
+            "--base-ref",
+            default="main",
             help="Base ref to merge off. Defaults to main.",
         )
 
     p_validate = sub.add_parser(
         "validate",
         help="Dry-merge a batch's branches in a scratch worktree and "
-             "optionally run the project's test_command. Mode-agnostic "
-             "validate path; does NOT mutate plan state or files (the "
-             "cross-plan rule owns that). Used by `clu ship --check`.",
+        "optionally run the project's test_command. Mode-agnostic "
+        "validate path; does NOT mutate plan state or files (the "
+        "cross-plan rule owns that). Used by `clu ship --check`.",
     )
     _add_validate_args(p_validate)
 
     p_integrate = sub.add_parser(
         "integrate",
         help="DEPRECATED alias for `clu validate`. The verb 'integrate' "
-             "never updated main; use `clu validate` for dry-merge "
-             "validation, `clu ship` to actually land code.",
+        "never updated main; use `clu validate` for dry-merge "
+        "validation, `clu ship` to actually land code.",
         description="DEPRECATED alias for `clu validate` — kept for one "
-                    "release cycle for muscle-memory continuity. Runs the "
-                    "same dry-merge validation; does NOT touch main. "
-                    "Use `clu validate` directly going forward; use "
-                    "`clu ship` to actually land code.",
+        "release cycle for muscle-memory continuity. Runs the "
+        "same dry-merge validation; does NOT touch main. "
+        "Use `clu validate` directly going forward; use "
+        "`clu ship` to actually land code.",
     )
     _add_validate_args(p_integrate)
 
     p_ship = sub.add_parser(
         "ship",
         help="One-action post-worker integration: validate, merge "
-             "to main (or open PR), push, trigger archive. Operator-"
-             "facing; preview-then-confirm gated by --yes.",
+        "to main (or open PR), push, trigger archive. Operator-"
+        "facing; preview-then-confirm gated by --yes.",
     )
     p_ship.add_argument("--project", type=Path, default=None)
     ship_target = p_ship.add_mutually_exclusive_group(required=True)
     ship_target.add_argument("--plan", help="Plan slug to ship.")
     ship_target.add_argument(
-        "--all-done", action="store_true",
+        "--all-done",
+        action="store_true",
         help="Ship every DONE plan with an unmerged branch.",
     )
     ship_mode = p_ship.add_mutually_exclusive_group()
     ship_mode.add_argument(
-        "--direct", action="store_true",
+        "--direct",
+        action="store_true",
         help="Merge to main directly and push (default).",
     )
     ship_mode.add_argument(
-        "--as-pr", action="store_true",
+        "--as-pr",
+        action="store_true",
         help="Open a GitHub PR instead of merging directly.",
     )
     p_ship.add_argument(
-        "--check", action="store_true",
+        "--check",
+        action="store_true",
         help="Validate only; no destructive steps.",
     )
     p_ship.add_argument(
-        "--yes", action="store_true",
-        help="Confirm destructive steps. Without this, prints a "
-             "preview and exits.",
+        "--yes",
+        action="store_true",
+        help="Confirm destructive steps. Without this, prints a preview and exits.",
     )
 
     p_unregister = sub.add_parser(
         "unregister",
         help="Remove plan(s) from the host registry. Per-plan: "
-             "--project P --plan S. Batch: --all-archived prunes every "
-             "registry entry whose master plan file no longer exists.",
+        "--project P --plan S. Batch: --all-archived prunes every "
+        "registry entry whose master plan file no longer exists.",
     )
     # --project / --plan are optional at parse-time so --all-archived can
     # forbid them; cmd_unregister validates the combination at runtime.
     p_unregister.add_argument(
-        "--project", type=Path, default=None,
+        "--project",
+        type=Path,
+        default=None,
         help="Project root (required without --all-archived)",
     )
     p_unregister.add_argument(
-        "--plan", default=None,
-        help="Plan slug (required without --all-archived; "
-             "mutually exclusive with --all-archived)",
+        "--plan",
+        default=None,
+        help="Plan slug (required without --all-archived; mutually exclusive with --all-archived)",
     )
     p_unregister.add_argument(
-        "--all-archived", action="store_true",
+        "--all-archived",
+        action="store_true",
         help="Remove every registry entry whose master plan file no "
-             "longer exists (post-archive ghost cleanup).",
+        "longer exists (post-archive ghost cleanup).",
     )
     p_unregister.add_argument(
-        "--dry-run", action="store_true",
-        help="With --all-archived: print what would be removed without "
-             "mutating the registry.",
+        "--dry-run",
+        action="store_true",
+        help="With --all-archived: print what would be removed without mutating the registry.",
     )
 
     sub.add_parser("list", help="List all registered plans on this host")
@@ -529,89 +587,105 @@ def main(argv: list[str] | None = None) -> int:
     p_install_skill = sub.add_parser(
         "install-skill",
         help="Copy bundled skills into ~/.claude/skills/<name>/SKILL.md "
-             "so Claude Code can find them. Six skills ship "
-             "(clu-phase, clu-plan, clu-reply, clu-monitor, plan, brainstorm). "
-             "Default installs all; use --only to install one.",
+        "so Claude Code can find them. Six skills ship "
+        "(clu-phase, clu-plan, clu-reply, clu-monitor, plan, brainstorm). "
+        "Default installs all; use --only to install one.",
         description="Copy bundled skills into ~/.claude/skills/<name>/SKILL.md "
-                    "so Claude Code can find them. Six skills ship: "
-                    "/clu-phase (worker dispatch entry — required for clu to "
-                    "function), /clu-plan (clu-format master + sub-plan "
-                    "authorship), /clu-reply (explicit blocker reply for "
-                    "scripted contexts), /clu-monitor (Monitor arming for "
-                    "background notifications on autonomous runs), /plan "
-                    "(project-agnostic plan authorship), /brainstorm "
-                    "(parallel-persona pre-planning for fuzzy problem spaces). "
-                    "Default installs all; pass --only <name> to install one.",
+        "so Claude Code can find them. Six skills ship: "
+        "/clu-phase (worker dispatch entry — required for clu to "
+        "function), /clu-plan (clu-format master + sub-plan "
+        "authorship), /clu-reply (explicit blocker reply for "
+        "scripted contexts), /clu-monitor (Monitor arming for "
+        "background notifications on autonomous runs), /plan "
+        "(project-agnostic plan authorship), /brainstorm "
+        "(parallel-persona pre-planning for fuzzy problem spaces). "
+        "Default installs all; pass --only <name> to install one.",
     )
     p_install_skill.add_argument(
-        "--list", action="store_true", default=False,
+        "--list",
+        action="store_true",
+        default=False,
         help="List bundled skills and their install targets, then exit. "
-             "No writes; other flags are ignored.",
+        "No writes; other flags are ignored.",
     )
     p_install_skill.add_argument(
-        "--force", action="store_true", default=False,
+        "--force",
+        action="store_true",
+        default=False,
         help="Overwrite an existing target, even a regular file the operator "
-             "wrote. Symlinks are overwritten without --force.",
+        "wrote. Symlinks are overwritten without --force.",
     )
     p_install_skill.add_argument(
-        "--dry-run", action="store_true", default=False,
+        "--dry-run",
+        action="store_true",
+        default=False,
         help="Print the planned action without writing.",
     )
     # Runtime-validate `--only` rather than `choices=` so the failure path
     # exits via _die (ExitCode), not argparse's SystemExit(2).
     p_install_skill.add_argument(
-        "--only", default=None,
+        "--only",
+        default=None,
         help="Install only the named skill (default: install all bundled).",
     )
     # Primes a fresh user's Claude on autonomous-loop pacing so multi-plan
     # chains drive themselves without a human re-poking the chain.
     _claude_md_grp = p_install_skill.add_mutually_exclusive_group()
     _claude_md_grp.add_argument(
-        "--add-claude-md-note", dest="add_claude_md_note",
-        action="store_true", default=False,
+        "--add-claude-md-note",
+        dest="add_claude_md_note",
+        action="store_true",
+        default=False,
         help="Append/update a clu-managed section in ~/.claude/CLAUDE.md "
-             "about ScheduleWakeup discipline for autonomous tasks.",
+        "about ScheduleWakeup discipline for autonomous tasks.",
     )
     _claude_md_grp.add_argument(
-        "--no-claude-md-note", dest="no_claude_md_note",
-        action="store_true", default=False,
+        "--no-claude-md-note",
+        dest="no_claude_md_note",
+        action="store_true",
+        default=False,
         help="Skip the CLAUDE.md note prompt (non-interactive runs).",
     )
 
     p_install_hook = sub.add_parser(
         "install-hook",
         help="Register the clu UserPromptSubmit hook in "
-             "~/.claude/settings.json so Claude Code sessions see "
-             "unprocessed inbox events at the start of every turn. "
-             "Idempotent; preserves the operator's other hooks and "
-             "their nested/flat array style.",
+        "~/.claude/settings.json so Claude Code sessions see "
+        "unprocessed inbox events at the start of every turn. "
+        "Idempotent; preserves the operator's other hooks and "
+        "their nested/flat array style.",
     )
     p_install_hook.add_argument(
-        "--session-start", action="store_true", default=False,
+        "--session-start",
+        action="store_true",
+        default=False,
         dest="install_session_start",
         help="Also install the SessionStart hook for cold-start "
-             "Monitor arming on the operator dashboard (#70). Composes "
-             "with the default UserPromptSubmit install — pass once to "
-             "get both surfaces.",
+        "Monitor arming on the operator dashboard (#70). Composes "
+        "with the default UserPromptSubmit install — pass once to "
+        "get both surfaces.",
     )
     sub.add_parser(
         "uninstall-hook",
         help="Remove the clu UserPromptSubmit hook (and SessionStart "
-             "hook, if installed) from ~/.claude/settings.json, "
-             "leaving the operator's other hooks intact. Clears the "
-             "monitor marker.",
+        "hook, if installed) from ~/.claude/settings.json, "
+        "leaving the operator's other hooks intact. Clears the "
+        "monitor marker.",
     )
 
     p_blockers = sub.add_parser(
-        "blockers", help="List or show open blockers on a plan",
+        "blockers",
+        help="List or show open blockers on a plan",
     )
     blockers_subs = p_blockers.add_subparsers(dest="blockers_cmd")
     p_blockers_list = blockers_subs.add_parser(
-        "list", help="List open blockers on the plan",
+        "list",
+        help="List open blockers on the plan",
     )
     add_common(p_blockers_list)
     p_blockers_show = blockers_subs.add_parser(
-        "show", help="Show a blocker by id with full context and events",
+        "show",
+        help="Show a blocker by id with full context and events",
     )
     add_common(p_blockers_show)
     p_blockers_show.add_argument("blocker_id")
@@ -623,56 +697,73 @@ def main(argv: list[str] | None = None) -> int:
     queue_subs = p_queue.add_subparsers(dest="queue_cmd")
     p_queue_add = queue_subs.add_parser(
         "add",
-        help="Append one or more plan slugs to the queue "
-             "(--front to insert at head).",
+        help="Append one or more plan slugs to the queue (--front to insert at head).",
     )
     p_queue_add.add_argument("slugs", nargs="+", help="One or more plan slugs")
     p_queue_add.add_argument(
-        "--front", action="store_true",
+        "--front",
+        action="store_true",
         help="Insert at head instead of tail.",
     )
     p_queue_add.add_argument(
-        "--project", type=Path, default=None,
+        "--project",
+        type=Path,
+        default=None,
         help="Project root (defaults to CWD).",
     )
     p_queue_add.add_argument(
-        "--token", default=None,
+        "--token",
+        default=None,
         help="Worker claim token (switches to worker mode).",
     )
     p_queue_add.add_argument(
-        "--plan", dest="source_plan", default=None,
+        "--plan",
+        dest="source_plan",
+        default=None,
         help="Source plan slug (required in worker mode).",
     )
     p_queue_add.add_argument(
-        "--phase", dest="source_phase", default=None,
+        "--phase",
+        dest="source_phase",
+        default=None,
         help="Source phase id (required in worker mode).",
     )
     p_queue_add.add_argument(
-        "--reason", default=None,
+        "--reason",
+        default=None,
         help="Optional reason text logged on the queue entry.",
     )
     p_queue_add.add_argument(
-        "--batch", dest="batch", default=None,
+        "--batch",
+        dest="batch",
+        default=None,
         help="Tag this batch of plans with a shared batch_id (validated as a slug). "
-             "Required for the multi-plan dry-merge gate to fire (#50).",
+        "Required for the multi-plan dry-merge gate to fire (#50).",
     )
     p_queue_add.add_argument(
-        "--quiet", action="store_true",
+        "--quiet",
+        action="store_true",
         help="Suppress post-add tips (useful for scripts).",
     )
     p_queue_list = queue_subs.add_parser(
-        "list", help="Show the pending queue and any recent failures.",
+        "list",
+        help="Show the pending queue and any recent failures.",
     )
     p_queue_list.add_argument(
-        "--project", type=Path, default=None,
+        "--project",
+        type=Path,
+        default=None,
         help="Project root (defaults to CWD).",
     )
     p_queue_remove = queue_subs.add_parser(
-        "remove", help="Drop a pending slug (moves it to history).",
+        "remove",
+        help="Drop a pending slug (moves it to history).",
     )
     p_queue_remove.add_argument("slug")
     p_queue_remove.add_argument(
-        "--project", type=Path, default=None,
+        "--project",
+        type=Path,
+        default=None,
         help="Project root (defaults to CWD).",
     )
 
@@ -683,104 +774,131 @@ def main(argv: list[str] | None = None) -> int:
     worktree_subs = p_worktree.add_subparsers(dest="worktree_cmd")
     p_worktree_gc = worktree_subs.add_parser(
         "gc",
-        help="List or remove worktrees of done/halted plans "
-             "(default: dry-run list).",
+        help="List or remove worktrees of done/halted plans (default: dry-run list).",
     )
     p_worktree_gc.add_argument(
-        "--project", type=Path, default=None,
+        "--project",
+        type=Path,
+        default=None,
         help="Project root (defaults to CWD).",
     )
     p_worktree_gc.add_argument(
-        "--confirm", action="store_true",
+        "--confirm",
+        action="store_true",
         help="Actually remove (default: dry run).",
     )
     p_worktree_gc.add_argument(
-        "--delete-branch", action="store_true", dest="delete_branch",
+        "--delete-branch",
+        action="store_true",
+        dest="delete_branch",
         help="Also drop the clu/<slug> branch via `git branch -D`. "
-             "Default keeps the branch so its commits stay reachable.",
+        "Default keeps the branch so its commits stay reachable.",
     )
     p_worktree_gc.add_argument(
-        "--include-archived", action="store_true", dest="include_archived",
+        "--include-archived",
+        action="store_true",
+        dest="include_archived",
         help="Widen to plans whose master plan file is gone (post-archive). "
-             "Default scope: currently-tracked plans only.",
+        "Default scope: currently-tracked plans only.",
     )
 
     p_worktree_reattach = worktree_subs.add_parser(
         "reattach",
         help="Point a plan's state.worktree.path at a new directory "
-             "(after operator moved or rebuilt the worktree).",
+        "(after operator moved or rebuilt the worktree).",
     )
     p_worktree_reattach.add_argument(
-        "--project", type=Path, required=True,
+        "--project",
+        type=Path,
+        required=True,
         help="Project root.",
     )
     p_worktree_reattach.add_argument(
-        "--plan", required=True, help="Plan slug.",
+        "--plan",
+        required=True,
+        help="Plan slug.",
     )
     p_worktree_reattach.add_argument(
-        "--path", type=Path, required=True,
+        "--path",
+        type=Path,
+        required=True,
         help="New worktree path. Must already exist and be a valid "
-             "git working directory (this command does NOT create one).",
+        "git working directory (this command does NOT create one).",
     )
 
     p_worktree_attach = worktree_subs.add_parser(
         "attach",
         help="Retrofit a worktree record onto an already-init'd plan "
-             "(use when the operator built the worktree by hand).",
+        "(use when the operator built the worktree by hand).",
     )
     p_worktree_attach.add_argument(
-        "--project", type=Path, required=True, help="Project root.",
+        "--project",
+        type=Path,
+        required=True,
+        help="Project root.",
     )
     p_worktree_attach.add_argument(
-        "--plan", required=True, help="Plan slug.",
+        "--plan",
+        required=True,
+        help="Plan slug.",
     )
     p_worktree_attach.add_argument(
-        "--path", type=Path, required=True,
+        "--path",
+        type=Path,
+        required=True,
         help="Existing worktree path. Must be a valid git working "
-             "directory on a branch (not detached HEAD).",
+        "directory on a branch (not detached HEAD).",
     )
 
     p_doctor = sub.add_parser(
         "doctor",
         help="Show what PATH and binary resolutions a worker subprocess "
-             "would see (read-only; doesn't touch plan state).",
+        "would see (read-only; doesn't touch plan state).",
         description="Build the same env dict `dispatch_for_tick` would pass "
-                    "to subprocess.Popen, then run a one-shot `sh -c` probe "
-                    "to print PATH and resolve gh/pipx/clu. Lets operators "
-                    "see what their LaunchAgent worker actually inherits "
-                    "instead of guessing dispatch.path.",
+        "to subprocess.Popen, then run a one-shot `sh -c` probe "
+        "to print PATH and resolve gh/pipx/clu. Lets operators "
+        "see what their LaunchAgent worker actually inherits "
+        "instead of guessing dispatch.path.",
     )
     p_doctor.add_argument(
-        "--project", type=Path, required=True,
+        "--project",
+        type=Path,
+        required=True,
         help="Project root (contains .orchestrator.json)",
     )
     p_doctor.add_argument(
-        "--worktree", action="store_true",
+        "--worktree",
+        action="store_true",
         help="Also walk every registered plan in this project and report "
-             "worktree-path liveness (stat + `git rev-parse --git-dir`).",
+        "worktree-path liveness (stat + `git rev-parse --git-dir`).",
     )
 
     sub.add_parser(
         "tick-all",
         help="Tick every registered plan once (cron entry point). Per-plan "
-             "errors are logged to stderr; the loop continues so one bad "
-             "plan doesn't poison the cadence.",
+        "errors are logged to stderr; the loop continues so one bad "
+        "plan doesn't poison the cadence.",
     )
 
     p_status = sub.add_parser("status", help="Show current state")
     add_common(p_status)
     p_status.add_argument(
-        "--json", action="store_true", help="Dump raw state JSON",
+        "--json",
+        action="store_true",
+        help="Dump raw state JSON",
     )
 
     p_pause = sub.add_parser("pause", help="Pause the plan (operator)")
     add_common(p_pause)
     p_pause.add_argument(
-        "--reason", default="", help="Why paused (recorded in event log)",
+        "--reason",
+        default="",
+        help="Why paused (recorded in event log)",
     )
 
     p_resume = sub.add_parser(
-        "resume", help="Resume a paused plan (operator). Use `retry` for halted.",
+        "resume",
+        help="Resume a paused plan (operator). Use `retry` for halted.",
     )
     add_common(p_resume)
 
@@ -800,47 +918,59 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_common(p_extend_lease)
     p_extend_lease.add_argument(
-        "minutes", type=int, help="Minutes to add to the current lease expiry",
+        "minutes",
+        type=int,
+        help="Minutes to add to the current lease expiry",
     )
 
     p_release_claim = sub.add_parser(
         "release-claim",
         help="Clear a stuck current_claim (operator escape hatch). Refuses "
-             "to clear a fresh-heartbeat claim on a running plan unless "
-             "`--force` is passed; use `clu pause` first or `--force` "
-             "explicitly. Emits EVENT_CLAIM_FORCE_RELEASED so the audit log "
-             "distinguishes operator recovery from automatic lease expiry.",
+        "to clear a fresh-heartbeat claim on a running plan unless "
+        "`--force` is passed; use `clu pause` first or `--force` "
+        "explicitly. Emits EVENT_CLAIM_FORCE_RELEASED so the audit log "
+        "distinguishes operator recovery from automatic lease expiry.",
     )
     add_common(p_release_claim)
     p_release_claim.add_argument(
-        "--force", action="store_true", default=False,
+        "--force",
+        action="store_true",
+        default=False,
         help="Override the live-worker safety check (running + fresh heartbeat).",
     )
     p_release_claim.add_argument(
-        "--reason", default="",
+        "--reason",
+        default="",
         help="Optional explanation, recorded in the audit event.",
     )
     p_release_claim.add_argument(
-        "--reset-attempts", action="store_true", default=False,
+        "--reset-attempts",
+        action="store_true",
+        default=False,
         help="Zero the phase's attempts counter on release (for operator-driven "
-             "aborts that shouldn't burn against max_attempts_per_phase).",
+        "aborts that shouldn't burn against max_attempts_per_phase).",
     )
 
     p_answer = sub.add_parser("answer", help="Answer a pending blocker")
     p_answer.add_argument(
-        "--project", type=Path, default=None,
+        "--project",
+        type=Path,
+        default=None,
         help="Project root (ignored; kept for backward compat).",
     )
     p_answer.add_argument(
-        "--plan", default=None,
+        "--plan",
+        default=None,
         help="Plan slug to disambiguate a bare-digit reply. Optional.",
     )
     p_answer.add_argument(
-        "answer", help='Option index ("0", "1", …)',
+        "answer",
+        help='Option index ("0", "1", …)',
     )
 
     p_spawn = sub.add_parser(
-        "spawn", help="Append a dynamic follow-up task to the plan",
+        "spawn",
+        help="Append a dynamic follow-up task to the plan",
     )
     add_common(p_spawn)
     p_spawn.add_argument("--token", required=True, help="Worker claim token")
@@ -850,63 +980,83 @@ def main(argv: list[str] | None = None) -> int:
     p_spawn.add_argument("--description", default="")
 
     p_complete = sub.add_parser(
-        "complete", help="Worker marks a phase complete",
+        "complete",
+        help="Worker marks a phase complete",
     )
     add_common(p_complete)
     p_complete.add_argument("--token", required=True, help="Worker claim token")
     p_complete.add_argument("--phase", required=True)
     p_complete.add_argument(
-        "--commit", action="append", default=[], dest="commits",
+        "--commit",
+        action="append",
+        default=[],
+        dest="commits",
         help="Commit SHA produced by this phase (repeatable, validated against git)",
     )
     p_complete.add_argument(
-        "--skip-verify", action="store_true", default=False,
+        "--skip-verify",
+        action="store_true",
+        default=False,
         help="Bypass the verify attestation gate (emits audit event)",
     )
     p_complete.add_argument(
-        "--skip-simplify", action="store_true", default=False,
+        "--skip-simplify",
+        action="store_true",
+        default=False,
         help="Bypass the simplify attestation gate (emits audit event)",
     )
 
     p_force_complete = sub.add_parser(
         "force-complete",
         help="Operator marks a phase complete after worker died with work on "
-             "disk. Releases any active claim without token validation; emits "
-             "EVENT_OPERATOR_FORCE_COMPLETE + EVENT_PHASE_COMPLETED so the "
-             "supervisor's plan_done detection fires normally next tick.",
+        "disk. Releases any active claim without token validation; emits "
+        "EVENT_OPERATOR_FORCE_COMPLETE + EVENT_PHASE_COMPLETED so the "
+        "supervisor's plan_done detection fires normally next tick.",
     )
     add_common(p_force_complete)
     p_force_complete.add_argument("--phase", required=True)
     p_force_complete.add_argument(
-        "--commit", action="append", default=[], dest="commits",
+        "--commit",
+        action="append",
+        default=[],
+        dest="commits",
         help="Commit SHA the operator committed on the phase's behalf "
-             "(repeatable, validated against git)",
+        "(repeatable, validated against git)",
     )
     p_force_complete.add_argument(
-        "--reason", default="",
+        "--reason",
+        default="",
         help="Optional explanation, recorded in the audit event.",
     )
     p_force_complete.add_argument(
-        "--really", action="store_true", default=False,
+        "--really",
+        action="store_true",
+        default=False,
         help="Bypass the never-started safety check (use only when sure the "
-             "phase has on-disk work despite no phase_started event).",
+        "phase has on-disk work despite no phase_started event).",
     )
 
     p_task_done = sub.add_parser(
-        "task-done", help="Mark a spawned task done (user or worker)",
+        "task-done",
+        help="Mark a spawned task done (user or worker)",
     )
     add_common(p_task_done)
     p_task_done.add_argument("task_id", help="Spawned task id (e.g. task-1)")
     p_task_done.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Skip claim check (user-initiated cleanup)",
     )
     p_task_done.add_argument(
-        "--token", default="",
+        "--token",
+        default="",
         help="Worker claim token if invoked by a phase-runner",
     )
     p_task_done.add_argument(
-        "--commit", action="append", default=[], dest="commits",
+        "--commit",
+        action="append",
+        default=[],
+        dest="commits",
     )
 
     p_heartbeat = sub.add_parser(
@@ -929,11 +1079,13 @@ def main(argv: list[str] | None = None) -> int:
     p_activity.add_argument("--phase", required=True)
     p_activity_group = p_activity.add_mutually_exclusive_group()
     p_activity_group.add_argument(
-        "--start-bash", action="store_true",
+        "--start-bash",
+        action="store_true",
         help="PreToolUse(Bash): stamp active_tool_started_at = now",
     )
     p_activity_group.add_argument(
-        "--end-bash", action="store_true",
+        "--end-bash",
+        action="store_true",
         help="PostToolUse(Bash): clear active_tool_started_at",
     )
 
@@ -943,81 +1095,101 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_common(p_logs)
     p_logs.add_argument(
-        "-f", "--follow", action="store_true",
+        "-f",
+        "--follow",
+        action="store_true",
         help="Stream new lines as they're appended (like `tail -f`)",
     )
 
     p_watch = sub.add_parser(
         "watch",
         help="Stream state-machine events for one plan, one project, "
-             "or every registered plan. One line per transition; "
-             "designed for AI-agent consumption via Claude's Monitor.",
+        "or every registered plan. One line per transition; "
+        "designed for AI-agent consumption via Claude's Monitor.",
     )
     p_watch.add_argument("--project", type=Path, default=None)
     _watch_scope = p_watch.add_mutually_exclusive_group()
     _watch_scope.add_argument("--plan", default=None, dest="watch_plan")
     _watch_scope.add_argument(
-        "--all", action="store_true", default=False, dest="watch_all",
+        "--all",
+        action="store_true",
+        default=False,
+        dest="watch_all",
     )
     p_watch.add_argument("--json", action="store_true", default=False)
     p_watch.add_argument("--verbose", action="store_true", default=False)
     p_watch.add_argument(
-        "--task-list", action="store_true", default=False,
+        "--task-list",
+        action="store_true",
+        default=False,
         dest="watch_task_list",
         help="Emit TASK_CREATE/TASK_UPDATE protocol lines for "
-             "Claude's TaskCreate UI (mutex with --json and --all). "
-             "See docs/operations.md § 'Task-list mode'.",
+        "Claude's TaskCreate UI (mutex with --json and --all). "
+        "See docs/operations.md § 'Task-list mode'.",
     )
     p_watch.add_argument(
-        "--operator", action="store_true", default=False,
+        "--operator",
+        action="store_true",
+        default=False,
         dest="watch_operator",
         help="Narrow output to cross-plan wedge events the operator "
-             "should act on immediately: tool_stuck, phase_blocked, "
-             "attestation_refused, stalled_claim_notified. Bypasses the "
-             "verbose gate. Composes with --all, --json. Used by the "
-             "operator-dashboard Monitor (#70).",
+        "should act on immediately: tool_stuck, phase_blocked, "
+        "attestation_refused, stalled_claim_notified. Bypasses the "
+        "verbose gate. Composes with --all, --json. Used by the "
+        "operator-dashboard Monitor (#70).",
     )
     p_watch.add_argument(
-        "--interval", type=float, default=None,
+        "--interval",
+        type=float,
+        default=None,
         help="Poll interval seconds (default: 1.0 single-project, 5.0 with --all)",
     )
 
     p_notify_test = sub.add_parser(
         "notify-test",
         help="Send a test notification through configured channels and report "
-             "per-channel status. Useful for verifying credentials after setup.",
+        "per-channel status. Useful for verifying credentials after setup.",
     )
     p_notify_test.add_argument(
-        "--project", type=Path, default=None,
+        "--project",
+        type=Path,
+        default=None,
         help="Project root (contains .orchestrator.json). Defaults to cwd.",
     )
     p_notify_test.add_argument(
-        "--channel", default=None, metavar="KIND",
+        "--channel",
+        default=None,
+        metavar="KIND",
         help="Test a specific channel kind only (e.g. imessage, discord).",
     )
 
     p_prior_blocker = sub.add_parser(
         "prior-blocker",
         help="Print the answer for the phase's most recent answered blocker (exit 0); "
-             "non-zero if none. Used by worker resume-after-answer detection.",
+        "non-zero if none. Used by worker resume-after-answer detection.",
     )
     add_common(p_prior_blocker)
     p_prior_blocker.add_argument("--phase", required=True)
 
     p_block = sub.add_parser(
-        "block", help="Worker reports a blocker + releases claim",
+        "block",
+        help="Worker reports a blocker + releases claim",
     )
     add_common(p_block)
     p_block.add_argument("--token", required=True, help="Worker claim token")
     p_block.add_argument("--phase", required=True)
     p_block.add_argument("--question", required=True)
     p_block.add_argument(
-        "--option", action="append", default=[], dest="options",
+        "--option",
+        action="append",
+        default=[],
+        dest="options",
         help="Answer option (repeatable)",
     )
     p_block.add_argument("--context", default="")
     p_block.add_argument(
-        "--type", default=st.BLOCKER_INPUT,
+        "--type",
+        default=st.BLOCKER_INPUT,
         choices=[st.BLOCKER_INPUT, st.BLOCKER_REPLAN],
     )
 
@@ -1027,10 +1199,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_common(p_verify)
     p_verify.add_argument(
-        "--phase", default="", help="Phase id (required when passing --token)",
+        "--phase",
+        default="",
+        help="Phase id (required when passing --token)",
     )
     p_verify.add_argument(
-        "--token", default="", help="Worker claim token (optional; operator omits)",
+        "--token",
+        default="",
+        help="Worker claim token (optional; operator omits)",
     )
 
     p_attest = sub.add_parser(
@@ -1043,13 +1219,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_common(p_attest)
     p_attest.add_argument(
-        "--phase", required=True, help="Phase id (must match the live claim)",
+        "--phase",
+        required=True,
+        help="Phase id (must match the live claim)",
     )
     p_attest.add_argument(
-        "--token", required=True, help="Worker claim token",
+        "--token",
+        required=True,
+        help="Worker claim token",
     )
     p_attest.add_argument(
-        "--simplify", action="store_true",
+        "--simplify",
+        action="store_true",
         help="Attest that /code-review was run on this phase's diff",
     )
 
@@ -1142,9 +1323,9 @@ def _resolve_ref(project_root: Path, ref: str) -> str | None:
     the `^{commit}` peel to fail cleanly on tags-without-commits.
     """
     result = subprocess.run(
-        ["git", "-C", str(project_root), "rev-parse", "--verify",
-         f"{ref}^{{commit}}"],
-        capture_output=True, text=True,
+        ["git", "-C", str(project_root), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         return None
@@ -1169,16 +1350,19 @@ def _remove_worktree_and_branch(
     don't need to special-case the skip.
     """
     wt = subprocess.run(
-        ["git", "-C", str(project_root), "worktree", "remove",
-         "--force", path],
-        capture_output=True, text=True, timeout=timeout,
+        ["git", "-C", str(project_root), "worktree", "remove", "--force", path],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     wt_pair = (wt.returncode == 0, wt.stderr.strip())
     if not delete_branch:
         return wt_pair, (True, "")
     br = subprocess.run(
         ["git", "-C", str(project_root), "branch", "-D", branch],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     return wt_pair, (br.returncode == 0, br.stderr.strip())
 
@@ -1191,9 +1375,9 @@ def _resolve_default_branch(project_root: Path) -> str | None:
     back to retain-and-warn rather than guess.
     """
     result = subprocess.run(
-        ["git", "-C", str(project_root), "symbolic-ref",
-         "refs/remotes/origin/HEAD"],
-        capture_output=True, text=True,
+        ["git", "-C", str(project_root), "symbolic-ref", "refs/remotes/origin/HEAD"],
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         return None
@@ -1202,7 +1386,8 @@ def _resolve_default_branch(project_root: Path) -> str | None:
 
 
 def _is_branch_reachable_from_origin(
-    project_root: Path, branch: str,
+    project_root: Path,
+    branch: str,
 ) -> tuple[bool, str]:
     """True iff every commit on `branch` is reachable from
     `origin/<default-branch>`, OR no origin is configured.
@@ -1218,9 +1403,17 @@ def _is_branch_reachable_from_origin(
     if default is None:
         return True, "no origin remote configured"
     result = subprocess.run(
-        ["git", "-C", str(project_root), "merge-base", "--is-ancestor",
-         branch, f"origin/{default}"],
-        capture_output=True, text=True,
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "merge-base",
+            "--is-ancestor",
+            branch,
+            f"origin/{default}",
+        ],
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0:
         return True, ""
@@ -1230,7 +1423,8 @@ def _is_branch_reachable_from_origin(
 
 
 def _commits_ahead_of_origin(
-    project_root: Path, branch: str,
+    project_root: Path,
+    branch: str,
 ) -> list[str]:
     """Short SHAs of commits on `branch` not on origin/<default>.
 
@@ -1242,9 +1436,9 @@ def _commits_ahead_of_origin(
     if default is None:
         return []
     result = subprocess.run(
-        ["git", "-C", str(project_root), "log", "--format=%h",
-         f"origin/{default}..{branch}"],
-        capture_output=True, text=True,
+        ["git", "-C", str(project_root), "log", "--format=%h", f"origin/{default}..{branch}"],
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         return []
@@ -1281,24 +1475,36 @@ def _maybe_cleanup_worktree(
         if not phases or not all(p.id in completed for p in phases):
             return
     reachable, reason = _is_branch_reachable_from_origin(
-        cfg.project_root, wt["branch"],
+        cfg.project_root,
+        wt["branch"],
     )
     if not reachable:
         ahead = _commits_ahead_of_origin(cfg.project_root, wt["branch"])
         st.append_event(
-            data, st.EVENT_WORKTREE_RETAINED_AHEAD,
-            path=wt["path"], branch=wt["branch"],
-            reason=reason, ahead_commits=ahead, trigger=trigger,
+            data,
+            st.EVENT_WORKTREE_RETAINED_AHEAD,
+            path=wt["path"],
+            branch=wt["branch"],
+            reason=reason,
+            ahead_commits=ahead,
+            trigger=trigger,
         )
         return
     (wt_ok, wt_err), (br_ok, br_err) = _remove_worktree_and_branch(
-        cfg.project_root, wt["path"], wt["branch"], timeout=30,
+        cfg.project_root,
+        wt["path"],
+        wt["branch"],
+        timeout=30,
     )
     st.append_event(
-        data, st.EVENT_WORKTREE_CLEANED,
-        path=wt["path"], branch=wt["branch"],
-        worktree_removed=wt_ok, branch_removed=br_ok,
-        worktree_error=wt_err, branch_error=br_err,
+        data,
+        st.EVENT_WORKTREE_CLEANED,
+        path=wt["path"],
+        branch=wt["branch"],
+        worktree_removed=wt_ok,
+        branch_removed=br_ok,
+        worktree_error=wt_err,
+        branch_error=br_err,
         trigger=trigger,
     )
     data["worktree"] = None
@@ -1328,7 +1534,8 @@ def _setup_worktree(args, cfg: ProjectConfig) -> dict | int:
     # Project must be a git repo.
     git_check = subprocess.run(
         ["git", "-C", str(cfg.project_root), "rev-parse", "--git-dir"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if git_check.returncode != 0:
         return _die(
@@ -1337,9 +1544,7 @@ def _setup_worktree(args, cfg: ProjectConfig) -> dict | int:
         )
 
     if args.worktree is True:
-        worktree_path = (
-            cfg.project_root.parent / f"{cfg.project_root.name}-{args.plan}"
-        )
+        worktree_path = cfg.project_root.parent / f"{cfg.project_root.name}-{args.plan}"
     else:
         worktree_path = Path(args.worktree).expanduser()
 
@@ -1350,20 +1555,18 @@ def _setup_worktree(args, cfg: ProjectConfig) -> dict | int:
     if base_sha is None:
         return _die(
             ExitCode.WORKTREE_SETUP_FAILED,
-            f"base ref {base_ref_input!r} could not be resolved in "
-            f"{cfg.project_root}",
+            f"base ref {base_ref_input!r} could not be resolved in {cfg.project_root}",
         )
 
     branch_check = subprocess.run(
-        ["git", "-C", str(cfg.project_root), "rev-parse", "--verify",
-         f"refs/heads/{branch}"],
-        capture_output=True, text=True,
+        ["git", "-C", str(cfg.project_root), "rev-parse", "--verify", f"refs/heads/{branch}"],
+        capture_output=True,
+        text=True,
     )
     if branch_check.returncode == 0:
         return _die(
             ExitCode.WORKTREE_SETUP_FAILED,
-            f"branch {branch!r} already exists; pass --branch <new> or "
-            f"delete the old branch first",
+            f"branch {branch!r} already exists; pass --branch <new> or delete the old branch first",
         )
 
     if worktree_path.exists():
@@ -1373,9 +1576,19 @@ def _setup_worktree(args, cfg: ProjectConfig) -> dict | int:
         )
 
     add_result = subprocess.run(
-        ["git", "-C", str(cfg.project_root), "worktree", "add",
-         "-b", branch, str(worktree_path), base_sha],
-        capture_output=True, text=True,
+        [
+            "git",
+            "-C",
+            str(cfg.project_root),
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree_path),
+            base_sha,
+        ],
+        capture_output=True,
+        text=True,
     )
     if add_result.returncode != 0:
         return _die(
@@ -1387,9 +1600,7 @@ def _setup_worktree(args, cfg: ProjectConfig) -> dict | int:
     # resolves to the wrong commit (e.g. stale local branch), so the
     # operator sees both the symbolic ref and the SHA they actually got.
     print(
-        f"Worktree at {worktree_path}\n"
-        f"  Branch: {branch}\n"
-        f"  Base:   {base_ref_input} → {base_sha}",
+        f"Worktree at {worktree_path}\n  Branch: {branch}\n  Base:   {base_ref_input} → {base_sha}",
         file=sys.stderr,
     )
 
@@ -1414,20 +1625,22 @@ def _is_plan_active(state: dict) -> bool:
 
 
 def _active_no_worktree_siblings(
-    project_root: Path, exclude_slug: str | None = None,
+    project_root: Path,
+    exclude_slug: str | None = None,
 ) -> list[str]:
     """Slugs of plans in `project_root` that are active AND lack a worktree."""
     cfg = load_project_config(project_root)
     return [
-        p.slug for p in cross_plan_rules.load_plans_for_project(project_root, cfg)
-        if p.slug != exclude_slug
-        and not st.get_worktree(p.state)
-        and _is_plan_active(p.state)
+        p.slug
+        for p in cross_plan_rules.load_plans_for_project(project_root, cfg)
+        if p.slug != exclude_slug and not st.get_worktree(p.state) and _is_plan_active(p.state)
     ]
 
 
 def _maybe_print_worktree_conflict_hint(
-    project_root: Path, plan_slug: str, has_worktree: bool,
+    project_root: Path,
+    plan_slug: str,
+    has_worktree: bool,
 ) -> None:
     """One-shot init-time stderr hint when sibling active plans lack a worktree.
 
@@ -1547,13 +1760,17 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     print(f"Initialized {state_path}")
     _print_worker_model(cfg)
     _maybe_print_worktree_conflict_hint(
-        cfg.project_root, args.plan, worktree_record is not None,
+        cfg.project_root,
+        args.plan,
+        worktree_record is not None,
     )
     _maybe_handle_claude_md_injection(cfg, args)
     _maybe_handle_notify_prompts(cfg, args)
     _maybe_print_monitor_tip()
     _maybe_print_watch_tip(
-        scope="plan", slug=args.plan, quiet=getattr(args, "quiet", False),
+        scope="plan",
+        slug=args.plan,
+        quiet=getattr(args, "quiet", False),
     )
     return 0
 
@@ -1577,8 +1794,7 @@ def cmd_unregister_one(args) -> int:
     if args.project is None or args.plan is None:
         return _die(
             ExitCode.GENERIC,
-            "unregister requires --project and --plan "
-            "(or --all-archived for batch ghost cleanup)",
+            "unregister requires --project and --plan (or --all-archived for batch ghost cleanup)",
         )
     try:
         st.validate_slug(args.plan, kind="plan slug")
@@ -1612,9 +1828,7 @@ def cmd_unregister_all_archived(args) -> int:
             if not proj.exists():
                 to_remove.append((entry.project_root, entry.plan_slug))
             else:
-                skipped.append(
-                    (entry.project_root, entry.plan_slug, str(exc))
-                )
+                skipped.append((entry.project_root, entry.plan_slug, str(exc)))
             continue
         if not cfg.master_plan_path(entry.plan_slug).exists():
             to_remove.append((entry.project_root, entry.plan_slug))
@@ -1624,8 +1838,7 @@ def cmd_unregister_all_archived(args) -> int:
             state = registry.load_entry_state(entry)
             if state and (wt := st.get_worktree(state)):
                 orphan_worktrees.append(
-                    (entry.project_root, entry.plan_slug,
-                     wt["path"], wt["branch"])
+                    (entry.project_root, entry.plan_slug, wt["path"], wt["branch"])
                 )
 
     if not to_remove:
@@ -1639,7 +1852,8 @@ def cmd_unregister_all_archived(args) -> int:
             targets = {(p, s) for p, s in to_remove}
             with registry._mutate(registry.registry_path()) as data:
                 data["plans"] = [
-                    row for row in data["plans"]
+                    row
+                    for row in data["plans"]
                     if (row["project_root"], row["plan_slug"]) not in targets
                 ]
             print(f"Unregistered {len(to_remove)} plans:")
@@ -1690,7 +1904,10 @@ def cmd_fleet(args) -> int:
 
 
 _QUEUE_LOAD_ERRORS = (
-    json.JSONDecodeError, st.SchemaVersionMismatch, KeyError, OSError,
+    json.JSONDecodeError,
+    st.SchemaVersionMismatch,
+    KeyError,
+    OSError,
 )
 
 
@@ -1752,7 +1969,8 @@ def _refuse_on_corrupt_queue(queue_path: Path, exc: Exception) -> int:
     paste-into-Claude instruction; the auto-repair pipeline only runs
     from cmd_tick_all (phase `repair`), never from the CLI."""
     backups = sorted(
-        queue_path.parent.glob(f"{queue_path.name}.corrupt-*"), reverse=True,
+        queue_path.parent.glob(f"{queue_path.name}.corrupt-*"),
+        reverse=True,
     )
     lines = [
         f"queue.json corrupt at {queue_path}:",
@@ -1775,7 +1993,7 @@ _CLU_NOTE_START = "<!-- clu:start autonomous-loop-pacing -->"
 _CLU_NOTE_END = "<!-- clu:end autonomous-loop-pacing -->"
 _CLU_NOTE_BODY = (
     "When the operator delegates a multi-step autonomous task to clu "
-    "(\"leave the grid\", \"keep driving\", \"ping me when done\"), use "
+    '("leave the grid", "keep driving", "ping me when done"), use '
     "ScheduleWakeup to self-pace check-ins — don't end the turn after "
     "dispatching a single phase. The `/loop` framing in the tool "
     "description is provenance, not scope."
@@ -1791,10 +2009,11 @@ def _decide_inject_claude_md_note(args) -> bool:
         return True
     if not sys.stdin.isatty():
         return False
-    response = input(
-        "Add a one-liner about autonomous-clu-chain pacing to "
-        "~/.claude/CLAUDE.md? [y/N] "
-    ).strip().lower()
+    response = (
+        input("Add a one-liner about autonomous-clu-chain pacing to ~/.claude/CLAUDE.md? [y/N] ")
+        .strip()
+        .lower()
+    )
     return response in ("y", "yes")
 
 
@@ -1919,6 +2138,7 @@ def _resolve_hook_script_path(script_name: str = "clu_inbox_surface.py") -> str:
     `"clu_session_start.py"` for the #70 SessionStart hook.
     """
     from importlib.resources import files
+
     return str(files("end_of_line").joinpath(f"hooks/{script_name}"))
 
 
@@ -2105,10 +2325,10 @@ def cmd_uninstall_hook(args) -> int:
 
 _DOCTOR_PROBE_SCRIPT = (
     'echo "PATH=$PATH"; '
-    'for b in gh pipx clu; do '
+    "for b in gh pipx clu; do "
     'printf "%s = " "$b"; '
     'command -v "$b" || echo "NOT FOUND: $b"; '
-    'done'
+    "done"
 )
 
 
@@ -2137,7 +2357,9 @@ def cmd_doctor(args) -> int:
     # resolves the shell independently of the env we pass.
     result = subprocess.run(
         ["/bin/sh", "-c", _DOCTOR_PROBE_SCRIPT],
-        env=probe_env, capture_output=True, text=True,
+        env=probe_env,
+        capture_output=True,
+        text=True,
     )
     print("Worker subprocess will see:")
     for line in result.stdout.splitlines():
@@ -2154,7 +2376,9 @@ def cmd_doctor(args) -> int:
 
 
 def _print_stuck_tool_health(
-    cfg: ProjectConfig, *, ps_output: str | None = None,
+    cfg: ProjectConfig,
+    *,
+    ps_output: str | None = None,
 ) -> None:
     """Report any active claims with wedged descendants.
 
@@ -2184,9 +2408,7 @@ def _print_stuck_tool_health(
             no_marker_claims.append((p.slug, phase))
             continue
         try:
-            active_age_s = (
-                st._now_utc() - st.parse_iso(active_at)
-            ).total_seconds()
+            active_age_s = (st._now_utc() - st.parse_iso(active_at)).total_seconds()
         except ValueError:
             continue
         descendants = supervisor.walk_worker_tree(pid, ps_output=shared_ps)
@@ -2208,8 +2430,7 @@ def _print_stuck_tool_health(
             )
     if no_marker_claims:
         print(
-            "\nActive claims without tool-activity hook installed "
-            "(stuck-tool detection disabled):"
+            "\nActive claims without tool-activity hook installed (stuck-tool detection disabled):"
         )
         for slug, phase in no_marker_claims:
             print(
@@ -2226,9 +2447,7 @@ def _print_notify_health(cfg: ProjectConfig) -> None:
     the resolved chat_identifier or the `SelfChatLookupError` message
     pointing at the override path.
     """
-    imessage_channels = [
-        c for c in cfg.notify.channels if c.kind == "imessage" and c.enabled
-    ]
+    imessage_channels = [c for c in cfg.notify.channels if c.kind == "imessage" and c.enabled]
     if not imessage_channels:
         return
     print("\nNotify channels:")
@@ -2238,9 +2457,8 @@ def _print_notify_health(cfg: ProjectConfig) -> None:
         _resolve_self_chat_id,
         open_chat_db,
     )
-    needs_chatdb = any(
-        c.params.get("self_chat_id") is None for c in imessage_channels
-    )
+
+    needs_chatdb = any(c.params.get("self_chat_id") is None for c in imessage_channels)
     conn = None
     if needs_chatdb:
         try:
@@ -2253,7 +2471,9 @@ def _print_notify_health(cfg: ProjectConfig) -> None:
         override = ch.params.get("self_chat_id")
         try:
             resolved = _resolve_self_chat_id(
-                conn, operator_handle=to, override=override,
+                conn,
+                operator_handle=to,
+                override=override,
             )
         except SelfChatLookupError as exc:
             print(f"  iMessage[to={to}]: {exc}")
@@ -2395,8 +2615,11 @@ def _cmd_queue_add_worker(args) -> int:
         # Plan-file existence check inside state lock so rejection event is atomic.
         if not plan_file.exists():
             st.append_event(
-                state_data, st.EVENT_QUEUE_REJECTED,
-                slug=slug, source_phase=args.source_phase, reason="missing_plan_file",
+                state_data,
+                st.EVENT_QUEUE_REJECTED,
+                slug=slug,
+                source_phase=args.source_phase,
+                reason="missing_plan_file",
             )
             return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
 
@@ -2407,14 +2630,18 @@ def _cmd_queue_add_worker(args) -> int:
         with queue.mutate(queue_path) as qdata:
             # Cap: count source-tagged entries across pending + history.
             existing_count = sum(
-                1 for e in qdata["queue"] + qdata["history"]
+                1
+                for e in qdata["queue"] + qdata["history"]
                 if e.get("source_plan") == args.source_plan
                 and e.get("source_phase") == args.source_phase
             )
             if existing_count >= cap:
                 st.append_event(
-                    state_data, st.EVENT_QUEUE_REJECTED,
-                    slug=slug, source_phase=args.source_phase, reason="cap",
+                    state_data,
+                    st.EVENT_QUEUE_REJECTED,
+                    slug=slug,
+                    source_phase=args.source_phase,
+                    reason="cap",
                 )
                 return _die(
                     ExitCode.QUEUE_CAP,
@@ -2440,16 +2667,18 @@ def _cmd_queue_add_worker(args) -> int:
                     "remove from history or pick a different slug",
                 )
 
-            qdata["queue"].append({
-                "slug": slug,
-                "added_at": st.utcnow(),
-                "added_by": "worker",
-                "position_at_add": "tail",
-                "source_plan": args.source_plan,
-                "source_phase": args.source_phase,
-                "source_token_fp": token_fp,
-                "reason": args.reason,
-            })
+            qdata["queue"].append(
+                {
+                    "slug": slug,
+                    "added_at": st.utcnow(),
+                    "added_by": "worker",
+                    "position_at_add": "tail",
+                    "source_plan": args.source_plan,
+                    "source_phase": args.source_phase,
+                    "source_token_fp": token_fp,
+                    "reason": args.reason,
+                }
+            )
             pos = len(qdata["queue"])
 
         event_fields: dict = {
@@ -2469,16 +2698,14 @@ def cmd_queue_add(args) -> int:
         if args.source_plan is None or args.source_phase is None:
             return _die(ExitCode.GENERIC, "--token requires --plan and --phase")
         if args.front:
-            return _die(ExitCode.GENERIC,
-                        "--front is operator-only (forbidden with --token)")
+            return _die(ExitCode.GENERIC, "--front is operator-only (forbidden with --token)")
         if args.batch is not None:
             return _die(ExitCode.GENERIC, "--batch is operator-only")
         if len(args.slugs) != 1:
             return _die(ExitCode.GENERIC, "--token requires a single slug")
         return _cmd_queue_add_worker(args)
     if args.source_plan is not None or args.source_phase is not None:
-        return _die(ExitCode.GENERIC,
-                    "--plan/--phase require --token (worker mode only)")
+        return _die(ExitCode.GENERIC, "--plan/--phase require --token (worker mode only)")
 
     slugs = list(args.slugs)
 
@@ -2534,9 +2761,7 @@ def cmd_queue_add(args) -> int:
     # post-yield save_atomic just rewrites the same bytes.
     positions: list[int] = []
     with queue.mutate(queue_path) as data:
-        existing_by_slug = {
-            entry["slug"]: i + 1 for i, entry in enumerate(data["queue"])
-        }
+        existing_by_slug = {entry["slug"]: i + 1 for i, entry in enumerate(data["queue"])}
         for slug in slugs:
             if slug in existing_by_slug:
                 return _die(
@@ -2578,9 +2803,13 @@ def cmd_queue_add(args) -> int:
     return ExitCode.OK
 
 
-_FREEZE_STATUSES = frozenset({
-    st.STATUS_HALTED, st.STATUS_HALTED_REPLAN, st.STATUS_PAUSED,
-})
+_FREEZE_STATUSES = frozenset(
+    {
+        st.STATUS_HALTED,
+        st.STATUS_HALTED_REPLAN,
+        st.STATUS_PAUSED,
+    }
+)
 
 
 def _project_state_status(state: dict) -> str:
@@ -2592,8 +2821,12 @@ def _project_state_status(state: dict) -> str:
 
 
 def _queue_row(
-    slug: str, cfg: ProjectConfig, reg_states: dict,
-    *, is_head: bool, head_frozen: bool,
+    slug: str,
+    cfg: ProjectConfig,
+    reg_states: dict,
+    *,
+    is_head: bool,
+    head_frozen: bool,
 ) -> tuple[str, str]:
     """Compute (STATUS, NOTE) for one pending queue entry.
 
@@ -2619,8 +2852,7 @@ def _queue_row(
 def _format_table(headers: list[str], rows: list[tuple[str, ...]]) -> str:
     """Two-space-separated columns, ljust-padded. Matches fleet.render."""
     widths = [
-        max(len(headers[i]), max((len(r[i]) for r in rows), default=0))
-        for i in range(len(headers))
+        max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(len(headers))
     ]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     lines = [fmt.format(*headers).rstrip()]
@@ -2679,14 +2911,19 @@ def cmd_queue_list(args) -> int:
         print("(queue is empty)")
     else:
         head_state = reg_states.get(pending[0]["slug"])
-        head_frozen = bool(
-            head_state and head_state.get("status") in _FREEZE_STATUSES
-        )
+        head_frozen = bool(head_state and head_state.get("status") in _FREEZE_STATUSES)
         rows = [
-            (str(i), entry["slug"], *_queue_row(
-                entry["slug"], cfg, reg_states,
-                is_head=(i == 1), head_frozen=head_frozen,
-            ))
+            (
+                str(i),
+                entry["slug"],
+                *_queue_row(
+                    entry["slug"],
+                    cfg,
+                    reg_states,
+                    is_head=(i == 1),
+                    head_frozen=head_frozen,
+                ),
+            )
             for i, entry in enumerate(pending, start=1)
         ]
         print(_format_table(["POS", "SLUG", "STATUS", "NOTE"], rows))
@@ -2726,10 +2963,7 @@ def cmd_queue_list(args) -> int:
         for slug, claim in in_flight:
             started = _format_iso_clock(claim.get("started_at"))
             lease = _format_iso_clock(claim.get("lease_expires"))
-            print(
-                f"In flight: {slug} (dispatched {started}, "
-                f"lease until {lease})"
-            )
+            print(f"In flight: {slug} (dispatched {started}, lease until {lease})")
     return ExitCode.OK
 
 
@@ -2752,17 +2986,17 @@ def cmd_queue_remove(args) -> int:
         return _refuse_on_corrupt_queue(queue_path, exc)
 
     with queue.mutate(queue_path) as data:
-        positions = [
-            i for i, e in enumerate(data["queue"]) if e["slug"] == slug
-        ]
+        positions = [i for i, e in enumerate(data["queue"]) if e["slug"] == slug]
         if not positions:
             return _die(ExitCode.UNKNOWN_TASK, f"{slug!r} is not in the queue")
         entry = data["queue"].pop(positions[0])
-        data["history"].append({
-            **entry,
-            "ended_at": st.utcnow(),
-            "outcome": "removed",
-        })
+        data["history"].append(
+            {
+                **entry,
+                "ended_at": st.utcnow(),
+                "outcome": "removed",
+            }
+        )
 
     print(f"removed {slug} from queue")
     return ExitCode.OK
@@ -2840,8 +3074,7 @@ def cmd_worktree_reattach(args) -> int:
         existing["path"] = str(new_path)
         data["worktree"] = existing
     print(
-        f"Reattached {args.plan}: {old_path} → {new_path} "
-        f"(branch: {existing['branch']})",
+        f"Reattached {args.plan}: {old_path} → {new_path} (branch: {existing['branch']})",
     )
     return ExitCode.OK
 
@@ -2858,11 +3091,13 @@ def autodetect_branch_and_base_ref(
     """
     branch = subprocess.run(
         ["git", "-C", str(worktree_path), "branch", "--show-current"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     sha = subprocess.run(
         ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     return branch, sha
 
@@ -2923,13 +3158,14 @@ def cmd_worktree_attach(args) -> int:
             "base_ref": sha,
         }
         st.append_event(
-            data, st.EVENT_WORKTREE_ATTACHED,
-            path=str(new_path), branch=branch, base_ref=sha,
+            data,
+            st.EVENT_WORKTREE_ATTACHED,
+            path=str(new_path),
+            branch=branch,
+            base_ref=sha,
         )
     print(
-        f"Attached {args.plan}: {new_path}\n"
-        f"  Branch: {branch}\n"
-        f"  Base:   {sha}",
+        f"Attached {args.plan}: {new_path}\n  Branch: {branch}\n  Base:   {sha}",
     )
     return ExitCode.OK
 
@@ -2992,7 +3228,8 @@ def cmd_worktree_gc(args) -> int:
                 continue
 
         reachable, reason = _is_branch_reachable_from_origin(
-            cfg.project_root, wt["branch"],
+            cfg.project_root,
+            wt["branch"],
         )
         if not reachable:
             print(
@@ -3004,7 +3241,9 @@ def cmd_worktree_gc(args) -> int:
             continue
 
         (wt_ok, wt_err), (br_ok, br_err) = _remove_worktree_and_branch(
-            cfg.project_root, wt["path"], wt["branch"],
+            cfg.project_root,
+            wt["path"],
+            wt["branch"],
             delete_branch=args.delete_branch,
             timeout=30,
         )
@@ -3053,7 +3292,11 @@ def _spawn_post_action_tick(cfg: ProjectConfig) -> None:
 
 
 def _tick_one_plan(
-    plan_slug: str, cfg: ProjectConfig, state_path: Path, *, dispatch: bool,
+    plan_slug: str,
+    cfg: ProjectConfig,
+    state_path: Path,
+    *,
+    dispatch: bool,
 ):
     """Run one supervisor tick + optional dispatch + optional notify.
 
@@ -3064,6 +3307,7 @@ def _tick_one_plan(
     result = tick(state_path, cfg)
     if dispatch and result.action == "dispatch":
         from .dispatch import dispatch_for_tick
+
         dispatch_for_tick(result, cfg, plan_slug, state_path)
     project_root = str(cfg.project_root.resolve())
     if result.notify_body and (kind := ACTION_NOTIFY_KIND.get(result.action)):
@@ -3071,8 +3315,11 @@ def _tick_one_plan(
         # event alongside the iMessage — keeps in-session signaling aligned
         # with the operator's phone.
         notify.notify(
-            cfg.notify, kind, result.notify_body,
-            plan_slug=plan_slug, project_root=project_root,
+            cfg.notify,
+            kind,
+            result.notify_body,
+            plan_slug=plan_slug,
+            project_root=project_root,
         )
     # side_notifies (stuck-blocker re-pings, stalled-claim transitions)
     # already wrote rich-detail inbox events from inside tick(); fire
@@ -3100,7 +3347,10 @@ def cmd_tick(args) -> int:
             return _die(ExitCode.INVALID_SLUG, str(exc))
         state_path = cfg.state_path(args.plan)
         result = _tick_one_plan(
-            args.plan, cfg, state_path, dispatch=not args.dry_tick,
+            args.plan,
+            cfg,
+            state_path,
+            dispatch=not args.dry_tick,
         )
         print(result)
         return ExitCode.OK
@@ -3113,7 +3363,9 @@ def cmd_tick(args) -> int:
             row_cfg = load_project_config(Path(row.project_root))
             row_state_path = row_cfg.state_path(row.plan_slug)
             result = _tick_one_plan(
-                row.plan_slug, row_cfg, row_state_path,
+                row.plan_slug,
+                row_cfg,
+                row_state_path,
                 dispatch=not args.dry_tick,
             )
             print(f"tick {row.plan_slug}: {result}")
@@ -3182,7 +3434,9 @@ _REPAIR_MAX_ATTEMPTS = 3
 
 
 def _handle_corrupt_queue(
-    cfg: ProjectConfig, exc: Exception, queue_path: Path,
+    cfg: ProjectConfig,
+    exc: Exception,
+    queue_path: Path,
 ) -> None:
     """Backup-first auto-repair pipeline for an unparseable queue.json.
 
@@ -3209,9 +3463,7 @@ def _handle_corrupt_queue(
             file=sys.stderr,
         )
         return
-    backup_path = queue_path.with_name(
-        f"{queue_path.name}.corrupt-{st.utcnow_compact()}"
-    )
+    backup_path = queue_path.with_name(f"{queue_path.name}.corrupt-{st.utcnow_compact()}")
     try:
         backup_path.write_bytes(original_bytes)
     except OSError as write_exc:
@@ -3224,7 +3476,8 @@ def _handle_corrupt_queue(
     attempts = queue.read_throttle(throttle_path, diagnosis_hash)
     if attempts >= _REPAIR_MAX_ATTEMPTS:
         notify.notify(
-            cfg.notify, notify.KIND_QUEUE_CORRUPT,
+            cfg.notify,
+            notify.KIND_QUEUE_CORRUPT,
             notify.render_queue_corrupt(diagnosis, backup_path)
             + f" (auto-repair gave up after {_REPAIR_MAX_ATTEMPTS} attempts)",
         )
@@ -3232,26 +3485,30 @@ def _handle_corrupt_queue(
 
     if not cfg.dispatch.repair_command:
         notify.notify(
-            cfg.notify, notify.KIND_QUEUE_CORRUPT,
+            cfg.notify,
+            notify.KIND_QUEUE_CORRUPT,
             notify.render_queue_corrupt(diagnosis, backup_path),
         )
         queue.increment_throttle(throttle_path, diagnosis_hash)
         return
 
-    log_path = (
-        queue_path.parent / "logs"
-        / f"repair-queue-{st.utcnow_compact()}.log"
-    )
+    log_path = queue_path.parent / "logs" / f"repair-queue-{st.utcnow_compact()}.log"
 
     try:
         dispatch.dispatch_repair_worker(
-            cfg, queue_path, backup_path, diagnosis, log_path,
+            cfg,
+            queue_path,
+            backup_path,
+            diagnosis,
+            log_path,
         )
     except (OSError, ValueError) as spawn_exc:
         notify.notify(
-            cfg.notify, notify.KIND_QUEUE_REPAIR_FAILED,
+            cfg.notify,
+            notify.KIND_QUEUE_REPAIR_FAILED,
             notify.render_queue_repair_failed(
-                f"dispatch failed: {spawn_exc}", backup_path,
+                f"dispatch failed: {spawn_exc}",
+                backup_path,
             ),
         )
         queue.increment_throttle(throttle_path, diagnosis_hash)
@@ -3267,7 +3524,8 @@ def _handle_corrupt_queue(
                 file=sys.stderr,
             )
         notify.notify(
-            cfg.notify, notify.KIND_QUEUE_REPAIR_FAILED,
+            cfg.notify,
+            notify.KIND_QUEUE_REPAIR_FAILED,
             notify.render_queue_repair_failed(result.reason or "unknown", backup_path),
         )
         queue.increment_throttle(throttle_path, diagnosis_hash)
@@ -3275,7 +3533,8 @@ def _handle_corrupt_queue(
 
     repaired = queue.load(queue_path)
     notify.notify(
-        cfg.notify, notify.KIND_QUEUE_REPAIRED,
+        cfg.notify,
+        notify.KIND_QUEUE_REPAIRED,
         notify.render_queue_repaired(len(repaired["queue"]), backup_path),
     )
     queue.reset_throttle(throttle_path)
@@ -3290,7 +3549,8 @@ def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
     data = st.load(state_path)
     answered = [
-        b for b in data.get("blockers", [])
+        b
+        for b in data.get("blockers", [])
         if b["phase_id"] == args.phase and b.get("answer") is not None
     ]
     if not answered:
@@ -3318,16 +3578,15 @@ def _resolve_log_path(state_path: Path, cfg: ProjectConfig) -> Path | None:
 
 
 def _follow_log(
-    log_path: Path, *, stop_after_seconds: float | None = None,
+    log_path: Path,
+    *,
+    stop_after_seconds: float | None = None,
     poll_interval: float = 0.25,
 ) -> int:
     """Stream a log file in tail-f fashion. Rotation/truncation mid-follow is
     not handled — punted to a follow-up. `stop_after_seconds` exists so tests
     can exercise the loop without a subprocess timeout."""
-    deadline = (
-        time.monotonic() + stop_after_seconds
-        if stop_after_seconds is not None else None
-    )
+    deadline = time.monotonic() + stop_after_seconds if stop_after_seconds is not None else None
     with open(log_path) as fh:
         sys.stdout.write(fh.read())
         sys.stdout.flush()
@@ -3359,29 +3618,29 @@ def cmd_watch(args) -> int:
     if task_list_mode and args.json:
         return _die(ExitCode.GENERIC, "--task-list and --json are mutually exclusive")
     if task_list_mode and getattr(args, "watch_operator", False):
-        return _die(ExitCode.GENERIC,
-                    "--operator and --task-list are mutually exclusive "
-                    "(operator filter not yet wired into task-list mode; "
-                    "use one or the other)")
+        return _die(
+            ExitCode.GENERIC,
+            "--operator and --task-list are mutually exclusive "
+            "(operator filter not yet wired into task-list mode; "
+            "use one or the other)",
+        )
 
     if all_mode:
         for e in registry.entries():
-            if args.project is None or (
-                Path(e.project_root).resolve() == args.project.resolve()
-            ):
+            if args.project is None or (Path(e.project_root).resolve() == args.project.resolve()):
                 cfg = load_project_config(Path(e.project_root))
                 state_paths.append(cfg.state_path(e.plan_slug))
     elif plan_slug:
         project_root = _resolve_project_arg(args)
         cfg = load_project_config(project_root)
         registered = any(
-            Path(e.project_root).resolve() == project_root
-            and e.plan_slug == plan_slug
+            Path(e.project_root).resolve() == project_root and e.plan_slug == plan_slug
             for e in registry.entries()
         )
         if not registered:
-            return _die(ExitCode.UNKNOWN_TASK,
-                        f"plan {plan_slug!r} is not registered in {project_root}")
+            return _die(
+                ExitCode.UNKNOWN_TASK, f"plan {plan_slug!r} is not registered in {project_root}"
+            )
         state_paths.append(cfg.state_path(plan_slug))
     else:
         project_root = _resolve_project_arg(args)
@@ -3390,9 +3649,7 @@ def cmd_watch(args) -> int:
             if Path(e.project_root).resolve() == project_root:
                 state_paths.append(cfg.state_path(e.plan_slug))
 
-    interval = args.interval if args.interval is not None else (
-        5.0 if all_mode else 1.0
-    )
+    interval = args.interval if args.interval is not None else (5.0 if all_mode else 1.0)
     try:
         return watch.stream_loop(
             state_paths,
@@ -3543,9 +3800,9 @@ def cmd_extend_lease(args, cfg: ProjectConfig, state_path: Path) -> int:
                 ExitCode.STATUS_TRANSITION,
                 f"no claim to extend on {args.plan}",
             )
-        current = _dt.datetime.strptime(
-            claim["lease_expires"], "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=_dt.timezone.utc)
+        current = _dt.datetime.strptime(claim["lease_expires"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc
+        )
         now = _dt.datetime.now(_dt.timezone.utc)
         baseline = max(current, now)
         new_expires = (baseline + _dt.timedelta(minutes=args.minutes)).strftime(
@@ -3553,16 +3810,14 @@ def cmd_extend_lease(args, cfg: ProjectConfig, state_path: Path) -> int:
         )
         claim["lease_expires"] = new_expires
         st.append_event(
-            data, st.EVENT_LEASE_EXTENDED,
+            data,
+            st.EVENT_LEASE_EXTENDED,
             phase=claim["phase_id"],
             extended_by_minutes=args.minutes,
             new_expires=new_expires,
             operator=True,
         )
-    print(
-        f"Extended {args.plan}/{claim['phase_id']} lease by "
-        f"{args.minutes} min → {new_expires}"
-    )
+    print(f"Extended {args.plan}/{claim['phase_id']} lease by {args.minutes} min → {new_expires}")
     return ExitCode.OK
 
 
@@ -3584,7 +3839,9 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
         token = claim.get("claimed_by")
         pid = claim.get("pid")
         fields = {
-            "phase": phase, "token": token, "forced": bool(args.force),
+            "phase": phase,
+            "token": token,
+            "forced": bool(args.force),
             "released_by_operator": True,
         }
         if args.reason:
@@ -3597,8 +3854,10 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
                 cmdline_match=f"/clu-phase {data['plan_slug']} {phase}",
             )
             st.append_event(
-                data, st.EVENT_PHASE_ORPHAN_REAPED,
-                phase=phase, pid=pid,
+                data,
+                st.EVENT_PHASE_ORPHAN_REAPED,
+                phase=phase,
+                pid=pid,
                 signaled=reap.signaled,
                 cmdline_mismatch=reap.cmdline_mismatch,
             )
@@ -3630,29 +3889,31 @@ def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         st.assert_claim_match(data, args.token, args.phase)
         cap = data["config"].get("max_spawns_per_phase", st.DEFAULT_MAX_SPAWNS_PER_PHASE)
-        existing = sum(
-            1 for t in data["spawned_tasks"]
-            if t.get("spawned_by_phase") == args.phase
-        )
+        existing = sum(1 for t in data["spawned_tasks"] if t.get("spawned_by_phase") == args.phase)
         if existing >= cap:
             return _die(
                 ExitCode.SPAWN_CAP,
                 f"phase {args.phase} already spawned {existing} task(s); cap is {cap}",
             )
         task_id = f"task-{len(data['spawned_tasks']) + 1}"
-        data["spawned_tasks"].append({
-            "id": task_id,
-            "source": args.source,
-            "spawned_by_phase": args.phase,
-            "title": args.title,
-            "description": args.description,
-            "depends_on_phases": [args.phase],
-            "status": "pending",
-            "spawned_at": st.utcnow(),
-        })
+        data["spawned_tasks"].append(
+            {
+                "id": task_id,
+                "source": args.source,
+                "spawned_by_phase": args.phase,
+                "title": args.title,
+                "description": args.description,
+                "depends_on_phases": [args.phase],
+                "status": "pending",
+                "spawned_at": st.utcnow(),
+            }
+        )
         st.append_event(
-            data, st.EVENT_TASK_SPAWNED,
-            task=task_id, source=args.source, spawned_by_phase=args.phase,
+            data,
+            st.EVENT_TASK_SPAWNED,
+            task=task_id,
+            source=args.source,
+            spawned_by_phase=args.phase,
         )
     print(f"Spawned {task_id}: {args.title}")
     return 0
@@ -3682,8 +3943,10 @@ def cmd_task_done(args, cfg: ProjectConfig, state_path: Path) -> int:
         match["status"] = "done"
         match["completed_at"] = st.utcnow()
         st.append_event(
-            data, st.EVENT_TASK_COMPLETED,
-            task=args.task_id, commits=list(args.commits),
+            data,
+            st.EVENT_TASK_COMPLETED,
+            task=args.task_id,
+            commits=list(args.commits),
             forced=bool(args.force),
         )
     _spawn_post_action_tick(cfg)
@@ -3711,7 +3974,9 @@ def _compute_phase_diff(git_root: Path, base_sha: str) -> tuple[int, int]:
     """
     result = subprocess.run(
         ["git", "-C", str(git_root), "diff", "--numstat", f"{base_sha}..HEAD"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     out = result.stdout.strip()
     if result.returncode != 0 or not out:
@@ -3761,6 +4026,7 @@ def _write_attestation_refused_inbox(
     capturing it inside the mutate block.
     """
     from . import inbox
+
     plan_slug = data_snap.get("plan_slug") or "<unknown>"
     stamped_short = stamped_at[:7] if stamped_at else "never"
     head_short = head_sha[:7] if head_sha else "?"
@@ -3821,9 +4087,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                     fresh_stamped = st.attestation_commit_sha(data, st.ATTESTATION_VERIFY)
                     if fresh_stamped is None or fresh_stamped != head_sha:
                         st.append_event(
-                            data, st.EVENT_ATTESTATION_REFUSED,
-                            phase=args.phase, gate=st.ATTESTATION_VERIFY,
-                            stamped_at=fresh_stamped, head_sha=head_sha,
+                            data,
+                            st.EVENT_ATTESTATION_REFUSED,
+                            phase=args.phase,
+                            gate=st.ATTESTATION_VERIFY,
+                            stamped_at=fresh_stamped,
+                            head_sha=head_sha,
                         )
                         emitted_stamped = fresh_stamped  # may be None (never stamped)
                         _emitted = True
@@ -3831,9 +4100,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                         _emitted = False
                 if _emitted:
                     _write_attestation_refused_inbox(
-                        cfg, data_snap, args.phase,
+                        cfg,
+                        data_snap,
+                        args.phase,
                         gate=st.ATTESTATION_VERIFY,
-                        stamped_at=emitted_stamped, head_sha=head_sha,
+                        stamped_at=emitted_stamped,
+                        head_sha=head_sha,
                     )
                 return _die(
                     ExitCode.STATUS_TRANSITION,
@@ -3855,9 +4127,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                             fresh_stamped = st.attestation_commit_sha(data, st.ATTESTATION_SIMPLIFY)
                             if fresh_stamped is None or fresh_stamped != head_sha:
                                 st.append_event(
-                                    data, st.EVENT_ATTESTATION_REFUSED,
-                                    phase=args.phase, gate=st.ATTESTATION_SIMPLIFY,
-                                    stamped_at=fresh_stamped, head_sha=head_sha,
+                                    data,
+                                    st.EVENT_ATTESTATION_REFUSED,
+                                    phase=args.phase,
+                                    gate=st.ATTESTATION_SIMPLIFY,
+                                    stamped_at=fresh_stamped,
+                                    head_sha=head_sha,
                                 )
                                 emitted_stamped_s = fresh_stamped
                                 _emitted_s = True
@@ -3865,9 +4140,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                                 _emitted_s = False
                         if _emitted_s:
                             _write_attestation_refused_inbox(
-                                cfg, data_snap, args.phase,
+                                cfg,
+                                data_snap,
+                                args.phase,
                                 gate=st.ATTESTATION_SIMPLIFY,
-                                stamped_at=emitted_stamped_s, head_sha=head_sha,
+                                stamped_at=emitted_stamped_s,
+                                head_sha=head_sha,
                             )
                         return _die(
                             ExitCode.STATUS_TRANSITION,
@@ -3880,24 +4158,28 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
 
     with st.mutate(state_path) as data:
         st.release_claim_and_emit(
-            data, expected_token=args.token, expected_phase=args.phase,
+            data,
+            expected_token=args.token,
+            expected_phase=args.phase,
             **cfg.coolant.release_kwargs(),
         )
         st.append_event(
-            data, st.EVENT_PHASE_COMPLETED,
-            phase=args.phase, commits=list(args.commits),
+            data,
+            st.EVENT_PHASE_COMPLETED,
+            phase=args.phase,
+            commits=list(args.commits),
         )
         if args.skip_verify:
-            st.append_event(data, st.EVENT_OPERATOR_SKIP_VERIFY,
-                            phase=args.phase, operator=True)
+            st.append_event(data, st.EVENT_OPERATOR_SKIP_VERIFY, phase=args.phase, operator=True)
         if args.skip_simplify:
-            st.append_event(data, st.EVENT_OPERATOR_SKIP_SIMPLIFY,
-                            phase=args.phase, operator=True)
+            st.append_event(data, st.EVENT_OPERATOR_SKIP_SIMPLIFY, phase=args.phase, operator=True)
         if not cfg.quality.verify_required:
-            st.append_event(data, st.EVENT_VERIFY_POLICY_SKIPPED,
-                            phase=args.phase)
+            st.append_event(data, st.EVENT_VERIFY_POLICY_SKIPPED, phase=args.phase)
         _maybe_cleanup_worktree(
-            cfg, data, trigger="complete", require_all_phases_done=True,
+            cfg,
+            data,
+            trigger="complete",
+            require_all_phases_done=True,
         )
     _spawn_post_action_tick(cfg)
     print(f"Completed phase {args.phase}")
@@ -3927,8 +4209,7 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.phase not in known_ids:
         return _die(
             ExitCode.UNKNOWN_TASK,
-            f"phase {args.phase!r} not in plan {args.plan!r} "
-            f"(known: {sorted(known_ids)})",
+            f"phase {args.phase!r} not in plan {args.plan!r} (known: {sorted(known_ids)})",
         )
     if args.commits:
         if err := _verify_commit_shas(cfg.project_root, args.commits):
@@ -3939,30 +4220,42 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 ExitCode.STATUS_TRANSITION,
                 f"phase {args.phase!r} already completed — see `clu status`",
             )
-        ever_started = st.latest_event(
-            data, st.EVENT_PHASE_STARTED, phase=args.phase,
-        ) is not None
+        ever_started = (
+            st.latest_event(
+                data,
+                st.EVENT_PHASE_STARTED,
+                phase=args.phase,
+            )
+            is not None
+        )
         claim = data.get("current_claim")
         claim_on_phase = claim is not None and claim.get("phase_id") == args.phase
         if not ever_started and not claim_on_phase and not args.really:
             return _die(
                 ExitCode.STATUS_TRANSITION,
-                f"phase {args.phase!r} never started — pass `--really` to "
-                f"force-complete anyway",
+                f"phase {args.phase!r} never started — pass `--really` to force-complete anyway",
             )
         if claim_on_phase:
             st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
         st.append_event(
-            data, st.EVENT_OPERATOR_FORCE_COMPLETE,
-            phase=args.phase, commits=list(args.commits),
-            reason=args.reason, operator=True,
+            data,
+            st.EVENT_OPERATOR_FORCE_COMPLETE,
+            phase=args.phase,
+            commits=list(args.commits),
+            reason=args.reason,
+            operator=True,
         )
         st.append_event(
-            data, st.EVENT_PHASE_COMPLETED,
-            phase=args.phase, commits=list(args.commits),
+            data,
+            st.EVENT_PHASE_COMPLETED,
+            phase=args.phase,
+            commits=list(args.commits),
         )
         _maybe_cleanup_worktree(
-            cfg, data, trigger="force-complete", require_all_phases_done=True,
+            cfg,
+            data,
+            trigger="force-complete",
+            require_all_phases_done=True,
         )
     _spawn_post_action_tick(cfg)
     print(f"Force-completed phase {args.phase}")
@@ -3997,7 +4290,8 @@ def cmd_validate(args) -> int:
             return _die(ExitCode.INVALID_SLUG, str(exc))
         plans = cross_plan_rules.load_plans_for_project(project_root, cfg)
         eligible = [
-            p for p in plans
+            p
+            for p in plans
             if p.state.get("status") == st.STATUS_DONE
             and p.state.get("batch_id") == args.batch
             and st.get_worktree(p.state) is not None
@@ -4007,7 +4301,8 @@ def cmd_validate(args) -> int:
             branch = st.get_worktree(p.state)["branch"]
             r = subprocess.run(
                 ["git", "-C", str(project_root), "rev-parse", "--verify", branch],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if r.returncode == 0:
                 branches.append(branch)
@@ -4136,7 +4431,9 @@ def _cmd_ship_direct_plan(args) -> int:
     # by design; ignore them so a live state file doesn't read as dirty.
     porcelain = subprocess.run(
         ["git", "-C", str(project_root), "status", "--porcelain"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     dirty = [line for line in porcelain.splitlines() if not line.startswith("??")]
     if dirty:
@@ -4150,7 +4447,10 @@ def _cmd_ship_direct_plan(args) -> int:
     # it later via project config if needed. --check honors test_command
     # the same way.
     result = dry_merge.attempt_merge(
-        project_root, "main", [branch], cfg.test_command,
+        project_root,
+        "main",
+        [branch],
+        cfg.test_command,
     )
     if result.outcome != "clean":
         print(f"validate: outcome={result.outcome}")
@@ -4164,8 +4464,7 @@ def _cmd_ship_direct_plan(args) -> int:
 
     if args.check:
         print(
-            f"validate: clean — ready to ship {args.plan!r} "
-            f"(branch {branch!r}).",
+            f"validate: clean — ready to ship {args.plan!r} (branch {branch!r}).",
         )
         return ExitCode.OK
 
@@ -4189,7 +4488,9 @@ def _cmd_ship_direct_plan(args) -> int:
 
 
 def _ship_apply_one_direct(
-    project_root: Path, branch: str, plan_slug: str,
+    project_root: Path,
+    branch: str,
+    plan_slug: str,
 ) -> tuple[bool, str]:
     """Apply the destructive ship steps for one plan in direct mode.
 
@@ -4205,32 +4506,33 @@ def _ship_apply_one_direct(
     """
     r = subprocess.run(
         ["git", "-C", str(project_root), "checkout", "main"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         return False, f"git checkout main failed: {r.stderr.strip()}"
 
     r = subprocess.run(
         ["git", "-C", str(project_root), "merge", "--ff-only", branch],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         # FF not possible; fall back to merge-commit. Diverges from gh /
         # git-town / jj which all commit to one strategy — see
         # docs/architecture.md for the rationale.
         r = subprocess.run(
-            ["git", "-C", str(project_root), "merge",
-             "--no-ff", "--no-edit", branch],
-            capture_output=True, text=True,
+            ["git", "-C", str(project_root), "merge", "--no-ff", "--no-edit", branch],
+            capture_output=True,
+            text=True,
         )
         if r.returncode != 0:
-            return False, (
-                f"git merge {branch!r} → main failed: {r.stderr.strip()}"
-            )
+            return False, (f"git merge {branch!r} → main failed: {r.stderr.strip()}")
 
     r = subprocess.run(
         ["git", "-C", str(project_root), "push", "origin", "main"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         return False, (
@@ -4244,12 +4546,12 @@ def _ship_apply_one_direct(
     # ship — main already has the work.
     r = subprocess.run(
         ["git", "-C", str(project_root), "push", "origin", branch],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         print(
-            f"warning: git push origin {branch!r} failed (non-fatal): "
-            f"{r.stderr.strip()}",
+            f"warning: git push origin {branch!r} failed (non-fatal): {r.stderr.strip()}",
             file=sys.stderr,
         )
 
@@ -4280,7 +4582,9 @@ def _cmd_ship_direct_all_done(args) -> int:
     # needed because the apply path leaves no uncommitted residue.
     porcelain = subprocess.run(
         ["git", "-C", str(project_root), "status", "--porcelain"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     dirty = [line for line in porcelain.splitlines() if not line.startswith("??")]
     if dirty:
@@ -4313,7 +4617,10 @@ def _cmd_ship_direct_all_done(args) -> int:
     validate_failures: set[str] = set()
     for slug, branch in eligible:
         result = dry_merge.attempt_merge(
-            project_root, "main", [branch], cfg.test_command,
+            project_root,
+            "main",
+            [branch],
+            cfg.test_command,
         )
         if result.outcome == "clean":
             print(f"  {slug} ({branch}): clean")
@@ -4325,9 +4632,7 @@ def _cmd_ship_direct_all_done(args) -> int:
             validate_failures.add(slug)
 
     if args.check:
-        return (
-            ExitCode.GENERIC if validate_failures else ExitCode.OK
-        )
+        return ExitCode.GENERIC if validate_failures else ExitCode.OK
 
     if not args.yes:
         print("")
@@ -4370,7 +4675,9 @@ def _gh_preflight() -> str | None:
     try:
         r = subprocess.run(
             ["gh", "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except FileNotFoundError:
         return (
@@ -4381,18 +4688,22 @@ def _gh_preflight() -> str | None:
         return f"`gh --version` returned non-zero: {r.stderr.strip()}"
     r = subprocess.run(
         ["gh", "auth", "status"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if r.returncode != 0:
         return (
-            "gh CLI is not authenticated; run `gh auth login` "
-            "(or use `--direct` to skip PR mode)"
+            "gh CLI is not authenticated; run `gh auth login` (or use `--direct` to skip PR mode)"
         )
     return None
 
 
 def _gh_create_pr(
-    project_root: Path, branch: str, plan_md: Path, plan_slug: str,
+    project_root: Path,
+    branch: str,
+    plan_md: Path,
+    plan_slug: str,
 ) -> tuple[bool, str]:
     """Open a PR via `gh pr create`. On "already exists" failure,
     falls back to `gh pr view` to return the existing URL — keeps
@@ -4407,10 +4718,15 @@ def _gh_create_pr(
         body_file = None
 
     cmd = [
-        "gh", "pr", "create",
-        "--title", title,
-        "--head", branch,
-        "--base", "main",
+        "gh",
+        "pr",
+        "create",
+        "--title",
+        title,
+        "--head",
+        branch,
+        "--base",
+        "main",
     ]
     if body_file is not None:
         cmd += ["--body-file", body_file]
@@ -4418,8 +4734,11 @@ def _gh_create_pr(
         cmd += ["--body", f"Worker ship for plan {plan_slug!r}."]
 
     r = subprocess.run(
-        cmd, capture_output=True, text=True,
-        cwd=str(project_root), timeout=60,
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=str(project_root),
+        timeout=60,
     )
     if r.returncode == 0:
         # gh prints the PR URL on stdout.
@@ -4433,8 +4752,10 @@ def _gh_create_pr(
     if "already" in err or "exists" in err:
         view = subprocess.run(
             ["gh", "pr", "view", branch, "--json", "url"],
-            capture_output=True, text=True,
-            cwd=str(project_root), timeout=30,
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=30,
         )
         if view.returncode == 0:
             try:
@@ -4500,7 +4821,10 @@ def _cmd_ship_as_pr_plan(args) -> int:
     # Validate (dry-merge) so a busted branch doesn't open a PR that's
     # immediately blocked by CI.
     result = dry_merge.attempt_merge(
-        project_root, "main", [branch], cfg.test_command,
+        project_root,
+        "main",
+        [branch],
+        cfg.test_command,
     )
     if result.outcome != "clean":
         print(f"validate: outcome={result.outcome}")
@@ -4514,8 +4838,7 @@ def _cmd_ship_as_pr_plan(args) -> int:
 
     if args.check:
         print(
-            f"validate: clean — ready to open PR for {args.plan!r} "
-            f"(branch {branch!r}).",
+            f"validate: clean — ready to open PR for {args.plan!r} (branch {branch!r}).",
         )
         return ExitCode.OK
 
@@ -4535,7 +4858,11 @@ def _cmd_ship_as_pr_plan(args) -> int:
         return _die(ExitCode.GENERIC, err)
 
     ok, msg = _ship_apply_one_as_pr(
-        project_root, cfg, branch, args.plan, state_path,
+        project_root,
+        cfg,
+        branch,
+        args.plan,
+        state_path,
     )
     if not ok:
         return _die(ExitCode.GENERIC, msg)
@@ -4557,14 +4884,12 @@ def _ship_apply_one_as_pr(
     needed for PR mode), and validate (dry-merge).
     """
     r = subprocess.run(
-        ["git", "-C", str(project_root), "push", "--set-upstream",
-         "origin", branch],
-        capture_output=True, text=True,
+        ["git", "-C", str(project_root), "push", "--set-upstream", "origin", branch],
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
-        return False, (
-            f"git push origin {branch!r} failed: {r.stderr.strip()}"
-        )
+        return False, (f"git push origin {branch!r} failed: {r.stderr.strip()}")
 
     plan_md = project_root / cfg.plan_dir / f"{plan_slug}.md"
     ok, url_or_err = _gh_create_pr(project_root, branch, plan_md, plan_slug)
@@ -4617,7 +4942,10 @@ def _cmd_ship_as_pr_all_done(args) -> int:
     validate_failures: set[str] = set()
     for slug, branch, _ in eligible:
         result = dry_merge.attempt_merge(
-            project_root, "main", [branch], cfg.test_command,
+            project_root,
+            "main",
+            [branch],
+            cfg.test_command,
         )
         if result.outcome == "clean":
             print(f"  {slug} ({branch}): clean")
@@ -4629,9 +4957,7 @@ def _cmd_ship_as_pr_all_done(args) -> int:
             validate_failures.add(slug)
 
     if args.check:
-        return (
-            ExitCode.GENERIC if validate_failures else ExitCode.OK
-        )
+        return ExitCode.GENERIC if validate_failures else ExitCode.OK
 
     if not args.yes:
         print("")
@@ -4655,7 +4981,11 @@ def _cmd_ship_as_pr_all_done(args) -> int:
             print(f"skipped {slug}: validate failed", file=sys.stderr)
             continue
         ok, msg = _ship_apply_one_as_pr(
-            project_root, cfg, branch, slug, state_path,
+            project_root,
+            cfg,
+            branch,
+            slug,
+            state_path,
         )
         if ok:
             successes.append(slug)
@@ -4691,7 +5021,10 @@ def _perform_archive(
     with st.mutate(state_path) as data:
         before = st.get_worktree(data)
         _maybe_cleanup_worktree(
-            cfg, data, trigger="archive", require_all_phases_done=False,
+            cfg,
+            data,
+            trigger="archive",
+            require_all_phases_done=False,
         )
         after = st.get_worktree(data)
         # Clear clu-ship lifecycle markers so they don't haunt the
@@ -4736,7 +5069,10 @@ def _perform_archive(
         )
         subprocess.run(
             ["git", "-C", str(cfg.project_root), "commit", "-m", msg],
-            check=True, capture_output=True, text=True, timeout=30,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     if unregister:
         registry.unregister(cfg.project_root, plan)
@@ -4779,9 +5115,7 @@ def cmd_archive(args) -> int:
             ExitCode.GENERIC,
             f"git operation timed out during archive of {args.plan!r}",
         )
-    move_note = (
-        f" Plan file moved to archive/{args.plan}/." if plan_moved else ""
-    )
+    move_note = f" Plan file moved to archive/{args.plan}/." if plan_moved else ""
     if before is None:
         print(f"Archive {args.plan}: no worktree to clean.{move_note}")
     elif after is None:
@@ -4806,10 +5140,7 @@ def _group_shipped_files_by_master(stems: list[str]) -> dict[str, list[str]]:
     one would have to start with the other + "-", contradicting both
     being masters). Every stem matches at minimum itself.
     """
-    masters = [
-        s for s in stems
-        if not any(t != s and s.startswith(t + "-") for t in stems)
-    ]
+    masters = [s for s in stems if not any(t != s and s.startswith(t + "-") for t in stems)]
     groups: dict[str, list[str]] = {}
     for s in stems:
         candidates = [m for m in masters if s == m or s.startswith(m + "-")]
@@ -4843,8 +5174,7 @@ def cmd_migrate_archive(args) -> int:
     groups = _group_shipped_files_by_master(stems)
     if args.dry_run:
         print(
-            f"would migrate {len(stems)} file(s) into "
-            f"{len(groups)} slug subdir(s):",
+            f"would migrate {len(stems)} file(s) into {len(groups)} slug subdir(s):",
         )
         for slug, files in sorted(groups.items()):
             print(f"  plans/archive/{slug}/  ({len(files)} file(s))")
@@ -4856,14 +5186,16 @@ def cmd_migrate_archive(args) -> int:
         try:
             subprocess.run(
                 ["git", "mv", *sources, str(dest)],
-                check=True, capture_output=True, text=True,
-                cwd=str(cfg.project_root), timeout=30,
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=str(cfg.project_root),
+                timeout=30,
             )
         except subprocess.CalledProcessError as exc:
             return _die(
                 ExitCode.GENERIC,
-                f"git mv failed for slug {slug!r}: "
-                f"{exc.stderr.strip() or str(exc)}",
+                f"git mv failed for slug {slug!r}: {exc.stderr.strip() or str(exc)}",
             )
         except subprocess.TimeoutExpired:
             return _die(ExitCode.GENERIC, f"git mv timed out for slug {slug!r}")
@@ -4871,10 +5203,18 @@ def cmd_migrate_archive(args) -> int:
         shipped_dir.rmdir()
     try:
         subprocess.run(
-            ["git", "-C", str(cfg.project_root), "commit",
-             "-m", f"chore: migrate-archive {len(stems)} file(s) "
-             f"to plans/archive/<slug>/ layout"],
-            check=True, capture_output=True, text=True, timeout=30,
+            [
+                "git",
+                "-C",
+                str(cfg.project_root),
+                "commit",
+                "-m",
+                f"chore: migrate-archive {len(stems)} file(s) to plans/archive/<slug>/ layout",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except subprocess.CalledProcessError as exc:
         return _die(
@@ -4886,12 +5226,10 @@ def cmd_migrate_archive(args) -> int:
     except subprocess.TimeoutExpired:
         return _die(
             ExitCode.GENERIC,
-            "git commit timed out after migration "
-            "(renames are staged; commit manually)",
+            "git commit timed out after migration (renames are staged; commit manually)",
         )
     print(
-        f"migrated {len(stems)} file(s) into {len(groups)} slug "
-        f"subdir(s) under plans/archive/",
+        f"migrated {len(stems)} file(s) into {len(groups)} slug subdir(s) under plans/archive/",
     )
     return ExitCode.OK
 
@@ -4928,7 +5266,8 @@ def cmd_activity(args, cfg: ProjectConfig, state_path: Path) -> int:
         )
     st.stamp_activity_marker(
         state_path,
-        token=args.token, phase=args.phase,
+        token=args.token,
+        phase=args.phase,
         action="start" if args.start_bash else "end",
         timeout_seconds=2.0,
     )
@@ -4939,17 +5278,28 @@ def cmd_activity(args, cfg: ProjectConfig, state_path: Path) -> int:
 def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         st.release_claim_and_emit(
-            data, expected_token=args.token, expected_phase=args.phase,
+            data,
+            expected_token=args.token,
+            expected_phase=args.phase,
             **cfg.coolant.release_kwargs(),
         )
         blocker_id = st.add_blocker(
-            data, args.phase, args.question, args.options,
-            args.context, args.type,
+            data,
+            args.phase,
+            args.question,
+            args.options,
+            args.context,
+            args.type,
         )
     notify.notify(
-        cfg.notify, notify.KIND_BLOCKER,
+        cfg.notify,
+        notify.KIND_BLOCKER,
         state_blocker.render_blocker(
-            args.plan, blocker_id, args.phase, args.question, args.options,
+            args.plan,
+            blocker_id,
+            args.phase,
+            args.question,
+            args.options,
         ),
         plan_slug=args.plan,
         project_root=str(cfg.project_root.resolve()),
@@ -4998,8 +5348,10 @@ def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         st.stamp_attestation(data, st.ATTESTATION_VERIFY, head)
         st.append_event(
-            data, st.EVENT_VERIFY_STAMPED,
-            phase=args.phase, commit_sha=head,
+            data,
+            st.EVENT_VERIFY_STAMPED,
+            phase=args.phase,
+            commit_sha=head,
         )
     print(f"verified at {head}")
     return ExitCode.OK
@@ -5026,8 +5378,10 @@ def cmd_attest(args, cfg: ProjectConfig, state_path: Path) -> int:
         st.assert_claim_match(data, args.token, args.phase)
         st.stamp_attestation(data, st.ATTESTATION_SIMPLIFY, head)
         st.append_event(
-            data, st.EVENT_SIMPLIFY_STAMPED,
-            phase=args.phase, commit_sha=head,
+            data,
+            st.EVENT_SIMPLIFY_STAMPED,
+            phase=args.phase,
+            commit_sha=head,
         )
     print(f"attested simplify at {head}")
     return ExitCode.OK
@@ -5100,10 +5454,7 @@ def cmd_blockers_show(args) -> int:
         print("  Options:")
         for i, opt in enumerate(blocker["options"]):
             print(f"    {i}. {opt}")
-    related = [
-        e for e in data.get("events", [])
-        if e.get("blocker_id") == args.blocker_id
-    ]
+    related = [e for e in data.get("events", []) if e.get("blocker_id") == args.blocker_id]
     if related:
         print("  Events:")
         for e in related:
@@ -5140,8 +5491,10 @@ def cmd_notify_test(args) -> int:
         notifier = notifier_cls.from_spec(ch)
         try:
             msg_id = notifier.send(
-                notify.KIND_COMPLETED, "clu notify smoke test",
-                plan_slug="_test", blocker_id=None,
+                notify.KIND_COMPLETED,
+                "clu notify smoke test",
+                plan_slug="_test",
+                blocker_id=None,
             )
             suffix = f" (msg {msg_id})" if msg_id else ""
             print(f"{ch.kind}: OK{suffix}")

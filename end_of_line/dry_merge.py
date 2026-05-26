@@ -4,6 +4,7 @@ See plans/dry-merge-gate.md and docs/architecture.md.
 Pure function: takes project_root + base_ref + list of branches
 + optional test_command, returns a MergeResult. No state I/O.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -46,28 +47,36 @@ def attempt_merge(
     """
     base_sha = subprocess.run(
         ["git", "-C", str(project_root), "rev-parse", base_ref],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
     tmpdir = tempfile.mkdtemp(prefix="clu-dry-merge-")
     try:
         subprocess.run(
-            ["git", "-C", str(project_root), "worktree", "add",
-             "--detach", tmpdir, base_sha],
-            capture_output=True, text=True, check=True,
+            ["git", "-C", str(project_root), "worktree", "add", "--detach", tmpdir, base_sha],
+            capture_output=True,
+            text=True,
+            check=True,
         )
 
         for branch in branches:
             merge = subprocess.run(
                 ["git", "-C", tmpdir, "merge", "--no-ff", "--no-edit", branch],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if merge.returncode != 0:
-                conflicts = subprocess.run(
-                    ["git", "-C", tmpdir, "diff", "--name-only",
-                     "--diff-filter=U"],
-                    capture_output=True, text=True,
-                ).stdout.strip().splitlines()
+                conflicts = (
+                    subprocess.run(
+                        ["git", "-C", tmpdir, "diff", "--name-only", "--diff-filter=U"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    .stdout.strip()
+                    .splitlines()
+                )
                 return MergeResult(
                     outcome=_OUTCOME_TEXTUAL_CONFLICT,
                     conflict_files=conflicts,
@@ -120,9 +129,9 @@ def attempt_merge(
     finally:
         try:
             r = subprocess.run(
-                ["git", "-C", str(project_root), "worktree",
-                 "remove", "--force", tmpdir],
-                capture_output=True, text=True,
+                ["git", "-C", str(project_root), "worktree", "remove", "--force", tmpdir],
+                capture_output=True,
+                text=True,
             )
             if r.returncode != 0:
                 print(f"dry_merge: teardown error: {r.stderr.strip()}", file=sys.stderr)

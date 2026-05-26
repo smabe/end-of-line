@@ -1,4 +1,5 @@
 """Fleet view — bare `clu` walks the registry and renders a plan-per-line summary."""
+
 from __future__ import annotations
 
 import io
@@ -33,7 +34,8 @@ class SummarizePlanTestCase(unittest.TestCase):
                 mutate(data)
             st.save_atomic(sp, data)
         return registry.PlanEntry(
-            project_root=str(self.project), plan_slug=slug,
+            project_root=str(self.project),
+            plan_slug=slug,
             registered_at=st.utcnow(),
         )
 
@@ -49,6 +51,7 @@ class SummarizePlanTestCase(unittest.TestCase):
     def test_active_claim_surfaces_current_phase(self) -> None:
         def m(data):
             st.claim_phase(data, "phase-1", lease_minutes=30)
+
         entry = self._seed("plan-a", mutate=m)
         summary = fleet.summarize_plan(entry)
         self.assertEqual(summary.current_phase, "phase-1")
@@ -58,6 +61,7 @@ class SummarizePlanTestCase(unittest.TestCase):
             st.add_blocker(data, "p", "?", ["A"])
             st.add_blocker(data, "p", "?", ["B"])
             data["blockers"][0]["answer"] = "A"
+
         entry = self._seed("plan-a", mutate=m)
         summary = fleet.summarize_plan(entry)
         self.assertEqual(summary.open_blocker_count, 1)
@@ -65,6 +69,7 @@ class SummarizePlanTestCase(unittest.TestCase):
     def test_halted_status_shown_verbatim(self) -> None:
         def m(data):
             data["status"] = st.STATUS_HALTED
+
         entry = self._seed("plan-a", mutate=m)
         summary = fleet.summarize_plan(entry)
         self.assertEqual(summary.status, st.STATUS_HALTED)
@@ -74,6 +79,7 @@ class SummarizePlanTestCase(unittest.TestCase):
         def m(data):
             st.claim_phase(data, "phase-1", lease_minutes=30)
             data["current_claim"]["last_heartbeat_at"] = "2020-01-01T00:00:00Z"
+
         entry = self._seed("plan-a", mutate=m)
         summary = fleet.summarize_plan(entry)
         self.assertEqual(summary.status, "stalled")
@@ -82,6 +88,7 @@ class SummarizePlanTestCase(unittest.TestCase):
     def test_last_event_age_from_most_recent_event(self) -> None:
         def m(data):
             st.append_event(data, st.EVENT_PHASE_STARTED, phase="p")
+
         entry = self._seed("plan-a", mutate=m)
         summary = fleet.summarize_plan(entry)
         self.assertIsNotNone(summary.last_event_age_seconds)
@@ -90,7 +97,8 @@ class SummarizePlanTestCase(unittest.TestCase):
     def test_missing_state_returns_none(self) -> None:
         # Registered but never `clu init`-ed.
         entry = registry.PlanEntry(
-            project_root=str(self.project), plan_slug="not-yet-init",
+            project_root=str(self.project),
+            plan_slug="not-yet-init",
             registered_at=st.utcnow(),
         )
         self.assertIsNone(fleet.summarize_plan(entry))
@@ -157,6 +165,7 @@ class FleetCommandTestCase(unittest.TestCase):
     def test_open_blocker_count_surfaces(self) -> None:
         def m(data):
             st.add_blocker(data, "p", "?", ["A", "B"])
+
         self._seed_plan("plan-a", mutate=m)
         out = self._run([])
         self.assertIn("plan-a", out)
@@ -166,6 +175,7 @@ class FleetCommandTestCase(unittest.TestCase):
         def m(data):
             st.claim_phase(data, "phase-1", lease_minutes=30)
             data["current_claim"]["last_heartbeat_at"] = "2020-01-01T00:00:00Z"
+
         self._seed_plan("plan-a", mutate=m)
         out = self._run([])
         self.assertIn("stalled", out)

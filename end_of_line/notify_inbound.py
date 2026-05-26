@@ -13,6 +13,7 @@ to disambiguate with the slug prefix. The render_blocker hint already
 nudges them toward `<plan-slug> <number>`, so this is the lower-surprise
 default.
 """
+
 from __future__ import annotations
 
 import sys
@@ -71,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         conn = open_chat_db(DEFAULT_CHAT_DB)
         self_chat_id = _resolve_self_chat_id(
-            conn, operator_handle=operator_handle, override=override,
+            conn,
+            operator_handle=operator_handle,
+            override=override,
         )
     except SelfChatLookupError as exc:
         print(f"notify_inbound: {exc}", file=sys.stderr)

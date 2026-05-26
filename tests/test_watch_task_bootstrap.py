@@ -1,4 +1,5 @@
 """Tests for watch.bootstrap_task_list — TASK_CREATE emission on startup."""
+
 import io
 import json
 import tempfile
@@ -12,11 +13,11 @@ from end_of_line.watch import bootstrap_task_list
 def _make_cfg_loader(project_root: Path):
     def loader(state_path: Path) -> ProjectConfig:
         return ProjectConfig(project_root=project_root)
+
     return loader
 
 
 class BootstrapEmissionTest(unittest.TestCase):
-
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
@@ -34,10 +35,7 @@ class BootstrapEmissionTest(unittest.TestCase):
         return self.tmp / "plans" / f"{slug}.md"
 
     def _write_master(self, slug: str, phases: list) -> None:
-        rows = "\n".join(
-            f"| {ph} | `{slug}-{ph}.md` | scope {ph} | 1h |"
-            for ph in phases
-        )
+        rows = "\n".join(f"| {ph} | `{slug}-{ph}.md` | scope {ph} | 1h |" for ph in phases)
         content = (
             f"# {slug}\n\n"
             "## Sessions index\n\n"
@@ -55,12 +53,15 @@ class BootstrapEmissionTest(unittest.TestCase):
         sink = io.StringIO()
         bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
         lines = sink.getvalue().splitlines()
-        self.assertEqual(lines, [
-            "TASK_CREATE task=my-plan status=pending",
-            "TASK_CREATE task=my-plan/a parent=my-plan status=pending",
-            "TASK_CREATE task=my-plan/b parent=my-plan status=pending",
-            "TASK_CREATE task=my-plan/c parent=my-plan status=pending",
-        ])
+        self.assertEqual(
+            lines,
+            [
+                "TASK_CREATE task=my-plan status=pending",
+                "TASK_CREATE task=my-plan/a parent=my-plan status=pending",
+                "TASK_CREATE task=my-plan/b parent=my-plan status=pending",
+                "TASK_CREATE task=my-plan/c parent=my-plan status=pending",
+            ],
+        )
 
     def test_bootstrap_parent_line_has_no_parent_field(self):
         slug = "my-plan"
@@ -101,14 +102,17 @@ class BootstrapEmissionTest(unittest.TestCase):
         sink = io.StringIO()
         bootstrap_task_list([state_a, state_b], _make_cfg_loader(self.tmp), sink)
         lines = sink.getvalue().splitlines()
-        self.assertEqual(lines, [
-            "TASK_CREATE task=plan-alpha status=pending",
-            "TASK_CREATE task=plan-alpha/x parent=plan-alpha status=pending",
-            "TASK_CREATE task=plan-alpha/y parent=plan-alpha status=pending",
-            "TASK_CREATE task=plan-beta status=pending",
-            "TASK_CREATE task=plan-beta/p parent=plan-beta status=pending",
-            "TASK_CREATE task=plan-beta/q parent=plan-beta status=pending",
-        ])
+        self.assertEqual(
+            lines,
+            [
+                "TASK_CREATE task=plan-alpha status=pending",
+                "TASK_CREATE task=plan-alpha/x parent=plan-alpha status=pending",
+                "TASK_CREATE task=plan-alpha/y parent=plan-alpha status=pending",
+                "TASK_CREATE task=plan-beta status=pending",
+                "TASK_CREATE task=plan-beta/p parent=plan-beta status=pending",
+                "TASK_CREATE task=plan-beta/q parent=plan-beta status=pending",
+            ],
+        )
 
     def test_bootstrap_state_path_pointing_at_missing_state_skips(self):
         nonexistent = self.tmp / "plans" / ".orchestrator" / "ghost.state.json"
@@ -116,15 +120,20 @@ class BootstrapEmissionTest(unittest.TestCase):
         bootstrap_task_list([nonexistent], _make_cfg_loader(self.tmp), sink)
         self.assertEqual(sink.getvalue(), "")
 
-    def _state_path_with_claim(self, slug: str, phase_id: str, *,
-                                plan_status: str = "running") -> Path:
+    def _state_path_with_claim(
+        self, slug: str, phase_id: str, *, plan_status: str = "running"
+    ) -> Path:
         p = self.tmp / "plans" / ".orchestrator" / f"{slug}.state.json"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({
-            "plan_slug": slug,
-            "status": plan_status,
-            "current_claim": {"phase_id": phase_id},
-        }))
+        p.write_text(
+            json.dumps(
+                {
+                    "plan_slug": slug,
+                    "status": plan_status,
+                    "current_claim": {"phase_id": phase_id},
+                }
+            )
+        )
         return p
 
     def test_bootstrap_emits_task_update_when_phase_active(self):

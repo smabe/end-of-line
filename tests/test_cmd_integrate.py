@@ -6,6 +6,7 @@ validate`. This file used to carry the full integrate coverage; that
 coverage now lives in `tests/test_cli_validate.py`. Only the
 deprecation-alias contract stays here.
 """
+
 from __future__ import annotations
 
 import io

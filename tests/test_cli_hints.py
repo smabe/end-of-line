@@ -9,6 +9,7 @@ Covers the four-layer discoverability hardening from #19 phase 2:
 All tests run in an isolated XDG dir so the real `~/.config/clu/monitor.json`
 is never touched.
 """
+
 from __future__ import annotations
 
 import io
@@ -68,21 +69,31 @@ class _BaseHintsCase(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             with mock.patch.object(
-                sys.stdout, "isatty", return_value=self._stdout_tty_flag,
+                sys.stdout,
+                "isatty",
+                return_value=self._stdout_tty_flag,
             ):
                 rc = main(list(argv))
         return rc, buf.getvalue()
 
     def _init(self, *extra: str) -> tuple[int, str]:
         return self._run(
-            "init", "--project", str(self.project), "--plan", "test-plan",
+            "init",
+            "--project",
+            str(self.project),
+            "--plan",
+            "test-plan",
             "--no-notify-prompt",  # tests focus on CLAUDE.md / monitor tips, not notify
             *extra,
         )
 
     def _queue_add(self, *slugs: str) -> tuple[int, str]:
         return self._run(
-            "queue", "add", *slugs, "--project", str(self.project),
+            "queue",
+            "add",
+            *slugs,
+            "--project",
+            str(self.project),
         )
 
 
@@ -100,7 +111,8 @@ class InitTipTestCase(_BaseHintsCase):
 
     def test_init_suppresses_tip_when_marker_present(self) -> None:
         monitor.record_hook_installed(
-            "/abs/hook.py", "/home/x/.claude/settings.json",
+            "/abs/hook.py",
+            "/home/x/.claude/settings.json",
         )
         rc, out = self._init()
         self.assertEqual(rc, 0)
@@ -135,7 +147,8 @@ class QueueAddTipTestCase(_BaseHintsCase):
 
     def test_queue_add_suppresses_tip_when_marker_present(self) -> None:
         monitor.record_hook_installed(
-            "/abs/hook.py", "/home/x/.claude/settings.json",
+            "/abs/hook.py",
+            "/home/x/.claude/settings.json",
         )
         rc, out = self._queue_add("a")
         self.assertEqual(rc, ExitCode.OK)
@@ -201,7 +214,8 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
     def test_init_skips_prompt_when_no_claude_md_file(self) -> None:
         # No CLAUDE.md created. input() must NOT be called.
         with mock.patch(
-            "builtins.input", side_effect=AssertionError("input called"),
+            "builtins.input",
+            side_effect=AssertionError("input called"),
         ):
             rc, _ = self._init()
         self.assertEqual(rc, 0)
@@ -211,7 +225,8 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
         claude_md = self._write_claude_md("# Doc\n\n## clu\n\nalready here\n")
         before = claude_md.read_text()
         with mock.patch(
-            "builtins.input", side_effect=AssertionError("input called"),
+            "builtins.input",
+            side_effect=AssertionError("input called"),
         ):
             rc, _ = self._init()
         self.assertEqual(rc, 0)
@@ -226,7 +241,8 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
         marker.touch()
         before = claude_md.read_text()
         with mock.patch(
-            "builtins.input", side_effect=AssertionError("input called"),
+            "builtins.input",
+            side_effect=AssertionError("input called"),
         ):
             rc, _ = self._init()
         self.assertEqual(rc, 0)
@@ -254,7 +270,8 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
         claude_md = self._write_claude_md()
         original = claude_md.read_text()
         with mock.patch(
-            "builtins.input", side_effect=AssertionError("input called"),
+            "builtins.input",
+            side_effect=AssertionError("input called"),
         ):
             rc, _ = self._init("--inject-claude-md")
         self.assertEqual(rc, 0)
@@ -267,7 +284,8 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
         claude_md = self._write_claude_md()
         before = claude_md.read_text()
         with mock.patch(
-            "builtins.input", side_effect=AssertionError("input called"),
+            "builtins.input",
+            side_effect=AssertionError("input called"),
         ):
             rc, _ = self._init("--no-claude-md")
         self.assertEqual(rc, 0)
@@ -281,7 +299,8 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
         marker.touch()
         mtime_before = marker.stat().st_mtime
         with mock.patch(
-            "builtins.input", side_effect=AssertionError("input called"),
+            "builtins.input",
+            side_effect=AssertionError("input called"),
         ):
             rc, _ = self._init("--no-claude-md")
         self.assertEqual(rc, 0)
@@ -295,7 +314,8 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
         claude_md = self._write_claude_md("# Doc\n\n## clu\n\nalready here\n")
         before = claude_md.read_text()
         with mock.patch(
-            "builtins.input", side_effect=AssertionError("input called"),
+            "builtins.input",
+            side_effect=AssertionError("input called"),
         ):
             rc, _ = self._init("--inject-claude-md")
         self.assertEqual(rc, 0)
@@ -307,7 +327,8 @@ class ClaudeMdInjectionTestCase(_BaseHintsCase):
         before = claude_md.read_text()
         with mock.patch("sys.stdin.isatty", return_value=False):
             with mock.patch(
-                "builtins.input", side_effect=AssertionError("input called"),
+                "builtins.input",
+                side_effect=AssertionError("input called"),
             ):
                 rc, _ = self._init()
         self.assertEqual(rc, 0)
@@ -335,10 +356,14 @@ class WorkerModelTipTestCase(_BaseHintsCase):
     """
 
     def _write_config(self, command: str) -> None:
-        (self.project / ".orchestrator.json").write_text(json.dumps({
-            "plan_dir": "plans",
-            "dispatch": {"kind": "shell", "command": command},
-        }))
+        (self.project / ".orchestrator.json").write_text(
+            json.dumps(
+                {
+                    "plan_dir": "plans",
+                    "dispatch": {"kind": "shell", "command": command},
+                }
+            )
+        )
 
     def test_init_unpinned_prints_settings_line(self) -> None:
         rc, out = self._init()
@@ -347,29 +372,23 @@ class WorkerModelTipTestCase(_BaseHintsCase):
         self.assertIn("no --model in dispatch.command", out)
 
     def test_init_pinned_prints_model_name(self) -> None:
-        self._write_config(
-            "claude --print --model claude-opus-4-7 '/clu-phase {plan_slug}'"
-        )
+        self._write_config("claude --print --model claude-opus-4-7 '/clu-phase {plan_slug}'")
         rc, out = self._init()
         self.assertEqual(rc, 0)
         self.assertIn(
-            "worker model: claude-opus-4-7 "
-            "(pinned via --model in dispatch.command)",
+            "worker model: claude-opus-4-7 (pinned via --model in dispatch.command)",
             out,
         )
 
     def test_queue_add_pinned_prints_model_name(self) -> None:
-        self._write_config(
-            "claude --print --model claude-sonnet-4-6 '/clu-phase'"
-        )
+        self._write_config("claude --print --model claude-sonnet-4-6 '/clu-phase'")
         rc, _ = self._init()
         self.assertEqual(rc, 0)
         _write_plan(self.project, "next-plan")
         rc, out = self._queue_add("next-plan")
         self.assertEqual(rc, 0)
         self.assertIn(
-            "worker model: claude-sonnet-4-6 "
-            "(pinned via --model in dispatch.command)",
+            "worker model: claude-sonnet-4-6 (pinned via --model in dispatch.command)",
             out,
         )
 

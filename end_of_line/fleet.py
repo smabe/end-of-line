@@ -1,4 +1,5 @@
 """Host-wide plan summary for bare `clu`. Pure projection — never mutates."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -80,24 +81,21 @@ def render(entries: Iterable[registry.PlanEntry]) -> str:
     for entry in entries:
         summary = summarize_plan(entry)
         if summary is None:
-            rows.append(
-                (entry.plan_slug, st.STATUS_MISSING, "-", "-", "-", "-")
-            )
+            rows.append((entry.plan_slug, st.STATUS_MISSING, "-", "-", "-", "-"))
             continue
-        rows.append((
-            summary.plan_slug,
-            summary.status,
-            summary.current_phase or "-",
-            str(summary.open_blocker_count),
-            humanize_age(summary.last_event_age_seconds),
-            "yes" if summary.has_worktree else "-",
-        ))
+        rows.append(
+            (
+                summary.plan_slug,
+                summary.status,
+                summary.current_phase or "-",
+                str(summary.open_blocker_count),
+                humanize_age(summary.last_event_age_seconds),
+                "yes" if summary.has_worktree else "-",
+            )
+        )
 
     header = ("PLAN", "STATUS", "PHASE", "BLOCKERS", "LAST", "WT")
-    widths = [
-        max(len(header[i]), max(len(r[i]) for r in rows))
-        for i in range(len(header))
-    ]
+    widths = [max(len(header[i]), max(len(r[i]) for r in rows)) for i in range(len(header))]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     lines = [fmt.format(*header)]
     for row in rows:

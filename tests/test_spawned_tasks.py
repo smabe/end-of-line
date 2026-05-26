@@ -1,4 +1,5 @@
 """Tests for fix 6: spawned-task completion path + spawn cap."""
+
 from __future__ import annotations
 
 import json
@@ -39,18 +40,38 @@ class SpawnedTaskTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def _spawn(self, title: str) -> int:
-        return main([
-            "spawn", "--project", str(self.project), "--plan", "t",
-            "--phase", "a", "--token", self.token,
-            "--source", "simplify", "--title", title,
-        ])
+        return main(
+            [
+                "spawn",
+                "--project",
+                str(self.project),
+                "--plan",
+                "t",
+                "--phase",
+                "a",
+                "--token",
+                self.token,
+                "--source",
+                "simplify",
+                "--title",
+                title,
+            ]
+        )
 
     def test_spawn_then_task_done_with_token(self) -> None:
         self.assertEqual(self._spawn("dedupe foo"), 0)
-        rc = main([
-            "task-done", "--project", str(self.project), "--plan", "t",
-            "--token", self.token, "task-1",
-        ])
+        rc = main(
+            [
+                "task-done",
+                "--project",
+                str(self.project),
+                "--plan",
+                "t",
+                "--token",
+                self.token,
+                "task-1",
+            ]
+        )
         self.assertEqual(rc, 0)
         data = json.loads(self.state_path.read_text())
         self.assertEqual(data["spawned_tasks"][0]["status"], "done")
@@ -60,25 +81,45 @@ class SpawnedTaskTestCase(unittest.TestCase):
         # Release claim so there's no live worker
         with st.mutate(self.state_path) as data:
             st.release_claim(data, expected_token=self.token, expected_phase="a")
-        rc = main([
-            "task-done", "--project", str(self.project), "--plan", "t",
-            "--force", "task-1",
-        ])
+        rc = main(
+            [
+                "task-done",
+                "--project",
+                str(self.project),
+                "--plan",
+                "t",
+                "--force",
+                "task-1",
+            ]
+        )
         self.assertEqual(rc, 0)
 
     def test_task_done_without_token_or_force_fails(self) -> None:
         self.assertEqual(self._spawn("noop"), 0)
-        rc = main([
-            "task-done", "--project", str(self.project), "--plan", "t",
-            "task-1",  # no token, no force
-        ])
+        rc = main(
+            [
+                "task-done",
+                "--project",
+                str(self.project),
+                "--plan",
+                "t",
+                "task-1",  # no token, no force
+            ]
+        )
         self.assertEqual(rc, 4)
 
     def test_task_done_unknown_id(self) -> None:
-        rc = main([
-            "task-done", "--project", str(self.project), "--plan", "t",
-            "--force", "task-999",
-        ])
+        rc = main(
+            [
+                "task-done",
+                "--project",
+                str(self.project),
+                "--plan",
+                "t",
+                "--force",
+                "task-999",
+            ]
+        )
         self.assertEqual(rc, 6)
 
     def test_spawn_cap_enforced(self) -> None:

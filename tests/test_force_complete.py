@@ -7,6 +7,7 @@ commits, and emits both `EVENT_OPERATOR_FORCE_COMPLETE` (audit) and
 `EVENT_PHASE_COMPLETED` (state) so the supervisor's plan_done detection
 fires normally on the next tick.
 """
+
 from __future__ import annotations
 
 import io
@@ -19,7 +20,6 @@ from tests import GitProjectTestCase
 
 
 class ForceCompleteTestCase(GitProjectTestCase):
-
     def _events(self, *types: str) -> list[dict]:
         return [e for e in self._read()["events"] if e["type"] in types]
 
@@ -40,10 +40,17 @@ class ForceCompleteTestCase(GitProjectTestCase):
 
     def test_force_complete_appends_operator_force_event(self) -> None:
         self._claim("a")
-        rc = main(self._argv(
-            "force-complete", "--phase", "a", "--commit", self.sha,
-            "--reason", "zombie worker",
-        ))
+        rc = main(
+            self._argv(
+                "force-complete",
+                "--phase",
+                "a",
+                "--commit",
+                self.sha,
+                "--reason",
+                "zombie worker",
+            )
+        )
         self.assertEqual(rc, ExitCode.OK)
         evts = self._events(st.EVENT_OPERATOR_FORCE_COMPLETE)
         self.assertEqual(len(evts), 1)
@@ -105,9 +112,16 @@ class ForceCompleteTestCase(GitProjectTestCase):
         self.assertIn("--really", buf.getvalue())
 
     def test_really_bypasses_never_started_check(self) -> None:
-        rc = main(self._argv(
-            "force-complete", "--phase", "b", "--commit", self.sha, "--really",
-        ))
+        rc = main(
+            self._argv(
+                "force-complete",
+                "--phase",
+                "b",
+                "--commit",
+                self.sha,
+                "--really",
+            )
+        )
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("b", st.completed_phase_ids(self._read()))
 
@@ -124,9 +138,15 @@ class ForceCompleteTestCase(GitProjectTestCase):
     def test_refuses_invalid_phase_slug(self) -> None:
         buf = io.StringIO()
         with redirect_stderr(buf):
-            rc = main(self._argv(
-                "force-complete", "--phase", "Bad/Slug", "--commit", self.sha,
-            ))
+            rc = main(
+                self._argv(
+                    "force-complete",
+                    "--phase",
+                    "Bad/Slug",
+                    "--commit",
+                    self.sha,
+                )
+            )
         self.assertEqual(rc, ExitCode.INVALID_SLUG)
 
     # ---- claim release semantics ---------------------------------------------

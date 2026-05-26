@@ -1,4 +1,5 @@
 """Per-project `.orchestrator.json` loader."""
+
 from __future__ import annotations
 
 import json
@@ -80,6 +81,7 @@ class CoolantSpec:
     parallel-mode formula see clu workers. `script_dir` overrides
     auto-discovery of `~/.claude/plugins/cache/.../scripts/`.
     """
+
     enabled: bool = True
     script_dir: str | None = None
 
@@ -167,10 +169,14 @@ class ProjectConfig:
 def _validate_channel(raw: dict) -> ChannelSpec:
     kind = raw.get("kind")
     if kind not in _KNOWN_KINDS:
-        raise ConfigError(f"notify.channels: unknown kind {kind!r} (expected one of {sorted(_KNOWN_KINDS)})")
+        raise ConfigError(
+            f"notify.channels: unknown kind {kind!r} (expected one of {sorted(_KNOWN_KINDS)})"
+        )
     for required in _KIND_REQUIRED.get(kind, []):
         if not raw.get(required):
-            raise ConfigError(f"notify.channels[kind={kind!r}]: missing required field {required!r}")
+            raise ConfigError(
+                f"notify.channels[kind={kind!r}]: missing required field {required!r}"
+            )
     kinds_raw = raw.get("kinds")
     kinds = frozenset(kinds_raw) if kinds_raw is not None else None
     enabled = bool(raw.get("enabled", True))
@@ -182,26 +188,18 @@ def _validate_quality(raw: dict) -> QualitySpec:
     q = raw.get("quality") or {}
     vc = q.get("verify_command")
     if vc is not None and not isinstance(vc, str):
-        raise ConfigError(
-            f"quality.verify_command: must be string, got {type(vc).__name__!r}"
-        )
+        raise ConfigError(f"quality.verify_command: must be string, got {type(vc).__name__!r}")
     st_raw = q.get("simplify_threshold")
     if st_raw is not None:
         if not isinstance(st_raw, dict):
-            raise ConfigError(
-                "quality.simplify_threshold: must be object with files+lines"
-            )
+            raise ConfigError("quality.simplify_threshold: must be object with files+lines")
         for key in ("files", "lines"):
             v = st_raw.get(key)
             if not isinstance(v, int) or v < 0:
-                raise ConfigError(
-                    f"quality.simplify_threshold.{key}: must be non-negative int"
-                )
+                raise ConfigError(f"quality.simplify_threshold.{key}: must be non-negative int")
     vr_raw = q.get("verify_required", True)
     if not isinstance(vr_raw, bool):
-        raise ConfigError(
-            f"quality.verify_required: must be bool, got {type(vr_raw).__name__!r}"
-        )
+        raise ConfigError(f"quality.verify_required: must be bool, got {type(vr_raw).__name__!r}")
     return QualitySpec(
         verify_command=vc,
         simplify_threshold=st_raw,
@@ -213,14 +211,11 @@ def _validate_coolant(raw: dict) -> CoolantSpec:
     block = raw.get("coolant") or {}
     enabled = block.get("enabled", True)
     if not isinstance(enabled, bool):
-        raise ConfigError(
-            f"coolant.enabled: must be bool, got {type(enabled).__name__!r}"
-        )
+        raise ConfigError(f"coolant.enabled: must be bool, got {type(enabled).__name__!r}")
     script_dir = block.get("script_dir")
     if script_dir is not None and not isinstance(script_dir, str):
         raise ConfigError(
-            f"coolant.script_dir: must be string or null, "
-            f"got {type(script_dir).__name__!r}"
+            f"coolant.script_dir: must be string or null, got {type(script_dir).__name__!r}"
         )
     return CoolantSpec(enabled=enabled, script_dir=script_dir)
 
@@ -246,36 +241,28 @@ _SHIP_MODES = ("direct", "as_pr")
 def _validate_ship_mode(disp: dict) -> str:
     val = disp.get("ship_mode", "direct")
     if val not in _SHIP_MODES:
-        raise ConfigError(
-            f"dispatch.ship_mode: must be one of {_SHIP_MODES}, got {val!r}"
-        )
+        raise ConfigError(f"dispatch.ship_mode: must be one of {_SHIP_MODES}, got {val!r}")
     return val
 
 
 def _validate_auto_archive(raw: dict) -> bool:
     value = raw.get("auto_archive", True)
     if not isinstance(value, bool):
-        raise ConfigError(
-            f"auto_archive: must be a boolean, got {type(value).__name__!r}"
-        )
+        raise ConfigError(f"auto_archive: must be a boolean, got {type(value).__name__!r}")
     return value
 
 
 def _validate_tick_on_action(raw: dict) -> bool:
     value = raw.get("tick_on_action", True)
     if not isinstance(value, bool):
-        raise ConfigError(
-            f"tick_on_action: must be a boolean, got {type(value).__name__!r}"
-        )
+        raise ConfigError(f"tick_on_action: must be a boolean, got {type(value).__name__!r}")
     return value
 
 
 def _validate_stuck_tool_threshold(raw: dict, key: str, default: int) -> int:
     value = raw.get(key, default)
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ConfigError(
-            f"{key}: must be non-negative int, got {value!r}"
-        )
+        raise ConfigError(f"{key}: must be non-negative int, got {value!r}")
     return value
 
 
@@ -290,9 +277,7 @@ def load_project_config(project_root: Path) -> ProjectConfig:
     quiet = notify_raw.get("quiet_hours")
     raw_path = disp.get("path", "") or ""
     if raw_path:
-        raw_path = ":".join(
-            os.path.expanduser(seg) for seg in raw_path.split(":")
-        )
+        raw_path = ":".join(os.path.expanduser(seg) for seg in raw_path.split(":"))
     channels_raw = notify_raw.get("channels")
     if channels_raw is None:
         legacy_to = (notify_raw.get("imessage") or {}).get("to")
@@ -320,9 +305,13 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         coolant=_validate_coolant(raw),
         lease_ttl_scale=_validate_lease_ttl_scale(raw),
         stuck_tool_threshold_seconds=_validate_stuck_tool_threshold(
-            raw, "stuck_tool_threshold_seconds", 300,
+            raw,
+            "stuck_tool_threshold_seconds",
+            300,
         ),
         stuck_tool_cpu_threshold_seconds=_validate_stuck_tool_threshold(
-            raw, "stuck_tool_cpu_threshold_seconds", 5,
+            raw,
+            "stuck_tool_cpu_threshold_seconds",
+            5,
         ),
     )

@@ -1,4 +1,5 @@
 """Tests for state.stamp_attestation — attestations slot on current_claim."""
+
 from __future__ import annotations
 
 import re
@@ -14,20 +15,15 @@ def _claim_data() -> dict:
 
 
 class StampAttestationTests(unittest.TestCase):
-
     def test_stamp_attestation_adds_verify_key(self) -> None:
         data = _claim_data()
         st.stamp_attestation(data, "verify", "abc123")
-        self.assertEqual(
-            data["current_claim"]["attestations"]["verify"]["commit_sha"], "abc123"
-        )
+        self.assertEqual(data["current_claim"]["attestations"]["verify"]["commit_sha"], "abc123")
 
     def test_stamp_attestation_adds_simplify_key(self) -> None:
         data = _claim_data()
         st.stamp_attestation(data, "simplify", "def456")
-        self.assertEqual(
-            data["current_claim"]["attestations"]["simplify"]["commit_sha"], "def456"
-        )
+        self.assertEqual(data["current_claim"]["attestations"]["simplify"]["commit_sha"], "def456")
 
     def test_stamp_attestation_lazy_inits_map(self) -> None:
         data = _claim_data()
@@ -39,9 +35,7 @@ class StampAttestationTests(unittest.TestCase):
         data = _claim_data()
         st.stamp_attestation(data, "verify", "old-sha")
         st.stamp_attestation(data, "verify", "new-sha")
-        self.assertEqual(
-            data["current_claim"]["attestations"]["verify"]["commit_sha"], "new-sha"
-        )
+        self.assertEqual(data["current_claim"]["attestations"]["verify"]["commit_sha"], "new-sha")
 
     def test_stamp_attestation_iso8601_z_format(self) -> None:
         data = _claim_data()

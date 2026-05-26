@@ -18,6 +18,7 @@ patching `Popen` breaks the `subprocess.run` calls in `_verify_commit_shas`
 on the way through cmd_complete — same module-level `subprocess.Popen`
 is the implementation of `subprocess.run`.
 """
+
 from __future__ import annotations
 
 import json
@@ -76,15 +77,16 @@ class _TickOnActionBase(unittest.TestCase):
         )
         subprocess.run(
             ["git", "-C", str(self.project), "commit", "--allow-empty", "-m", "init"],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         self.sha = subprocess.run(
             ["git", "-C", str(self.project), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
         with st.mutate(self.state_path) as data:
@@ -112,47 +114,89 @@ class SpawnInvocationTests(_TickOnActionBase):
         call = helper_mock.call_args
         cfg_arg = call.args[0]
         self.assertEqual(
-            cfg_arg.project_root.resolve(), self.project.resolve(),
+            cfg_arg.project_root.resolve(),
+            self.project.resolve(),
         )
 
     def test_complete_invokes_spawn_helper(self) -> None:
         with mock.patch("end_of_line.cli._spawn_post_action_tick") as helper:
-            rc = main([
-                "complete", "--project", str(self.project), "--plan", "test-plan",
-                "--phase", "a", "--token", self.token, "--commit", self.sha,
-                "--skip-verify", "--skip-simplify",
-            ])
+            rc = main(
+                [
+                    "complete",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "test-plan",
+                    "--phase",
+                    "a",
+                    "--token",
+                    self.token,
+                    "--commit",
+                    self.sha,
+                    "--skip-verify",
+                    "--skip-simplify",
+                ]
+            )
         self.assertEqual(rc, 0)
         self._assert_helper_called_for_project(helper)
 
     def test_block_invokes_spawn_helper(self) -> None:
-        with mock.patch("end_of_line.cli._spawn_post_action_tick") as helper, \
-                mock.patch("end_of_line.cli.notify.notify"):
-            rc = main([
-                "block", "--project", str(self.project), "--plan", "test-plan",
-                "--phase", "a", "--token", self.token,
-                "--question", "should we?",
-                "--type", st.BLOCKER_INPUT,
-            ])
+        with (
+            mock.patch("end_of_line.cli._spawn_post_action_tick") as helper,
+            mock.patch("end_of_line.cli.notify.notify"),
+        ):
+            rc = main(
+                [
+                    "block",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "test-plan",
+                    "--phase",
+                    "a",
+                    "--token",
+                    self.token,
+                    "--question",
+                    "should we?",
+                    "--type",
+                    st.BLOCKER_INPUT,
+                ]
+            )
         self.assertEqual(rc, 0)
         self._assert_helper_called_for_project(helper)
 
     def test_force_complete_invokes_spawn_helper(self) -> None:
         with mock.patch("end_of_line.cli._spawn_post_action_tick") as helper:
-            rc = main([
-                "force-complete", "--project", str(self.project),
-                "--plan", "test-plan", "--phase", "a",
-                "--commit", self.sha, "--reason", "test",
-            ])
+            rc = main(
+                [
+                    "force-complete",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "test-plan",
+                    "--phase",
+                    "a",
+                    "--commit",
+                    self.sha,
+                    "--reason",
+                    "test",
+                ]
+            )
         self.assertEqual(rc, 0)
         self._assert_helper_called_for_project(helper)
 
     def test_queue_add_invokes_spawn_helper(self) -> None:
         (self.project / "plans" / "other-plan.md").write_text(OTHER_PLAN_BODY)
         with mock.patch("end_of_line.cli._spawn_post_action_tick") as helper:
-            rc = main([
-                "queue", "add", "--project", str(self.project), "other-plan",
-            ])
+            rc = main(
+                [
+                    "queue",
+                    "add",
+                    "--project",
+                    str(self.project),
+                    "other-plan",
+                ]
+            )
         self.assertEqual(rc, 0)
         self._assert_helper_called_for_project(helper)
 
@@ -164,25 +208,43 @@ class TaskDoneSpawnTests(_TickOnActionBase):
 
     def setUp(self) -> None:
         super().setUp()
-        rc = main([
-            "spawn", "--project", str(self.project), "--plan", "test-plan",
-            "--phase", "a", "--token", self.token,
-            "--title", "side task",
-        ])
+        rc = main(
+            [
+                "spawn",
+                "--project",
+                str(self.project),
+                "--plan",
+                "test-plan",
+                "--phase",
+                "a",
+                "--token",
+                self.token,
+                "--title",
+                "side task",
+            ]
+        )
         self.assertEqual(rc, 0)
 
     def test_task_done_invokes_spawn_helper(self) -> None:
         with mock.patch("end_of_line.cli._spawn_post_action_tick") as helper:
-            rc = main([
-                "task-done", "--project", str(self.project),
-                "--plan", "test-plan", "task-1",
-                "--token", self.token,
-            ])
+            rc = main(
+                [
+                    "task-done",
+                    "--project",
+                    str(self.project),
+                    "--plan",
+                    "test-plan",
+                    "task-1",
+                    "--token",
+                    self.token,
+                ]
+            )
         self.assertEqual(rc, 0)
         self.assertTrue(helper.called)
         cfg_arg = helper.call_args.args[0]
         self.assertEqual(
-            cfg_arg.project_root.resolve(), self.project.resolve(),
+            cfg_arg.project_root.resolve(),
+            self.project.resolve(),
         )
 
 
@@ -212,7 +274,8 @@ class SpawnHelperTests(unittest.TestCase):
 
     def test_helper_noop_when_tick_on_action_false(self) -> None:
         cfg = ProjectConfig(
-            project_root=Path("/tmp/example-proj"), tick_on_action=False,
+            project_root=Path("/tmp/example-proj"),
+            tick_on_action=False,
         )
         with mock.patch("end_of_line.cli.subprocess.Popen") as popen:
             _spawn_post_action_tick(cfg)
@@ -245,14 +308,20 @@ class SpawnSuppressionEndToEndTests(_TickOnActionBase):
     def test_queue_add_skips_popen_when_disabled(self) -> None:
         (self.project / "plans" / "other-plan.md").write_text(OTHER_PLAN_BODY)
         with mock.patch("end_of_line.cli.subprocess.Popen") as popen:
-            rc = main([
-                "queue", "add", "--project", str(self.project), "other-plan",
-            ])
+            rc = main(
+                [
+                    "queue",
+                    "add",
+                    "--project",
+                    str(self.project),
+                    "other-plan",
+                ]
+            )
         self.assertEqual(rc, 0)
         tick_calls = [
-            c for c in popen.call_args_list
-            if len(c.args) >= 1 and isinstance(c.args[0], list)
-            and "tick" in c.args[0]
+            c
+            for c in popen.call_args_list
+            if len(c.args) >= 1 and isinstance(c.args[0], list) and "tick" in c.args[0]
         ]
         self.assertEqual(len(tick_calls), 0)
 

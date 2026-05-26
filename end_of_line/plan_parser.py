@@ -5,6 +5,7 @@ declare each phase. We extract phase id + plan file + scope + effort. For
 single-phase plans (no Sessions index), return [] — the caller decides
 whether to synthesize one phase from the master itself.
 """
+
 from __future__ import annotations
 
 import re
@@ -16,9 +17,7 @@ from . import state as st
 _EFFORT_SINGLE_RE = re.compile(r"^(\d+(?:\.\d+)?)(h|min)$", re.IGNORECASE)
 _EFFORT_RANGE_RE = re.compile(r"^\d+(?:\.\d+)?-(\d+(?:\.\d+)?)(h|min)$", re.IGNORECASE)
 
-_SESSIONS_HEADER_RE = re.compile(
-    r"^##\s+Sessions?\s+index\s*$", re.MULTILINE | re.IGNORECASE
-)
+_SESSIONS_HEADER_RE = re.compile(r"^##\s+Sessions?\s+index\s*$", re.MULTILINE | re.IGNORECASE)
 _SEPARATOR_RE = re.compile(r"^\|[\s\-:|]+\|\s*$")
 # `[text](target)` — natural Sessions-index navigation syntax. Author intent
 # is the bracketed text (the displayed filename); target may diverge but the
@@ -41,7 +40,7 @@ def parse_sessions_index(plan_path: Path) -> list[Phase]:
         return []
 
     master_stem = plan_path.stem
-    lines = text[match.end():].splitlines()
+    lines = text[match.end() :].splitlines()
     phases: list[Phase] = []
     in_table = False
     seen_separator = False
@@ -77,16 +76,18 @@ def parse_sessions_index(plan_path: Path) -> list[Phase]:
             effort = cells[3].strip()
             basename = Path(plan_file).stem
             if basename.startswith(master_stem + "-"):
-                phase_id = basename[len(master_stem) + 1:]
+                phase_id = basename[len(master_stem) + 1 :]
             else:
                 phase_id = basename
             st.validate_slug(phase_id, kind="phase_id")
-            phases.append(Phase(
-                id=phase_id,
-                plan_file=plan_file,
-                scope=scope,
-                effort=effort,
-            ))
+            phases.append(
+                Phase(
+                    id=phase_id,
+                    plan_file=plan_file,
+                    scope=scope,
+                    effort=effort,
+                )
+            )
     return phases
 
 

@@ -9,6 +9,7 @@ hook_path, settings_json_path}.
 `is_scheduled()` must return True only for v2 markers — v1 markers were
 written by the broken `/schedule` skill and represent "needs reinstall."
 """
+
 from __future__ import annotations
 
 import json
@@ -31,12 +32,16 @@ class V1MarkerTests(unittest.TestCase):
 
     def _write_v1(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({
-            "schema_version": 1,
-            "scheduled_at": "2026-05-12T00:00:00Z",
-            "schedule_id": "sch-legacy",
-            "cadence": "*/15 * * * *",
-        }))
+        self.path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "scheduled_at": "2026-05-12T00:00:00Z",
+                    "schedule_id": "sch-legacy",
+                    "cadence": "*/15 * * * *",
+                }
+            )
+        )
 
     def test_is_scheduled_returns_false_for_v1_marker(self) -> None:
         self._write_v1()
@@ -55,7 +60,8 @@ class V1MarkerTests(unittest.TestCase):
         self.assertEqual(data["schema_version"], 2)
         self.assertEqual(data["hook_path"], "/abs/path/to/clu_inbox_surface.py")
         self.assertEqual(
-            data["settings_json_path"], "/home/x/.claude/settings.json",
+            data["settings_json_path"],
+            "/home/x/.claude/settings.json",
         )
         self.assertTrue(data["hook_installed_at"].endswith("Z"))
 

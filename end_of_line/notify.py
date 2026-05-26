@@ -5,6 +5,7 @@ Quiet hours gate every kind defined here. If you add a kind that must bypass
 quiet hours (halts, emergency stale escalations), include it in
 QUIET_HOURS_BYPASS_KINDS.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -40,6 +41,7 @@ def set_global_suppress(v: bool) -> None:
     global _GLOBAL_SUPPRESS
     _GLOBAL_SUPPRESS = v
 
+
 KIND_BLOCKER = "blocker"
 KIND_STALLED = "stalled"
 KIND_COMPLETED = "completed"
@@ -65,11 +67,13 @@ KIND_PLAN_AUTO_ARCHIVED = "plan_auto_archived"
 # data["ship_pending"] once ship is in flight.
 KIND_READY_TO_SHIP = "ready_to_ship"
 
-QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset({
-    KIND_HALTED,
-    KIND_QUEUE_REPAIR_FAILED,
-    KIND_QUEUE_CORRUPT,
-})
+QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset(
+    {
+        KIND_HALTED,
+        KIND_QUEUE_REPAIR_FAILED,
+        KIND_QUEUE_CORRUPT,
+    }
+)
 
 
 def parse_hhmm(s: str) -> _dt.time:
@@ -78,7 +82,9 @@ def parse_hhmm(s: str) -> _dt.time:
 
 
 def is_quiet_hours(
-    now: _dt.datetime, start: _dt.time, end: _dt.time,
+    now: _dt.datetime,
+    start: _dt.time,
+    end: _dt.time,
 ) -> bool:
     """True if `now` falls inside the [start, end) quiet window.
 
@@ -117,6 +123,7 @@ def notify(
         writer = inbox_writer
         if writer is None:
             from . import inbox as _inbox
+
             writer = _inbox.write_event
         try:
             writer(
@@ -171,8 +178,12 @@ def in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:
 # import them from notify continue to work.
 
 __all__ = [
-    "BLOCKER_BODY_SOFT_LIMIT", "KIND_STUCK_BLOCKER",
-    "render_blocker", "render_halted", "render_stalled", "render_stuck_blocker",
+    "BLOCKER_BODY_SOFT_LIMIT",
+    "KIND_STUCK_BLOCKER",
+    "render_blocker",
+    "render_halted",
+    "render_stalled",
+    "render_stuck_blocker",
     "render_worker_dead",
 ]
 
@@ -227,10 +238,7 @@ def render_gate_clean(batch_id: str, slugs: list[str]) -> str:
 
 
 def render_gate_dirty(batch_id: str, outcome: str, follow_up_path: str) -> str:
-    return (
-        f"Batch {batch_id} dry-merge DIRTY ({outcome}). "
-        f"Follow-up: {follow_up_path}"
-    )
+    return f"Batch {batch_id} dry-merge DIRTY ({outcome}). Follow-up: {follow_up_path}"
 
 
 def render_plan_auto_archived(slug: str, branch: str) -> str:
@@ -256,7 +264,9 @@ def render_ready_to_ship(slugs: list[str], mode: str) -> str:
 
 
 def render_worktree_conflict(
-    project_root: Path, slug_a: str, slug_b: str,
+    project_root: Path,
+    slug_a: str,
+    slug_b: str,
 ) -> str:
     return (
         f"🌳 {slug_a} ⟷ {slug_b} in {project_root.name} — both active "

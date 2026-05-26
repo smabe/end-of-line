@@ -10,6 +10,7 @@ Dedup: stamps `data["ready_to_ship_announced"] = {"branch_sha": ...}`
 after firing so subsequent ticks don't re-spam the inbox. Re-fires
 if the worker pushes new commits to the branch (branch_sha changes).
 """
+
 from __future__ import annotations
 
 import unittest
@@ -24,6 +25,7 @@ from tests import CluTestCase, git as _git, make_git_project as _make_git_projec
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _commit_branch(project: Path, branch: str, msg: str = "work") -> str:
     """Create branch (if needed) + one commit; return the new HEAD SHA.
@@ -73,6 +75,7 @@ def _make_done_plan(
 # rule tests
 # ---------------------------------------------------------------------------
 
+
 class _ReadyToShipRuleBase(CluTestCase):
     """Real git project + bare origin so is_branch_merged_into has
     a meaningful origin/main; only ready_to_ship_rule is registered."""
@@ -83,9 +86,11 @@ class _ReadyToShipRuleBase(CluTestCase):
         # Bare origin remote
         bare = self.tmp_path / "origin.git"
         import subprocess
+
         subprocess.run(
             ["git", "init", "-q", "--bare", str(bare)],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         _git(self.project, "remote", "add", "origin", str(bare))
         _git(self.project, "push", "-u", "origin", "main")
@@ -93,6 +98,7 @@ class _ReadyToShipRuleBase(CluTestCase):
         self._rules_snapshot = list(cross_plan_rules._RULES)
         cross_plan_rules._RULES.clear()
         from end_of_line.cross_plan_rules import ready_to_ship_rule  # noqa: PLC0415
+
         register_rule(ready_to_ship_rule)
 
     def tearDown(self) -> None:
@@ -101,7 +107,6 @@ class _ReadyToShipRuleBase(CluTestCase):
 
 
 class ReadyToShipEligibilityTests(_ReadyToShipRuleBase):
-
     def test_no_done_plans_returns_None(self) -> None:
         result = run_rules(self.project, [])
         self.assertIsNone(result)
@@ -137,19 +142,22 @@ class ReadyToShipEligibilityTests(_ReadyToShipRuleBase):
     def test_ship_pending_suppresses(self) -> None:
         _commit_branch(self.project, "clu/alpha")
         p = _make_done_plan(
-            self.project, "alpha", "clu/alpha",
-            extra_state={"ship_pending": {
-                "mode": "as_pr",
-                "pr_url": "https://github.com/example/repo/pull/1",
-                "ts": "2026-05-23T12:00:00Z",
-            }},
+            self.project,
+            "alpha",
+            "clu/alpha",
+            extra_state={
+                "ship_pending": {
+                    "mode": "as_pr",
+                    "pr_url": "https://github.com/example/repo/pull/1",
+                    "ts": "2026-05-23T12:00:00Z",
+                }
+            },
         )
         result = run_rules(self.project, [p])
         self.assertIsNone(result)
 
 
 class ReadyToShipNotifyTests(_ReadyToShipRuleBase):
-
     def test_eligible_plan_emits_notification(self) -> None:
         _commit_branch(self.project, "clu/alpha")
         p = _make_done_plan(self.project, "alpha", "clu/alpha")
@@ -220,8 +228,8 @@ class ReadyToShipNotifyTests(_ReadyToShipRuleBase):
 # render tests
 # ---------------------------------------------------------------------------
 
-class RenderReadyToShipTests(unittest.TestCase):
 
+class RenderReadyToShipTests(unittest.TestCase):
     def test_single_plan_direct(self) -> None:
         body = notify.render_ready_to_ship(["alpha"], "direct")
         self.assertIn("alpha", body)

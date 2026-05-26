@@ -1,4 +1,5 @@
 """Tests for end_of_line.state_blocker — pure blocker state machine."""
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -57,7 +58,6 @@ def _blocker(
 
 
 class TestProcessAnsweredBlockers(unittest.TestCase):
-
     def test_no_blockers_returns_empty(self) -> None:
         data = _base_data()
         events, status = process_answered_blockers(data)
@@ -110,7 +110,6 @@ class TestProcessAnsweredBlockers(unittest.TestCase):
 
 
 class TestStuckBlockerRepings(unittest.TestCase):
-
     def _now(self) -> _dt.datetime:
         return _utcnow()
 
@@ -121,9 +120,7 @@ class TestStuckBlockerRepings(unittest.TestCase):
 
     def test_recently_pinged_blocker_skipped(self) -> None:
         data = _base_data()
-        data["blockers"].append(
-            _blocker(asked_minutes_ago=31, last_repinged_minutes_ago=5)
-        )
+        data["blockers"].append(_blocker(asked_minutes_ago=31, last_repinged_minutes_ago=5))
         result = stuck_blocker_repings(data, self._now())
         self.assertEqual(result, [])
 
@@ -137,9 +134,7 @@ class TestStuckBlockerRepings(unittest.TestCase):
 
     def test_stale_ping_repings(self) -> None:
         data = _base_data()
-        data["blockers"].append(
-            _blocker(asked_minutes_ago=62, last_repinged_minutes_ago=31)
-        )
+        data["blockers"].append(_blocker(asked_minutes_ago=62, last_repinged_minutes_ago=31))
         result = stuck_blocker_repings(data, self._now())
         self.assertEqual(len(result), 1)
 
@@ -151,9 +146,7 @@ class TestStuckBlockerRepings(unittest.TestCase):
 
     def test_consumed_blocker_not_repinged(self) -> None:
         data = _base_data()
-        data["blockers"].append(
-            _blocker(asked_minutes_ago=31, consumed=True, answer="Alpha")
-        )
+        data["blockers"].append(_blocker(asked_minutes_ago=31, consumed=True, answer="Alpha"))
         result = stuck_blocker_repings(data, self._now())
         self.assertEqual(result, [])
 
@@ -169,10 +162,13 @@ class TestStuckBlockerRepings(unittest.TestCase):
 
 
 class TestRenderFunctions(unittest.TestCase):
-
     def test_render_blocker_includes_question_and_options(self) -> None:
         body = render_blocker(
-            "my-plan", "q-1", "phase-a", "Which approach?", ["Alpha", "Beta"],
+            "my-plan",
+            "q-1",
+            "phase-a",
+            "Which approach?",
+            ["Alpha", "Beta"],
         )
         self.assertIn("Which approach?", body)
         self.assertIn("Alpha", body)

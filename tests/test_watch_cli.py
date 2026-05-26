@@ -1,4 +1,5 @@
 """Tests for `clu watch` CLI subcommand — arg resolution and dispatch."""
+
 from __future__ import annotations
 
 import io
@@ -43,17 +44,18 @@ class WatchArgparseTest(CluTestCase):
         self.project.mkdir()
 
     def test_argparse_plan_and_all_mutually_exclusive(self) -> None:
-        with self.assertRaises(SystemExit) as ctx, \
-             redirect_stderr(io.StringIO()):
-            main(["watch", "--plan", "x", "--all",
-                  "--project", str(self.project)])
+        with self.assertRaises(SystemExit) as ctx, redirect_stderr(io.StringIO()):
+            main(["watch", "--plan", "x", "--all", "--project", str(self.project)])
         self.assertNotEqual(ctx.exception.code, 0)
 
     def test_argparse_plan_requires_project(self) -> None:
         # --plan without --project: CWD project has no such plan → UNKNOWN_TASK
         out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err), \
-             mock.patch.object(Path, "cwd", return_value=self.project):
+        with (
+            redirect_stdout(out),
+            redirect_stderr(err),
+            mock.patch.object(Path, "cwd", return_value=self.project),
+        ):
             rc = main(["watch", "--plan", "x"])
         self.assertEqual(rc, int(ExitCode.UNKNOWN_TASK))
         self.assertIn("x", err.getvalue())
@@ -61,8 +63,7 @@ class WatchArgparseTest(CluTestCase):
     def test_unknown_plan_exits_unknown_task(self) -> None:
         err = io.StringIO()
         with redirect_stderr(err):
-            rc = main(["watch", "--plan", "nonexistent",
-                       "--project", str(self.project)])
+            rc = main(["watch", "--plan", "nonexistent", "--project", str(self.project)])
         self.assertEqual(rc, int(ExitCode.UNKNOWN_TASK))
         self.assertIn("nonexistent", err.getvalue())
 
@@ -78,8 +79,7 @@ class WatchResolutionTest(CluTestCase):
     def test_cwd_default_resolution(self) -> None:
         _init_plan(self.project, "alpha")
         _init_plan(self.project, "beta")
-        with _mock_loop() as m, \
-             mock.patch.object(Path, "cwd", return_value=self.project):
+        with _mock_loop() as m, mock.patch.object(Path, "cwd", return_value=self.project):
             rc = main(["watch"])
         self.assertEqual(rc, 0)
         state_paths = m.call_args.args[0]
@@ -101,23 +101,22 @@ class WatchResolutionTest(CluTestCase):
     def test_json_flag_propagates(self) -> None:
         _init_plan(self.project, "my-plan")
         with _mock_loop() as m:
-            rc = main(["watch", "--plan", "my-plan",
-                       "--project", str(self.project), "--json"])
+            rc = main(["watch", "--plan", "my-plan", "--project", str(self.project), "--json"])
         self.assertEqual(rc, 0)
         self.assertTrue(m.call_args.kwargs["json_mode"])
 
     def test_verbose_flag_propagates(self) -> None:
         _init_plan(self.project, "my-plan")
         with _mock_loop() as m:
-            rc = main(["watch", "--plan", "my-plan",
-                       "--project", str(self.project), "--verbose"])
+            rc = main(["watch", "--plan", "my-plan", "--project", str(self.project), "--verbose"])
         self.assertEqual(rc, 0)
         self.assertTrue(m.call_args.kwargs["verbose"])
 
     def test_interval_flag_parsed(self) -> None:
         _init_plan(self.project, "my-plan")
         with _mock_loop() as m:
-            rc = main(["watch", "--plan", "my-plan",
-                       "--project", str(self.project), "--interval", "0.5"])
+            rc = main(
+                ["watch", "--plan", "my-plan", "--project", str(self.project), "--interval", "0.5"]
+            )
         self.assertEqual(rc, 0)
         self.assertAlmostEqual(m.call_args.kwargs["poll_interval"], 0.5)

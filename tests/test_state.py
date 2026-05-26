@@ -1,4 +1,5 @@
 """Unit tests for end_of_line.state."""
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -26,9 +27,16 @@ class TestEmptyState(unittest.TestCase):
     def test_has_required_top_level_keys(self) -> None:
         data = st.empty_state("foo", "plans")
         for key in (
-            "schema_version", "plan_slug", "plan_dir", "status",
-            "current_claim", "blockers", "spawned_tasks",
-            "config", "events", "created_at",
+            "schema_version",
+            "plan_slug",
+            "plan_dir",
+            "status",
+            "current_claim",
+            "blockers",
+            "spawned_tasks",
+            "config",
+            "events",
+            "created_at",
         ):
             self.assertIn(key, data)
         self.assertEqual(data["schema_version"], st.SCHEMA_VERSION)
@@ -60,7 +68,8 @@ class TestClaim(TempStateMixin, unittest.TestCase):
         self.assertEqual(data["current_claim"]["phase_id"], "phase-a")
         self.assertEqual(data["current_claim"]["attempts"], 1)
         self.assertEqual(
-            data["events"][-1]["type"], "phase_started",
+            data["events"][-1]["type"],
+            "phase_started",
         )
 
     def test_claim_raises_when_active(self) -> None:
@@ -94,7 +103,8 @@ class TestReleaseClaimAndEmit(TempStateMixin, unittest.TestCase):
         with patch("end_of_line.state.coolant.emit_stop") as emit:
             st.release_claim_and_emit(
                 data,
-                expected_token=token, expected_phase="phase-a",
+                expected_token=token,
+                expected_phase="phase-a",
             )
         self.assertIsNone(data["current_claim"])
         emit.assert_called_once()
@@ -124,7 +134,8 @@ class TestReleaseClaimAndEmit(TempStateMixin, unittest.TestCase):
             with self.assertRaises(st.ClaimMismatch):
                 st.release_claim_and_emit(
                     data,
-                    expected_token="wrong-token", expected_phase="phase-a",
+                    expected_token="wrong-token",
+                    expected_phase="phase-a",
                 )
         # Release was rejected; the claim still belongs to the right token.
         # Decrementing coolant here would lie about the worker's status.
@@ -155,11 +166,13 @@ class TestReleaseClaimAndEmit(TempStateMixin, unittest.TestCase):
         st.claim_phase(data, "phase-a", lease_minutes=30)
         with patch("end_of_line.state.coolant.emit_stop") as emit:
             st.release_claim_and_emit(
-                data, coolant_script_override="/opt/coolant/scripts",
+                data,
+                coolant_script_override="/opt/coolant/scripts",
             )
         emit.assert_called_once()
         self.assertEqual(
-            emit.call_args.kwargs["script_override"], "/opt/coolant/scripts",
+            emit.call_args.kwargs["script_override"],
+            "/opt/coolant/scripts",
         )
 
 
@@ -167,7 +180,11 @@ class TestBlockers(TempStateMixin, unittest.TestCase):
     def test_add_and_answer(self) -> None:
         data = st.empty_state("foo", "plans")
         blocker_id = st.add_blocker(
-            data, "phase-a", "Which one?", ["A", "B"], context="…",
+            data,
+            "phase-a",
+            "Which one?",
+            ["A", "B"],
+            context="…",
         )
         self.assertEqual(blocker_id, "q-1")
         self.assertTrue(st.phase_has_open_blocker(data, "phase-a"))
@@ -268,7 +285,9 @@ class TestLockedJson(TempStateMixin, unittest.TestCase):
         path.write_text('{"schema_version": 7, "payload": "x"}')
         with self.assertRaises(st.SchemaVersionMismatch):
             with st.locked_json(
-                path, expected_version=1, empty=lambda: {"schema_version": 1},
+                path,
+                expected_version=1,
+                empty=lambda: {"schema_version": 1},
             ):
                 pass
 
@@ -339,28 +358,47 @@ class TestClaimWorkerAlive(unittest.TestCase):
         # PID is alive but cmdline doesn't match the expected /clu-phase
         # invocation → PID was reused. Treat as dead.
         from subprocess import CompletedProcess
-        with patch("end_of_line.state.os.kill", return_value=None), patch(
-            "end_of_line.state.subprocess.run",
-            return_value=CompletedProcess(
-                args=[], returncode=0, stdout="some other command", stderr="",
+
+        with (
+            patch("end_of_line.state.os.kill", return_value=None),
+            patch(
+                "end_of_line.state.subprocess.run",
+                return_value=CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout="some other command",
+                    stderr="",
+                ),
             ),
         ):
-            self.assertFalse(st.claim_worker_alive(
-                {"pid": 1}, cmdline_match="/clu-phase foo bar",
-            ))
+            self.assertFalse(
+                st.claim_worker_alive(
+                    {"pid": 1},
+                    cmdline_match="/clu-phase foo bar",
+                )
+            )
 
     def test_cmdline_match_hit_returns_true(self) -> None:
         from subprocess import CompletedProcess
-        with patch("end_of_line.state.os.kill", return_value=None), patch(
-            "end_of_line.state.subprocess.run",
-            return_value=CompletedProcess(
-                args=[], returncode=0,
-                stdout="claude /clu-phase foo bar token", stderr="",
+
+        with (
+            patch("end_of_line.state.os.kill", return_value=None),
+            patch(
+                "end_of_line.state.subprocess.run",
+                return_value=CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout="claude /clu-phase foo bar token",
+                    stderr="",
+                ),
             ),
         ):
-            self.assertTrue(st.claim_worker_alive(
-                {"pid": 1}, cmdline_match="/clu-phase foo bar",
-            ))
+            self.assertTrue(
+                st.claim_worker_alive(
+                    {"pid": 1},
+                    cmdline_match="/clu-phase foo bar",
+                )
+            )
 
 
 if __name__ == "__main__":

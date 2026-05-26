@@ -3,6 +3,7 @@
 Implements Notifier via osascript. Uses argv form so user-controlled text in
 the body never touches the AppleScript source.
 """
+
 from __future__ import annotations
 
 import logging
@@ -95,6 +96,7 @@ class IMessageNotifier:
         # inbound module at import time — the dependency is only
         # exercised when an iMessage actually fires.
         from .notify_imessage_inbound import append_outbound_mark
+
         try:
             append_outbound_mark(self.to, time.time())
         except Exception as exc:

@@ -4,6 +4,7 @@ every 30 minutes.
 Companion to ``test_stalled_claim`` and ``test_inbox`` — both gap-fills shipped
 as part of clu-inbox phase `gap-notifications` (closes #20).
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -41,12 +42,11 @@ class StuckBlockerTestCase(unittest.TestCase):
         (self.project / "plans").mkdir()
         (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
         self.cfg = ProjectConfig(
-            project_root=self.project, plan_dir="plans",
+            project_root=self.project,
+            plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command="echo"),
         )
-        self.state_path = (
-            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
-        )
+        self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         self.state_path.parent.mkdir(parents=True)
         with st.locked(self.state_path):
             st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))

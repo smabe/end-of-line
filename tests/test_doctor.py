@@ -4,6 +4,7 @@ Closes #14.  Mirrors test_dispatch.py's setUp/isolate_registry pattern; the
 doctor command is read-only so most cases construct a `ProjectConfig`
 directly via `_write_cfg` rather than the heavier `clu init` path.
 """
+
 from __future__ import annotations
 
 import io
@@ -128,6 +129,7 @@ class DoctorCommandTestCase(unittest.TestCase):
         """`--worktree` walks plans, reports liveness + missing rows."""
         # Need a real git repo for `clu init --worktree` to succeed.
         import subprocess
+
         subprocess.run(["git", "-C", str(self.project), "init", "-q"], check=True)
         subprocess.run(
             ["git", "-C", str(self.project), "config", "user.email", "t@t"],
@@ -139,7 +141,8 @@ class DoctorCommandTestCase(unittest.TestCase):
         )
         subprocess.run(
             ["git", "-C", str(self.project), "commit", "--allow-empty", "-m", "i"],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         # Plan alpha: with worktree (alive). Plan beta: with worktree
         # that we delete to simulate operator removal. Plan gamma:
@@ -148,14 +151,13 @@ class DoctorCommandTestCase(unittest.TestCase):
             (self.project / "plans" / f"{slug}.md").write_text(PLAN)
         self._write_cfg(path=os.environ["PATH"])
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            main(["init", "--project", str(self.project),
-                  "--plan", "alpha", "--worktree"])
-            main(["init", "--project", str(self.project),
-                  "--plan", "beta", "--worktree"])
+            main(["init", "--project", str(self.project), "--plan", "alpha", "--worktree"])
+            main(["init", "--project", str(self.project), "--plan", "beta", "--worktree"])
             main(["init", "--project", str(self.project), "--plan", "gamma"])
         # Wipe beta's worktree dir to trigger MISSING.
         beta_wt = self.project.resolve().parent / f"{self.project.name}-beta"
         import shutil
+
         shutil.rmtree(beta_wt)
 
         out, err = io.StringIO(), io.StringIO()
@@ -211,6 +213,7 @@ class DoctorCommandTestCase(unittest.TestCase):
         # machine; mock it so the override-misses branch is exercised
         # cleanly.
         from unittest import mock
+
         with mock.patch("end_of_line.coolant._marketplace_glob", return_value=None):
             rc, stdout, _ = self._run_doctor()
         self.assertEqual(rc, 0)
@@ -219,6 +222,7 @@ class DoctorCommandTestCase(unittest.TestCase):
     def test_doctor_reports_coolant_not_installed(self) -> None:
         self._write_cfg(extra={"coolant": {}})
         from unittest import mock
+
         with mock.patch("end_of_line.coolant._marketplace_glob", return_value=None):
             rc, stdout, _ = self._run_doctor()
         self.assertEqual(rc, 0)
@@ -239,10 +243,11 @@ class DoctorCommandTestCase(unittest.TestCase):
     def test_doctor_reports_override_without_chatdb(self) -> None:
         # An explicit self_chat_id short-circuits the chat.db lookup, so
         # doctor reports cleanly even in test environments without chat.db.
-        self._write_cfg_with_notify([
-            {"kind": "imessage", "to": "+15551234567",
-             "self_chat_id": "+15551234567"},
-        ])
+        self._write_cfg_with_notify(
+            [
+                {"kind": "imessage", "to": "+15551234567", "self_chat_id": "+15551234567"},
+            ]
+        )
         _, stdout, _ = self._run_doctor()
         self.assertIn("Notify channels:", stdout)
         self.assertIn("self_chat=+15551234567", stdout)
@@ -252,9 +257,11 @@ class DoctorCommandTestCase(unittest.TestCase):
         # No override + a synthetic handle that won't match the operator's
         # real chat.db → resolver surfaces SelfChatLookupError, doctor prints
         # the hint pointing at the override knob.
-        self._write_cfg_with_notify([
-            {"kind": "imessage", "to": "+15550000000"},
-        ])
+        self._write_cfg_with_notify(
+            [
+                {"kind": "imessage", "to": "+15550000000"},
+            ]
+        )
         _, stdout, _ = self._run_doctor()
         self.assertIn("Notify channels:", stdout)
         self.assertIn("self_chat_id", stdout)

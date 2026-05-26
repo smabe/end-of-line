@@ -3,6 +3,7 @@
 TDD: these tests are written before the implementation. They should fail
 until `reap_orphan_pid` and `ReapResult` land in `state.py`.
 """
+
 from __future__ import annotations
 
 import sys
@@ -59,9 +60,7 @@ class TestReapOrphanPid(unittest.TestCase):
 
         p = subprocess.Popen(["sleep", "30"])
         try:
-            result = reap_orphan_pid(
-                p.pid, cmdline_match="this-string-not-in-cmdline-xyz"
-            )
+            result = reap_orphan_pid(p.pid, cmdline_match="this-string-not-in-cmdline-xyz")
             # Process should still be alive
             time.sleep(0.5)
             self.assertIsNone(p.poll(), "process should still be alive after mismatch")
@@ -75,9 +74,7 @@ class TestReapOrphanPid(unittest.TestCase):
         import subprocess
 
         marker = "REAP_TEST_MARKER_12345"
-        p = subprocess.Popen(
-            [sys.executable, "-c", f"# {marker}\nimport time; time.sleep(30)"]
-        )
+        p = subprocess.Popen([sys.executable, "-c", f"# {marker}\nimport time; time.sleep(30)"])
         _waiter = threading.Thread(target=p.wait, daemon=True)
         _waiter.start()
         try:

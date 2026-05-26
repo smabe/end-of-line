@@ -1,6 +1,7 @@
 """`clu notify-test` smoke command — fires test notifications through configured
 channels and reports per-channel status.
 """
+
 from __future__ import annotations
 
 import io
@@ -30,10 +31,14 @@ class NotifyTestCommandTestCase(unittest.TestCase):
     def _notify_test(self, *extra: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main([
-                "notify-test", "--project", str(self.project),
-                *extra,
-            ])
+            rc = main(
+                [
+                    "notify-test",
+                    "--project",
+                    str(self.project),
+                    *extra,
+                ]
+            )
         return rc, out.getvalue(), err.getvalue()
 
     def _write_config(self, data: dict) -> None:
@@ -60,9 +65,15 @@ class NotifyTestCommandTestCase(unittest.TestCase):
     # --- single-channel filter ---------------------------------------------
 
     def test_notify_test_fires_one_channel_by_kind(self) -> None:
-        self._write_config({"notify": {"channels": [
-            {"kind": "imessage", "to": "+15550001234"},
-        ]}})
+        self._write_config(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "imessage", "to": "+15550001234"},
+                    ]
+                }
+            }
+        )
         mock_cls, mock_notifier = self._mock_notifier("imessage", send_return="msg-1")
         with mock.patch.dict(notify._NOTIFIER_REGISTRY, {"imessage": mock_cls}):
             rc, out, _err = self._notify_test("--channel", "imessage")
@@ -73,15 +84,25 @@ class NotifyTestCommandTestCase(unittest.TestCase):
     # --- all channels without filter ---------------------------------------
 
     def test_notify_test_fires_all_channels_when_no_filter(self) -> None:
-        self._write_config({"notify": {"channels": [
-            {"kind": "imessage", "to": "+1"},
-            {"kind": "discord", "bot_token": "tok", "user_id": "uid"},
-        ]}})
+        self._write_config(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "imessage", "to": "+1"},
+                        {"kind": "discord", "bot_token": "tok", "user_id": "uid"},
+                    ]
+                }
+            }
+        )
         im_cls, im_notifier = self._mock_notifier("imessage")
         dc_cls, dc_notifier = self._mock_notifier("discord")
-        with mock.patch.dict(notify._NOTIFIER_REGISTRY, {
-            "imessage": im_cls, "discord": dc_cls,
-        }):
+        with mock.patch.dict(
+            notify._NOTIFIER_REGISTRY,
+            {
+                "imessage": im_cls,
+                "discord": dc_cls,
+            },
+        ):
             rc, _out, _err = self._notify_test()
         self.assertEqual(rc, 0)
         im_notifier.send.assert_called_once()
@@ -90,10 +111,16 @@ class NotifyTestCommandTestCase(unittest.TestCase):
     # --- disabled channels -------------------------------------------------
 
     def test_notify_test_skips_disabled_channels(self) -> None:
-        self._write_config({"notify": {"channels": [
-            {"kind": "imessage", "to": "+1", "enabled": True},
-            {"kind": "discord", "bot_token": "tok", "user_id": "uid", "enabled": False},
-        ]}})
+        self._write_config(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "imessage", "to": "+1", "enabled": True},
+                        {"kind": "discord", "bot_token": "tok", "user_id": "uid", "enabled": False},
+                    ]
+                }
+            }
+        )
         im_cls, im_notifier = self._mock_notifier("imessage")
         # Discord mock shouldn't be called, so no need to register it.
         with mock.patch.dict(notify._NOTIFIER_REGISTRY, {"imessage": im_cls}):
@@ -105,17 +132,28 @@ class NotifyTestCommandTestCase(unittest.TestCase):
     # --- per-channel status reporting -------------------------------------
 
     def test_notify_test_reports_per_channel_status(self) -> None:
-        self._write_config({"notify": {"channels": [
-            {"kind": "imessage", "to": "+1"},
-            {"kind": "discord", "bot_token": "tok", "user_id": "uid"},
-        ]}})
+        self._write_config(
+            {
+                "notify": {
+                    "channels": [
+                        {"kind": "imessage", "to": "+1"},
+                        {"kind": "discord", "bot_token": "tok", "user_id": "uid"},
+                    ]
+                }
+            }
+        )
         im_cls, _im_notifier = self._mock_notifier("imessage", send_return=None)
         dc_cls, _dc_notifier = self._mock_notifier(
-            "discord", send_side_effect=Exception("HTTPError 401"),
+            "discord",
+            send_side_effect=Exception("HTTPError 401"),
         )
-        with mock.patch.dict(notify._NOTIFIER_REGISTRY, {
-            "imessage": im_cls, "discord": dc_cls,
-        }):
+        with mock.patch.dict(
+            notify._NOTIFIER_REGISTRY,
+            {
+                "imessage": im_cls,
+                "discord": dc_cls,
+            },
+        ):
             rc, out, _err = self._notify_test()
         # notify-test doesn't exit non-zero on channel failure — it reports
         # per-channel and continues.

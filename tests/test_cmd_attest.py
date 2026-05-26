@@ -1,6 +1,7 @@
 """Tests for `clu attest` — pure self-attestation; stamps attestations.simplify
 with current HEAD on --simplify flag; extensible to future --lint / --type-check.
 """
+
 from __future__ import annotations
 
 import io
@@ -30,11 +31,14 @@ class CmdAttestTestCase(GitProjectTestCase):
     def _make_commit(self) -> str:
         subprocess.run(
             ["git", "-C", str(self.project), "commit", "--allow-empty", "-m", "second"],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         return subprocess.run(
             ["git", "-C", str(self.project), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
 
     # ---- happy path ------------------------------------------------------------
@@ -73,11 +77,16 @@ class CmdAttestTestCase(GitProjectTestCase):
         self._claim("phase-a")
         buf = io.StringIO()
         with redirect_stderr(buf):
-            rc = main(self._argv(
-                "attest", "--phase", "phase-a",
-                "--token", "forged-token-xyz",
-                "--simplify",
-            ))
+            rc = main(
+                self._argv(
+                    "attest",
+                    "--phase",
+                    "phase-a",
+                    "--token",
+                    "forged-token-xyz",
+                    "--simplify",
+                )
+            )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
         self.assertIsNone(self._simplify_stamp())
 
@@ -101,10 +110,7 @@ class CmdAttestTestCase(GitProjectTestCase):
         token = self._claim("phase-a")
         rc = main(self._argv("attest", "--phase", "phase-a", "--token", token, "--simplify"))
         self.assertEqual(rc, ExitCode.OK)
-        events = [
-            e for e in self._read()["events"]
-            if e["type"] == st.EVENT_SIMPLIFY_STAMPED
-        ]
+        events = [e for e in self._read()["events"] if e["type"] == st.EVENT_SIMPLIFY_STAMPED]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["commit_sha"], self.sha)
 
@@ -139,8 +145,9 @@ class CmdAttestTestCase(GitProjectTestCase):
             self.assertEqual(rc, ExitCode.OK)
             stamp = self._simplify_stamp()
             self.assertIsNotNone(stamp)
-            self.assertEqual(stamp["commit_sha"], wt_sha,
-                             "stamp must use worktree HEAD, not canonical HEAD")
+            self.assertEqual(
+                stamp["commit_sha"], wt_sha, "stamp must use worktree HEAD, not canonical HEAD"
+            )
         finally:
             wt_tmp.cleanup()
 
