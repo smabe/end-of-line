@@ -19,3 +19,55 @@ include = ["end_of_line*"]
 
 [tool.setuptools.package-data]
 end_of_line = ["skills/*/SKILL.md", "hooks/*.py"]
+
+[project.optional-dependencies]
+# Dev-only — pipx install ruff && pipx install basedpyright recommended,
+# but documenting here so it's discoverable.
+dev = ["ruff>=0.15", "basedpyright>=1.39"]
+
+# --- Ruff (lint + format) ---------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "plans",
+    "experiments",
+    "graphify-out",
+    "end_of_line.egg-info",
+]
+
+[tool.ruff.lint]
+# Conservative starter; widen over time with B (bugbear), SIM (simplify),
+# RUF (ruff-specific), S (security) once baseline noise drops.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "UP",  # pyupgrade (modern syntax)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501", "F841"]  # tests can have long lines + intentional unused vars
+
+# --- basedpyright (type checker) -------------------------------------------
+[tool.basedpyright]
+include = ["end_of_line", "tests"]
+exclude = [
+    "plans",
+    "experiments",
+    "graphify-out",
+    "end_of_line.egg-info",
+    "**/__pycache__",
+    "**/.venv",
+]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+
+# Suppress the noisiest defaults for a stdlib-only project that's never
+# been type-checked. Re-enable as type annotations get added.
+reportUnusedCallResult = "none"
+reportAny = "none"
+reportExplicitAny = "none"
+reportImplicitStringConcatenation = "none"
+reportMissingTypeStubs = "none"

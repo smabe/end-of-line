@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Project-local pre-commit hook for end-of-line (clu).
+#
+# Pipeline (fail-fast, cheapest deterministic check first):
+#   1. Ruff lint — style + footgun anti-patterns
+#   2. basedpyright — type errors (uses .basedpyright-baseline.json to
+#      freeze pre-existing errors so only NEW violations fail)
+#   3. jscpd — duplication across end_of_line/
+#
+# Invoked by ~/projects/abe-skills/hooks/pre-commit via the project-local
+# extension point.
+#
+# Per-stage skip:  RUFF_SKIP=1 / PYRIGHT_SKIP=1 / JSCPD_SKIP=1 git commit ...
+# Skip everything: git commit --no-verify  (use sparingly)
+#
+# Format check is NOT in the gate (would require a 143-file reformat of
+# pre-existing code). Run `ruff format` manually when desired.
+
+set -euo pipefail
+
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+if [[ -z "$STAGED_PY" ]]; then
+    exit 0
+fi
+
+# --- Ruff lint (staged files only — brownfield-friendly) ---------------
+# Existing violations in unmodified files don't block. Touching a file
+# with violations DOES flag them (boy-scout rule).
+if [[ "${RUFF_SKIP:-0}" != "1" ]]; then
+    if command -v ruff >/dev/null 2>&1; then
+        LINT_FILES=()
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && LINT_FILES+=("$f")
+        done <<< "$STAGED_PY"
+
+        echo "[ruff] Linting ${#LINT_FILES[@]} staged Python file(s)..."
+        if ! ruff check "${LINT_FILES[@]}"; then
+            echo
+            echo "[ruff] BLOCKED - lint errors above."
+            echo "[ruff] Auto-fix what's fixable: ruff check --fix ${LINT_FILES[*]}"
+            echo "[ruff] Override: RUFF_SKIP=1 git commit ..."
+            exit 1
+        fi
+        echo "[ruff] OK"
+    else
+        echo "[ruff] ruff not on PATH; skipping" >&2
+    fi
+fi
+
+# --- basedpyright (with baseline) ---------------------------------------
+if [[ "${PYRIGHT_SKIP:-0}" != "1" ]]; then
+    if command -v basedpyright >/dev/null 2>&1; then
+        echo "[pyright] Type-checking (against baseline)..."
+        if [[ -f .basedpyright-baseline.json ]]; then
+            BASELINE_ARG=(--baselinefile .basedpyright-baseline.json)
+        else
+            BASELINE_ARG=()
+        fi
+        if ! basedpyright "${BASELINE_ARG[@]}"; then
+            echo
+            echo "[pyright] BLOCKED - new type errors above (baseline-suppressed)."
+            echo "[pyright] After fixing or accepting more, regenerate baseline:"
+            echo "[pyright]   basedpyright --writebaseline .basedpyright-baseline.json"
+            echo "[pyright] Override: PYRIGHT_SKIP=1 git commit ..."
+            exit 1
+        fi
+        echo "[pyright] OK"
+    else
+        echo "[pyright] basedpyright not on PATH; skipping" >&2
+    fi
+fi
+
+# --- jscpd --------------------------------------------------------------
+if [[ "${JSCPD_SKIP:-0}" != "1" ]]; then
+    if command -v npx >/dev/null 2>&1; then
+        echo "[jscpd] Scanning end_of_line/ for duplication (min 75 tokens / 10 lines)..."
+        if npx -y jscpd@4 --config .jscpd.json end_of_line/; then
+            echo "[jscpd] OK - no duplication above threshold"
+        else
+            echo
+            echo "[jscpd] BLOCKED - duplication detected above threshold."
+            echo "[jscpd] Either dedupe the flagged regions or override with:"
+            echo "[jscpd]   JSCPD_SKIP=1 git commit ..."
+            exit 1
+        fi
+    else
+        echo "[jscpd] npx not on PATH; skipping duplication check" >&2
+    fi
+fi
+
+exit 0

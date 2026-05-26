@@ -20,3 +20,8 @@ dist/
 # graphify knowledge graph — regenerated on every commit by the
 # post-commit hook (`graphify hook install`). Not source.
 graphify-out/
+
+# Ruff cache — regenerated per-machine.
+.ruff_cache/
+# jscpd JSON-reporter output, regenerated on demand.
+report/

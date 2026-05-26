@@ -1,0 +1,20 @@
+{
+  "format": ["python"],
+  "minLines": 10,
+  "minTokens": 75,
+  "threshold": 0,
+  "mode": "mild",
+  "ignore": [
+    "**/tests/**",
+    "**/build/**",
+    "**/.venv/**",
+    "**/__pycache__/**",
+    "graphify-out/**",
+    "end_of_line.egg-info/**",
+    "plans/**",
+    "experiments/**"
+  ],
+  "reporters": ["console"],
+  "absolute": false,
+  "gitignore": true
+}
