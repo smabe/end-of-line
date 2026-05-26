@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import coolant, inbox, notify, state as st, state_blocker
+from . import coolant, inbox, notify, state_blocker
+from . import state as st
 from .config import ProjectConfig
 from .plan_parser import parse_sessions_index
 

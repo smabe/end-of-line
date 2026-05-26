@@ -11,12 +11,14 @@ import json
 import logging
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from end_of_line import dry_merge, notify, queue, registry, state as st
+from end_of_line import dry_merge, notify, queue, registry
+from end_of_line import state as st
 from end_of_line.config import ProjectConfig, load_project_config
 
 log = logging.getLogger(__name__)
@@ -292,7 +294,7 @@ def _write_followup_plan_pair(
     cfg: ProjectConfig,
     batch_id: str,
     ts: str,
-    result: "dry_merge.MergeResult",
+    result: dry_merge.MergeResult,
     group: list[ProjectPlan],
 ) -> tuple[Path, Path]:
     """Write master + sub-plan for a dirty merge result. Returns (master, sub)."""
@@ -395,7 +397,7 @@ def dry_merge_gate_rule(
             test_command=test_cmd,
         )
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+        ts = datetime.now(UTC).strftime("%Y%m%d%H%M")
         gate_result_base: dict[str, Any] = {
             "sha_key": sha_key,
             "ts": st.utcnow(),

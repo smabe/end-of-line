@@ -11,8 +11,9 @@ from __future__ import annotations
 import datetime as _dt
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from .notify_discord import DiscordNotifier
 from .notify_imessage import IMessageNotifier
@@ -100,7 +101,7 @@ def is_quiet_hours(
 
 
 def notify(
-    spec: "NotifySpec",
+    spec: NotifySpec,
     kind: str,
     body: str,
     *,
@@ -162,7 +163,7 @@ def notify(
     return sent_any
 
 
-def in_quiet_window(spec: "NotifySpec", now: _dt.datetime) -> bool:
+def in_quiet_window(spec: NotifySpec, now: _dt.datetime) -> bool:
     if not spec.quiet_hours:
         return False
     try:

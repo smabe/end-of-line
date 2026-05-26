@@ -32,7 +32,7 @@ def _stamp_claim(
     pid: int | None = None,
 ) -> None:
     """Inject a current_claim with a controllable heartbeat age."""
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.UTC)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     started = (now - _dt.timedelta(seconds=heartbeat_age_seconds)).strftime(fmt)
     heartbeat = (now - _dt.timedelta(seconds=heartbeat_age_seconds)).strftime(fmt)

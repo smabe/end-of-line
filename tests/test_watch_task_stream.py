@@ -11,7 +11,6 @@ from end_of_line.config import ProjectConfig
 from end_of_line.watch import stream_loop
 from tests import CluTestCase
 
-
 TS = "2026-05-17T10:00:00Z"
 
 

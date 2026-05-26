@@ -9,7 +9,6 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.plan_parser import parse_effort_minutes, parse_sessions_index
 
-
 WATCH_PLAN = """\
 # Watch — Start Workout
 

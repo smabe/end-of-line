@@ -13,7 +13,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import queue, registry, state as st
+from end_of_line import queue, registry
+from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig, load_project_config
 from end_of_line.cross_plan_rules import ProjectPlan, queue_advancement_rule

@@ -33,7 +33,6 @@ from end_of_line.cli import _spawn_post_action_tick, main
 from end_of_line.config import ProjectConfig
 from tests import isolate_registry
 
-
 PLAN_BODY = """\
 # Test plan
 

@@ -18,7 +18,6 @@ import unittest
 from pathlib import Path
 
 from end_of_line import monitor
-
 from tests import isolate_monitor_marker
 
 

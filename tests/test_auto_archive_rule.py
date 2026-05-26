@@ -13,14 +13,16 @@ from pathlib import Path
 from unittest import mock
 
 import end_of_line.cli as _cli
-from end_of_line import cross_plan_rules, notify, registry, state as st
+from end_of_line import cross_plan_rules, notify, registry
+from end_of_line import state as st
 from end_of_line.cross_plan_rules import (
     ProjectPlan,
     register_rule,
     run_rules,
 )
-from tests import CluTestCase, git as _git, make_git_project as _make_git_project
-
+from tests import CluTestCase
+from tests import git as _git
+from tests import make_git_project as _make_git_project
 
 # ---------------------------------------------------------------------------
 # helpers

@@ -11,7 +11,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from end_of_line import inbox, state as st
+from end_of_line import inbox
+from end_of_line import state as st
 from end_of_line.config import ProjectConfig
 from end_of_line.supervisor import (
     Descendant,
@@ -441,6 +442,7 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
     def test_doctor_prints_stuck_tool_when_descendant_wedged(self) -> None:
         import io
         from contextlib import redirect_stdout
+
         from end_of_line.cli import _print_stuck_tool_health
         from end_of_line.config import load_project_config
 
@@ -463,6 +465,7 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
     def test_doctor_silent_when_no_wedges(self) -> None:
         import io
         from contextlib import redirect_stdout
+
         from end_of_line.cli import _print_stuck_tool_health
         from end_of_line.config import load_project_config
 
@@ -486,6 +489,7 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
         import io
         from contextlib import redirect_stdout
         from unittest.mock import patch
+
         from end_of_line.cli import _print_stuck_tool_health
         from end_of_line.config import load_project_config
 
@@ -517,6 +521,7 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
     def test_doctor_silent_when_no_active_claims(self) -> None:
         import io
         from contextlib import redirect_stdout
+
         from end_of_line.cli import _print_stuck_tool_health
         from end_of_line.config import load_project_config
 

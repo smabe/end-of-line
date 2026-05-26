@@ -15,7 +15,6 @@ from pathlib import Path
 from end_of_line.dry_merge import MergeResult, attempt_merge
 from tests import git as _git
 
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------

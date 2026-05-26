@@ -16,7 +16,7 @@ from end_of_line.state_blocker import (
 
 
 def _utcnow() -> _dt.datetime:
-    return _dt.datetime.now(_dt.timezone.utc)
+    return _dt.datetime.now(_dt.UTC)
 
 
 def _minutes_ago(n: int) -> _dt.datetime:

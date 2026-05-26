@@ -22,7 +22,7 @@ def utcnow_minus(seconds: int) -> str:
     Used to seed `current_claim.active_tool_started_at` and other
     "N seconds ago" timestamps in tests without freezing the clock.
     """
-    return (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=seconds)).strftime(
+    return (_dt.datetime.now(_dt.UTC) - _dt.timedelta(seconds=seconds)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
@@ -148,7 +148,7 @@ def make_worktree(
     project: Path,
     *,
     branch: str = "clu/p",
-) -> tuple["tempfile.TemporaryDirectory[str]", Path, str]:
+) -> tuple[tempfile.TemporaryDirectory[str], Path, str]:
     """Create a linked git worktree with one empty commit on a new branch.
 
     Returns (wt_tmp, wt_path, wt_sha). Caller must call wt_tmp.cleanup().

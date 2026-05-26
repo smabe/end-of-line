@@ -12,7 +12,6 @@ from end_of_line import state as st
 from end_of_line.watch import stream_loop
 from tests import CluTestCase
 
-
 TS = "2026-05-17T10:00:00Z"
 
 

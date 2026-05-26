@@ -17,7 +17,7 @@ from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from end_of_line.config import ProjectConfig, DispatchSpec
+from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.dispatch import (
     _delete_stale_attempt_context,
     _last_termination_reason,
@@ -27,7 +27,6 @@ from end_of_line.dispatch import (
 )
 from end_of_line.supervisor import TickResult
 from tests import CluTestCase
-
 
 PLAN = """\
 # T

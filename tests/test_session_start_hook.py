@@ -19,7 +19,6 @@ from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.hooks import clu_session_start
 
-
 # ---- hook script unit tests ------------------------------------------------
 
 
@@ -51,7 +50,7 @@ class SessionStartHookScriptTest(unittest.TestCase):
 
     def test_main_returns_zero_on_stdin_failure(self) -> None:
         bad_stdin = mock.MagicMock()
-        bad_stdin.read.side_effect = IOError("pipe closed")
+        bad_stdin.read.side_effect = OSError("pipe closed")
         with (
             mock.patch.object(sys, "stdin", bad_stdin),
             mock.patch.object(sys, "stdout", io.StringIO()),

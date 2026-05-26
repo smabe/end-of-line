@@ -7,16 +7,17 @@ shim that re-exports this module's surface and provides the __main__ entry.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-import logging
-from typing import Callable
 
-from . import registry, state as st, state_locator
+from . import registry, state_locator
+from . import state as st
 from ._xdg_guard import assert_xdg_safe
 from .config import load_project_config
 from .notify_base import OpenBlocker, Reply

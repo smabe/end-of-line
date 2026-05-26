@@ -17,12 +17,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import cross_plan_rules, notify, state as st
+from end_of_line import cross_plan_rules, notify
+from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import load_project_config
 from end_of_line.cross_plan_rules import worktree_conflict_rule
 from tests import isolate_registry
-
 
 PLAN_BODY = """\
 # T

@@ -13,7 +13,6 @@ import unittest
 
 from end_of_line import notify
 
-
 PLAN = "workout-rearchitect-hk"
 BID = "q-1"
 PHASE = "t5-hkworkoutsession"

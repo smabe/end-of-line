@@ -14,7 +14,6 @@ from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.supervisor import _detect_stalled, tick
 from tests import CluTestCase
 
-
 PLAN_BODY = """\
 # Test plan
 
@@ -29,7 +28,7 @@ PLAN_BODY = """\
 
 def _backdate_claim(state_path: Path, *, minutes: int) -> None:
     """Pretend the worker last heartbeat-ed `minutes` ago."""
-    past = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=minutes)
+    past = _dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=minutes)
     stamp = past.strftime("%Y-%m-%dT%H:%M:%SZ")
     with st.mutate(state_path) as data:
         data["current_claim"]["last_heartbeat_at"] = stamp
@@ -82,12 +81,12 @@ class HeartbeatStateTestCase(unittest.TestCase):
             st.record_heartbeat(data, token, "b")
 
     def test_is_claim_stalled_below_threshold(self) -> None:
-        now = _dt.datetime(2026, 5, 11, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        now = _dt.datetime(2026, 5, 11, 12, 0, 0, tzinfo=_dt.UTC)
         claim = self._claim(last_heartbeat_at="2026-05-11T11:55:00Z")  # 5 min ago
         self.assertFalse(st.is_claim_stalled(claim, threshold_minutes=10, now=now))
 
     def test_is_claim_stalled_above_threshold(self) -> None:
-        now = _dt.datetime(2026, 5, 11, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        now = _dt.datetime(2026, 5, 11, 12, 0, 0, tzinfo=_dt.UTC)
         claim = self._claim(last_heartbeat_at="2026-05-11T11:45:00Z")  # 15 min ago
         self.assertTrue(st.is_claim_stalled(claim, threshold_minutes=10, now=now))
 
@@ -125,7 +124,7 @@ class StalledThresholdResolutionTestCase(unittest.TestCase):
         self.assertNotIn("stalled_heartbeat_minutes", data["config"])
 
     def test_claim_is_stalled_wraps_resolution_and_check(self) -> None:
-        now = _dt.datetime(2026, 5, 11, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        now = _dt.datetime(2026, 5, 11, 12, 0, 0, tzinfo=_dt.UTC)
         data = st.empty_state("p", "plans")  # default 60-min lease → 30-min threshold
         fresh = {
             "phase_id": "a",

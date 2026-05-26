@@ -80,7 +80,7 @@ class IMessageNotifier:
         self.to = to
 
     @classmethod
-    def from_spec(cls, channel: "ChannelSpec") -> "IMessageNotifier":
+    def from_spec(cls, channel: ChannelSpec) -> IMessageNotifier:
         return cls(channel.params["to"])
 
     def send(

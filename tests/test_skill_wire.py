@@ -15,7 +15,7 @@ from importlib.resources import files
 from pathlib import Path
 from unittest import mock
 
-from end_of_line.cli import main, ExitCode
+from end_of_line.cli import ExitCode, main
 
 
 class CluPlanSkillMonitorTest(unittest.TestCase):

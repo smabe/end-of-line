@@ -13,11 +13,10 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from end_of_line.config import ProjectConfig, DispatchSpec
+from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.dispatch import dispatch_for_tick, resolved_model
 from end_of_line.supervisor import TickResult
 from tests import CluTestCase
-
 
 PLAN = """\
 # T

@@ -9,11 +9,9 @@ from pathlib import Path
 from unittest import mock
 
 from end_of_line import state as st
-from end_of_line.config import ProjectConfig, DispatchSpec, NotifySpec
+from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
-
 from tests import CluTestCase
-
 
 PLAN_BODY = """\
 # Test plan

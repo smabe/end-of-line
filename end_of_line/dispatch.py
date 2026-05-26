@@ -17,7 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import coolant, notify, state as st
+from . import coolant, notify
+from . import state as st
 from .config import ProjectConfig
 from .supervisor import TickResult
 
@@ -130,7 +131,7 @@ def _match_systemic_signature(log_path: Path, *, rc: int) -> str | None:
     legitimate.
     """
     try:
-        with open(log_path, "r", errors="replace") as fh:
+        with open(log_path, errors="replace") as fh:
             lines = fh.readlines()
     except (FileNotFoundError, OSError):
         return None

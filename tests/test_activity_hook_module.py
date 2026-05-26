@@ -16,7 +16,6 @@ from end_of_line import state as st
 from end_of_line.cli import main as cli_main
 from tests import CluTestCase
 
-
 PLAN_BODY = """\
 # Test plan
 

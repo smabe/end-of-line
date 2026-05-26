@@ -21,9 +21,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import inbox, registry, state as st
+from end_of_line import inbox, registry
+from end_of_line import state as st
 from end_of_line.notify_base import BlockerDetail, open_blockers_with_details
-
 from tests import isolate_monitor_marker
 
 

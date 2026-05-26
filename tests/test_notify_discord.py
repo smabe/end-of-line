@@ -5,17 +5,15 @@ from __future__ import annotations
 import io
 import json
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
-
-import urllib.error
 
 from end_of_line import state as st
 from end_of_line.config import ChannelSpec
 from end_of_line.notify_base import Notifier
 from end_of_line.notify_discord import DiscordNotifier
 from tests import CluTestCase
-
 
 # ---------------------------------------------------------------------------
 # Helpers

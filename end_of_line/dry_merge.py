@@ -13,7 +13,6 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 _OUTCOME_CLEAN = "clean"
 _OUTCOME_TEXTUAL_CONFLICT = "textual_conflict"
 _OUTCOME_SUITE_FAILED = "suite_failed"

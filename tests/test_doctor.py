@@ -12,14 +12,14 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from end_of_line import dispatch, state as st
+from end_of_line import dispatch
+from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
 from tests import isolate_registry
-
 
 PLAN = """\
 # T

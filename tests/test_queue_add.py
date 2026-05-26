@@ -190,7 +190,7 @@ class QueueAddTestCase(unittest.TestCase):
 
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
         import io
-        from contextlib import redirect_stdout, redirect_stderr
+        from contextlib import redirect_stderr, redirect_stdout
 
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):

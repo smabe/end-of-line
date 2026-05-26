@@ -1,7 +1,7 @@
 """Tests for watch.project_event — pure event projector."""
 
-import unittest
 import importlib
+import unittest
 
 from end_of_line import state as st
 from end_of_line.watch import project_event

@@ -14,12 +14,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import inbox, notify, state as st
+from end_of_line import inbox, notify
+from end_of_line import state as st
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
-
 from tests import isolate_registry
-
 
 PLAN_BODY = """\
 # Test plan

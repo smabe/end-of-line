@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from end_of_line import notify
 from end_of_line.notify_base import (
     InboundPoller,
     Notifier,
@@ -14,7 +15,6 @@ from end_of_line.notify_base import (
 )
 from end_of_line.notify_imessage import IMessageNotifier
 from end_of_line.notify_imessage_inbound import IMessageInboundPoller
-from end_of_line import notify
 
 
 class NotifierProtocolTestCase(unittest.TestCase):

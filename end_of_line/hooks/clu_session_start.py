@@ -85,7 +85,8 @@ def _active_plans_for_cwd() -> list[str]:
     by returning [].
     """
     try:
-        from end_of_line import registry, state as st  # local — avoid module-load cost
+        from end_of_line import registry  # local — avoid module-load cost
+        from end_of_line import state as st
 
         cwd = Path(os.getcwd()).resolve()
         slugs: list[str] = []

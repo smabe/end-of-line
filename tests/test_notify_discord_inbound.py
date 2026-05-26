@@ -6,16 +6,14 @@ import io
 import json
 import subprocess
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
-import urllib.error
-
-from end_of_line import registry, state as st
+from end_of_line import registry
+from end_of_line import state as st
 from end_of_line.notify_base import InboundPoller, OpenBlocker
-
 from tests import CluTestCase
-
 
 # ---------------------------------------------------------------------------
 # Helpers

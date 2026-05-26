@@ -19,7 +19,6 @@ from unittest import mock
 from end_of_line.cli import ExitCode, main
 from tests import isolate_registry
 
-
 PLAN_BODY = """\
 # Test plan
 

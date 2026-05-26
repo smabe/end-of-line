@@ -62,7 +62,7 @@ class NotifySpec:
         *,
         quiet_hours: tuple[str, str] | None = None,
         inbound_auto_tick: bool = True,
-    ) -> "NotifySpec":
+    ) -> NotifySpec:
         """Factory for tests: single iMessage channel."""
         return cls(
             channels=(ChannelSpec(kind="imessage", params={"to": to}),),

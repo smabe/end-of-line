@@ -22,7 +22,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import notify, queue, registry, state as st
+from end_of_line import notify, queue, registry
+from end_of_line import state as st
 from end_of_line.cli import _handle_corrupt_queue, main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from tests import isolate_registry

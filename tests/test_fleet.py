@@ -8,7 +8,8 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from end_of_line import fleet, registry, state as st
+from end_of_line import fleet, registry
+from end_of_line import state as st
 from end_of_line.cli import main
 from tests import isolate_registry
 

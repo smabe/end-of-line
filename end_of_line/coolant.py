@@ -27,7 +27,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
 _ENV_OVERRIDE = "CLU_COOLANT_SCRIPT_DIR"
 _PLUGIN_AUTHOR = "todd-w-shaffer"
 _PLUGIN_NAME = "coolant"

@@ -17,10 +17,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
-from . import registry, state as st, state_locator
+from . import registry, state_locator
+from . import state as st
 from .notify_base import OpenBlocker, Reply
 from .notify_imessage_inbound import _cli_dispatch
 
@@ -236,10 +237,10 @@ class DiscordInboundPoller:
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from .config import load_project_config
-
     import argparse
     import os
+
+    from .config import load_project_config
 
     parser = argparse.ArgumentParser(description="clu Discord inbound poller")
     parser.add_argument("--project", default=".", help="Project root")

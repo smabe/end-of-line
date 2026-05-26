@@ -17,7 +17,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import state as st, watch
+from end_of_line import state as st
+from end_of_line import watch
 from end_of_line.cli import ExitCode, main
 from end_of_line.watch import _FORMATTERS, _OPERATOR_VISIBLE, project_event
 from tests import CluTestCase

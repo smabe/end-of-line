@@ -25,7 +25,6 @@ from end_of_line import monitor, registry
 from end_of_line.cli import ExitCode, main
 from tests import isolate_monitor_marker
 
-
 _PLAN_BODY = "# placeholder plan\n"
 
 

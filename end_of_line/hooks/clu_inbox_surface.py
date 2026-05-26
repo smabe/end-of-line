@@ -17,8 +17,8 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 # Absolute import (not `from .. import`) so the script works when launched
 # directly via `python /path/to/clu_inbox_surface.py` — Claude Code's

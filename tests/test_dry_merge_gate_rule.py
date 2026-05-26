@@ -12,7 +12,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import cross_plan_rules, notify, state as st
+from end_of_line import cross_plan_rules, notify
+from end_of_line import state as st
 from end_of_line.config import load_project_config
 from end_of_line.cross_plan_rules import (
     ProjectPlan,
@@ -21,8 +22,9 @@ from end_of_line.cross_plan_rules import (
     run_rules,
 )
 from end_of_line.dry_merge import MergeResult
-from tests import CluTestCase, git as _git, make_git_project as _make_git_project
-
+from tests import CluTestCase
+from tests import git as _git
+from tests import make_git_project as _make_git_project
 
 # ---------------------------------------------------------------------------
 # helpers

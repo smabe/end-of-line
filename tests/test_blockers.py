@@ -13,7 +13,6 @@ from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from tests import isolate_registry
 
-
 PLAN_BODY = """\
 # Test plan
 

@@ -26,7 +26,6 @@ from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from tests import isolate_registry
 
-
 # Plan-file basenames must be `<slug>-<phase>.md` so plan_parser extracts
 # clean phase ids ("a", "b") instead of treating the whole basename as the id.
 PLAN_BODY_TWO_PHASES_TMPL = """\

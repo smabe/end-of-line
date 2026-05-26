@@ -12,7 +12,6 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from tests import isolate_registry
 
-
 PLAN = """\
 # T
 

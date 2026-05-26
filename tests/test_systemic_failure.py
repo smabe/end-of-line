@@ -15,7 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import notify, notify_imessage, state as st
+from end_of_line import notify, notify_imessage
+from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.dispatch import (
@@ -24,7 +25,6 @@ from end_of_line.dispatch import (
 )
 from end_of_line.supervisor import TickResult
 from tests import CluTestCase, isolate_registry
-
 
 PLAN = """\
 # T

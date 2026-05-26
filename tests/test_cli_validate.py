@@ -14,11 +14,14 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import registry, state as st
+from end_of_line import registry
+from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import CONFIG_FILENAME
 from end_of_line.dry_merge import MergeResult
-from tests import CluTestCase, git as _git, make_git_project as _make_git_project
+from tests import CluTestCase
+from tests import git as _git
+from tests import make_git_project as _make_git_project
 
 
 def _make_branch(repo: Path, branch: str) -> None:

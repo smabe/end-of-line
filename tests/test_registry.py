@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import registry, state as st
+from end_of_line import registry
+from end_of_line import state as st
 
 
 class RegistryTestCase(unittest.TestCase):

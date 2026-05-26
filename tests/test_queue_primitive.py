@@ -13,7 +13,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from end_of_line import queue, state as st
+from end_of_line import queue
+from end_of_line import state as st
 from end_of_line.config import ORCHESTRATOR_DIR, ProjectConfig
 
 

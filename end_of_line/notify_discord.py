@@ -46,7 +46,7 @@ class DiscordNotifier:
         self._state_root = state_root
 
     @classmethod
-    def from_spec(cls, channel: "ChannelSpec") -> "DiscordNotifier":
+    def from_spec(cls, channel: ChannelSpec) -> DiscordNotifier:
         return cls(
             bot_token=channel.params["bot_token"],
             user_id=channel.params["user_id"],

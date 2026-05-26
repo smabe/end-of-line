@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from end_of_line import notify, state as st
+from end_of_line import notify
+from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.supervisor import tick

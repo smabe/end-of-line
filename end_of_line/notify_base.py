@@ -8,9 +8,10 @@ them without importing the iMessage-specific modules.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, NamedTuple, Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 from . import state as st
 

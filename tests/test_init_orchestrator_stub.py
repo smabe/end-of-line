@@ -18,7 +18,6 @@ from end_of_line.cli import main
 from end_of_line.config import CONFIG_FILENAME
 from tests import isolate_registry
 
-
 PLAN_BODY = """\
 # Test plan
 

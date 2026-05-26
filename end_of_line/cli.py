@@ -45,16 +45,17 @@ from . import (
     notify,
     queue,
     registry,
-    state as st,
     state_blocker,
     state_locator,
     supervisor,
     watch,
 )
+from . import (
+    state as st,
+)
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
-
 
 _MONITOR_TIP = "\n  Tip: run /clu-monitor for background notifications on halts and blockers.\n"
 
@@ -208,7 +209,7 @@ def _prompt_yn(question: str, *, default: bool) -> bool:
 
 
 def _maybe_handle_notify_prompts(
-    cfg: "ProjectConfig",
+    cfg: ProjectConfig,
     args: argparse.Namespace,
 ) -> None:
     """Interactive iMessage/Discord channel setup during `clu init`.
@@ -2395,7 +2396,7 @@ def _print_stuck_tool_health(
     # for N active plans. The snapshot is intentionally shared across
     # plans; `clu doctor` reports a single moment in time anyway.
     shared_ps = ps_output if ps_output is not None else supervisor.capture_ps_snapshot()
-    findings: list[tuple[str, str, int, "supervisor.Descendant"]] = []
+    findings: list[tuple[str, str, int, supervisor.Descendant]] = []
     no_marker_claims: list[tuple[str, str]] = []
     for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
         claim = p.state.get("current_claim") or {}
@@ -3801,9 +3802,9 @@ def cmd_extend_lease(args, cfg: ProjectConfig, state_path: Path) -> int:
                 f"no claim to extend on {args.plan}",
             )
         current = _dt.datetime.strptime(claim["lease_expires"], "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=_dt.timezone.utc
+            tzinfo=_dt.UTC
         )
-        now = _dt.datetime.now(_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.UTC)
         baseline = max(current, now)
         new_expires = (baseline + _dt.timedelta(minutes=args.minutes)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
@@ -4439,8 +4440,8 @@ def _cmd_ship_direct_plan(args) -> int:
     if dirty:
         return _die(
             ExitCode.GENERIC,
-            f"canonical checkout has uncommitted changes; clean them "
-            f"first.\ngit status:\n" + "\n".join(dirty),
+            "canonical checkout has uncommitted changes; clean them "
+            "first.\ngit status:\n" + "\n".join(dirty),
         )
 
     # Validate (dry-merge). Suite ON by default; the caller can drop
@@ -4470,10 +4471,10 @@ def _cmd_ship_direct_plan(args) -> int:
 
     if not args.yes:
         print(f"ready to ship {args.plan!r}:")
-        print(f"  validate: clean")
+        print("  validate: clean")
         print(f"  merge:    {branch!r} → main (FF-first, merge-commit fallback)")
         print(f"  push:     origin main + {branch!r}")
-        print(f"  trigger:  tick (auto_archive_rule fires next)")
+        print("  trigger:  tick (auto_archive_rule fires next)")
         print("")
         print("re-run with --yes to apply.")
         return ExitCode.OK
@@ -4590,8 +4591,8 @@ def _cmd_ship_direct_all_done(args) -> int:
     if dirty:
         return _die(
             ExitCode.GENERIC,
-            f"canonical checkout has uncommitted changes; clean them "
-            f"first.\ngit status:\n" + "\n".join(dirty),
+            "canonical checkout has uncommitted changes; clean them "
+            "first.\ngit status:\n" + "\n".join(dirty),
         )
 
     plans = cross_plan_rules.load_plans_for_project(project_root, cfg)
@@ -4844,10 +4845,10 @@ def _cmd_ship_as_pr_plan(args) -> int:
 
     if not args.yes:
         print(f"ready to ship {args.plan!r} via PR:")
-        print(f"  validate: clean")
+        print("  validate: clean")
         print(f"  push:     origin {branch!r}")
         print(f"  open:     PR head={branch!r} base=main")
-        print(f"  stamp:    state.ship_pending (suppresses ready-to-ship rule)")
+        print("  stamp:    state.ship_pending (suppresses ready-to-ship rule)")
         print("")
         print("re-run with --yes to apply.")
         return ExitCode.OK

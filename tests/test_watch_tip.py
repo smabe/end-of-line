@@ -14,7 +14,6 @@ from end_of_line import monitor, registry
 from end_of_line.cli import main
 from tests import isolate_monitor_marker
 
-
 _PLAN_BODY = "# placeholder\n"
 _WATCH_TIP_PLAN = "clu watch --project . --plan"
 _WATCH_TIP_ALL = "clu watch --project . --all"

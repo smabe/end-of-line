@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest import mock
 
 from end_of_line import inbox
-
 from tests import isolate_monitor_marker
 
 

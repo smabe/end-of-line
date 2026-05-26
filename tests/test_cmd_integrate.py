@@ -18,7 +18,6 @@ from end_of_line.cli import ExitCode, main
 from end_of_line.dry_merge import MergeResult
 from tests import CluTestCase
 
-
 _CLEAN = MergeResult(outcome="clean", merged_branches=["a", "b"], base_sha="abc123")
 
 

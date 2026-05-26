@@ -15,7 +15,8 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from end_of_line import queue, state as st
+from end_of_line import queue
+from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig
 from tests import isolate_queue

@@ -8,10 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from end_of_line import notify_inbound, registry, state as st
+from end_of_line import notify_inbound, registry
+from end_of_line import state as st
 from end_of_line.notify_inbound import OpenBlocker
 from tests import isolate_registry
-
 
 DEFAULT_CHAT_ID = "+15551234567"  # operator's self-chat handle for fixtures
 

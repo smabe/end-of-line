@@ -18,10 +18,11 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from . import coolant
 
@@ -335,7 +336,7 @@ def reap_orphan_pid(pid: int, cmdline_match: str | None = None) -> ReapResult:
 
 
 def _now_utc() -> _dt.datetime:
-    return _dt.datetime.now(_dt.timezone.utc)
+    return _dt.datetime.now(_dt.UTC)
 
 
 def utcnow() -> str:

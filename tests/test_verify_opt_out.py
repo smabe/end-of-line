@@ -21,7 +21,6 @@ from end_of_line.cli import ExitCode, main
 from end_of_line.config import CONFIG_FILENAME
 from tests import isolate_registry
 
-
 PLAN_BODY = """\
 # Test plan
 
@@ -249,7 +248,7 @@ class VerifyOptOutTestCase(unittest.TestCase):
         self.assertFalse(cfg.quality.verify_required)
 
     def test_verify_required_non_bool_rejected(self) -> None:
-        from end_of_line.config import load_project_config, ConfigError
+        from end_of_line.config import ConfigError, load_project_config
 
         _write_config(self.project, quality={"verify_required": "false"})  # string, not bool
         with self.assertRaises(ConfigError):

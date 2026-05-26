@@ -12,7 +12,6 @@ from unittest import mock
 from end_of_line.cli import ExitCode, main
 from tests import CluTestCase
 
-
 _PLAN_BODY = """\
 # placeholder
 ## Sessions index

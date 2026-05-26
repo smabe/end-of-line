@@ -14,7 +14,6 @@ from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from tests import isolate_registry
 
-
 PLAN_BODY = """\
 # Test plan
 
@@ -35,7 +34,7 @@ def _stamp_claim(
     token: str = "session-abc",
     lease_expires: _dt.datetime | None = None,
 ) -> None:
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.UTC)
     if lease_expires is None:
         lease_expires = now + _dt.timedelta(minutes=30)
     started = now.strftime(_FMT)
@@ -92,7 +91,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
     # ---- happy path -----------------------------------------------------------
 
     def test_extend_lease_happy_path_bumps_lease_expires(self) -> None:
-        now = _dt.datetime.now(_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.UTC)
         original_expires = now + _dt.timedelta(minutes=30)
         self._write(lambda d: _stamp_claim(d, lease_expires=original_expires))
 
@@ -101,7 +100,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
 
         claim = self._read()["current_claim"]
         new_expires = _dt.datetime.strptime(claim["lease_expires"], _FMT).replace(
-            tzinfo=_dt.timezone.utc
+            tzinfo=_dt.UTC
         )
         # new_expires should be ~90 min from now (30 remaining + 60 added)
         expected = original_expires + _dt.timedelta(minutes=60)
@@ -109,7 +108,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
         self.assertLess(diff, 5, f"lease_expires off by {diff}s")
 
     def test_extend_lease_happy_path_appends_event(self) -> None:
-        now = _dt.datetime.now(_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.UTC)
         self._write(
             lambda d: _stamp_claim(
                 d,
@@ -130,7 +129,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
         self.assertIn("new_expires", evt)
 
     def test_extend_lease_happy_path_event_new_expires_matches_claim(self) -> None:
-        now = _dt.datetime.now(_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.UTC)
         self._write(
             lambda d: _stamp_claim(
                 d,
@@ -159,7 +158,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
     # ---- refuse: invalid minutes ----------------------------------------------
 
     def test_refuses_on_zero_minutes(self) -> None:
-        now = _dt.datetime.now(_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.UTC)
         self._write(
             lambda d: _stamp_claim(
                 d,
@@ -172,7 +171,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
         self.assertEqual(rc, ExitCode.INVALID_VALUE)
 
     def test_refuses_on_negative_minutes(self) -> None:
-        now = _dt.datetime.now(_dt.timezone.utc)
+        now = _dt.datetime.now(_dt.UTC)
         self._write(
             lambda d: _stamp_claim(
                 d,
@@ -188,17 +187,17 @@ class ExtendLeaseTestCase(unittest.TestCase):
 
     def test_extend_from_past_lease_uses_now_as_baseline(self) -> None:
         # lease_expires is already in the past (stalled worker)
-        past = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=5)
+        past = _dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=5)
         self._write(lambda d: _stamp_claim(d, lease_expires=past))
 
-        before = _dt.datetime.now(_dt.timezone.utc)
+        before = _dt.datetime.now(_dt.UTC)
         rc = main(self._argv("30"))
-        after = _dt.datetime.now(_dt.timezone.utc)
+        after = _dt.datetime.now(_dt.UTC)
         self.assertEqual(rc, 0)
 
         claim = self._read()["current_claim"]
         new_expires = _dt.datetime.strptime(claim["lease_expires"], _FMT).replace(
-            tzinfo=_dt.timezone.utc
+            tzinfo=_dt.UTC
         )
         # Must be ~now+30, not past+30 (which would still be in the past).
         # Allow 1s downward slack: the ISO format truncates to whole seconds.
