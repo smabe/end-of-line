@@ -591,18 +591,19 @@ def main(argv: list[str] | None = None) -> int:
     p_install_skill = sub.add_parser(
         "install-skill",
         help="Copy bundled skills into ~/.claude/skills/<name>/SKILL.md "
-        "so Claude Code can find them. Six skills ship "
-        "(clu-phase, clu-plan, clu-reply, clu-monitor, plan, brainstorm). "
-        "Default installs all; use --only to install one.",
+        "so Claude Code can find them. Seven skills ship "
+        "(audit-skill, brainstorm, clu-monitor, clu-phase, clu-plan, "
+        "clu-reply, plan). Default installs all; use --only to install one.",
         description="Copy bundled skills into ~/.claude/skills/<name>/SKILL.md "
-        "so Claude Code can find them. Six skills ship: "
-        "/clu-phase (worker dispatch entry — required for clu to "
-        "function), /clu-plan (clu-format master + sub-plan "
-        "authorship), /clu-reply (explicit blocker reply for "
-        "scripted contexts), /clu-monitor (Monitor arming for "
-        "background notifications on autonomous runs), /plan "
-        "(project-agnostic plan authorship), /brainstorm "
-        "(parallel-persona pre-planning for fuzzy problem spaces). "
+        "so Claude Code can find them. Seven skills ship: "
+        "/audit-skill (drift audit of a bundled SKILL.md against "
+        "current code), /brainstorm (parallel-persona pre-planning "
+        "for fuzzy problem spaces), /clu-monitor (Monitor arming for "
+        "background notifications on autonomous runs), /clu-phase "
+        "(worker dispatch entry — required for clu to function), "
+        "/clu-plan (clu-format master + sub-plan authorship), "
+        "/clu-reply (explicit blocker reply for scripted contexts), "
+        "/plan (project-agnostic plan authorship). "
         "Default installs all; pass --only <name> to install one.",
     )
     p_install_skill.add_argument(
@@ -1991,7 +1992,15 @@ def _refuse_on_corrupt_queue(queue_path: Path, exc: Exception) -> int:
     return _die(ExitCode.GENERIC, "\n".join(lines))
 
 
-BUNDLED_SKILLS = ("brainstorm", "clu-monitor", "clu-phase", "clu-plan", "clu-reply", "plan")
+BUNDLED_SKILLS = (
+    "audit-skill",
+    "brainstorm",
+    "clu-monitor",
+    "clu-phase",
+    "clu-plan",
+    "clu-reply",
+    "plan",
+)
 
 _CLU_NOTE_START = "<!-- clu:start autonomous-loop-pacing -->"
 _CLU_NOTE_END = "<!-- clu:end autonomous-loop-pacing -->"

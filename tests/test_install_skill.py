@@ -1,13 +1,14 @@
 """Tests for `clu install-skill` — copies bundled skills into
 ~/.claude/skills/<name>/SKILL.md.
 
-clu ships five skills: `clu-phase` (worker contract), `plan` (generic
-authorship), `brainstorm` (parallel-persona pre-planning), `clu-monitor`
-(background notification scheduling), and `clu-plan` (clu-format plan
-authoring — master + sub-plans). Default installs all five. `--only <name>`
+Default installs every skill in `BUNDLED_SKILLS`. `--only <name>`
 installs one. `--force` overrides the no-clobber-non-symlink safety.
 
 HOME is redirected per-test so we never write to the real ~/.claude.
+
+Setup builds per-skill `self.targets[name]` paths and
+`self.bundled_bytes[name]` bodies driven by `BUNDLED_SKILLS` so adding
+a new bundled skill auto-extends coverage without editing each test.
 """
 
 from __future__ import annotations
@@ -38,22 +39,27 @@ class InstallSkillTestBase(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.target = self.home / ".claude" / "skills" / "clu-phase" / "SKILL.md"
-        self.plan_target = self.home / ".claude" / "skills" / "plan" / "SKILL.md"
-        self.brainstorm_target = self.home / ".claude" / "skills" / "brainstorm" / "SKILL.md"
-        self.monitor_target = self.home / ".claude" / "skills" / "clu-monitor" / "SKILL.md"
-        self.clu_plan_target = self.home / ".claude" / "skills" / "clu-plan" / "SKILL.md"
-        self.bundled_bytes = files("end_of_line").joinpath("skills/clu-phase/SKILL.md").read_bytes()
-        self.bundled_plan_bytes = files("end_of_line").joinpath("skills/plan/SKILL.md").read_bytes()
-        self.bundled_brainstorm_bytes = (
-            files("end_of_line").joinpath("skills/brainstorm/SKILL.md").read_bytes()
-        )
-        self.bundled_monitor_bytes = (
-            files("end_of_line").joinpath("skills/clu-monitor/SKILL.md").read_bytes()
-        )
-        self.bundled_clu_plan_bytes = (
-            files("end_of_line").joinpath("skills/clu-plan/SKILL.md").read_bytes()
-        )
+        self.targets: dict[str, Path] = {
+            name: self.home / ".claude" / "skills" / name / "SKILL.md"
+            for name in BUNDLED_SKILLS
+        }
+        self.bundled_bytes_by_name: dict[str, bytes] = {
+            name: files("end_of_line")
+            .joinpath(f"skills/{name}/SKILL.md")
+            .read_bytes()
+            for name in BUNDLED_SKILLS
+        }
+        # Backward-compat aliases used by tests targeting specific skills.
+        self.target = self.targets["clu-phase"]
+        self.plan_target = self.targets["plan"]
+        self.brainstorm_target = self.targets["brainstorm"]
+        self.monitor_target = self.targets["clu-monitor"]
+        self.clu_plan_target = self.targets["clu-plan"]
+        self.bundled_bytes = self.bundled_bytes_by_name["clu-phase"]
+        self.bundled_plan_bytes = self.bundled_bytes_by_name["plan"]
+        self.bundled_brainstorm_bytes = self.bundled_bytes_by_name["brainstorm"]
+        self.bundled_monitor_bytes = self.bundled_bytes_by_name["clu-monitor"]
+        self.bundled_clu_plan_bytes = self.bundled_bytes_by_name["clu-plan"]
 
     def _run(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -61,128 +67,74 @@ class InstallSkillTestBase(unittest.TestCase):
             rc = main(["install-skill", *argv])
         return rc, out.getvalue(), err.getvalue()
 
+    def _assert_only_installed(self, only_name: str) -> None:
+        """Assert exactly `only_name` is installed; all other bundled skills are absent."""
+        for name, target in self.targets.items():
+            if name == only_name:
+                self.assertTrue(target.exists(), f"{name} should be installed")
+            else:
+                self.assertFalse(target.exists(), f"{name} should be absent")
+
 
 class FreshInstallTests(InstallSkillTestBase):
-    def test_default_installs_all_five_skills(self):
+    def test_default_installs_all_bundled_skills(self):
         rc, out, _ = self._run()
         self.assertEqual(rc, int(ExitCode.OK))
-        self.assertTrue(self.target.exists())
-        self.assertTrue(self.plan_target.exists())
-        self.assertTrue(self.brainstorm_target.exists())
-        self.assertTrue(self.monitor_target.exists())
-        self.assertTrue(self.clu_plan_target.exists())
-        self.assertEqual(self.target.read_bytes(), self.bundled_bytes)
-        self.assertEqual(self.plan_target.read_bytes(), self.bundled_plan_bytes)
-        self.assertEqual(
-            self.brainstorm_target.read_bytes(),
-            self.bundled_brainstorm_bytes,
-        )
-        self.assertEqual(
-            self.monitor_target.read_bytes(),
-            self.bundled_monitor_bytes,
-        )
-        self.assertEqual(
-            self.clu_plan_target.read_bytes(),
-            self.bundled_clu_plan_bytes,
-        )
-        self.assertIn(str(self.target), out)
-        self.assertIn(str(self.plan_target), out)
-        self.assertIn(str(self.brainstorm_target), out)
-        self.assertIn(str(self.monitor_target), out)
-        self.assertIn(str(self.clu_plan_target), out)
+        for name, target in self.targets.items():
+            self.assertTrue(target.exists(), f"{name} not installed")
+            self.assertEqual(
+                target.read_bytes(),
+                self.bundled_bytes_by_name[name],
+                f"{name} bytes differ from bundled",
+            )
+            self.assertIn(str(target), out, f"{name} target path not in stdout")
 
     def test_creates_parent_dirs(self):
-        self.assertFalse(self.target.parent.exists())
-        self.assertFalse(self.plan_target.parent.exists())
-        self.assertFalse(self.brainstorm_target.parent.exists())
-        self.assertFalse(self.monitor_target.parent.exists())
-        self.assertFalse(self.clu_plan_target.parent.exists())
+        for name, target in self.targets.items():
+            self.assertFalse(target.parent.exists(), f"{name} parent leaked")
         rc, _, _ = self._run()
         self.assertEqual(rc, int(ExitCode.OK))
-        self.assertTrue(self.target.exists())
-        self.assertTrue(self.plan_target.exists())
-        self.assertTrue(self.brainstorm_target.exists())
-        self.assertTrue(self.monitor_target.exists())
-        self.assertTrue(self.clu_plan_target.exists())
+        for name, target in self.targets.items():
+            self.assertTrue(target.exists(), f"{name} not installed")
 
 
 class OnlyFlagTests(InstallSkillTestBase):
-    def test_only_clu_phase(self):
-        rc, out, _ = self._run("--only", "clu-phase")
-        self.assertEqual(rc, int(ExitCode.OK))
-        self.assertTrue(self.target.exists())
-        self.assertFalse(self.plan_target.exists())
-        self.assertFalse(self.brainstorm_target.exists())
-        self.assertFalse(self.monitor_target.exists())
-        self.assertFalse(self.clu_plan_target.exists())
-        self.assertIn(str(self.target), out)
-
-    def test_only_plan(self):
-        rc, out, _ = self._run("--only", "plan")
-        self.assertEqual(rc, int(ExitCode.OK))
-        self.assertFalse(self.target.exists())
-        self.assertTrue(self.plan_target.exists())
-        self.assertFalse(self.brainstorm_target.exists())
-        self.assertFalse(self.monitor_target.exists())
-        self.assertFalse(self.clu_plan_target.exists())
-        self.assertIn(str(self.plan_target), out)
-
-    def test_only_brainstorm(self):
-        rc, out, _ = self._run("--only", "brainstorm")
-        self.assertEqual(rc, int(ExitCode.OK))
-        self.assertFalse(self.target.exists())
-        self.assertFalse(self.plan_target.exists())
-        self.assertTrue(self.brainstorm_target.exists())
-        self.assertFalse(self.monitor_target.exists())
-        self.assertFalse(self.clu_plan_target.exists())
-        self.assertEqual(
-            self.brainstorm_target.read_bytes(),
-            self.bundled_brainstorm_bytes,
-        )
-        self.assertIn(str(self.brainstorm_target), out)
-
-    def test_only_clu_monitor(self):
-        rc, out, _ = self._run("--only", "clu-monitor")
-        self.assertEqual(rc, int(ExitCode.OK))
-        self.assertFalse(self.target.exists())
-        self.assertFalse(self.plan_target.exists())
-        self.assertFalse(self.brainstorm_target.exists())
-        self.assertTrue(self.monitor_target.exists())
-        self.assertFalse(self.clu_plan_target.exists())
-        self.assertEqual(
-            self.monitor_target.read_bytes(),
-            self.bundled_monitor_bytes,
-        )
-        self.assertIn(str(self.monitor_target), out)
-
-    def test_only_clu_plan(self):
-        rc, out, _ = self._run("--only", "clu-plan")
-        self.assertEqual(rc, int(ExitCode.OK))
-        self.assertFalse(self.target.exists())
-        self.assertFalse(self.plan_target.exists())
-        self.assertFalse(self.brainstorm_target.exists())
-        self.assertFalse(self.monitor_target.exists())
-        self.assertTrue(self.clu_plan_target.exists())
-        self.assertEqual(
-            self.clu_plan_target.read_bytes(),
-            self.bundled_clu_plan_bytes,
-        )
-        self.assertIn(str(self.clu_plan_target), out)
+    def test_only_each_bundled_skill_isolates_install(self):
+        """Per-skill: `--only X` installs X and no other bundled skill."""
+        for name in BUNDLED_SKILLS:
+            with self.subTest(skill=name):
+                # Re-isolate HOME per subTest so prior installs don't leak.
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                home = Path(tmp.name)
+                with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                    targets = {
+                        n: home / ".claude" / "skills" / n / "SKILL.md"
+                        for n in BUNDLED_SKILLS
+                    }
+                    out_buf, err_buf = io.StringIO(), io.StringIO()
+                    with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                        rc = main(["install-skill", "--only", name])
+                    self.assertEqual(rc, int(ExitCode.OK))
+                    for n, target in targets.items():
+                        if n == name:
+                            self.assertTrue(target.exists(), f"{name} not installed")
+                            self.assertEqual(
+                                target.read_bytes(),
+                                self.bundled_bytes_by_name[n],
+                            )
+                            self.assertIn(str(target), out_buf.getvalue())
+                        else:
+                            self.assertFalse(target.exists(), f"{n} should be absent")
 
     def test_only_unknown_name_exits_clean(self):
         rc, _, err = self._run("--only", "banana")
         self.assertNotEqual(rc, int(ExitCode.OK))
-        self.assertFalse(self.target.exists())
-        self.assertFalse(self.plan_target.exists())
-        self.assertFalse(self.brainstorm_target.exists())
-        self.assertFalse(self.monitor_target.exists())
-        self.assertFalse(self.clu_plan_target.exists())
-        # Message must list the valid names so the operator can self-correct.
-        self.assertIn("clu-phase", err)
-        self.assertIn("plan", err)
-        self.assertIn("brainstorm", err)
-        self.assertIn("clu-monitor", err)
-        self.assertIn("clu-plan", err)
+        for target in self.targets.values():
+            self.assertFalse(target.exists())
+        # Message must list every valid name so the operator can self-correct.
+        for name in BUNDLED_SKILLS:
+            self.assertIn(name, err, f"{name} missing from error message")
         self.assertIn("banana", err)
 
 
@@ -206,16 +158,13 @@ class ExistingTargetTests(InstallSkillTestBase):
     def test_refusal_is_atomic_other_skills_not_installed(self):
         # clu-phase target is a regular file → refuse. Other targets are
         # fresh → would install, but abort-all means they MUST NOT install.
-        self.assertFalse(self.plan_target.exists())
-        self.assertFalse(self.brainstorm_target.exists())
-        self.assertFalse(self.monitor_target.exists())
-        self.assertFalse(self.clu_plan_target.exists())
+        others = {n: t for n, t in self.targets.items() if n != "clu-phase"}
+        for name, target in others.items():
+            self.assertFalse(target.exists(), f"{name} pre-state leaked")
         rc, _, _ = self._run()
         self.assertEqual(rc, int(ExitCode.STATUS_TRANSITION))
-        self.assertFalse(self.plan_target.exists())
-        self.assertFalse(self.brainstorm_target.exists())
-        self.assertFalse(self.monitor_target.exists())
-        self.assertFalse(self.clu_plan_target.exists())
+        for name, target in others.items():
+            self.assertFalse(target.exists(), f"{name} installed despite abort")
 
 
 class SymlinkTargetTests(InstallSkillTestBase):

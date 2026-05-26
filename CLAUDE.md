@@ -58,7 +58,8 @@ For the *why* behind each, see
   `state.py` the schema; `supervisor.py` the tick loop; `notify_*.py`
   pluggable channels (iMessage / Discord / watch); `hooks/` ships
   Claude Code SessionStart + PreToolUse hooks; `skills/` bundles
-  `/clu-plan`, `/clu-phase`, `/clu-reply`, `/clu-monitor`.
+  `/clu-plan`, `/clu-phase`, `/clu-reply`, `/clu-monitor`,
+  `/audit-skill` (drift audit of a SKILL.md against current code).
 - **`tests/`** — `unittest` suite. `tests/__init__.py` exports
   `CluTestCase` + `isolate_registry` helpers (see Conventions).
 - **`docs/`** — depth docs (see "Where to look for depth" below).
