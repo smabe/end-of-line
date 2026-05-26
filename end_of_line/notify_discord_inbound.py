@@ -15,18 +15,14 @@ from __future__ import annotations
 import json
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from . import registry, state_locator
+from . import notify_discord_http, registry, state_locator
 from . import state as st
 from .notify_base import OpenBlocker, Reply
 from .notify_imessage_inbound import _cli_dispatch
 
-_API_BASE = "https://discord.com/api/v10"
-_USER_AGENT = "clu/1.0 (https://github.com/smabe/end-of-line)"
 POLL_INTERVAL = 30  # seconds; mirrors iMessage cadence
 
 
@@ -185,51 +181,15 @@ class DiscordInboundPoller:
     # HTTP
     # ------------------------------------------------------------------
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        body: dict | None = None,
-        *,
-        _retried: bool = False,
-    ) -> dict | list:
-        req = urllib.request.Request(
-            _API_BASE + path,
-            method=method,
-            headers={
-                "Authorization": f"Bot {self.bot_token}",
-                "Content-Type": "application/json",
-                "User-Agent": _USER_AGENT,
-            },
-            data=json.dumps(body).encode() if body else None,
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict | list:
+        return notify_discord_http.request(
+            self.bot_token,
+            method,
+            path,
+            body,
+            log_prefix="discord_inbound",
+            empty_on_double_429=lambda m: [] if m == "GET" else {},
         )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429 and not _retried:
-                time.sleep(self._parse_retry_after(exc))
-                return self._request(method, path, body, _retried=True)
-            if exc.code == 429 and _retried:
-                print(
-                    f"discord_inbound: rate limited twice on {method} {path}, dropping",
-                    file=sys.stderr,
-                )
-                return [] if method == "GET" else {}
-            raise
-
-    def _parse_retry_after(self, exc: urllib.error.HTTPError) -> float:
-        header_val = exc.headers.get("Retry-After")
-        if header_val is not None:
-            try:
-                return float(header_val)
-            except (ValueError, TypeError):
-                pass
-        try:
-            body_data = json.loads(exc.read())
-            return float(body_data.get("retry_after", 1.0))
-        except Exception:
-            return 1.0
 
 
 # ------------------------------------------------------------------

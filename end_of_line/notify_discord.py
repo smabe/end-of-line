@@ -12,19 +12,14 @@ from __future__ import annotations
 
 import json
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import notify_discord_http
 from . import state as st
 
 if TYPE_CHECKING:
     from .config import ChannelSpec
-
-_API_BASE = "https://discord.com/api/v10"
-_USER_AGENT = "clu/1.0 (https://github.com/smabe/end-of-line)"
 
 
 class DiscordNotifier:
@@ -133,50 +128,12 @@ class DiscordNotifier:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         st.save_atomic(self.state_path, existing)
 
-    def _parse_retry_after(self, exc: urllib.error.HTTPError) -> float:
-        header_val = exc.headers.get("Retry-After")
-        if header_val is not None:
-            try:
-                return float(header_val)
-            except (ValueError, TypeError):
-                pass
-        try:
-            body_bytes = exc.read()
-            body_data = json.loads(body_bytes)
-            return float(body_data.get("retry_after", 1.0))
-        except Exception:
-            return 1.0
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        body: dict | None = None,
-        *,
-        _retried: bool = False,
-    ) -> dict:
-        req = urllib.request.Request(
-            _API_BASE + path,
-            method=method,
-            headers={
-                "Authorization": f"Bot {self.bot_token}",
-                "Content-Type": "application/json",
-                "User-Agent": _USER_AGENT,
-            },
-            data=json.dumps(body).encode() if body else None,
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        return notify_discord_http.request(
+            self.bot_token,
+            method,
+            path,
+            body,
+            log_prefix="discord",
+            empty_on_double_429=lambda _method: {},
         )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429 and not _retried:
-                retry_after = self._parse_retry_after(exc)
-                time.sleep(retry_after)
-                return self._request(method, path, body, _retried=True)
-            if exc.code == 429 and _retried:
-                print(
-                    f"discord: rate limited twice on {method} {path}, dropping",
-                    file=sys.stderr,
-                )
-                return {}
-            raise
