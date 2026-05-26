@@ -27,12 +27,12 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 git clone https://github.com/smabe/end-of-line.git
 cd end-of-line
 pipx install -e .          # puts `clu` on $PATH via its own venv
-clu install-skill          # copies the 5 bundled skills (/clu-phase + /plan + /clu-plan + /brainstorm + /clu-monitor) into ~/.claude/skills/
+clu install-skill          # copies the 6 bundled skills (/clu-phase + /plan + /clu-plan + /clu-reply + /brainstorm + /clu-monitor) into ~/.claude/skills/
 ```
 
 On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path that works without `--break-system-packages`.
 
-`clu install-skill` writes five bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
+`clu install-skill` writes six bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
 
 After installing the skills, run `/clu-monitor` once in Claude Code to install a `UserPromptSubmit` hook that surfaces clu's events into Claude's context on your next message — type "ok" after walking back and Claude already knows what halted, completed, or stuck. Idempotent — re-running prints the current install status. State file: `~/.config/clu/monitor.json`.
 
@@ -52,11 +52,12 @@ graphify claude install  # CLAUDE.md section + PreToolUse hook to consult the gr
 
 ## Working with clu
 
-`clu install-skill` ships five skills:
+`clu install-skill` ships six skills:
 
 - **`/clu-phase`** — the worker skill clu's dispatch invokes for each phase. Required for clu to function; you don't run it directly. The dispatch command in `.orchestrator.json` (see [Configure a project](#configure-a-project)) launches Claude with this skill so each phase honors the worker callback contract.
 - **`/plan`** — generic project-agnostic authorship skill. Drops a single file at `plans/<slug>.md` with Goal / Files-to-touch / Failure-modes / Done-criteria sections. Use this for solo human-authored plans in any project. Does NOT produce the Sessions-index format clu's supervisor needs — for clu-dispatched plans use `/clu-plan`.
 - **`/clu-plan`** — clu-format authorship: produces a master with `## Sessions index` table PLUS one sub-plan file per phase (the worker brief). Use this whenever you intend to dispatch the plan via `clu queue add`. Refuses with a pointer to `/plan` in non-clu projects.
+- **`/clu-reply`** — explicit blocker reply for scripted or disambiguation contexts. The natural-language inbox surface handles most replies hands-free; reach for `/clu-reply <plan-slug> <answer>` when you need precision (multiple open blockers, non-interactive script).
 - **`/brainstorm`** — parallel-persona pre-planning. Launches 3-6 agents (UX, engineer, QA, …) in parallel to analyze a feature from different angles, then consolidates their outputs into a master plan. Useful before `/plan` or `/clu-plan` when the problem space is fuzzy and you'd rather explore than guess.
 - **`/clu-monitor`** — one-shot setup skill that registers a `UserPromptSubmit` hook in `~/.claude/settings.json`. The hook surfaces clu's events (halts, blockers, plan completions, queue lifecycle, stuck-blocker re-pings, stalled claims) into Claude's context on every user message, so walking back to a session always has Claude already aware of what happened. Run once per machine; idempotent via the marker at `~/.config/clu/monitor.json`.
 
@@ -159,7 +160,7 @@ cp examples/clu.inbound.plist ~/Library/LaunchAgents/com.clu.inbound.plist
 # Edit ProgramArguments[0] to point at your pipx venv python
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.inbound.plist
 
-# Tick driver — fires every 60s, advances every registered plan via `clu tick-all`
+# Tick driver — fires every 30s (fallback cadence; `clu complete` push-dispatches the next tick directly), advances every registered plan via `clu tick-all`
 cp examples/clu.tick.plist ~/Library/LaunchAgents/com.clu.tick.plist
 # Verify ProgramArguments[0] matches `which clu` in your shell (default: ~/.local/bin/clu)
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
@@ -177,8 +178,11 @@ A worker is a process clu spawns for one phase. The included `/clu-phase` skill 
 | Need user input | `clu block --project P --plan S --phase X --token T --question "..." --option A --option B [--context "..."]` |
 | Spawn a follow-up | `clu spawn --project P --plan S --phase X --token T --source <kind> --title "..."` |
 | Still alive (long phases) | `clu heartbeat --project P --plan S --phase X --token T` |
+| Active-tool window (Claude Code) | `clu activity --plan S --phase X --token T --start-bash` (wired as `PreToolUse(Bash)`) and `--end-bash` (wired as `PostToolUse(Bash)`) — stamps `active_tool_started_at` so the supervisor's stuck-tool detection only fires while a Bash call is actually running |
+| Quality gate (before `complete`) | `clu verify --token T` (runs `quality.verify_command` from `.orchestrator.json`) and `clu attest --token T --simplify` (after `/code-review`); both stamp `current_claim.attestations.*` so `complete` doesn't refuse with `ATTESTATION_MISSING` |
+| Read prior answered blocker (resume) | `clu prior-blocker --project P --plan S --phase X --token T` |
 
-Every worker callback validates `--token` against the live claim — `clu` rejects forged tokens with exit code 4 (`CLAIM_MISMATCH`). Never exit without calling `complete` or `block`, or the lease expires after 30 min and your phase's attempts counter ticks toward the halt cap.
+Every worker callback validates `--token` against the live claim — `clu` rejects forged tokens with exit code 4 (`CLAIM_MISMATCH`). Never exit without calling `complete` or `block`, or the lease expires (default 60 min, effort-scaled per phase via `plan_parser.parse_effort_minutes` so a `4h` phase gets a proportionally longer TTL) and your phase's attempts counter ticks toward the halt cap.
 
 If a worker calls `clu block`, clu releases the claim and sends an iMessage. When you reply, the inbound poller routes the answer back, the supervisor consumes it on the next tick, and re-dispatches the phase — the resume-aware worker reads the answered blocker from state and continues with your choice.
 
@@ -197,23 +201,29 @@ Workers can also chain a follow-up plan into the project queue mid-phase via `cl
 | `clu status` | Pretty-print one plan's current state, with a `Reason:` line for paused/halted plans |
 | `clu logs [--follow]` | Tail the active worker's log (falls back to the newest log if idle) |
 | `clu watch [--plan SLUG\|--all] [--json] [--verbose] [--interval N] [--task-list]` | Stream state-machine events live — one line per transition. Default: every plan in the CWD project. SIGINT exits cleanly. Pair with Claude's `Monitor` tool for an in-session live feed. `--task-list` emits `TASK_CREATE`/`TASK_UPDATE` protocol lines for Claude's native TaskCreate UI (mutually exclusive with `--json`/`--all`) |
-| `clu tick` | One supervisor decision step on one plan; spawns a worker if a phase is ready. `--dry-tick` skips spawn (debug only) |
+| `clu tick [--project P]` | One supervisor decision step on one plan; spawns a worker if a phase is ready. `--project` scopes to all registered plans in one project (push-dispatch from `clu complete` uses this). `--dry-tick` skips spawn (debug only) |
 | `clu tick-all` | Tick every registered plan once (host-scoped; what cron runs) |
 | `clu answer <id> <text\|index>` | Resolve a blocker by hand (instead of via iMessage) |
 | `clu pause [--reason ...]` | Halt dispatching new phases |
 | `clu resume` | Un-pause |
 | `clu retry [--phase X]` | Clear max-attempts on a halted phase and resume |
+| `clu queue add\|list\|remove ...` | Operator-only plan-queue management. `queue add <slug>` enqueues a plan for cron dispatch; subsequent ticks pop it and init concurrently |
 | `clu release-claim [--force] [--reason ...] [--reset-attempts]` | Escape hatch when a worker dies holding the lease. `--reset-attempts` zeroes the attempt counter so the next dispatch starts fresh (use when the abort is operator-fault, not worker-fault) |
+| `clu force-complete --project P --plan S --phase X [--commit SHA]` | Operator marks a phase done after a worker died with its work on disk. Bypasses token validation, releases any active claim, emits both `EVENT_OPERATOR_FORCE_COMPLETE` + `EVENT_PHASE_COMPLETED` so the next tick advances the plan normally |
 | `clu extend-lease --project P --plan S MINUTES` | Add N minutes to the live claim's lease without touching the worker. Anchors from `max(now, current_expires)` so it's safe to call on an already-expired claim |
 | `clu task-done <task_id>` | Mark a spawned follow-up done |
 | `clu blockers list \| show` | Read-only inspection: `list` shows every open blocker for a plan (id, phase, question, numbered options); `show <id>` prints the full payload plus related events |
 | `clu ship --project P --plan X [--direct \| --as-pr] [--check] [--yes]` | One-action post-worker integration: validate, merge to main (or open PR), push, trigger archive. Mode default from `.orchestrator.json` `dispatch.ship_mode`. Without `--yes`, prints preview |
 | `clu ship --project P --all-done [--direct \| --as-pr] [--yes]` | Batch ship for every DONE plan with an unmerged branch, behind one `--yes`. Per-plan failures don't halt the batch |
 | `clu validate --project P [--batch B \| --branches a,b]` | Operator-on-demand dry-merge of one or more branches. Mode-agnostic; shared by `clu ship --check`. `clu integrate` is a deprecation alias |
+| `clu verify --project P --plan S --phase X --token T` | Run the project's verify command (`.orchestrator.json` `quality.verify_command`, falling back to `quality.test_command`) and stamp `current_claim.attestations.verify` on success. Quality-gate input for `clu complete` |
+| `clu attest --project P --plan S --phase X --token T --simplify` | Stamp `current_claim.attestations.simplify` against the current worktree HEAD. Required before `clu complete` when the simplify gate fires (diff exceeds threshold). Additional flavors land on `--<name>` |
 | `clu archive --project P --plan S` | Post-ship cleanup: removes the clu-managed worktree + branch (when reachable from origin) AND `git mv plans/<slug>*.md plans/archive/<slug>/` + commits the rename atomically. Idempotent on the file-move step |
-| `clu install-skill [--force] [--dry-run] [--only <name>] [--list]` | (Re-)install the 5 bundled skills (`/clu-phase` + `/plan` + `/clu-plan` + `/brainstorm` + `/clu-monitor`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it); `--list` enumerates bundled skills and exits |
+| `clu migrate-archive --project P [--dry-run]` | One-shot migration helper for projects on the old flat `plans/shipped/` layout — moves each shipped plan into `plans/archive/<master-slug>/`, committing one rename per master |
+| `clu install-skill [--force] [--dry-run] [--only <name>] [--list]` | (Re-)install the 6 bundled skills (`/clu-phase` + `/plan` + `/clu-plan` + `/clu-reply` + `/brainstorm` + `/clu-monitor`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it); `--list` enumerates bundled skills and exits |
 | `clu install-hook` / `clu uninstall-hook` | Register or remove the `UserPromptSubmit` hook in `~/.claude/settings.json` that surfaces clu's inbox events into the active Claude session. `/clu-monitor` is the user-facing wrapper |
-| `clu doctor --project P` | Smoke-test what a worker subprocess sees (PATH + resolved binary locations). No state writes |
+| `clu doctor --project P` | Smoke-test what a worker subprocess sees (PATH + resolved binary locations, channel handles, coolant integration). No state writes |
+| `clu notify-test --project P` | Fire a test notification through every configured channel; reports per-channel send status. Smoke-test after credential setup |
 | `clu unregister --all-archived [--dry-run]` | Batch-prune registry entries whose master plan file no longer exists. `--dry-run` previews without mutating |
 | `clu worktree gc [--project P] [--confirm] [--delete-branch] [--include-archived]` | List or remove worktrees of done/halted plans. Default is dry-run; `--confirm` runs `git worktree remove --force` (and `--delete-branch` adds `git branch -D`) |
 | `clu worktree attach --project P --plan S [PATH] [--branch B] [--base-ref REF]` | Retrofit a worktree onto a plan that was init'd without one |
@@ -232,7 +242,7 @@ Sketch — see `docs/contract.md` for the full schema:
   "blockers": [{"id": "q-1", "phase_id": "design", "question": "...", "answer": null}],
   "spawned_tasks": [{"id": "task-1", "source": "simplify", "title": "...", "status": "pending"}],
   "events": [{"ts": "...", "type": "phase_completed", "phase": "design"}],
-  "config": {"lease_ttl_minutes": 30, "blocked_question_sla_hours": 24, "max_attempts_per_phase": 3, "stalled_heartbeat_minutes": 10}
+  "config": {"lease_ttl_minutes": 60, "blocked_question_sla_hours": 24, "max_attempts_per_phase": 3, "stalled_heartbeat_minutes": 10}
 }
 ```
 
@@ -244,9 +254,27 @@ end_of_line/skills/   # bundled skills (/clu-phase worker, /plan + /clu-plan aut
 end_of_line/hooks/    # bundled UserPromptSubmit hook script that surfaces inbox events into Claude's context
 tests/                # unittest suite
 plans/                # active plan files (dogfooded — this repo uses clu on itself)
+plans/archive/<slug>/ # shipped plans, nested by master slug — receipts that the system runs on itself
 docs/                 # architecture, reference, operations, conventions, contract
-docs/history/         # archived plans + pre-Day-1 brainstorms — receipts that the system shipped real features
+docs/history/         # pre-Day-1 brainstorms (frozen, read-only)
 examples/             # .orchestrator.json template, LaunchAgent plists, fake-worker.sh for smoke testing
+```
+
+## Contributing
+
+A three-tool pre-commit gate lives at `.githooks/pre-commit-local`:
+
+- **Ruff** — lint (E + W + F + I + UP) on staged files only. Brownfield-friendly: pre-existing violations in unmodified files are tolerated, but touching a violation-laden file surfaces them (boy-scout rule). Format is not gated; run `ruff format` ad-hoc when desired.
+- **basedpyright** — basic-mode type check with `.basedpyright-baseline.json` freezing the current pre-existing error set; only NEW violations fail the commit.
+- **jscpd** — duplication scan on `end_of_line/` (min 75 tokens / 10 lines, tests excluded since `CluTestCase` boilerplate is similar by design).
+
+Per-stage opt-out via env: `RUFF_SKIP=1 git commit ...`, `PYRIGHT_SKIP=1`, `JSCPD_SKIP=1`. Install the dev tooling via `pipx install ruff basedpyright` and ensure `npx` is on `$PATH` for jscpd — that keeps the stdlib-only runtime promise intact.
+
+The hook is wired through the project-local extension point of a personal `pre-commit` harness, not via `core.hooksPath`. To run the gate on a fresh clone, drop a one-line `.git/hooks/pre-commit` that execs the project-local script:
+
+```bash
+printf '#!/usr/bin/env bash\nexec ./.githooks/pre-commit-local\n' > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
 ```
 
 ## Naming
