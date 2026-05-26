@@ -401,7 +401,10 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         dest="stalled_heartbeat_minutes",
-        help="Override stall threshold (minutes). Default: derived from lease TTL (max(15, lease_ttl//2)).",
+        help=(
+            "Override stall threshold (minutes). "
+            "Default: derived from lease TTL (max(15, lease_ttl//2))."
+        ),
     )
     p_init.add_argument(
         "--max-attempts-per-phase",
@@ -4154,7 +4157,8 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                             f"{lines_changed} lines (threshold: {t_files}/{t_lines}). "
                             f"Stamp missing or stale "
                             f"(stamped at {stamped_at or 'never'}, HEAD is {head_sha}). "
-                            f"Run `clu attest --simplify` before complete, or pass --skip-simplify.",
+                            f"Run `clu attest --simplify` before complete, "
+                            f"or pass --skip-simplify.",
                         )
 
     with st.mutate(state_path) as data:

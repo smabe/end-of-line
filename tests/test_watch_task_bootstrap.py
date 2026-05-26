@@ -143,7 +143,7 @@ class BootstrapEmissionTest(unittest.TestCase):
         sink = io.StringIO()
         bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
         lines = sink.getvalue().splitlines()
-        updates = [l for l in lines if l.startswith("TASK_UPDATE")]
+        updates = [line for line in lines if line.startswith("TASK_UPDATE")]
         self.assertEqual(len(updates), 2)
         self.assertIn(
             'TASK_UPDATE task=my-plan status=in_progress msg="bootstrap: plan running"',
@@ -160,7 +160,7 @@ class BootstrapEmissionTest(unittest.TestCase):
         self._write_master(slug, ["p1"])
         sink = io.StringIO()
         bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
-        updates = [l for l in sink.getvalue().splitlines() if l.startswith("TASK_UPDATE")]
+        updates = [line for line in sink.getvalue().splitlines() if line.startswith("TASK_UPDATE")]
         self.assertEqual(updates, [])
 
     def test_bootstrap_skips_task_update_when_status_not_running(self):
@@ -170,5 +170,5 @@ class BootstrapEmissionTest(unittest.TestCase):
         self._write_master(slug, ["p1"])
         sink = io.StringIO()
         bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)
-        updates = [l for l in sink.getvalue().splitlines() if l.startswith("TASK_UPDATE")]
+        updates = [line for line in sink.getvalue().splitlines() if line.startswith("TASK_UPDATE")]
         self.assertEqual(updates, [])

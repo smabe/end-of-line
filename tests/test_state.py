@@ -272,8 +272,11 @@ class TestLockedJson(TempStateMixin, unittest.TestCase):
 
     def test_works_with_custom_empty_factory(self) -> None:
         path = self.tmp / "custom.json"
-        empty = lambda: {"schema_version": 1, "payload": "fresh"}
-        with st.locked_json(path, expected_version=1, empty=empty) as data:
+        with st.locked_json(
+            path,
+            expected_version=1,
+            empty=lambda: {"schema_version": 1, "payload": "fresh"},
+        ) as data:
             self.assertEqual(data["payload"], "fresh")
             data["payload"] = "modified"
         reloaded = json.loads(path.read_text())
@@ -300,16 +303,22 @@ class TestLockedJson(TempStateMixin, unittest.TestCase):
 
     def test_atomic_rename_leaves_no_tmp_on_success(self) -> None:
         path = self.tmp / "atomic.json"
-        empty = lambda: {"schema_version": 1, "rows": []}
-        with st.locked_json(path, expected_version=1, empty=empty) as data:
+        with st.locked_json(
+            path,
+            expected_version=1,
+            empty=lambda: {"schema_version": 1, "rows": []},
+        ) as data:
             data["rows"].append("x")
         leftover = list(path.parent.glob("atomic.json.*.tmp"))
         self.assertEqual(leftover, [])
 
     def test_creates_parent_dir(self) -> None:
         path = self.tmp / "nested" / "deep" / "file.json"
-        empty = lambda: {"schema_version": 1}
-        with st.locked_json(path, expected_version=1, empty=empty):
+        with st.locked_json(
+            path,
+            expected_version=1,
+            empty=lambda: {"schema_version": 1},
+        ):
             pass
         self.assertTrue(path.exists())
 

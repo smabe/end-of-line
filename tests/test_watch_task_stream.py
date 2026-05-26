@@ -95,11 +95,11 @@ class TaskListStreamTest(CluTestCase):
             cfg_loader=_cfg_loader(self.project),
         )
         lines = sink.getvalue().splitlines()
-        task_creates = [l for l in lines if l.startswith("TASK_CREATE")]
+        task_creates = [line for line in lines if line.startswith("TASK_CREATE")]
         self.assertEqual(
             len(task_creates), 3, f"expected parent + 2 phase TASK_CREATEs; got: {lines}"
         )
-        snapshot_idx = next(i for i, l in enumerate(lines) if "[snapshot]" in l)
+        snapshot_idx = next(i for i, line in enumerate(lines) if "[snapshot]" in line)
         for i, line in enumerate(lines):
             if line.startswith("TASK_CREATE"):
                 self.assertLess(
@@ -247,15 +247,17 @@ class TaskListStreamTest(CluTestCase):
         )
         lines = sink.getvalue().splitlines()
         create_plan = next(
-            i for i, l in enumerate(lines) if "TASK_CREATE" in l and "task=ord-plan " in l
+            i for i, line in enumerate(lines) if "TASK_CREATE" in line and "task=ord-plan " in line
         )
         update_plan = next(
-            i for i, l in enumerate(lines) if "TASK_UPDATE" in l and "task=ord-plan " in l
+            i for i, line in enumerate(lines) if "TASK_UPDATE" in line and "task=ord-plan " in line
         )
         update_phase = next(
-            i for i, l in enumerate(lines) if "TASK_UPDATE" in l and "task=ord-plan/phase-a" in l
+            i
+            for i, line in enumerate(lines)
+            if "TASK_UPDATE" in line and "task=ord-plan/phase-a" in line
         )
-        snapshot = next(i for i, l in enumerate(lines) if "[snapshot]" in l)
+        snapshot = next(i for i, line in enumerate(lines) if "[snapshot]" in line)
         self.assertLess(create_plan, update_plan)
         self.assertLess(update_plan, update_phase)
         self.assertLess(update_phase, snapshot)

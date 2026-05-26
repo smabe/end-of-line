@@ -359,7 +359,10 @@ def bootstrap_task_list(
     cfg_loader: Callable[[Path], Any],
     sink: TextIO,
 ) -> None:
-    """Emit TASK_CREATE per plan+phase; if current_claim is running, also emit TASK_UPDATE to reconcile."""
+    """Emit TASK_CREATE per plan+phase.
+
+    If current_claim is running, also emit TASK_UPDATE to reconcile.
+    """
     for state_path in state_paths:
         if not state_path.exists():
             continue
@@ -451,7 +454,9 @@ def stream_loop(
         if cfg_loader is None:
             from .cli import load_project_config  # lazy — cli imports watch, avoid cycle
 
-            cfg_loader = lambda sp: load_project_config(_state_path_to_project(sp))
+            def cfg_loader(sp: Path) -> Any:
+                return load_project_config(_state_path_to_project(sp))
+
         bootstrap_task_list(list(cursors.keys()), cfg_loader, sink)
 
     # Operator mode wants ONLY wedge events; suppress the per-plan snapshot

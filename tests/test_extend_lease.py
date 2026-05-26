@@ -99,9 +99,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
         self.assertEqual(rc, 0)
 
         claim = self._read()["current_claim"]
-        new_expires = _dt.datetime.strptime(claim["lease_expires"], _FMT).replace(
-            tzinfo=_dt.UTC
-        )
+        new_expires = _dt.datetime.strptime(claim["lease_expires"], _FMT).replace(tzinfo=_dt.UTC)
         # new_expires should be ~90 min from now (30 remaining + 60 added)
         expected = original_expires + _dt.timedelta(minutes=60)
         diff = abs((new_expires - expected).total_seconds())
@@ -196,9 +194,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
         self.assertEqual(rc, 0)
 
         claim = self._read()["current_claim"]
-        new_expires = _dt.datetime.strptime(claim["lease_expires"], _FMT).replace(
-            tzinfo=_dt.UTC
-        )
+        new_expires = _dt.datetime.strptime(claim["lease_expires"], _FMT).replace(tzinfo=_dt.UTC)
         # Must be ~now+30, not past+30 (which would still be in the past).
         # Allow 1s downward slack: the ISO format truncates to whole seconds.
         lower_bound = before + _dt.timedelta(minutes=30, seconds=-1)

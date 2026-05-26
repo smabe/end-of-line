@@ -143,7 +143,7 @@ class StreamLoopCursorTest(CluTestCase):
             max_ticks=2,
             _before_first_tick=inject,
         )
-        lines = [l for l in sink.getvalue().splitlines() if "completed" in l]
+        lines = [line for line in sink.getvalue().splitlines() if "completed" in line]
         self.assertEqual(len(lines), 1)
 
     def test_multiple_events_in_one_tick_all_emit(self) -> None:
@@ -237,7 +237,7 @@ class StreamLoopJsonModeTest(CluTestCase):
                 self.state_path, _evt(st.EVENT_PHASE_COMPLETED, phase="x")
             ),
         )
-        lines = [l for l in sink.getvalue().splitlines() if l.startswith("{")]
+        lines = [line for line in sink.getvalue().splitlines() if line.startswith("{")]
         self.assertGreater(len(lines), 0)
         for line in lines:
             parsed = json.loads(line)
@@ -258,7 +258,7 @@ class StreamLoopJsonModeTest(CluTestCase):
                 self.state_path, _evt(st.EVENT_LEASE_EXPIRED, phase="x")
             ),
         )
-        lines = [l for l in sink.getvalue().splitlines() if l.startswith("{")]
+        lines = [line for line in sink.getvalue().splitlines() if line.startswith("{")]
         for line in lines:
             parsed = json.loads(line)
             self.assertNotEqual(parsed["event"].get("type"), st.EVENT_LEASE_EXPIRED)
