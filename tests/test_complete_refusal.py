@@ -11,7 +11,6 @@ Each bypass emits an audit event.
 from __future__ import annotations
 
 import io
-import json
 import subprocess
 import tempfile
 import unittest

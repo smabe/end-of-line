@@ -155,8 +155,6 @@ class ActivityCallbackTestCase(CluTestCase):
         # callback is holding the state lock, we'd rather drop the marker
         # update than freeze the worker's Bash invocation. clu activity
         # exits 0 on lock-timeout; the marker just stays whatever it was.
-        import fcntl
-        import os
 
         lock_path = self.state_path.with_name(self.state_path.name + ".lock")
         # Hold the lock from a subprocess so flock contention is real

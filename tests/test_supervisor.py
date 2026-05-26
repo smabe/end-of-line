@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from end_of_line import state as st

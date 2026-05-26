@@ -14,7 +14,6 @@ import unittest
 from end_of_line.state import (
     EVENT_PHASE_ORPHAN_REAPED,
     SIGNAL_TERM,
-    SIGNAL_TERM_THEN_KILL,
     ReapResult,
     reap_orphan_pid,
 )

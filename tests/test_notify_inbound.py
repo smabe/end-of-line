@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 
 from end_of_line import notify_inbound, registry
-from end_of_line import state as st
 from end_of_line.notify_inbound import OpenBlocker
 from tests import isolate_registry
 

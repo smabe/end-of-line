@@ -3,7 +3,6 @@ and queue-entry schema extension for worker-enqueue lineage fields."""
 
 from __future__ import annotations
 
-import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory

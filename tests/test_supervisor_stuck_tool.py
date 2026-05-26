@@ -15,7 +15,6 @@ from end_of_line import inbox
 from end_of_line import state as st
 from end_of_line.config import ProjectConfig
 from end_of_line.supervisor import (
-    Descendant,
     _emit_stuck_tool,
     _parse_duration,
     _parse_ps_output,

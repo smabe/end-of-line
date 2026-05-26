@@ -6,7 +6,6 @@ import io
 import json
 import unittest
 import urllib.error
-from pathlib import Path
 from unittest import mock
 
 from end_of_line import state as st

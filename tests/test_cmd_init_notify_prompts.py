@@ -7,15 +7,14 @@ added in the notify-multi-channel docs phase.
 from __future__ import annotations
 
 import io
-import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line.cli import ExitCode, main
-from end_of_line.config import CONFIG_FILENAME, load_project_config
+from end_of_line.cli import main
+from end_of_line.config import load_project_config
 from tests import isolate_registry
 
 PLAN_BODY = """\

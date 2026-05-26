@@ -10,7 +10,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.registry import PlanEntry
-from end_of_line.state_locator import LocatorResult, find_blocker_for_reply
+from end_of_line.state_locator import find_blocker_for_reply
 from tests import isolate_registry
 
 

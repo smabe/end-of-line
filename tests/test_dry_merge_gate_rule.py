@@ -7,17 +7,14 @@ plans in the same batch_id are STATUS_DONE with live worktree records.
 from __future__ import annotations
 
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from end_of_line import cross_plan_rules, notify
 from end_of_line import state as st
-from end_of_line.config import load_project_config
 from end_of_line.cross_plan_rules import (
     ProjectPlan,
-    load_plans_for_project,
     register_rule,
     run_rules,
 )

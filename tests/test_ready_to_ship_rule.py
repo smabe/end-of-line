@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from end_of_line import cross_plan_rules, notify, registry
 from end_of_line import state as st

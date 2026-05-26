@@ -9,7 +9,6 @@ runs `main(["tick-all"])` and inspects the resulting queue / state.
 from __future__ import annotations
 
 import io
-import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout

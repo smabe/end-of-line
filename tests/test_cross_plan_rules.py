@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 from pathlib import Path
 
 from end_of_line import cross_plan_rules, registry
 from end_of_line import state as st
-from end_of_line.config import ProjectConfig, load_project_config
+from end_of_line.config import load_project_config
 from end_of_line.cross_plan_rules import (
-    ProjectPlan,
     RuleResult,
     load_plans_for_project,
     register_rule,

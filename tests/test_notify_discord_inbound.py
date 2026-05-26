@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import io
 import json
-import subprocess
 import unittest
 import urllib.error
 from pathlib import Path
@@ -12,7 +10,7 @@ from unittest import mock
 
 from end_of_line import registry
 from end_of_line import state as st
-from end_of_line.notify_base import InboundPoller, OpenBlocker
+from end_of_line.notify_base import InboundPoller
 from tests import CluTestCase
 
 # ---------------------------------------------------------------------------

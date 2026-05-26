@@ -8,7 +8,6 @@ worker skill expects it.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import tempfile
 import unittest

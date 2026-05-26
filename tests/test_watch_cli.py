@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import io
-import tempfile
-import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock

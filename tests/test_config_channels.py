@@ -9,9 +9,7 @@ from tempfile import TemporaryDirectory
 
 from end_of_line.config import (
     CONFIG_FILENAME,
-    ChannelSpec,
     ConfigError,
-    NotifySpec,
     load_project_config,
 )
 

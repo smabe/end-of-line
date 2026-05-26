@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from end_of_line.dry_merge import MergeResult, attempt_merge
+from end_of_line.dry_merge import attempt_merge
 from tests import git as _git
 
 # ---------------------------------------------------------------------------

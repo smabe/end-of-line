@@ -13,7 +13,6 @@ from end_of_line.config import (
     ConfigError,
     CoolantSpec,
     DispatchSpec,
-    QualitySpec,
     load_project_config,
 )
 

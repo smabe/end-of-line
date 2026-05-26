@@ -238,7 +238,6 @@ class DiscordInboundPoller:
 
 if __name__ == "__main__":
     import argparse
-    import os
 
     from .config import load_project_config
 
