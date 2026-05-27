@@ -163,6 +163,10 @@ EVENT_QUEUE_REJECTED = "queue_rejected"
 # CLAIM_NOTIFIED fires once per (claim, transition) pair.
 EVENT_STUCK_BLOCKER_REPINGED = "stuck_blocker_repinged"
 EVENT_STALLED_CLAIM_NOTIFIED = "stalled_claim_notified"
+# Worker-side heartbeat-loop failure surface: fires when the bash heartbeat
+# loop in clu-phase/SKILL.md detects 3 consecutive non-zero exits (~6min at
+# 120s interval). Idempotent per claim via heartbeat_loop_failing_notified.
+EVENT_HEARTBEAT_LOOP_FAILING = "heartbeat_loop_failing"
 # Worktree lifecycle. MISSING fires once per dispatch when state.worktree
 # points at a path that's been deleted or detached (operator removed the
 # directory or ran `git worktree prune`); accompanied by a status=PAUSED
@@ -231,6 +235,11 @@ EVENT_PHASE_WORKER_DEAD = "phase_worker_dead"
 # elapsed_seconds, cpu_seconds. Deduped per descendant_pid via
 # current_claim.stuck_tool_emitted_at — at most one emit per (claim, leaf).
 EVENT_TOOL_STUCK = "tool_stuck"
+# Supervisor detected worker PID alive but CPU-idle with no active Bash tool
+# and no open Anthropic API socket — classic silent wedge. Detection only;
+# operator-approval checkpoint from user-CLAUDE.md applies.
+# Fields: plan, phase, pid, low_cpu_minutes. Deduped via worker_idle_notified.
+EVENT_WORKER_IDLE = "worker_idle"
 
 # Per-project verify opt-out (quality.verify_required: false). Fires on
 # every cmd_complete under the opt-out so the audit trail records the
@@ -249,6 +258,10 @@ BLOCKER_REPLAN = "blocked_replan"
 # Signal strings stored in ReapResult.signaled — constants prevent silent typos.
 SIGNAL_TERM = "SIGTERM"
 SIGNAL_TERM_THEN_KILL = "SIGTERM+SIGKILL"
+
+# Maximum CPU samples kept per claim in current_claim.cpu_samples. Caps
+# state.json growth — at 30s tick cadence this covers ~10 minutes of history.
+WORKER_IDLE_SAMPLE_CAP = 20
 
 
 @dataclass
@@ -780,6 +793,59 @@ def mark_tool_stuck_emitted(claim: dict, descendant_pid: int, at: str) -> None:
 def tool_stuck_already_emitted(claim: dict, descendant_pid: int) -> bool:
     """True if EVENT_TOOL_STUCK already fired for this descendant_pid."""
     return str(descendant_pid) in (claim.get("stuck_tool_emitted_at") or {})
+
+
+def mark_heartbeat_loop_failing_notified(claim: dict) -> bool:
+    """Stamp heartbeat_loop_failing_notified on the claim. Returns True if newly set."""
+    if claim.get("heartbeat_loop_failing_notified"):
+        return False
+    claim["heartbeat_loop_failing_notified"] = True
+    return True
+
+
+def worker_idle_already_emitted(claim: dict) -> bool:
+    """True if EVENT_WORKER_IDLE already fired for this claim."""
+    return bool(claim.get("worker_idle_notified", False))
+
+
+def mark_worker_idle_emitted(claim: dict, now: _dt.datetime) -> None:
+    """Stamp worker_idle_notified + timestamp on the claim."""
+    claim["worker_idle_notified"] = True
+    claim["worker_idle_notified_at"] = now.strftime(_ISO_FMT)
+
+
+def append_cpu_sample(claim: dict, cpu_pct: float, now: _dt.datetime) -> None:
+    """Append a CPU sample and trim to WORKER_IDLE_SAMPLE_CAP."""
+    samples: list[dict] = claim.setdefault("cpu_samples", [])
+    samples.append({"ts": now.strftime(_ISO_FMT), "cpu": cpu_pct})
+    if len(samples) > WORKER_IDLE_SAMPLE_CAP:
+        del samples[: len(samples) - WORKER_IDLE_SAMPLE_CAP]
+
+
+def worker_idle_window_satisfied(
+    claim: dict,
+    now: _dt.datetime,
+    *,
+    min_samples: int = 5,
+    window_min: float = 10.0,
+    cpu_threshold: float = 1.0,
+) -> bool:
+    """True when the CPU sample window shows an idle worker.
+
+    Requires ≥min_samples, oldest sample within the window covers ≥window_min
+    minutes back from now, and every sample ≤cpu_threshold.
+    """
+    samples: list[dict] = claim.get("cpu_samples") or []
+    if len(samples) < min_samples:
+        return False
+    if any(s["cpu"] > cpu_threshold for s in samples):
+        return False
+    try:
+        oldest_ts = parse_iso(samples[0]["ts"])
+    except (KeyError, ValueError):
+        return False
+    span_minutes = (now - oldest_ts).total_seconds() / 60.0
+    return span_minutes >= window_min
 
 
 def mark_active_tool_start(claim: dict, at: str) -> None:

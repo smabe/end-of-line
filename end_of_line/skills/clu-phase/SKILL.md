@@ -100,18 +100,30 @@ If you see an answered blocker, that means: you asked a question previously, the
    ```
    If they differ, you are in a worktree. Git ops stay in `$WORKTREE_ROOT`; `clu --project` calls take `$PROJECT_ROOT`.
 
-2. **Arm the heartbeat ticker.** Long phases that don't ping `clu heartbeat` look identical to hung workers — `clu status` reports `STALLED` and the supervisor's gap-fill notifications fire. Start a background loop that pings every 2 minutes, tied to the worker's parent PID so it self-terminates if the worker is SIGKILLed/OOMed (issue #72). The EXIT trap is the fast-cleanup path for graceful exits:
+2. **Arm the heartbeat ticker.** Long phases that don't ping `clu heartbeat` look identical to hung workers — `clu status` reports `STALLED` and the supervisor's gap-fill notifications fire. Start a background loop that pings every 2 minutes, tied to the worker's parent PID so it self-terminates if the worker is SIGKILLed/OOMed (issue #72). The EXIT trap is the fast-cleanup path for graceful exits. The loop counts consecutive failures: on the 3rd in a row (~6 min) it calls `clu notify-heartbeat-failure` so the operator learns the loop is broken before lease expiry surfaces it. stderr from each `clu heartbeat` call is tee'd to a sidecar log for post-mortem inspection:
    ```bash
    WORKER_PID=$PPID
+   FAILS=0
+   ERRLOG="$(dirname "$STATE")/logs/heartbeat-errors.$PLAN.$PHASE.log"
+   mkdir -p "$(dirname "$ERRLOG")"
    ( while kill -0 $WORKER_PID 2>/dev/null; do
-       clu heartbeat --project "$PROJECT_ROOT" --plan "$PLAN" \
-           --phase "$PHASE" --token "$TOKEN" >/dev/null 2>&1
+       if clu heartbeat --project "$PROJECT_ROOT" --plan "$PLAN" \
+               --phase "$PHASE" --token "$TOKEN" >/dev/null 2>>"$ERRLOG"; then
+           FAILS=0
+       else
+           FAILS=$((FAILS + 1))
+           if [ "$FAILS" -eq 3 ]; then
+               clu notify-heartbeat-failure --project "$PROJECT_ROOT" \
+                   --plan "$PLAN" --phase "$PHASE" --token "$TOKEN" \
+                   --log "$ERRLOG" >/dev/null 2>&1 || true
+           fi
+       fi
        sleep 120
      done ) &
    HEARTBEAT_PID=$!
    trap "kill $HEARTBEAT_PID 2>/dev/null" EXIT
    ```
-   The 2-minute interval is well inside the heartbeat threshold (derived from lease TTL: `max(15, lease_ttl//2)`, so 30 min at the default 60-min lease) and loose enough to not flood state.json writes. **Both terminators are load-bearing**: `kill -0 $WORKER_PID` catches death-by-signal where the EXIT trap doesn't fire (SIGKILL, OOM, crash); the EXIT trap catches graceful exits faster than the next `sleep 120` would notice. Supervisor-side detection (`_detect_dead_pid`) is the third layer that catches the worst case where both fail.
+   The 2-minute interval is well inside the heartbeat threshold (derived from lease TTL: `max(15, lease_ttl//2)`, so 30 min at the default 60-min lease) and loose enough to not flood state.json writes. **Both terminators are load-bearing**: `kill -0 $WORKER_PID` catches death-by-signal where the EXIT trap doesn't fire (SIGKILL, OOM, crash); the EXIT trap catches graceful exits faster than the next `sleep 120` would notice. Supervisor-side detection (`_detect_dead_pid`) is the third layer that catches the worst case where both fail. The 3-strike self-report adds a fourth layer: if all three of those silently miss a wedge, the operator gets an iMessage when the bash loop itself stops landing heartbeats.
 
 2b. **Export the activity-hook environment.** The stuck-tool detector (`clu doctor`, supervisor gap-fill) scopes its process-tree walk to descendants spawned during the current Bash tool call. That window is stamped by a Claude Code PreToolUse/PostToolUse hook that calls `clu activity --start-bash` / `--end-bash`. The hook reads its context from env, so export the four vars here so they propagate to child processes (including Claude Code and its hooks):
    ```bash

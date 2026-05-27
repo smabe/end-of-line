@@ -58,6 +58,7 @@ KIND_QUEUE_CORRUPT = "queue_corrupt"
 # turn regardless of quiet hours.
 # KIND_STUCK_BLOCKER is imported from state_blocker above.
 KIND_STALLED_CLAIM = "stalled_claim"
+KIND_HEARTBEAT_LOOP_FAILING = "heartbeat_loop_failing"
 KIND_GATE_CLEAN = "gate_clean"
 KIND_GATE_DIRTY = "gate_dirty"
 KIND_PLAN_AUTO_ARCHIVED = "plan_auto_archived"
@@ -67,6 +68,7 @@ KIND_PLAN_AUTO_ARCHIVED = "plan_auto_archived"
 # Mode-aware body via render_ready_to_ship; suppressed by per-plan
 # data["ship_pending"] once ship is in flight.
 KIND_READY_TO_SHIP = "ready_to_ship"
+KIND_WORKER_IDLE = "worker_idle"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset(
     {
@@ -216,6 +218,27 @@ def render_stalled_claim(plan_slug: str, phase: str, age_min: int) -> str:
         f"Worker is unresponsive. Run `clu release-claim --plan {plan_slug} "
         f"--phase {phase}` to free it, or `clu retry` if you've fixed the "
         f"underlying cause."
+    )
+
+
+def render_heartbeat_loop_failing(plan_slug: str, phase_id: str, log_path: str) -> str:
+    return (
+        f"💔 {plan_slug}/{phase_id}: heartbeat loop failing (3+ consecutive errors).\n"
+        f"Worker may be wedged — `clu heartbeat` is exiting non-zero silently.\n"
+        f"Inspect the sidecar log: {log_path}\n"
+        f"Run `clu release-claim --plan {plan_slug} --phase {phase_id}` to free it."
+    )
+
+
+def render_worker_idle(
+    plan_slug: str, phase_id: str, pid: int, low_cpu_minutes: float
+) -> str:
+    return (
+        f"😴 {plan_slug}/{phase_id} (pid {pid}): worker idle for ~{low_cpu_minutes:.0f}min.\n"
+        f"No active Bash tool, no open Anthropic socket, CPU ≤1% across the window.\n"
+        f"Investigate: `kill -0 {pid}` confirms alive; `ps -p {pid}` for CPU; "
+        f"`lsof -p {pid} -i` for sockets.\n"
+        f"If wedged: `clu release-claim --plan {plan_slug} --phase {phase_id}` to free it."
     )
 
 
