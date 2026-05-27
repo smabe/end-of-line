@@ -41,6 +41,7 @@ from . import (
     dispatch,
     dry_merge,
     fleet,
+    inbox,
     monitor,
     notify,
     queue,
@@ -1072,6 +1073,20 @@ def main(argv: list[str] | None = None) -> int:
     p_heartbeat.add_argument("--token", required=True, help="Worker claim token")
     p_heartbeat.add_argument("--phase", required=True)
 
+    p_notify_hbf = sub.add_parser(
+        "notify-heartbeat-failure",
+        help="Worker reports 3+ consecutive clu-heartbeat failures (silent non-zero exits)",
+    )
+    add_common(p_notify_hbf)
+    p_notify_hbf.add_argument("--token", required=True, help="Worker claim token")
+    p_notify_hbf.add_argument("--phase", required=True)
+    p_notify_hbf.add_argument(
+        "--log",
+        required=True,
+        metavar="PATH",
+        help="Path to heartbeat-errors sidecar log (included in inbox details)",
+    )
+
     p_activity = sub.add_parser(
         "activity",
         help=(
@@ -1305,6 +1320,7 @@ def main(argv: list[str] | None = None) -> int:
         "block": cmd_block,
         "task-done": cmd_task_done,
         "heartbeat": cmd_heartbeat,
+        "notify-heartbeat-failure": cmd_notify_heartbeat_failure,
         "activity": cmd_activity,
         "register": cmd_register,
         "pause": cmd_pause,
@@ -5253,6 +5269,54 @@ def cmd_heartbeat(args, cfg: ProjectConfig, state_path: Path) -> int:
     with st.mutate(state_path) as data:
         ts = st.record_heartbeat(data, args.token, args.phase)
     print(f"heartbeat {args.phase} @ {ts}")
+    return ExitCode.OK
+
+
+@_translate_claim_mismatch
+def cmd_notify_heartbeat_failure(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """Worker reports that its heartbeat loop has failed 3+ consecutive times.
+
+    The bash heartbeat loop in clu-phase/SKILL.md swallows stderr from each
+    `clu heartbeat` call. Any non-zero exit (LockTimeout, ClaimMismatch, etc.)
+    is silent. This command is called after the 3rd consecutive failure so the
+    operator learns the loop is broken before lease expiry surfaces it.
+
+    Token-validated and idempotent — heartbeat_loop_failing_notified on the
+    claim prevents duplicate events and inbox entries if the bash `|| true`
+    wrapper ever retries more than once per strike run.
+    """
+    notify_body = None
+    with st.mutate(state_path) as data:
+        st.assert_claim_match(data, args.token, args.phase)
+        claim = data["current_claim"]
+        if not st.mark_heartbeat_loop_failing_notified(claim):
+            print(f"notify-heartbeat-failure {args.phase}: already notified, skipping")
+            return ExitCode.OK
+        st.append_event(
+            data,
+            st.EVENT_HEARTBEAT_LOOP_FAILING,
+            phase=args.phase,
+            log_path=args.log,
+        )
+        notify_body = notify.render_heartbeat_loop_failing(
+            args.plan, args.phase, args.log
+        )
+    try:
+        inbox.write_event(
+            type="heartbeat_loop_failing",
+            plan_slug=args.plan,
+            project_root=str(cfg.project_root.resolve()),
+            summary=(f"Heartbeat loop failing for {args.plan}/{args.phase}"),
+            details={
+                "phase_id": args.phase,
+                "log_path": args.log,
+            },
+        )
+    except OSError:
+        pass
+    if notify_body:
+        notify.notify(cfg.notify, notify.KIND_HEARTBEAT_LOOP_FAILING, notify_body)
+    print(f"notify-heartbeat-failure {args.phase}: notified")
     return ExitCode.OK
 
 

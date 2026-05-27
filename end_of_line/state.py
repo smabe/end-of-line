@@ -161,6 +161,10 @@ EVENT_QUEUE_REJECTED = "queue_rejected"
 # CLAIM_NOTIFIED fires once per (claim, transition) pair.
 EVENT_STUCK_BLOCKER_REPINGED = "stuck_blocker_repinged"
 EVENT_STALLED_CLAIM_NOTIFIED = "stalled_claim_notified"
+# Worker-side heartbeat-loop failure surface: fires when the bash heartbeat
+# loop in clu-phase/SKILL.md detects 3 consecutive non-zero exits (~6min at
+# 120s interval). Idempotent per claim via heartbeat_loop_failing_notified.
+EVENT_HEARTBEAT_LOOP_FAILING = "heartbeat_loop_failing"
 # Worktree lifecycle. MISSING fires once per dispatch when state.worktree
 # points at a path that's been deleted or detached (operator removed the
 # directory or ran `git worktree prune`); accompanied by a status=PAUSED
@@ -772,6 +776,14 @@ def mark_tool_stuck_emitted(claim: dict, descendant_pid: int, at: str) -> None:
 def tool_stuck_already_emitted(claim: dict, descendant_pid: int) -> bool:
     """True if EVENT_TOOL_STUCK already fired for this descendant_pid."""
     return str(descendant_pid) in (claim.get("stuck_tool_emitted_at") or {})
+
+
+def mark_heartbeat_loop_failing_notified(claim: dict) -> bool:
+    """Stamp heartbeat_loop_failing_notified on the claim. Returns True if newly set."""
+    if claim.get("heartbeat_loop_failing_notified"):
+        return False
+    claim["heartbeat_loop_failing_notified"] = True
+    return True
 
 
 def mark_active_tool_start(claim: dict, at: str) -> None:

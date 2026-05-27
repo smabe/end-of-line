@@ -61,6 +61,7 @@ _VERBOSE_ONLY: frozenset[str] = frozenset(
         st.EVENT_ATTEMPTS_RESET,
         st.EVENT_STUCK_BLOCKER_REPINGED,
         st.EVENT_STALLED_CLAIM_NOTIFIED,
+        st.EVENT_HEARTBEAT_LOOP_FAILING,
         st.EVENT_WORKTREE_ATTACHED,
         st.EVENT_WORKTREE_CLEANED,
         st.EVENT_WORKTREE_RETAINED_AHEAD,
@@ -79,6 +80,7 @@ _OPERATOR_VISIBLE: frozenset[str] = frozenset(
             st.EVENT_PHASE_BLOCKED,
             getattr(st, "EVENT_ATTESTATION_REFUSED", None),
             st.EVENT_STALLED_CLAIM_NOTIFIED,
+            st.EVENT_HEARTBEAT_LOOP_FAILING,
             getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
         },
     )
@@ -176,6 +178,10 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
     st.EVENT_STALLED_CLAIM_NOTIFIED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: stalled claim notification sent "
         f"({e.get('stalled_min', '?')}min past lease)"
+    ),
+    st.EVENT_HEARTBEAT_LOOP_FAILING: lambda slug, e: (
+        f"{_phase_prefix(slug, e)}: HEARTBEAT LOOP FAILING "
+        f"log={_trunc(e.get('log_path', '?'), 60)}"
     ),
     st.EVENT_WORKTREE_ATTACHED: lambda slug, e: (
         f"{slug}: worktree attached at {e.get('path', '?')} (branch {e.get('branch', '?')})"
