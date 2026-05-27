@@ -409,5 +409,117 @@ class TestClaimWorkerAlive(unittest.TestCase):
             )
 
 
+class AppendCpuSampleTestCase(unittest.TestCase):
+    def _claim(self) -> dict:
+        return {}
+
+    def test_appends_sample(self) -> None:
+        import datetime as _dt
+
+        claim = self._claim()
+        now = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        st.append_cpu_sample(claim, 0.5, now)
+        self.assertEqual(len(claim["cpu_samples"]), 1)
+        self.assertEqual(claim["cpu_samples"][0]["cpu"], 0.5)
+
+    def test_trims_to_cap(self) -> None:
+        import datetime as _dt
+
+        claim = self._claim()
+        cap = st.WORKER_IDLE_SAMPLE_CAP
+        for i in range(cap + 5):
+            now = _dt.datetime(2026, 1, 1, 12, i, 0, tzinfo=_dt.timezone.utc)
+            st.append_cpu_sample(claim, float(i), now)
+        self.assertEqual(len(claim["cpu_samples"]), cap)
+        # Last sample should be the most recent
+        self.assertEqual(claim["cpu_samples"][-1]["cpu"], float(cap + 4))
+
+    def test_keeps_most_recent_on_trim(self) -> None:
+        import datetime as _dt
+
+        claim = self._claim()
+        cap = st.WORKER_IDLE_SAMPLE_CAP
+        for i in range(cap + 3):
+            now = _dt.datetime(2026, 1, 1, 12, i, 0, tzinfo=_dt.timezone.utc)
+            st.append_cpu_sample(claim, float(i), now)
+        # Oldest samples (0, 1, 2) should be gone
+        cpus = [s["cpu"] for s in claim["cpu_samples"]]
+        self.assertNotIn(0.0, cpus)
+        self.assertNotIn(1.0, cpus)
+        self.assertNotIn(2.0, cpus)
+
+
+class WorkerIdleWindowSatisfiedTestCase(unittest.TestCase):
+    def _samples(self, count: int, span_minutes: float, cpu: float = 0.5) -> list[dict]:
+        import datetime as _dt
+
+        base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        if count == 1:
+            return [{"ts": base.isoformat(), "cpu": cpu}]
+        step = (span_minutes * 60) / (count - 1)
+        return [
+            {
+                "ts": (_dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+                       + _dt.timedelta(seconds=i * step)).isoformat(),
+                "cpu": cpu,
+            }
+            for i in range(count)
+        ]
+
+    def _now(self, span_minutes: float = 12.0) -> "_dt.datetime":
+        import datetime as _dt
+
+        return _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc) + _dt.timedelta(
+            minutes=span_minutes
+        )
+
+    def test_satisfied_with_sufficient_samples_and_span(self) -> None:
+        import datetime as _dt
+
+        claim = {"cpu_samples": self._samples(6, 12.0)}
+        now = self._now(12.0)
+        self.assertTrue(st.worker_idle_window_satisfied(claim, now))
+
+    def test_not_satisfied_too_few_samples(self) -> None:
+        import datetime as _dt
+
+        claim = {"cpu_samples": self._samples(3, 12.0)}
+        now = self._now(12.0)
+        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+
+    def test_not_satisfied_span_too_short(self) -> None:
+        # 5 samples but only 8 minutes of span — below the 10-min window
+        claim = {"cpu_samples": self._samples(5, 8.0)}
+        now = self._now(8.0)
+        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+
+    def test_not_satisfied_high_cpu(self) -> None:
+        # One sample above the threshold poisons the window
+        samples = self._samples(6, 12.0, cpu=0.5)
+        samples[3]["cpu"] = 30.0
+        claim = {"cpu_samples": samples}
+        now = self._now(12.0)
+        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+
+    def test_not_satisfied_empty_samples(self) -> None:
+        claim: dict = {}
+        import datetime as _dt
+
+        now = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+
+    def test_boundary_exactly_at_threshold(self) -> None:
+        # cpu exactly at threshold (1.0) should satisfy
+        claim = {"cpu_samples": self._samples(6, 12.0, cpu=1.0)}
+        now = self._now(12.0)
+        self.assertTrue(st.worker_idle_window_satisfied(claim, now))
+
+    def test_boundary_just_above_threshold(self) -> None:
+        # cpu just above threshold should NOT satisfy
+        claim = {"cpu_samples": self._samples(6, 12.0, cpu=1.01)}
+        now = self._now(12.0)
+        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+
+
 if __name__ == "__main__":
     unittest.main()

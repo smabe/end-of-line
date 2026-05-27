@@ -82,6 +82,7 @@ _OPERATOR_VISIBLE: frozenset[str] = frozenset(
             st.EVENT_STALLED_CLAIM_NOTIFIED,
             st.EVENT_HEARTBEAT_LOOP_FAILING,
             getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
+            getattr(st, "EVENT_WORKER_IDLE", None),
         },
     )
 )
@@ -243,6 +244,15 @@ if _ATTEST_REFUSED:
         )
 
     _FORMATTERS[_ATTEST_REFUSED] = _fmt_attest_refused
+
+
+# Worker-idle formatter (wedge-watchdogs P2) — splice in when defined.
+_WORKER_IDLE = getattr(st, "EVENT_WORKER_IDLE", None)
+if _WORKER_IDLE:
+    _FORMATTERS[_WORKER_IDLE] = lambda slug, e: (
+        f"{_phase_prefix(slug, e)}: WORKER IDLE pid={e.get('pid', '?')} "
+        f"low_cpu={e.get('low_cpu_minutes', '?')}min"
+    )
 
 
 _TASK_STATUS_MAP: dict[str, str] = {

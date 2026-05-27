@@ -452,6 +452,122 @@ def _emit_stuck_tool(
             pass
 
 
+def _emit_worker_idle(
+    data: dict,
+    config: ProjectConfig,
+    side_notifies: list[tuple[str, str]],
+    *,
+    ps_output: str | None = None,
+    lsof_output: str | None = None,
+) -> None:
+    """Fire EVENT_WORKER_IDLE once per claim when the worker is PID-alive but
+    doing nothing: no active Bash tool, CPU ≤1% over ≥10 min, no open
+    Anthropic API socket.
+
+    Detection only — no auto-kill. `ps_output` and `lsof_output` are test
+    seams; production callers leave both None to shell out.
+    """
+    claim = data.get("current_claim")
+    if not claim:
+        return
+    pid = claim.get("pid")
+    if not pid:
+        return
+    if claim.get("active_tool_started_at"):
+        return
+
+    # Sample this tick's CPU via ps.
+    now = st._now_utc()
+    if ps_output is not None:
+        raw_cpu = ps_output
+    else:
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "%cpu="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            raw_cpu = result.stdout
+        except (subprocess.TimeoutExpired, OSError):
+            raw_cpu = ""
+    try:
+        cpu_pct = float(raw_cpu.strip())
+    except ValueError:
+        cpu_pct = None
+
+    if cpu_pct is not None:
+        st.append_cpu_sample(claim, cpu_pct, now)
+
+    if not st.worker_idle_window_satisfied(claim, now):
+        return
+    if st.worker_idle_already_emitted(claim):
+        return
+
+    # API-socket heuristic suppression.
+    if lsof_output is not None:
+        lsof_text = lsof_output
+    else:
+        try:
+            lsof_result = subprocess.run(
+                ["lsof", "-p", str(pid), "-i"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            lsof_text = lsof_result.stdout
+        except (subprocess.TimeoutExpired, OSError):
+            # Can't check; emit anyway (false negative > false positive).
+            lsof_text = ""
+    if "anthropic" in lsof_text.lower():
+        return
+
+    plan_slug = data["plan_slug"]
+    phase_id = claim["phase_id"]
+    project_root = str(config.project_root.resolve())
+    samples = claim.get("cpu_samples") or []
+    low_cpu_minutes = 0.0
+    if samples:
+        try:
+            oldest_ts = st.parse_iso(samples[0]["ts"])
+            low_cpu_minutes = (now - oldest_ts).total_seconds() / 60.0
+        except (KeyError, ValueError):
+            pass
+
+    st.mark_worker_idle_emitted(claim, now)
+    st.append_event(
+        data,
+        st.EVENT_WORKER_IDLE,
+        plan=plan_slug,
+        phase=phase_id,
+        pid=pid,
+        low_cpu_minutes=round(low_cpu_minutes, 1),
+    )
+    side_notifies.append(
+        (
+            notify.KIND_WORKER_IDLE,
+            notify.render_worker_idle(plan_slug, phase_id, pid, low_cpu_minutes),
+        )
+    )
+    try:
+        inbox.write_event(
+            type="worker_idle",
+            plan_slug=plan_slug,
+            project_root=project_root,
+            summary=(
+                f"Worker on {plan_slug}/{phase_id} idle for ~{low_cpu_minutes:.0f}min "
+                f"(pid {pid}, no tool, no API socket, CPU ≤1%)"
+            ),
+            details={
+                "phase_id": phase_id,
+                "pid": pid,
+                "low_cpu_minutes": round(low_cpu_minutes, 1),
+            },
+        )
+    except OSError:
+        pass
+
+
 def tick(state_path: Path, config: ProjectConfig) -> TickResult:
     if not state_path.exists():
         return TickResult("idle", f"no state at {state_path}")
@@ -477,6 +593,7 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         _emit_stalled_claim_notify(data, config, side_notifies)
         _emit_stuck_blocker_repings(data, config, side_notifies)
         _emit_stuck_tool(data, config)
+        _emit_worker_idle(data, config, side_notifies)
 
         if claim := data.get("current_claim"):
             pid = claim.get("pid")

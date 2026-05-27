@@ -2399,6 +2399,7 @@ def cmd_doctor(args) -> int:
     _print_coolant_health(cfg)
     _print_effort_health(cfg)
     _print_stuck_tool_health(cfg)
+    _print_worker_idle_health(cfg)
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
@@ -2466,6 +2467,35 @@ def _print_stuck_tool_health(
                 f"  {slug}/{phase}  — install the PreToolUse/PostToolUse "
                 "hook from end_of_line/skills/clu-phase/SKILL.md"
             )
+
+
+def _print_worker_idle_health(cfg: ProjectConfig) -> None:
+    """Print a one-line summary for each recent EVENT_WORKER_IDLE in any plan's log.
+
+    Quiet when nothing to report — doctor noise hurts signal-to-noise.
+    """
+    worker_idle_event = getattr(st, "EVENT_WORKER_IDLE", None)
+    if not worker_idle_event:
+        return
+    project_root = cfg.project_root.resolve()
+    findings: list[tuple[str, str, str, int]] = []  # (ts, slug, phase, pid)
+    for p in cross_plan_rules.load_plans_for_project(project_root, cfg):
+        for e in reversed(p.state.get("events", [])):
+            if e.get("type") == worker_idle_event:
+                findings.append(
+                    (
+                        e.get("ts", "?"),
+                        p.slug,
+                        e.get("phase", "?"),
+                        e.get("pid", 0),
+                    )
+                )
+                break  # one per plan is enough for doctor
+    if findings:
+        print("\nWorker idle events:")
+        for ts, slug, phase, pid in findings:
+            ts_short = ts[:19] if len(ts) >= 19 else ts
+            print(f"  {ts_short}  {slug}/{phase}  pid={pid}")
 
 
 def _print_notify_health(cfg: ProjectConfig) -> None:

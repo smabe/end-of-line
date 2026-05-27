@@ -68,6 +68,7 @@ KIND_PLAN_AUTO_ARCHIVED = "plan_auto_archived"
 # Mode-aware body via render_ready_to_ship; suppressed by per-plan
 # data["ship_pending"] once ship is in flight.
 KIND_READY_TO_SHIP = "ready_to_ship"
+KIND_WORKER_IDLE = "worker_idle"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset(
     {
@@ -226,6 +227,18 @@ def render_heartbeat_loop_failing(plan_slug: str, phase_id: str, log_path: str) 
         f"Worker may be wedged — `clu heartbeat` is exiting non-zero silently.\n"
         f"Inspect the sidecar log: {log_path}\n"
         f"Run `clu release-claim --plan {plan_slug} --phase {phase_id}` to free it."
+    )
+
+
+def render_worker_idle(
+    plan_slug: str, phase_id: str, pid: int, low_cpu_minutes: float
+) -> str:
+    return (
+        f"😴 {plan_slug}/{phase_id} (pid {pid}): worker idle for ~{low_cpu_minutes:.0f}min.\n"
+        f"No active Bash tool, no open Anthropic socket, CPU ≤1% across the window.\n"
+        f"Investigate: `kill -0 {pid}` confirms alive; `ps -p {pid}` for CPU; "
+        f"`lsof -p {pid} -i` for sockets.\n"
+        f"If wedged: `clu release-claim --plan {plan_slug} --phase {phase_id}` to free it."
     )
 
 
