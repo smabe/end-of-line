@@ -827,7 +827,7 @@ Outbound — fired during supervisor ticks. Kinds:
 |---|---|---|
 | `blocker` | Worker called `clu block` | Gated |
 | `blocker_sla` | Open blocker older than `blocked_question_sla_hours` (default 24h) | Gated, re-checked next loud tick |
-| `stalled` | Live claim with no heartbeat past the threshold (explicit `stalled_heartbeat_minutes`, else derived `max(15, lease_ttl//2)`; 30m at the default 60-min lease) | Gated |
+| `stalled` | Live claim with no heartbeat past the threshold (explicit `stalled_heartbeat_minutes`, else derived `min(25, max(15, lease_ttl//2))`; 25m at the default 60-min lease) | Gated |
 | `plan_completed` | All phases done | Gated |
 | `halted` | Plan halted (max attempts, lease expired too many times, etc.) | **Bypasses quiet hours** |
 | `queue_skipped` | Queue head abandoned (plan file missing) | Gated |
@@ -1292,7 +1292,7 @@ at least once and then went quiet.
 ### Worker dispatches but never completes
 
 Symptom: `clu status` shows a live claim that ages past the heartbeat
-threshold (`stalled_heartbeat_minutes` if set, else `max(15, lease_ttl//2)`)
+threshold (`stalled_heartbeat_minutes` if set, else `min(25, max(15, lease_ttl//2))`)
 and eventually past the 60-minute lease.
 
 Check, in order:

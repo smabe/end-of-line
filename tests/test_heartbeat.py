@@ -96,8 +96,8 @@ class StalledThresholdResolutionTestCase(unittest.TestCase):
 
     def test_derives_from_default_lease_ttl(self) -> None:
         data = st.empty_state("p", "plans")
-        # Default lease TTL is 60 min → max(15, 60//2) = 30.
-        self.assertEqual(st.stalled_threshold_for_phase(data, "a"), 30)
+        # Default lease TTL is 60 min → max(15, 30) = 30 → min(25, 30) = 25.
+        self.assertEqual(st.stalled_threshold_for_phase(data, "a"), 25)
 
     def test_explicit_config_override_wins(self) -> None:
         data = st.empty_state("p", "plans")
@@ -115,9 +115,25 @@ class StalledThresholdResolutionTestCase(unittest.TestCase):
     def test_per_phase_lease_override_propagates(self) -> None:
         data = st.empty_state("p", "plans")
         data["phases"] = [{"id": "long", "lease_ttl_minutes": 120}]
-        self.assertEqual(st.stalled_threshold_for_phase(data, "long"), 60)
-        # Other phases fall back to global config (60 min default → 30).
-        self.assertEqual(st.stalled_threshold_for_phase(data, "other"), 30)
+        # 120 // 2 = 60, capped at CEILING (25).
+        self.assertEqual(st.stalled_threshold_for_phase(data, "long"), 25)
+        # Other phases fall back to global config (60-min default → 25).
+        self.assertEqual(st.stalled_threshold_for_phase(data, "other"), 25)
+
+    def test_ceiling_caps_derived_threshold(self) -> None:
+        """Long Effort-scaled leases stop deriving past the ceiling."""
+        data = st.empty_state("p", "plans")
+        data["config"]["lease_ttl_minutes"] = 120  # 60 derived, capped
+        self.assertEqual(
+            st.stalled_threshold_for_phase(data, "a"),
+            st.STALLED_HEARTBEAT_MIN_CEILING,
+        )
+
+    def test_explicit_override_bypasses_ceiling(self) -> None:
+        """Operator-set explicit value is respected even above ceiling."""
+        data = st.empty_state("p", "plans")
+        data["config"]["stalled_heartbeat_minutes"] = 90
+        self.assertEqual(st.stalled_threshold_for_phase(data, "a"), 90)
 
     def test_empty_state_does_not_seed_stalled_heartbeat_minutes(self) -> None:
         data = st.empty_state("p", "plans")
@@ -125,7 +141,7 @@ class StalledThresholdResolutionTestCase(unittest.TestCase):
 
     def test_claim_is_stalled_wraps_resolution_and_check(self) -> None:
         now = _dt.datetime(2026, 5, 11, 12, 0, 0, tzinfo=_dt.UTC)
-        data = st.empty_state("p", "plans")  # default 60-min lease → 30-min threshold
+        data = st.empty_state("p", "plans")  # default 60-min lease → 25-min threshold (ceiling-capped)
         fresh = {
             "phase_id": "a",
             "claimed_by": "session-aaaa1111bbbb2222",

@@ -70,8 +70,8 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     "max_attempts_per_phase": 3,
     "max_spawns_per_phase": 10
     // `stalled_heartbeat_minutes` is optional. When absent, threshold
-    // derives as max(15, lease_ttl_for_phase // 2). Set an int to
-    // pin an explicit override.
+    // derives as min(25, max(15, lease_ttl_for_phase // 2)). Set an
+    // int to pin an explicit override (bypasses both bounds).
   },
 
   // Optional, additive (no schema_version bump). Present iff the plan was
@@ -374,7 +374,7 @@ The outbound router (`notify.py`) classifies every send by kind. Quiet hours (de
 | Kind | Trigger | Quiet hours |
 |---|---|---|
 | `KIND_BLOCKER` | Worker called `clu block` | Gated |
-| `KIND_STALLED` | Live claim past heartbeat threshold (explicit `stalled_heartbeat_minutes` or derived `max(15, lease_ttl//2)`) | Gated |
+| `KIND_STALLED` | Live claim past heartbeat threshold (explicit `stalled_heartbeat_minutes` or derived `min(25, max(15, lease_ttl//2))`) | Gated |
 | `KIND_COMPLETED` | Plan finished cleanly (`plan_completed`) | Gated |
 | `KIND_HALTED` | Plan halted (max-attempts / replan / systemic failure) | **Bypass** |
 | `KIND_QUEUE_SKIPPED` | Queue head popped + abandoned (plan file missing) | Gated |

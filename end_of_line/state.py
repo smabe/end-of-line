@@ -103,11 +103,13 @@ DEFAULT_SLA_HOURS = 24
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_SPAWNS_PER_PHASE = 10
 DEFAULT_MAX_QUEUE_ADDS_PER_PHASE = 3
-# Floor for the derived stalled-heartbeat threshold (minutes). Short
-# Effort-scaled leases (#58) divided by 2 can fall below the old 10-min
-# ballpark; the floor keeps the threshold sensible without re-introducing
-# the false-alarm cadence operators saw on long tool-use chains.
+# Bounds for the derived stalled-heartbeat threshold (minutes). Floor
+# keeps short Effort-scaled leases (#58) from triggering too eagerly;
+# ceiling keeps long leases from letting wedged workers slip past the
+# watchdog until full lease expiry. Both bypassed by an explicit
+# `config.stalled_heartbeat_minutes` (operator override).
 STALLED_HEARTBEAT_MIN_FLOOR = 15
+STALLED_HEARTBEAT_MIN_CEILING = 25
 
 # Plan status (`data["status"]`)
 STATUS_RUNNING = "running"
@@ -524,15 +526,21 @@ def lease_ttl_for_phase(data: dict, phase_id: str) -> int:
 def stalled_threshold_for_phase(data: dict, phase_id: str) -> int:
     """Heartbeat threshold (minutes) before a claim is flagged stalled.
 
-    Explicit `config.stalled_heartbeat_minutes` wins. Otherwise derive as
-    `max(STALLED_HEARTBEAT_MIN_FLOOR, lease_ttl_for_phase // 2)` so
-    Effort-scaled leases (#58) don't false-alarm on deep tool-use chains
-    that legitimately skip heartbeats until a top-level decision.
+    Explicit `config.stalled_heartbeat_minutes` wins. Otherwise derive
+    as `max(STALLED_HEARTBEAT_MIN_FLOOR, lease_ttl_for_phase // 2)`
+    capped at `STALLED_HEARTBEAT_MIN_CEILING`. The floor keeps short
+    Effort-scaled leases (#58) from triggering too eagerly; the ceiling
+    keeps long leases from leaving wedged workers undetected until full
+    lease expiry. The bash heartbeat loop runs on an independent 120s
+    timer (see clu-phase SKILL.md), so deep tool-use chains do not
+    legitimately skip heartbeats — staleness past the ceiling means
+    something is wrong, regardless of lease length.
     """
     explicit = data.get("config", {}).get("stalled_heartbeat_minutes")
     if explicit is not None:
         return int(explicit)
-    return max(STALLED_HEARTBEAT_MIN_FLOOR, lease_ttl_for_phase(data, phase_id) // 2)
+    derived = max(STALLED_HEARTBEAT_MIN_FLOOR, lease_ttl_for_phase(data, phase_id) // 2)
+    return min(STALLED_HEARTBEAT_MIN_CEILING, derived)
 
 
 def claim_is_stalled(
