@@ -4577,14 +4577,22 @@ def _cmd_ship_direct_plan(args) -> int:
         print(f"ready to ship {args.plan!r}:")
         print("  validate: clean")
         print(f"  merge:    {branch!r} → main (FF-first, merge-commit fallback)")
-        print(f"  push:     origin main + {branch!r}")
+        if cfg.keep_remote_branches:
+            print(f"  push:     origin main + {branch!r}")
+        else:
+            print("  push:     origin main (branch stays local; archive deletes it)")
         print("  trigger:  tick (auto_archive_rule fires next)")
         print("")
         print("re-run with --yes to apply.")
         return ExitCode.OK
 
     # Apply.
-    ok, msg = _ship_apply_one_direct(project_root, branch, args.plan)
+    ok, msg = _ship_apply_one_direct(
+        project_root,
+        branch,
+        args.plan,
+        keep_remote_branches=cfg.keep_remote_branches,
+    )
     if not ok:
         return _die(ExitCode.GENERIC, msg)
     _spawn_post_action_tick(cfg)
@@ -4596,6 +4604,8 @@ def _ship_apply_one_direct(
     project_root: Path,
     branch: str,
     plan_slug: str,
+    *,
+    keep_remote_branches: bool,
 ) -> tuple[bool, str]:
     """Apply the destructive ship steps for one plan in direct mode.
 
@@ -4604,6 +4614,12 @@ def _ship_apply_one_direct(
     error string suitable for stderr / _die. Branch-push warnings
     are emitted directly to stderr inside the helper — they don't
     block success.
+
+    `keep_remote_branches`: when True, also push the feature branch
+    to origin (legacy behavior, retained for operators who want a
+    remote ref for audit). When False (the default), only main is
+    pushed; the local branch ref is left for the archive flow to
+    drop, and origin never sees a `clu/<plan>` ref.
 
     Caller is responsible for: canonical-dirty check up front,
     validate (dry-merge), and triggering the post-action tick after
@@ -4646,19 +4662,21 @@ def _ship_apply_one_direct(
             f"`clu ship --plan {plan_slug} --direct --yes` to retry."
         )
 
-    # Branch push is best-effort: if the branch was deleted upstream
-    # (auto-delete-head-branches, another worker) we don't fail the
-    # ship — main already has the work.
-    r = subprocess.run(
-        ["git", "-C", str(project_root), "push", "origin", branch],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        print(
-            f"warning: git push origin {branch!r} failed (non-fatal): {r.stderr.strip()}",
-            file=sys.stderr,
+    # Branch push is best-effort and only happens when the operator
+    # has opted in via `keep_remote_branches: true`. Default config
+    # skips the push — archive flow drops the local branch later, and
+    # the remote never sees a `clu/<plan>` ref.
+    if keep_remote_branches:
+        r = subprocess.run(
+            ["git", "-C", str(project_root), "push", "origin", branch],
+            capture_output=True,
+            text=True,
         )
+        if r.returncode != 0:
+            print(
+                f"warning: git push origin {branch!r} failed (non-fatal): {r.stderr.strip()}",
+                file=sys.stderr,
+            )
 
     # Sanity-check: origin/main now sees the branch as an ancestor. If
     # not, the push side-effect didn't update the local ref and the
@@ -4756,7 +4774,12 @@ def _cmd_ship_direct_all_done(args) -> int:
         if slug in validate_failures:
             print(f"skipped {slug}: validate failed", file=sys.stderr)
             continue
-        ok, msg = _ship_apply_one_direct(project_root, branch, slug)
+        ok, msg = _ship_apply_one_direct(
+            project_root,
+            branch,
+            slug,
+            keep_remote_branches=cfg.keep_remote_branches,
+        )
         if ok:
             successes.append(slug)
             print(msg)

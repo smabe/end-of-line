@@ -265,8 +265,13 @@ class ShipHappyPathTests(ShipBase):
 
     def test_branch_push_failure_is_warning_not_fatal(self) -> None:
         # If origin/<branch> push fails (third-party deletes the branch,
-        # etc.), the ship still succeeds — main has the work.
+        # etc.), the ship still succeeds — main has the work. Requires
+        # keep_remote_branches=true to opt INTO the branch push, since
+        # default-config ship doesn't attempt it.
         self._init_plan("alpha")
+        (self.project / ".orchestrator.json").write_text(
+            '{"keep_remote_branches": true}'
+        )
         self._add_worker_commit("alpha")
         self._set_done("alpha")
         branch = self._branch("alpha")
@@ -292,6 +297,21 @@ class ShipHappyPathTests(ShipBase):
                 rc, _, err = self._ship("--plan", "alpha", "--direct", "--yes")
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("warning", err.lower())
+
+    def test_default_config_does_not_push_branch_to_origin(self) -> None:
+        # Default `keep_remote_branches=False` → `clu ship --direct` lands
+        # main on origin and skips the feature-branch push. The local
+        # branch ref still exists (archive cleans it up later); only the
+        # *remote* never sees a `clu/<plan>` ref.
+        self._init_plan("alpha")
+        self._add_worker_commit("alpha")
+        self._set_done("alpha")
+        branch = self._branch("alpha")
+        with mock.patch("end_of_line.cli._spawn_post_action_tick"):
+            rc, _, _ = self._ship("--plan", "alpha", "--direct", "--yes")
+        self.assertEqual(rc, ExitCode.OK)
+        ls_remote = _git(self.project, "ls-remote", "--heads", "origin", branch).stdout
+        self.assertEqual(ls_remote.strip(), "")
 
 
 class ShipAsPrPlanTests(ShipBase):
