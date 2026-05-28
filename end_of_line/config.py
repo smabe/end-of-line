@@ -118,6 +118,13 @@ class ProjectConfig:
     notify: NotifySpec = field(default_factory=NotifySpec)
     test_command: str | None = None
     auto_archive: bool = True
+    # When False (default), post-merge cleanup deletes `origin/<branch>`
+    # alongside the local branch, and `clu ship --direct` skips the
+    # branch push entirely (main carries the work). When True, the
+    # remote branch is preserved and direct-mode ship pushes it.
+    # Independent of `auto_archive`: that knob gates the rule firing,
+    # this knob shapes what cleanup does.
+    keep_remote_branches: bool = False
     tick_on_action: bool = True
     quality: QualitySpec = field(default_factory=QualitySpec)
     coolant: CoolantSpec = field(default_factory=CoolantSpec)
@@ -245,17 +252,10 @@ def _validate_ship_mode(disp: dict) -> str:
     return val
 
 
-def _validate_auto_archive(raw: dict) -> bool:
-    value = raw.get("auto_archive", True)
+def _validate_bool_field(raw: dict, name: str, default: bool) -> bool:
+    value = raw.get(name, default)
     if not isinstance(value, bool):
-        raise ConfigError(f"auto_archive: must be a boolean, got {type(value).__name__!r}")
-    return value
-
-
-def _validate_tick_on_action(raw: dict) -> bool:
-    value = raw.get("tick_on_action", True)
-    if not isinstance(value, bool):
-        raise ConfigError(f"tick_on_action: must be a boolean, got {type(value).__name__!r}")
+        raise ConfigError(f"{name}: must be a boolean, got {type(value).__name__!r}")
     return value
 
 
@@ -299,8 +299,9 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             inbound_auto_tick=bool(notify_raw.get("inbound_auto_tick", True)),
         ),
         test_command=raw.get("test_command") or None,
-        auto_archive=_validate_auto_archive(raw),
-        tick_on_action=_validate_tick_on_action(raw),
+        auto_archive=_validate_bool_field(raw, "auto_archive", True),
+        keep_remote_branches=_validate_bool_field(raw, "keep_remote_branches", False),
+        tick_on_action=_validate_bool_field(raw, "tick_on_action", True),
         quality=_validate_quality(raw),
         coolant=_validate_coolant(raw),
         lease_ttl_scale=_validate_lease_ttl_scale(raw),

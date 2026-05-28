@@ -148,6 +148,29 @@ class AutoArchiveFieldTests(_ConfigTestBase):
                     load_project_config(self.root)
 
 
+class KeepRemoteBranchesFieldTests(_ConfigTestBase):
+    def test_keep_remote_branches_defaults_to_false_when_absent(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.keep_remote_branches, False)
+
+    def test_keep_remote_branches_true_in_orchestrator_json(self) -> None:
+        self._write({"keep_remote_branches": True})
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.keep_remote_branches, True)
+
+    def test_keep_remote_branches_false_explicit(self) -> None:
+        self._write({"keep_remote_branches": False})
+        cfg = load_project_config(self.root)
+        self.assertIs(cfg.keep_remote_branches, False)
+
+    def test_keep_remote_branches_non_bool_raises_config_error(self) -> None:
+        for bad_value in ("yes", 1, 0, "true", "false"):
+            with self.subTest(value=bad_value):
+                self._write({"keep_remote_branches": bad_value})
+                with self.assertRaises(ConfigError):
+                    load_project_config(self.root)
+
+
 class TickOnActionFieldTests(_ConfigTestBase):
     def test_tick_on_action_defaults_to_true_when_absent(self) -> None:
         cfg = load_project_config(self.root)
