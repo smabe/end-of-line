@@ -1359,16 +1359,25 @@ def _remove_worktree_and_branch(
     branch: str,
     *,
     delete_branch: bool = True,
+    delete_remote: bool = False,
     timeout: int | None = None,
-) -> tuple[tuple[bool, str], tuple[bool, str]]:
-    """Run `git worktree remove --force <path>` and optionally drop the
-    branch with `git branch -D <branch>`.
+) -> tuple[tuple[bool, str], tuple[bool, str], tuple[bool, str]]:
+    """Run `git worktree remove --force <path>`, optionally drop the local
+    branch with `git branch -D <branch>`, and optionally drop the remote
+    branch with `git push origin --delete <branch>`.
 
     Best-effort: never raises on git failure. Returns
-    `((worktree_ok, worktree_stderr), (branch_ok, branch_stderr))` so
-    callers decide whether to log, event, or ignore the outcome. When
-    `delete_branch=False`, the branch tuple is `(True, "")` so consumers
-    don't need to special-case the skip.
+    `((worktree_ok, worktree_stderr), (branch_ok, branch_stderr),
+    (remote_ok, remote_stderr))` so callers decide whether to log, event,
+    or ignore the outcome. When `delete_branch=False` or
+    `delete_remote=False`, the corresponding tuple is `(True, "")` so
+    consumers don't need to special-case the skip.
+
+    Remote-delete benign-race contract: stderr containing
+    `remote ref does not exist` (the GitHub auto-delete-head-branches
+    race signal) is reported as `(True, stderr)` so the caller treats it
+    as success. Any other nonzero exit (protected branch, auth, hook
+    rejection) is reported as `(False, stderr)`.
     """
     wt = subprocess.run(
         ["git", "-C", str(project_root), "worktree", "remove", "--force", path],
@@ -1378,14 +1387,41 @@ def _remove_worktree_and_branch(
     )
     wt_pair = (wt.returncode == 0, wt.stderr.strip())
     if not delete_branch:
-        return wt_pair, (True, "")
+        return wt_pair, (True, ""), (True, "")
     br = subprocess.run(
         ["git", "-C", str(project_root), "branch", "-D", branch],
         capture_output=True,
         text=True,
         timeout=timeout,
     )
-    return wt_pair, (br.returncode == 0, br.stderr.strip())
+    br_pair = (br.returncode == 0, br.stderr.strip())
+    if not delete_remote:
+        return wt_pair, br_pair, (True, "")
+    origin_check = subprocess.run(
+        ["git", "-C", str(project_root), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if origin_check.returncode != 0:
+        # No origin → nothing to delete remotely. Same skip semantics as
+        # `_is_branch_reachable_from_origin` when origin is absent.
+        return wt_pair, br_pair, (True, "no origin remote configured")
+    rm = subprocess.run(
+        ["git", "-C", str(project_root), "push", "origin", "--delete", branch],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if rm.returncode == 0:
+        remote_pair = (True, rm.stderr.strip())
+    elif "remote ref does not exist" in rm.stderr:
+        # Benign race: another client (or GitHub's auto-delete) beat us
+        # to it. Branch is already gone — that's success for our purpose.
+        remote_pair = (True, rm.stderr.strip())
+    else:
+        remote_pair = (False, rm.stderr.strip())
+    return wt_pair, br_pair, remote_pair
 
 
 def _resolve_default_branch(project_root: Path) -> str | None:
@@ -1511,10 +1547,11 @@ def _maybe_cleanup_worktree(
             trigger=trigger,
         )
         return
-    (wt_ok, wt_err), (br_ok, br_err) = _remove_worktree_and_branch(
+    (wt_ok, wt_err), (br_ok, br_err), (rm_ok, rm_err) = _remove_worktree_and_branch(
         cfg.project_root,
         wt["path"],
         wt["branch"],
+        delete_remote=not cfg.keep_remote_branches,
         timeout=30,
     )
     st.append_event(
@@ -1524,8 +1561,10 @@ def _maybe_cleanup_worktree(
         branch=wt["branch"],
         worktree_removed=wt_ok,
         branch_removed=br_ok,
+        remote_branch_removed=rm_ok,
         worktree_error=wt_err,
         branch_error=br_err,
+        remote_branch_error=rm_err,
         trigger=trigger,
     )
     data["worktree"] = None
@@ -3299,11 +3338,12 @@ def cmd_worktree_gc(args) -> int:
             )
             continue
 
-        (wt_ok, wt_err), (br_ok, br_err) = _remove_worktree_and_branch(
+        (wt_ok, wt_err), (br_ok, br_err), (rm_ok, rm_err) = _remove_worktree_and_branch(
             cfg.project_root,
             wt["path"],
             wt["branch"],
             delete_branch=args.delete_branch,
+            delete_remote=args.delete_branch and not cfg.keep_remote_branches,
             timeout=30,
         )
         if not wt_ok:
@@ -3320,6 +3360,11 @@ def cmd_worktree_gc(args) -> int:
                 )
             else:
                 print(f"  branch dropped: {wt['branch']}")
+            if not cfg.keep_remote_branches and not rm_ok:
+                print(
+                    f"  remote branch removal failed for {slug}: {rm_err}",
+                    file=sys.stderr,
+                )
 
     print(f"Removed {removed}/{len(candidates)} worktree(s).")
     return ExitCode.OK

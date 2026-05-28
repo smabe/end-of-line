@@ -23,7 +23,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from end_of_line import state as st
-from end_of_line.cli import ExitCode, main
+from end_of_line.cli import ExitCode, _remove_worktree_and_branch, main
 from tests import isolate_registry
 
 # Plan-file basenames must be `<slug>-<phase>.md` so plan_parser extracts
@@ -444,6 +444,92 @@ class CmdArchiveAtomicCommitTests(WorktreeCleanupBase):
         data = st.load(self._state_path("alpha"))
         self.assertNotIn("ship_pending", data)
         self.assertNotIn("ready_to_ship_announced", data)
+
+
+class RemoveWorktreeAndBranchRemoteDeleteTests(WorktreeCleanupBase):
+    """Phase 2: `_remove_worktree_and_branch(delete_remote=...)` drops
+    `origin/<branch>` when requested. Best-effort: races with auto-delete
+    are swallowed; protected-branch / other failures are reported."""
+
+    def _push_branch(self, slug: str) -> str:
+        wt = self._wt_record(slug)
+        assert wt is not None
+        _git(self.project, "push", "origin", wt["branch"])
+        return wt["branch"]
+
+    def _remote_branch_exists(self, branch: str) -> bool:
+        result = subprocess.run(
+            ["git", "-C", str(self.project), "ls-remote", "--heads", "origin", branch],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return bool(result.stdout.strip())
+
+    def test_delete_remote_true_drops_origin_branch(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        branch = self._push_branch("alpha")
+        self.assertTrue(self._remote_branch_exists(branch))
+        wt = self._wt_record("alpha")
+        assert wt is not None
+        _, _, remote = _remove_worktree_and_branch(
+            self.project,
+            wt["path"],
+            branch,
+            delete_remote=True,
+        )
+        remote_ok, _remote_err = remote
+        self.assertTrue(remote_ok)
+        self.assertFalse(self._remote_branch_exists(branch))
+
+    def test_delete_remote_false_preserves_origin_branch(self) -> None:
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        branch = self._push_branch("alpha")
+        wt = self._wt_record("alpha")
+        assert wt is not None
+        _, _, remote = _remove_worktree_and_branch(
+            self.project,
+            wt["path"],
+            branch,
+            delete_remote=False,
+        )
+        self.assertEqual(remote, (True, ""))
+        self.assertTrue(self._remote_branch_exists(branch))
+
+    def test_delete_remote_true_without_origin_is_benign(self) -> None:
+        # Project has no `origin` remote → delete_remote=True must
+        # no-op cleanly. Same skip semantics as the reachability check
+        # uses for projects that operate without an upstream.
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        _git(self.project, "remote", "remove", "origin")
+        wt = self._wt_record("alpha")
+        assert wt is not None
+        _, _, remote = _remove_worktree_and_branch(
+            self.project,
+            wt["path"],
+            wt["branch"],
+            delete_remote=True,
+        )
+        remote_ok, remote_err = remote
+        self.assertTrue(remote_ok)
+        self.assertIn("no origin", remote_err)
+
+    def test_delete_remote_true_when_remote_ref_already_gone_is_benign(self) -> None:
+        # Simulates GitHub auto-delete-head-branches racing with our delete:
+        # the branch was never pushed to origin, so `git push --delete`
+        # sees `remote ref does not exist`. Helper must treat this as
+        # success (no surface to the operator).
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        wt = self._wt_record("alpha")
+        assert wt is not None
+        _, _, remote = _remove_worktree_and_branch(
+            self.project,
+            wt["path"],
+            wt["branch"],
+            delete_remote=True,
+        )
+        remote_ok, _remote_err = remote
+        self.assertTrue(remote_ok, "missing remote ref should be benign, not failure")
 
 
 if __name__ == "__main__":
