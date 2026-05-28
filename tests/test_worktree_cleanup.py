@@ -154,6 +154,15 @@ class WorktreeCleanupBase(unittest.TestCase):
     def _wt_record(self, slug: str) -> dict | None:
         return st.get_worktree(st.load(self._state_path(slug)))
 
+    def _remote_branch_exists(self, branch: str) -> bool:
+        result = subprocess.run(
+            ["git", "-C", str(self.project), "ls-remote", "--heads", "origin", branch],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return bool(result.stdout.strip())
+
 
 class CmdCompleteCleanupTests(WorktreeCleanupBase):
     def test_completes_last_phase_cleans_up_when_reachable(self) -> None:
@@ -263,6 +272,39 @@ class CmdArchiveTests(WorktreeCleanupBase):
     def test_refuses_unknown_plan(self) -> None:
         rc, _stdout, _stderr = self._archive("nonexistent")
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
+
+    def test_archive_deletes_origin_branch_by_default(self) -> None:
+        # End-to-end: cmd_archive → _perform_archive →
+        # _maybe_cleanup_worktree → _remove_worktree_and_branch with
+        # `delete_remote=not cfg.keep_remote_branches`. Default config
+        # → origin/<branch> is dropped.
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        wt = self._wt_record("alpha")
+        assert wt is not None
+        branch = wt["branch"]
+        _git(self.project, "push", "origin", branch)
+        self.assertTrue(self._remote_branch_exists(branch))
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, _stdout, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertFalse(self._remote_branch_exists(branch))
+
+    def test_archive_preserves_origin_branch_when_keep_remote_set(self) -> None:
+        # `keep_remote_branches: true` opts out: local cleanup still
+        # fires, but origin/<branch> stays put.
+        self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
+        wt = self._wt_record("alpha")
+        assert wt is not None
+        branch = wt["branch"]
+        _git(self.project, "push", "origin", branch)
+        (self.project / ".orchestrator.json").write_text(
+            '{"keep_remote_branches": true}'
+        )
+        self._set_status("alpha", st.STATUS_DONE)
+        rc, _stdout, _ = self._archive("alpha")
+        self.assertEqual(rc, 0)
+        self.assertIsNone(self._wt_record("alpha"))  # local cleanup still fires
+        self.assertTrue(self._remote_branch_exists(branch))
 
 
 class CmdWorktreeGcUpstreamTests(WorktreeCleanupBase):
@@ -456,15 +498,6 @@ class RemoveWorktreeAndBranchRemoteDeleteTests(WorktreeCleanupBase):
         assert wt is not None
         _git(self.project, "push", "origin", wt["branch"])
         return wt["branch"]
-
-    def _remote_branch_exists(self, branch: str) -> bool:
-        result = subprocess.run(
-            ["git", "-C", str(self.project), "ls-remote", "--heads", "origin", branch],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return bool(result.stdout.strip())
 
     def test_delete_remote_true_drops_origin_branch(self) -> None:
         self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL)
