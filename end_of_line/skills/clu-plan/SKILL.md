@@ -524,9 +524,13 @@ project's `.orchestrator.json` `dispatch.ship_mode` picks the default:
 
 - **`ship_mode: "direct"`** (default): `clu ship --plan X --yes`
   validates (dry-merge + suite), checks out main, merges (FF-first
-  then merge-commit fallback), pushes origin main + the branch,
-  and triggers an immediate tick so `auto_archive_rule` cleans up
-  the worktree without waiting for cron.
+  then merge-commit fallback), pushes origin main, and triggers an
+  immediate tick so `auto_archive_rule` cleans up the worktree
+  without waiting for cron. The feature branch is NOT pushed to
+  origin (main carries the work; archive drops the local branch
+  shortly after). Set `keep_remote_branches: true` in
+  `.orchestrator.json` to preserve the remote ref and have ship
+  push the branch alongside main.
 - **`ship_mode: "as_pr"`**: `clu ship --plan X --yes` opens a
   GitHub PR (via `gh pr create`) with the plan body as the PR body,
   stamps `state.ship_pending`, and exits. The operator clicks

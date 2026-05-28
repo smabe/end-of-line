@@ -538,6 +538,34 @@ With `auto_archive: false`, operators must run `clu archive --plan <slug>` and
 `clu unregister --all-archived` manually, as before. Non-bool values (e.g.
 `"yes"`, `1`) raise `ConfigError` at startup.
 
+### Remote-branch cleanup (`keep_remote_branches`)
+
+By default, both auto-archive and operator-driven `clu archive` also delete
+`origin/<branch>` after the local worktree + branch are removed. GitHub's
+"Automatically delete head branches" setting only fires on PR merges, so a
+direct-mode ship leaves the feature branch stranded on the remote unless clu
+deletes it. `clu ship --direct` skips the feature-branch push entirely for
+the same reason — main carries the work, and the local branch is dropped by
+archive a few seconds later.
+
+Opt out (preserve worker branches on the remote, e.g. for external CI or
+audit):
+
+```json
+{
+  "keep_remote_branches": true
+}
+```
+
+With `keep_remote_branches: true`, `clu ship --direct` pushes the feature
+branch to origin, and archive cleanup leaves `origin/<branch>` in place.
+The local cleanup (worktree dir + local branch ref) still fires either way.
+
+Best-effort semantics: a remote delete that fails because the branch is
+already gone (GitHub's auto-delete, another client, manual `git push --delete`)
+is treated as success. Other failures (protected branch, hook rejection,
+auth) are logged to stderr but never block the archive.
+
 ### Cleanup with `clu worktree gc`
 
 ```bash

@@ -115,6 +115,7 @@ Other config fields:
 - `dispatch.path` (optional) — colon-separated PATH for the worker subprocess. `~` is expanded per segment. Empty/unset = inherit parent env.
 - `quiet_hours` is `[start, end]` in local wall-clock time; wraps overnight. Halt notifications bypass it (see `notify.QUIET_HOURS_BYPASS_KINDS`).
 - `clu --no-notify <cmd>` suppresses outbound sends for a single invocation (debug/dry-run). `clu notify-test` fires a test notification through all configured channels.
+- `keep_remote_branches` (default `false`) — when `false`, archive cleanup deletes `origin/<branch>` after merge and `clu ship --direct` skips the feature-branch push entirely (main carries the work). Set to `true` to preserve worker branches on the remote for audit / external tooling.
 
 The dispatch command above launches Claude with the `/clu-phase` skill. Run `clu install-skill` to drop it into `~/.claude/skills/clu-phase/SKILL.md`, or write your own equivalent — anything that honors the worker callback contract (always call `clu complete` or `clu block` before exiting) will work.
 
