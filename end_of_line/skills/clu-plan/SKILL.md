@@ -93,18 +93,97 @@ phase added a single ~15-line helper plus 5 tests and could have
 shipped inside the next phase's commit without losing TDD-ability.
 Each saved phase is ~30–60s of dead time off the plan's wall clock.
 
-### Step 2: Pre-author research (optional, scale to size)
+### Step 2: Pre-author research (mandatory — EPCC's Explore)
 
-For plans touching surfaces you haven't already read in the current
-conversation: dispatch parallel `Explore` agents to map the touch
-points. Skip if "Files to touch" lists ≤ 3 files and you've already
-read each. Each agent's brief: file:line citations mandatory, report
-under 500 words.
+This is the E in EPCC (Explore → Plan → Code → Commit), the same
+unconditional explore gate as `/plan` Mode 1 step 4 — but for
+clu-plans it runs BEFORE drafting (not after a first approval),
+because the master's Locked-decisions and Files-touched sections
+commit to specific file paths, function signatures, and behaviors
+the moment they're written. A worker dispatched off those paths
+inherits whatever the research got wrong. There is no "small plan"
+exception and no opt-out: research grounds the master, and the master
+is the contract the cold-context worker can't push back on.
 
-This is the same disciplined-exploration pattern from `/plan` step
-7.5 — but for clu-plans it happens BEFORE drafting (not after first
-approval), because the master's Locked-decisions section commits to
-specific file paths and behaviors that need ground-truth grounding.
+**Three mandatory research dimensions, each its own agent, dispatched
+in parallel in a single message:**
+
+1. **Codebase / internal exploration** — `subagent_type: "Explore"`.
+   Brief: "Map the area this plan will touch. List existing helpers
+   to reuse instead of reimplementing. List callers of any function
+   we're changing. Note file sizes, naming patterns, and test
+   coverage of the surface. Quote file:line for every claim."
+
+2. **Project-local API documentation + canonical samples** —
+   `subagent_type: "general-purpose"`. Brief: "For the dependencies
+   this plan touches, surface the framework's canonical pattern and
+   working examples (vendored docs, library README/examples in
+   site-packages, framework headers; fetch the vendor's official docs
+   when no local copy exists). What footguns does the doc itself call
+   out? Cite file:line for local sources or URL+section for fetched
+   docs." (For clu itself, stdlib-only — this dimension is light, but
+   still run it to confirm no new third-party dep is implied.)
+
+3. **Web prior art / community evidence** — `subagent_type:
+   "general-purpose"` with WebSearch + WebFetch. Brief: "How are
+   others solving this problem? GitHub issues, Stack Overflow, recent
+   blog posts. Vendor docs describe intended contracts that don't
+   always match shipped reality — independent corroboration is the
+   point. Cite URLs."
+
+Each brief also carries: the slug + one-line plan goal, an explicit
+"You are NOT to invoke `/clu-plan` or `/plan`; research only, report
+under 400 words," and a request for file:line / URL+section citations.
+
+**Beyond the three, add specialist agents when the plan's shape
+demands it** (role specialization — each agent has one sharp job no
+other is doing). The full role-split catalog lives in `/plan` Mode 1
+step 4; the three that force a binary decision at approval are
+mandatory here when triggered:
+
+- **Reuse / refactor specialist** — MANDATORY when the plan adds a
+  NEW file described as "mirrors / like / similar to / same family
+  as" an existing one, OR a sibling with the same suffix already
+  exists in the target dir. Brief it to read both, list concrete
+  duplication (blocks ≥30 lines, ≥3 near-verbatim methods, shared
+  chrome) with file:line, and recommend (a) **refactor-first**
+  (extract the shared base/helper as its OWN phase, then build the new
+  file on top in a later phase) or (b) copy-and-defer. Default to (a).
+  In clu this maps cleanly: the refactor becomes the first row of the
+  Sessions index; the new file is a later row. Parallel worktrees make
+  silent duplication worse, so refactor-then-extend is the default,
+  not a `/code-review` afterthought.
+
+- **Exclusion-safety specialist** — MANDATORY when a Non-goal will
+  exclude some members of a peer set (some op types, endpoints,
+  entities, files in a related family) that share state, a queue, a
+  cache, an ordering/FIFO contract, or an applied-token set with the
+  in-scope items. Brief it to list every dependency between the two
+  groups, walk realistic call sequences for race/ordering/stale-state
+  hazards (file:line), and recommend (a) **fold excluded into scope**
+  or (b) keep the exclusion with a one-sentence iron-clad invariant.
+  Default to (a). This is the project CLAUDE.md rule "Non-goals are
+  claims that need proof" enforced at research time — and across
+  worktrees the asymmetry auto-merges silently.
+
+- **Algorithmic / inner-loop specialist** — MANDATORY for plans that
+  cite a paper, GDC talk, engine docs, or a third-party primitive, or
+  implement physics / integrators / control loops / constraint
+  solvers. The four required questions are inlined under "Critical
+  rules" below — concentrate them in this agent's brief.
+
+**Skip-condition (narrow):** the three mandatory dimensions still run
+even for a single small phase. The only files you may skip re-reading
+are ones you've *already read in this conversation* — cite them from
+that read instead of re-dispatching. You may not skip the API-docs or
+web dimensions on a "pure docs/config" basis.
+
+**Consolidate as ground truth.** Walk away with: the corrected
+understanding of the touched area; any forced binary decisions from
+the reuse / exclusion specialists, with the recommended option (baked
+into the draft as the default — see Step 3); and a list of claims
+research could NOT verify — these become `TODO: verify <claim>`
+markers in the draft, never written as fact.
 
 ### Step 3: Draft all files in memory
 
@@ -119,6 +198,26 @@ master is shown in Step 4. The worker dispatched after `clu init` will
 read a sub-plan that exists or fail; you can't lazily author them on
 ship.
 
+**Three drafting rules (carried from `/plan`):**
+
+- **Every factual claim is backed by Step 2 findings.** Cite file:line
+  / URL+section in the master and sub-plans wherever a claim depends on
+  a verified source.
+- **TODO markers are mandatory for unverified specifics.** Any cited
+  path, function name, schema field, config key, version, or external
+  behavior is either verified in Step 2 (stated as fact with a
+  citation) or written as `TODO: verify <thing>` — never as bare fact.
+  This matters more in clu than in `/plan`: a cold-context worker reads
+  the master's Locked-decisions paths as settled and won't re-check
+  them. Absence of a TODO marker means positive verification, not
+  absence of doubt.
+- **Bake forced binary decisions in as the recommended option.** If
+  the reuse specialist recommended a refactor-first split, draft the
+  Sessions index with that refactor as the first row. If the exclusion
+  specialist recommended folding excluded items in, draft them in
+  scope. The decision is still surfaced at approval (Step 4) so the
+  operator can override.
+
 #### Master template
 
 ```markdown
@@ -127,6 +226,18 @@ ship.
 <2-3 paragraph intro: what the plan does, why it matters, what's the
 ordering of phases. Reference any GitHub issues it closes. If the plan
 is a follow-up to a recent incident, name the incident.>
+
+## Diagnosis  *(required for perf/bug/regression plans; omit for greenfield)*
+
+- **Hypothesis:** <the suspected cause, named concretely — a function,
+  a flag, a code path; not "something is slow">
+- **Falsifiable test:** <a one-line experiment runnable in seconds that
+  CONFIRMS or DISPROVES the hypothesis before "Files touched" is scoped>
+- **Test result:** <run it during Step 2. Record what you observed. If
+  it disproves the hypothesis, STOP — return to Step 2 research with the
+  negative result as a sharper question; do NOT draft phases yet. The
+  master commits paths workers can't second-guess, so a wrong target
+  here ships as wrong worker dispatch.>
 
 ## Locked design decisions
 
@@ -266,8 +377,27 @@ to the operator with this exact framing:
 > say `ship` to write + queue, or tell me what to change. If you want
 > to see a specific sub-plan before shipping, name it and I'll expand
 > it inline.
+>
+> [If the reuse specialist surfaced a decision]
+> **Reuse decision baked in:** plan adopts a refactor-first split of
+> `<duplicated surface>` (now the first row of the Sessions index)
+> based on `<file:line>` evidence. Say so if you'd prefer
+> copy-and-defer.
+>
+> [If the exclusion specialist surfaced a decision]
+> **Exclusion decision baked in:** plan folds `<excluded items>` into
+> scope based on `<file:line>` dependency on `<included items>`. To
+> keep the exclusion, give me the one-sentence invariant that makes it
+> safe.
+>
+> [If any TODO markers remain]
+> **Unverified claims still in the master/sub-plans:** `<list>`. Step 2
+> couldn't verify these — sanity-check before approving.
 
-Then **wait**. Do not write to disk. Silence is not approval.
+Then **wait**. Do not write to disk. Silence is not approval. If the
+operator picks copy-and-defer for a reuse decision, record the
+deferred refactor in the master's Non-goals (with the follow-up) before
+shipping.
 
 Sub-plans are intentionally NOT dumped in chat by default. The design
 judgment lives in the master (locked decisions, non-goals, Sessions
@@ -466,13 +596,66 @@ after step 1. Don't run `clu init` without explicit operator intent.
   queued plans = three concurrent workers ~60s apart, NOT one-after-
   another. See "Sequential queue execution requires waiting" below
   before queueing plans that touch overlapping files.
+- **New file mirrors an existing file? Refactor first by default.**
+  When the plan adds a file described as "mirrors / like / similar to
+  / same family as" an existing one — or a same-suffix sibling already
+  exists in the target dir — the reuse specialist (Step 2) is
+  mandatory and its refactor-first recommendation is presumed
+  correct unless the operator overrides at approval. The refactor
+  becomes the first row of the Sessions index; the new file is a
+  later row.
+  Copy-and-defer requires an explicit operator override, recorded in
+  the master's Non-goals — not a passive default that leaves
+  duplication for `/code-review` after parallel worktrees have already
+  forked it.
+
+- **Justify Non-goal exclusions across peer sets.** When a Non-goal
+  excludes some members of a peer set and includes others, each
+  exclusion needs a one-sentence "why this asymmetry is safe" rationale
+  in the Non-goals section. If you can't write it, fold the excluded
+  items into scope or restructure to avoid the asymmetry. The
+  exclusion-safety specialist (Step 2) surfaces this as a forced binary
+  decision at approval; trust its default-include recommendation absent
+  an iron-clad invariant. Across worktrees the asymmetry auto-merges
+  silently (project CLAUDE.md: "Non-goals are claims that need proof").
+
+- **TODO markers are mandatory for unverified specifics.** Any cited
+  path, function name, schema field, config key, version, or external
+  behavior in the master or a sub-plan is either verified in Step 2
+  (stated as fact with file:line / URL+section) or written as
+  `TODO: verify <thing>`. A cold-context worker reads Locked-decisions
+  paths as settled and won't re-check them — an unmarked wrong path
+  ships as wrong dispatch.
+
+- **Perf/bug plans: run the Diagnosis falsifiable test in Step 2,
+  BEFORE drafting the Sessions index.** Fill the master's Diagnosis
+  section. If the test disproves the hypothesis, return to Step 2
+  research with the negative result; don't phase a fix against the
+  wrong target. Files-read alone doesn't ground a diagnosis;
+  "I disabled X and the symptom didn't change" does.
+
 - **For ALGORITHMIC plans** (signals: cites a paper, uses a constraint
-  solver, implements physics/integrator/control loop), include the
-  inner-loop-specialist research from `/plan`'s step 7.5 BEFORE
-  drafting. The four required questions (canonical implementation
-  inside the inner loop / what fails without surrounding solver
-  structure / minimum executable test / load-bearing details absent
-  from API docs) carry over verbatim.
+  solver, implements physics/integrator/control loop), the
+  inner-loop specialist (Step 2) is mandatory BEFORE drafting, and its
+  brief MUST require these four questions answered:
+  1. **What does the canonical implementation do INSIDE the per-tick /
+     per-step inner loop, beyond the formula on the page?** Iteration
+     counts, regularization, stabilization terms, accumulator resets,
+     warm-start clamps, convergence tolerance.
+  2. **What fails if we ship just the formula without the surrounding
+     solver structure?** Under sustained load (gravity, friction,
+     accumulated error) does it drift / diverge / oscillate? Quote the
+     failure mode concretely.
+  3. **What's the minimum executable test that catches a naive
+     implementation?** Exact scenario — initial state, applied forces,
+     horizon, expected vs. failing behavior. This becomes the first
+     thing validated in phase 1 (land it as phase 1's first commit; if
+     it can only run in phase 2, say so and make it phase 2's first
+     step). If it fails when it lands, the research was incomplete —
+     return to Step 2, don't tune past it.
+  4. **What load-bearing details exist in the engine source that are
+     absent from the API docs?** Default iteration counts, hardcoded
+     thresholds, internal stabilization passes.
 
 ### Sequential queue execution requires waiting
 
@@ -528,9 +711,11 @@ project's `.orchestrator.json` `dispatch.ship_mode` picks the default:
   immediate tick so `auto_archive_rule` cleans up the worktree
   without waiting for cron. The feature branch is NOT pushed to
   origin (main carries the work; archive drops the local branch
-  shortly after). Set `keep_remote_branches: true` in
-  `.orchestrator.json` to preserve the remote ref and have ship
-  push the branch alongside main.
+  shortly after). `keep_remote_branches: true` in
+  `.orchestrator.json` makes ship push the branch alongside main AND
+  stops archive from deleting any remote `clu/<plan>` ref — relevant
+  mainly to `as_pr` runs, where the PR branch lives on origin and
+  archive otherwise runs `git push origin --delete` once it merges.
 - **`ship_mode: "as_pr"`**: `clu ship --plan X --yes` opens a
   GitHub PR (via `gh pr create`) with the plan body as the PR body,
   stamps `state.ship_pending`, and exits. The operator clicks
