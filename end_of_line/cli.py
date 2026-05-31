@@ -2462,9 +2462,45 @@ def cmd_doctor(args) -> int:
     _print_stuck_tool_health(cfg)
     _print_worker_idle_health(cfg)
     _print_zombie_health(cfg)
+    _print_skill_drift_health()
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _print_skill_drift_health() -> None:
+    """Warn when an installed `~/.claude/skills/<name>/SKILL.md` differs from
+    the bundled copy (#75).
+
+    A stale installed skill is what made the pre-#72 heartbeat loop ship at the
+    incident — clu had no way to surface that the deployed copy was behind.
+    SHA-256 over raw bytes, not mtime: mtime false-positives on every reinstall.
+    Quiet when every installed skill matches; skills that aren't installed
+    aren't drift.
+    """
+    import hashlib
+    from importlib.resources import files
+
+    drifted: list[str] = []
+    for name in BUNDLED_SKILLS:
+        installed_path = Path.home() / ".claude" / "skills" / name / "SKILL.md"
+        if not installed_path.exists():
+            continue
+        try:
+            bundled = files("end_of_line").joinpath(f"skills/{name}/SKILL.md").read_bytes()
+            installed = installed_path.read_bytes()
+        except OSError:
+            continue
+        if hashlib.sha256(bundled).digest() != hashlib.sha256(installed).digest():
+            drifted.append(name)
+    if not drifted:
+        return
+    print(
+        "Installed skills differ from the bundle "
+        "(re-sync with `clu install-skill --only <name> --force`):"
+    )
+    for name in drifted:
+        print(f"  {name} — ~/.claude/skills/{name}/SKILL.md differs from the bundled copy")
 
 
 def _print_zombie_health(cfg: ProjectConfig) -> None:
