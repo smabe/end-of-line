@@ -1,124 +1,165 @@
 # clu — orphaned heartbeat/worker processes + zombie `running` state files
 
-> **Research-only handoff.** Authored 2026-05-31 from a live incident in a *consumer*
-> repo (HealthData) where clu had been used. All diagnosis below was **run, not guessed** —
-> evidence is real `ps`/state-file output captured on the host. Pick this up in
-> `~/projects/end-of-line`; the fix is **not** started. Tracks **smabe/end-of-line#75**.
->
-> **Citation honesty:** `SKILL.md` line numbers (installed vs repo) were verified by direct
-> `grep` this session. `cli.py` / `registry.py` / `supervisor.py` / `state.py` / `dispatch.py`
-> line numbers came from a code-reading research agent over `~/projects/end-of-line` this
-> session — they're grounded but **`TODO: reconfirm line numbers on pickup`** since the tree moves.
-
 ## Goal
-Make a *terminalized or unregistered* plan reliably (a) reap its live worker + heartbeat
-subprocesses and (b) leave no state file stuck at `status=running`. Today both leak: a
-finished plan can orphan a `clu heartbeat` loop for hours, and an unregistered plan can sit
-at `status=running` on disk forever, invisible to every reaper.
+Make a terminalized or unregistered plan reliably (a) reap its live worker +
+heartbeat process group and (b) leave no state file stuck at `status=running`.
+Add a registry-independent sweep that backstops the unregistered-while-running
+window the registry-walking tick can never reach, plus a `doctor` guard against
+the installed-skill drift that caused the live incident. Tracks
+**smabe/end-of-line#75**.
 
 ## Diagnosis
-
-Three distinct, independently-real defects. Two symptoms observed live; root causes traced to source.
-
-### Defect A — orphaned heartbeat/worker processes outlive a finished plan
-- **Hypothesis:** the worker's background `clu heartbeat` loop is not reaped when the worker
-  exits abnormally (SIGKILL/crash/orphan), so it loops forever.
-- **Falsifiable test (RUN):** `ps -eo pid,etime,command | grep "clu heartbeat"` on the host
-  ~4.6h after a capture run that had already reached `status=done` + unregistered + archived.
-- **Result — CONFIRMED:** 6 live processes for `penpot-cap-w1/w2/w4`, etime **04:38:xx**:
-  2 worker `claude --print … /clu-phase … capture` (w1, w2) + 4 `while :; do clu heartbeat …; sleep 120; done` loops.
-- **Root cause:** the **installed** skill is the *pre-#72* form. Verified:
-  - Installed `~/.claude/skills/clu-phase/SKILL.md:105` → `( while :; do` (bare loop) + `:111` `trap "kill $HEARTBEAT_PID" EXIT` **only**.
-  - Repo `end_of_line/skills/clu-phase/SKILL.md:109` → `( while kill -0 $WORKER_PID 2>/dev/null; do` (the #72 PID-tied guard) + `:124` EXIT trap.
-  - The EXIT trap **does not fire on SIGKILL/OOM/abnormal exit** (uncatchable). With no `kill -0 $WORKER_PID` loop condition, the installed heartbeat had no second terminator → it ran forever after its worker died unclean.
-- **So Defect A is partly deployment drift:** #72's fix exists in the repo but was never
-  re-installed (`clu install-skill clu-phase`). clu has **no skill-version check** to warn the
-  operator the installed copy is behind the bundle.
-- **But even with #72 installed, a gap remains:** the supervisor-side backstop
-  `_detect_dead_pid` (supervisor.py:628 — `TODO: reconfirm`) only runs **inside a tick**, and
-  `tick-all` walks the **registry only** (cli.py:3496 / architecture.md:184 — `TODO: reconfirm`).
-  An **unregistered** plan never ticks → its orphans are never reaped server-side. The worker's
-  own `kill -0` loop becomes the *only* protection, so a stale skill = nothing reaps them.
-
-### Defect B — `unregister`/`archive` leave a zombie `status=running` state file
-- **Hypothesis:** a plan can be removed from the registry while its state file still says
-  `running`, and nothing ever flips it terminal.
-- **Falsifiable test (RUN):** inspect a week-old plan the operator believed they'd cleaned.
-- **Result — CONFIRMED (`fm-docs-sweep`):** state file `status=running`, but `token` /
-  `heartbeat_at` / `updated_at` / `current_claim` all **null**, last event
-  `blocker_consumed` at **2026-05-23T23:54:50Z**, file mtime frozen at **May 23 19:54**
-  (untouched since), **not in the registry**, no live process, no worktree on disk. A pure
-  zombie — it never re-ran; it just never left `running`. (The operator "cleaned it
-  yesterday"; the file proves nothing touched it — any state-file-scanning view re-surfaced
-  the stale status.)
-- **Root cause:**
-  - `running` is **non-terminal** (state.py:115-120 — `TERMINAL_STATUSES = {paused, halted, halted_for_replan, done}`; `TODO: reconfirm`). Docs are explicit that `running` is strictly transient (contract.md:139, architecture.md:83-88, 132-134).
-  - `unregister` (registry.py) is **status-blind** — removes the registry row, touches neither status nor the state file (cli.py:1864 — `TODO: reconfirm`).
-  - Operator `clu archive` **refuses on RUNNING** (cli.py:5214) and doesn't terminalize; `--force` (added in #31) opts past the refusal but the *terminalize-on-cleanup* gap remains.
-  - The **one documented self-heal** for "unregistered + running" is a crash-recovery window the architecture expects the **next tick to repair** (architecture.md:229-236). It **cannot fire**: tick-all walks the registry, and the plan is unregistered → never visited. The design relies on a repair path that is unreachable for this exact state.
-
-### Defect C — no registry-independent reaper (the structural gap behind A+B)
-- There is no lease-TTL sweep that reaps "`status=running` + heartbeat stale beyond TTL"
-  **independent of registry membership**. `_detect_dead_pid` is tick/registry-bound. Both A's
-  orphan-for-unregistered-plan and B's zombie escape it for the same reason: invisibility to
-  the registry walk. A sweep over `.orchestrator/*.state.json` (TTL ≈ 3× the 120s heartbeat,
-  per standard lease-reaper design) would catch both.
+- **Hypothesis:** nothing reaps a plan that has left the registry or finished —
+  neither its processes nor its `running` state file — because the only reaper
+  (`_detect_dead_pid`) runs inside a tick and `tick-all` walks the **registry
+  only**.
+- **Falsifiable tests (RUN this session):**
+  - Code anchors reconfirmed (handoff said "reconfirm on pickup"):
+    `TERMINAL_STATUSES` excludes `running` (`state.py:120`); `unregister` is
+    status-blind, pure row removal (`registry.py:113-125`); claim stores `pid`,
+    no `pgid` (`dispatch.py:638`); worker spawned `start_new_session=True`
+    (`dispatch.py:219`); `reap_orphan_pid` is single-PID via `os.kill`, no
+    `killpg` (`state.py:315-350`); `install-skill` copies bundle→installed with
+    **no version/hash compare** (`cli.py:2119-2181`).
+  - **Two handoff claims DISPROVEN:** (1) `clu archive --force`/`--drop-state`
+    do **not** exist — `cmd_archive` hard-refuses RUNNING at `cli.py:5227` and
+    has only `plan`/`project` args (`cli.py:436-453`); the `--force` flags live
+    on unregister/install-skill/release-claim. (2) `cmd_complete` never sets
+    `status=done` — it releases the claim + emits `phase_completed`
+    (`cli.py:4263-4287`); the **next tick** (supervisor priority #9) flips
+    status. So a plan unregistered before that tick stays `running` forever.
+- **Process-group result (verified):** with `start_new_session=True`, **PGID ==
+  worker PID** (stdlib agent, doc-grounded); the group persists while any member
+  is alive even after the leader dies; `getpgid()` must NOT be used to recover
+  the pgid (raises `ProcessLookupError` the instant the leader exits). **Claude
+  Code's Bash tool does not re-group its commands** (claude-code-guide,
+  medium-high confidence from CC issues #43944/#25188/#16135 — *not* official
+  docs): the backgrounded heartbeat subshell inherits the `claude` worker's
+  PGID, and `$PPID` inside a Bash command is the `claude` PID itself (so
+  `WORKER_PID=$PPID` == `claim["pid"]`). **Therefore `os.killpg(claim["pid"],
+  SIG)` reaps worker + heartbeat atomically.**
+- **Why `killpg`, not the existing single-PID `os.kill`:** `os.kill(worker_pid)`
+  alone kills only `claude`; the heartbeat then **reparents to launchd and keeps
+  running** — *exactly the 4h38m orphan in the incident*. `killpg` closes that
+  reparent-and-linger window. CC #16135 notes `killpg` also kills `claude` —
+  here that is **intended** (we reap a done/terminalized plan), and the
+  `pgid != os.getpgid(0)` guard protects the `clu` reaper itself (different
+  session).
 
 ## Non-goals
-- **Not** changing the worker-side heartbeat skill logic — #72 already fixed it in the repo;
-  this plan only *redeploys* it + guards against drift. (Excluded safely: the repo skill is
-  already correct; the bug is the *installed copy* + *server-side* reaping, a different layer.)
-- **Not** re-litigating `clu archive` file-moving / `--drop-state` / `--force` — shipped in #31.
-  This plan *uses* those, doesn't redesign them.
-- **Not** touching the iMessage inbound poller, lease retry, or cross-plan rules.
-- **Not** auto-killing processes the operator didn't authorize — reaping is scoped to a plan
-  the operator is explicitly terminalizing/unregistering, or to a sweep gated behind a clear
-  TTL + (optionally) a `--dry-run` default.
+- **Not** changing worker-side heartbeat skill logic — #72 already fixed it in
+  `end_of_line/skills/clu-phase/SKILL.md:109` (`while kill -0 $WORKER_PID`).
+  *Safe to exclude:* the repo skill is already correct and the installed copy on
+  this host was re-installed today (16:02, now byte-matches the bundle); the
+  remaining bug is server-side reaping + drift detection, a different layer.
+- **Not** adding terminalize to `cmd_archive`. *Safe to exclude:* archive
+  deliberately refuses RUNNING and directs the operator to `halt`/`pause` first,
+  so by the time archive runs the status is already terminal — adding a
+  terminalizing `--force` would duplicate `halt`'s job and erode a correct
+  safety guard. Terminalization routes through `unregister` / `force-complete` /
+  the sweep instead.
+- **Not** adding a new `abandoned` status. *Safe to exclude:* no consumer needs
+  to distinguish operator-halt from reaped-zombie at the *status* level; the new
+  `EVENT_PLAN_ABANDONED` audit event carries that distinction, so terminalize
+  reuses the existing `halted` status and avoids touching every status switch in
+  notify/watch/supervisor.
+- **Not** auto-killing processes the operator didn't authorize — reaping is
+  scoped to a plan the operator is explicitly terminalizing/unregistering, or to
+  the sweep gated behind a stale-heartbeat TTL + dead-PID/unregistered check.
+- **Not** deleting worktrees on terminalize — worktree-ahead retention (unpushed
+  commits) is by-design; reaping kills processes, never worktrees.
+- **Not** touching the iMessage poller, lease retry, or cross-plan rules.
 
-## Files to touch  *(line numbers `TODO: reconfirm on pickup` except SKILL.md, grep-verified)*
-- `end_of_line/registry.py` — `unregister()`: terminalize status (e.g. → `halted`/new `abandoned`) and/or reap the plan's live processes before/after removing the row. (cli.py:1864 call site.)
-- `end_of_line/cli.py` — `cmd_archive` (≈5210-5259), `cmd_unregister` (≈1864), `cmd_complete` (≈4264), `cmd_force_complete` (≈4344): add a best-effort **process reap** step (none reap today). `cmd_tick_all` (≈3495) or `cmd_doctor`: host the registry-independent zombie sweep.
-- `end_of_line/dispatch.py` — worker spawned `start_new_session=True` (≈219): the child is its own process group → record the PGID on the claim so reapers can `os.killpg(pgid, SIGTERM→SIGKILL)`. (cmd template ≈170-176.)
-- `end_of_line/supervisor.py` — `_detect_dead_pid` (≈628-670) / `_detect_stalled` (≈219-252): factor the liveness/TTL check into a form the new registry-independent sweep can call.
-- `end_of_line/state.py` — `TERMINAL_STATUSES` (≈115-120): if adding an `abandoned` terminal status, define it here; add a helper to terminalize + stamp an `EVENT_PLAN_ABANDONED`.
-- `~/.claude/skills/clu-phase/SKILL.md` (installed) — **redeploy** from bundle via `clu install-skill clu-phase`; this is the proximate fix for the live orphans.
-- `end_of_line/cli.py` `cmd_doctor` (+ `install-skill`) — add an **installed-vs-bundled skill version check** so drift warns instead of silently shipping a pre-#72 heartbeat.
-- `tests/` — see Done criteria.
+## Files to touch
+**Phase 1 — group-reap primitive**
+- `end_of_line/state.py` — new `reap_plan_processes(claim, ...)` (or
+  `reap_orphan_pgroup(pgid, cmdline_match)`): `os.killpg(pgid, SIGTERM)` →
+  poll → `SIGKILL`, guarded `pgid > 0 and pgid != os.getpgid(0)`, cmdline-marker
+  check before signaling (reuse the `ps -p` pattern from `reap_orphan_pid`
+  `state.py:315-350`), `ProcessLookupError`→success / `PermissionError`→surface.
+  Plus a token-scoped straggler sweep for any `clu heartbeat … <token>` loop —
+  **backstop only** (verification shows the heartbeat shares the worker's pgroup,
+  so `killpg` already gets it; the sweep covers the medium-confidence inference
+  + any reparent-lingering edge). Unique token → no over-match.
+- `end_of_line/dispatch.py` — `_stamp_pid` (`:632-642`): also record
+  `claim["pgid"] = proc.pid` with a one-line comment citing the
+  `start_new_session` pid==pgid invariant (cheap, removes the coupling to that
+  invariant at every reap site).
+
+**Phase 2 — terminalize + wire cleanup commands**
+- `end_of_line/state.py` — new `EVENT_PLAN_ABANDONED` constant; new
+  `terminalize(data, *, status=STATUS_HALTED, event=EVENT_PLAN_ABANDONED)`
+  helper: CAS-gated (no-op if `data["status"]` already terminal), flips status +
+  appends the audit event, under the caller's `mutate` lock.
+- `end_of_line/cli.py` — `cmd_unregister_one` (`:1851`): if the plan's state
+  file is `running`, terminalize + reap the claim's process group **before**
+  removing the registry row. `cmd_force_complete` (`:4294`) and `cmd_complete`
+  (`:4161`): add a best-effort process reap after releasing the claim.
+
+**Phase 3 — registry-independent zombie sweep**
+- `end_of_line/cli.py` — host the sweep in BOTH (decision locked):
+  - `cmd_tick_all` (`:3495`, after the registry loop) — runs the sweep
+    **automatically** so zombies self-heal unattended; terminalize + reap inline.
+  - `cmd_doctor` (`:2403`) — **reports** the sweep with a `--dry-run` preview so
+    the operator can see what would be reaped without acting.
+  - Predicate (shared): `status == running` AND stale-heartbeat (null
+    `heartbeat_at` OR older than the derived threshold) AND (claim PID dead OR
+    plan not in registry). No-op on live/registered/already-terminal. Factor the
+    sweep into one helper both call sites invoke (DRY — single source of truth).
+- `end_of_line/state.py` — reuse `stalled_threshold_for_phase` (`:539-556`,
+  `max(15, lease_ttl//2)` cap 25 min) for the TTL; factor a tiny
+  `is_zombie_state(data, registered: bool)` predicate the sweep calls.
+
+**Phase 4 — skill-drift guard**
+- `end_of_line/cli.py` — `cmd_doctor` (`:2403`): SHA-256 compare each installed
+  `~/.claude/skills/<name>/SKILL.md` against the bundled
+  `end_of_line/skills/<name>/SKILL.md`; warn on mismatch with the remediation
+  (`clu install-skill <name>`). Hash, not mtime (mtime false-positives on every
+  reinstall).
+
+**Phase 5 — docs**
+- `docs/architecture.md` — extend the **"Crash recovery" paragraph (`:229-237`,
+  reconfirmed)**: that self-heal relies on the queue head still being present so
+  the next tick re-enters; it structurally cannot reach an unregistered zombie
+  with no queue head (the `fm-docs-sweep` shape). Note the sweep as that
+  backstop. Touch `docs/reference.md` / `contract.md` for the new event/helper.
+
+**Tests (per phase)** — `tests/` on `GitProjectTestCase` (`tests/__init__.py:164`).
 
 ## Failure modes to anticipate
-- **`os.killpg` on the wrong group kills the CLI itself.** The worker must be in its *own*
-  session (it is — `start_new_session=True`); target *that* PGID, never `getpgid(0)`.
-- **PID reuse.** A recorded PID/PGID may belong to an unrelated process after a crash. Pair
-  the PGID with a cmdline-marker check (`/clu-phase <plan> <phase> <token>`) before killing —
-  `claim_worker_alive(cmdline_match=…)` already does this; reuse it.
-- **`pkill -f` over-matching.** If reaping by marker instead of PGID, scope to the unique
-  `token`, never a bare `clu`/`clu-phase` substring (would kill siblings + the grep).
-- **TTL false-trips.** Heartbeat is 120s; a sweep TTL below ~3× (=6 min) will reap a merely-slow
-  phase. Use the existing derived stalled threshold (`min(25, max(15, lease_ttl//2))`), not a new constant.
-- **Terminalizing a genuinely-live plan.** The sweep must require BOTH `status=running` AND
-  stale-heartbeat AND (PID dead OR unregistered) — not status alone (the fm-docs case had null
-  heartbeat, which is the tell).
-- **Idempotency / races with a concurrent tick.** A reap during archive can race the 30s
-  `com.clu.tick`. Guard with the existing state lock; make the sweep a no-op on already-terminal plans.
-- **Worktree-ahead retention is correct, don't "fix" it.** `archive` retaining a worktree with
-  unpushed commits is by-design (don't lose work); terminalizing status must not imply deleting that worktree.
+- **`killpg(getpgid(0))` kills `clu` itself.** Assert `pgid > 0 and pgid !=
+  os.getpgid(0)` before every signal; never reconstruct pgid via `getpgid` (dies
+  when leader exits) — use the stored `claim["pgid"]`.
+- **PID/PGID reuse.** A recorded pgid can alias a recycled unrelated group.
+  Cmdline-marker check (the unique `token` / `/clu-phase <plan> <phase>`) before
+  `killpg`, mirroring `reap_orphan_pid`'s guard.
+- **Heartbeat in a separate session.** Verified the heartbeat shares the
+  worker's pgroup (CC Bash tool doesn't re-group; medium-high confidence from CC
+  issues, not docs), so `killpg(worker_pgid)` gets it. If that inference is ever
+  wrong, the token-scoped straggler sweep + #72's worker-side `kill -0` are the
+  backstops. Confidence isn't doc-certain → keep the straggler sweep.
+- **TTL false-trips.** Heartbeat is 120s; a sweep TTL below ~3× reaps a slow
+  phase. Use the existing derived threshold, never a new constant; require
+  stale-heartbeat AND dead-PID/unregistered, never status alone.
+- **Sweep racing the 30s `com.clu.tick`.** Terminalize under the `mutate` lock;
+  CAS no-op on already-terminal makes it idempotent.
+- **`ProcessLookupError` mid-escalation** = group already drained → treat as
+  success, not error.
 
 ## Done criteria
-- [ ] `clu unregister` (and `clu archive --force`) flips a `running` plan to a terminal status
-  and emits an audit event — no state file left at `running` after either command.
-- [ ] `clu archive` / `unregister` / `complete` / `force-complete` best-effort **reap** the
-  plan's live worker + heartbeat process group (verified by a test that spawns a fake
-  PGID-tagged sleeper and asserts it's gone post-command).
-- [ ] A registry-independent sweep (in `tick-all` and/or `clu doctor`) detects a
-  `status=running` + stale-heartbeat + unregistered state file, terminalizes it, and reaps any
-  orphan — covering the exact `fm-docs-sweep` shape. Default `--dry-run` or clearly logged.
-- [ ] `clu doctor` warns when the installed `clu-phase` skill is behind the bundled version
-  (catches the pre-#72 drift that caused this incident).
-- [ ] Tests: unregister-on-running terminalizes; archive reaps a tagged sleeper; sweep
-  terminalizes+reaps a synthetic zombie; sweep is a no-op on a live/registered plan; doctor
-  flags a stale installed skill.
-- [ ] Docs: `architecture.md` note that the registry-independent sweep is the backstop for the
-  "unregistered + running" window that tick-all can't reach (closes the gap named at architecture.md:229-236).
+- [ ] `clu unregister` on a `running` plan flips it to a terminal status, emits
+  `plan_abandoned`, and reaps its process group before removing the row — no
+  state file left at `running`. (Test: synthetic running plan + tagged sleeper.)
+- [ ] `clu complete` / `force-complete` best-effort reap the plan's worker +
+  heartbeat group (test: PGID-tagged sleeper gone post-command).
+- [ ] Registry-independent sweep terminalizes + reaps a synthetic `fm-docs-sweep`
+  zombie (running + null heartbeat + unregistered); no-op on a live/registered
+  plan and on an already-terminal plan.
+- [ ] `clu doctor` warns when an installed skill's SHA-256 differs from the
+  bundle; silent when in sync.
+- [ ] Tests for each of the above, all green; full suite passes (report count).
+- [ ] `docs/architecture.md` documents the sweep as the backstop for the
+  unregistered-while-running window.
 
 ## Parking lot
 (empty)
@@ -128,8 +169,8 @@ Three distinct, independently-real defects. Two symptoms observed live; root cau
 ### Appendix — raw incident evidence (host: HealthData, 2026-05-31)
 ```
 # orphans, 4h38m after plan done+unregistered+archived:
-25798  04:38:44  claude --print … /clu-phase penpot-cap-w1 capture session-e4dc40… …w1.state.json
-25938  04:38:43  claude --print … /clu-phase penpot-cap-w2 capture session-9ace41… …w2.state.json
+25798  04:38:44  claude --print … /clu-phase penpot-cap-w1 capture …w1.state.json
+25938  04:38:43  claude --print … /clu-phase penpot-cap-w2 capture …w2.state.json
 27425  04:38:25  zsh -c … while :; do clu heartbeat --plan penpot-cap-w1 …; sleep 120; done
 27594/28327      penpot-cap-w2 heartbeat wrapper + inner loop
 27761  04:38:20  penpot-cap-w4 heartbeat loop
@@ -139,5 +180,5 @@ Three distinct, independently-real defects. Two symptoms observed live; root cau
 fm-docs-sweep.state.json  status=running  token/heartbeat_at/updated_at/current_claim = null
   last event blocker_consumed 2026-05-23T23:54:50Z ; mtime May 23 19:54 ; not registered ; no worktree
 ```
-Related: **#31** (archive file-moving + `--drop-state`/`--force`, shipped) · **#72**
-(worker-PID-tied heartbeat, in repo, *not* in the installed skill at incident time).
+Related: **#31** (archive plan-move — note: did NOT add `archive --force`) ·
+**#72** (worker-PID-tied heartbeat, in repo + now installed on this host).

@@ -350,6 +350,98 @@ def reap_orphan_pid(pid: int, cmdline_match: str | None = None) -> ReapResult:
     return ReapResult(SIGNAL_TERM_THEN_KILL, True, False)
 
 
+def _pgroup_member_cmdlines(pgid: int) -> list[str]:
+    """Cmdlines of every live process currently in process group `pgid`.
+
+    Empty list on no members / `ps` failure. Used as the PID-reuse guard for
+    `reap_orphan_pgroup`: a recycled pgid won't carry our plan's marker.
+    """
+    try:
+        # `-eo` (GNU/UNIX style) is the repo's portable convention — works on
+        # both macOS (BSD ps) and Linux (procps); BSD-style `-ax` risks procps
+        # personality differences. Empty `=` headers suppress the title line.
+        result = subprocess.run(
+            ["ps", "-eo", "pgid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    cmdlines: list[str] = []
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        pg, cmd = parts
+        if pg.isdigit() and int(pg) == pgid:
+            cmdlines.append(cmd)
+    return cmdlines
+
+
+def reap_orphan_pgroup(pgid: int, cmdline_match: str | None = None) -> ReapResult:
+    """SIGTERM→SIGKILL an orphaned worker's whole process GROUP.
+
+    The clu worker is spawned `start_new_session=True`, so its PGID == its PID
+    and the backgrounded `clu heartbeat` subshell inherits that group. Reaping
+    the group takes worker + heartbeat together — unlike `reap_orphan_pid`,
+    which SIGTERMs only the worker PID and leaves the heartbeat reparented to
+    launchd, looping for hours (the #75 orphan). Reparenting changes the parent,
+    not the PGID, so `killpg` still reaches the heartbeat after the worker dies,
+    as long as any group member is alive.
+
+    Guards:
+      - `pgid <= 0` (0 == the *caller's own* group to killpg) or
+        `pgid == os.getpgid(0)` → no-op. Never signal the clu CLI / cron tick
+        that called us.
+      - PID-reuse: when `cmdline_match` is given, at least one live group member
+        must carry the marker before we signal. No members → "gone" (no-op);
+        members but no match → `cmdline_mismatch=True`, no signal.
+
+    Mirrors `reap_orphan_pid`'s escalation: SIGTERM, poll 5s, then SIGKILL.
+    Best-effort — `ProcessLookupError`/`PermissionError` resolve to a no-op
+    rather than raising, so a reap during cleanup never crashes the command.
+    """
+    try:
+        own = os.getpgid(0)
+    except OSError:
+        own = None
+    if pgid <= 0 or pgid == own:
+        return ReapResult(None, False, False)
+
+    if cmdline_match is not None:
+        members = _pgroup_member_cmdlines(pgid)
+        if not any(cmdline_match in cmd for cmd in members):
+            # members present but unmatched → reused/unrelated group (mismatch);
+            # no members → already gone. Either way we do not signal.
+            return ReapResult(None, False, bool(members))
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return ReapResult(None, False, False)
+    except PermissionError:
+        return ReapResult(None, False, False)
+
+    for _ in range(20):
+        time.sleep(0.25)
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return ReapResult(SIGNAL_TERM, False, False)
+
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # EPERM here (e.g. only-remaining member changed credentials between
+        # SIGTERM and now) must not crash a best-effort cleanup — honor the
+        # no-op-on-failure contract the first killpg already follows.
+        pass
+    return ReapResult(SIGNAL_TERM_THEN_KILL, True, False)
+
+
 def _now_utc() -> _dt.datetime:
     return _dt.datetime.now(_dt.UTC)
 
