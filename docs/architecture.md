@@ -106,8 +106,12 @@ debugging session that asks "why didn't this tick advance?" reduces to
    zombie heartbeat-keeper (issue #72) doesn't keep the lease looking
    fresh until full TTL — detection now happens within one tick instead
    of waiting 60 min. Probe via `state.claim_worker_alive(claim,
-   cmdline_match=...)`; on dead, emit event → release_claim_and_emit
-   (atomic release + coolant) → best-effort `reap_orphan_pid`. Best-
+   cmdline_match=...)` where the marker is the **plan slug** — present in
+   every dispatch template's worker cmdline AND the heartbeat cmdline, so
+   it doesn't false-negative on `/plan ...`-style templates the way the
+   old `/clu-phase <plan> <phase>` marker did (#75). On dead, emit event →
+   release_claim_and_emit (atomic release + coolant) → best-effort
+   `reap_orphan_pid`. Best-
    effort reap is last so a wedged `ps` can't crash the tick.
 3. **Stalled heartbeat.** If a live claim hasn't heartbeat within the
    threshold returned by `state.stalled_threshold_for_phase` —
@@ -234,6 +238,21 @@ the slug isn't yet registered — the "registered AND status" guard
 declines to absorb), and the inner `state.exists()` check skips re-
 creating. `registry.register` is idempotent; `queue.pop` then completes
 the sequence.
+
+This self-heal only works while the **queue head is still present** — it
+relies on the next tick re-entering through the pop path. It cannot reach
+a state file that is `running` *and* fully unregistered with no queue
+entry: `tick-all` walks the registry, so an unregistered slug is never
+visited, and the pop path never fires. That window — a plan unregistered
+(or finished) while `running`, the `fm-docs-sweep` zombie shape (#75) —
+is closed by the **registry-independent sweep**
+(`supervisor.sweep_zombie_states`). After its per-project rule pass,
+`tick-all` scans `.orchestrator/*.state.json` for unregistered files at
+`running` whose worker PID is gone (`state.is_zombie_state`), then
+terminalizes them (→ `halted` + `plan_abandoned`) and reaps the worker
+process group. `clu doctor` previews the same sweep dry-run. Residual
+gap: a project whose *every* plan is unregistered never appears in the
+registry, so its zombies surface only via `clu doctor --project <it>`.
 
 **Lock ordering.** When two locks are taken together, the order is
 always `queue → state` (and `registry` reads/writes are queue-lock-

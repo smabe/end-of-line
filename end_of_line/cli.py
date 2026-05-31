@@ -1861,6 +1861,28 @@ def cmd_unregister_one(args) -> int:
     except st.InvalidSlug as exc:
         return _die(ExitCode.INVALID_SLUG, str(exc))
     cfg = load_project_config(args.project)
+    state_path = cfg.state_path(args.plan)
+    if state_path.exists():
+        try:
+            with st.mutate(state_path) as data:
+                if data["status"] not in st.TERMINAL_STATUSES:
+                    # Unregistering a non-terminal plan would otherwise leave a
+                    # zombie state file (status=running, not in registry,
+                    # invisible to tick-all's registry walk). Reap the worker
+                    # group, release any claim, and terminalize so nothing is
+                    # left at running (#75).
+                    st.reap_claim(data)
+                    if data.get("current_claim"):
+                        st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
+                    st.terminalize(data, reason="unregister")
+        except (OSError, ValueError, st.SchemaVersionMismatch) as exc:
+            # A corrupt / stale-schema state file must NOT block registry
+            # cleanup — unregister is the operator's tool for broken plans.
+            # Best-effort terminalize; always fall through to remove the row.
+            print(
+                f"warning: could not terminalize {args.plan!r} before unregister: {exc}",
+                file=sys.stderr,
+            )
     removed = registry.unregister(cfg.project_root, args.plan)
     msg = "Unregistered" if removed else "Not in registry"
     print(f"{msg}: {cfg.project_root}  →  {args.plan}")
@@ -2439,9 +2461,62 @@ def cmd_doctor(args) -> int:
     _print_effort_health(cfg)
     _print_stuck_tool_health(cfg)
     _print_worker_idle_health(cfg)
+    _print_zombie_health(cfg)
+    _print_skill_drift_health()
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _print_skill_drift_health() -> None:
+    """Warn when an installed `~/.claude/skills/<name>/SKILL.md` differs from
+    the bundled copy (#75).
+
+    A stale installed skill is what made the pre-#72 heartbeat loop ship at the
+    incident — clu had no way to surface that the deployed copy was behind.
+    SHA-256 over raw bytes, not mtime: mtime false-positives on every reinstall.
+    Quiet when every installed skill matches; skills that aren't installed
+    aren't drift.
+    """
+    import hashlib
+    from importlib.resources import files
+
+    drifted: list[str] = []
+    for name in BUNDLED_SKILLS:
+        installed_path = Path.home() / ".claude" / "skills" / name / "SKILL.md"
+        if not installed_path.exists():
+            continue
+        try:
+            bundled = files("end_of_line").joinpath(f"skills/{name}/SKILL.md").read_bytes()
+            installed = installed_path.read_bytes()
+        except OSError:
+            continue
+        if hashlib.sha256(bundled).digest() != hashlib.sha256(installed).digest():
+            drifted.append(name)
+    if not drifted:
+        return
+    print(
+        "Installed skills differ from the bundle "
+        "(re-sync with `clu install-skill --only <name> --force`):"
+    )
+    for name in drifted:
+        print(f"  {name} — ~/.claude/skills/{name}/SKILL.md differs from the bundled copy")
+
+
+def _print_zombie_health(cfg: ProjectConfig) -> None:
+    """Dry-run report of registry-independent `status=running` zombies (#75).
+
+    Quiet when there are none — matches the other doctor health printers. The
+    automatic terminalize+reap happens in `clu tick-all`; doctor only previews
+    so the operator sees what would be swept without acting.
+    """
+    registered = {e.plan_slug for e in registry.entries_for_project(cfg.project_root)}
+    zombies = supervisor.sweep_zombie_states(cfg, registered, dry_run=True)
+    if not zombies:
+        return
+    print("Zombie state files (status=running, unregistered, worker gone):")
+    for z in zombies:
+        print(f"  {z.plan_slug} — would terminalize + reap (auto-swept by `clu tick-all`)")
 
 
 def _print_stuck_tool_health(
@@ -3512,13 +3587,18 @@ def cmd_tick_all(args) -> int:
     # worktree conflict scan), first-match-wins per ADR-0002.
     # Re-read registry.entries() — claim state mutated above is what the
     # busy gate needs to see.
-    seen: dict[Path, None] = {}
+    # Build the project set AND the per-project registered-slug map from one
+    # registry read — the zombie sweep below needs the slugs and there's no
+    # reason to re-read registry.json once per project.
+    slugs_by_project: dict[Path, set[str]] = {}
     for row in registry.entries():
         try:
-            seen.setdefault(Path(row.project_root).resolve(), None)
+            slugs_by_project.setdefault(Path(row.project_root).resolve(), set()).add(
+                row.plan_slug
+            )
         except OSError:
             continue
-    for project_root in sorted(seen):
+    for project_root in sorted(slugs_by_project):
         try:
             project_cfg = load_project_config(project_root)
             plans = cross_plan_rules.load_plans_for_project(project_root, project_cfg)
@@ -3526,6 +3606,16 @@ def cmd_tick_all(args) -> int:
             if result is not None:
                 for kind, body in result.notifies:
                     notify.notify(project_cfg.notify, kind, body)
+            # Registry-independent zombie sweep: terminalize + reap any
+            # unregistered state file stuck at status=running whose worker is
+            # gone — the backstop tick-all's registry walk can't reach (#75).
+            for z in supervisor.sweep_zombie_states(
+                project_cfg, slugs_by_project[project_root]
+            ):
+                print(
+                    f"zombie-sweep {z.plan_slug} @ {project_root}: terminalized"
+                    + (" + reaped worker group" if z.reaped else "")
+                )
         except Exception as exc:
             print(
                 f"tick-all post-loop @ {project_root}: {type(exc).__name__}: {exc}",
@@ -3953,9 +4043,15 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
         st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
         st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
         if pid:
-            reap = st.reap_orphan_pid(
-                pid,
-                cmdline_match=f"/clu-phase {data['plan_slug']} {phase}",
+            # Group reap (worker + heartbeat) with the slug marker — same
+            # mechanism as force-complete/unregister/sweep, so the operator's
+            # release-claim path doesn't leave an orphaned heartbeat (#75). The
+            # slug marker also matches non-clu-phase dispatch templates, where
+            # `/clu-phase <plan> <phase>` would be a silent no-op.
+            pgid = claim.get("pgid") or pid
+            reap = st.reap_orphan_pgroup(
+                pgid,
+                cmdline_match=data["plan_slug"],
             )
             st.append_event(
                 data,
@@ -4341,6 +4437,10 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 f"phase {args.phase!r} never started — pass `--really` to force-complete anyway",
             )
         if claim_on_phase:
+            # The worker died (that's why we're force-completing). Reap its
+            # process group before releasing so a lingering heartbeat loop
+            # can't orphan past the claim (#75); no-op if already gone.
+            st.reap_claim(data)
             st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
         st.append_event(
             data,

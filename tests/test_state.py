@@ -340,8 +340,8 @@ class TestEvents(unittest.TestCase):
 
 
 class TestClaimWorkerAlive(unittest.TestCase):
-    """Liveness probe used by the supervisor's dead-PID rule. Mirrors
-    `reap_orphan_pid`'s ESRCH/EPERM/cmdline-match contract.
+    """Liveness probe used by the supervisor's dead-PID rule:
+    ESRCH → dead, EPERM → alive, plus the cmdline-match guard.
     """
 
     def test_pid_none_returns_true(self) -> None:
@@ -358,7 +358,7 @@ class TestClaimWorkerAlive(unittest.TestCase):
 
     def test_live_pid_permission_error_treated_as_alive(self) -> None:
         # EPERM means the process exists but we lack signaling permission
-        # (cross-user / sandboxed). Treat as alive — mirrors reap_orphan_pid.
+        # (cross-user / sandboxed). Treat as alive — the process is there.
         with patch("end_of_line.state.os.kill", side_effect=PermissionError):
             self.assertTrue(st.claim_worker_alive({"pid": 1}))
 

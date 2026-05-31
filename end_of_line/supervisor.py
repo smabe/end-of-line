@@ -25,7 +25,7 @@ from typing import Literal
 
 from . import coolant, inbox, notify, state_blocker
 from . import state as st
-from .config import ProjectConfig
+from .config import ORCHESTRATOR_DIR, ProjectConfig
 from .plan_parser import parse_sessions_index
 
 
@@ -611,10 +611,13 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         script_override=config.coolant.script_dir,
                     )
                 if pid:
-                    reap = st.reap_orphan_pid(
-                        pid,
-                        cmdline_match=f"/clu-phase {data['plan_slug']} {phase_id}",
-                    )
+                    # Reap the whole process GROUP, not just the worker PID:
+                    # the backgrounded heartbeat loop is in the worker's pgroup
+                    # and would otherwise reparent to launchd and survive — the
+                    # #75 orphan. Robust to #72-skill-drift, unlike a single-PID
+                    # reap that relies on the worker-side `kill -0` self-clean.
+                    pgid = claim.get("pgid") or pid
+                    reap = st.reap_orphan_pgroup(pgid, cmdline_match=data["plan_slug"])
                     st.append_event(
                         data,
                         st.EVENT_PHASE_ORPHAN_REAPED,
@@ -631,15 +634,20 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             # tick-side half of the fix; the shell-side `kill -0 $WORKER_PID`
             # loop condition in /clu-phase SKILL.md ships in the same change
             # as the worker-side half.
-            cmdline_match = f"/clu-phase {data['plan_slug']} {phase_id}"
+            # Marker = the plan slug, present in EVERY dispatch template's worker
+            # cmdline. The old `/clu-phase <plan> <phase>` marker is absent from
+            # `/plan ...`-style templates (e.g. the incident host's), so it made
+            # claim_worker_alive falsely report a LIVE worker dead — releasing +
+            # "reaping" a healthy worker — and made the reap itself a no-op.
+            cmdline_match = data["plan_slug"]
             if pid and not st.claim_worker_alive(
                 claim,
                 cmdline_match=cmdline_match,
             ):
                 # Order matters: durable state first (event + release +
-                # coolant), best-effort reap last. If `reap_orphan_pid`
-                # raises (e.g. ps timeout), the claim is already released
-                # and the event is on disk — next tick won't re-fire.
+                # coolant), best-effort reap last. If the reap raises (e.g.
+                # ps timeout), the claim is already released and the event is
+                # on disk — next tick won't re-fire.
                 st.append_event(
                     data,
                     st.EVENT_PHASE_WORKER_DEAD,
@@ -652,7 +660,9 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                     coolant_script_override=config.coolant.script_dir,
                 )
                 try:
-                    st.reap_orphan_pid(pid, cmdline_match=cmdline_match)
+                    # Group reap (worker + heartbeat), see lease-expiry note above.
+                    pgid = claim.get("pgid") or pid
+                    st.reap_orphan_pgroup(pgid, cmdline_match=cmdline_match)
                 except Exception:
                     pass
                 return _attach(
@@ -815,3 +825,80 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             )
 
         return _attach(TickResult("idle", "all phases blocked or none dispatchable"))
+
+
+@dataclass
+class ZombieSweepResult:
+    """One state file the registry-independent sweep terminalized (or, in
+    dry-run, would terminalize). `reaped` is True when a worker process group
+    was actually signaled."""
+
+    plan_slug: str
+    reaped: bool
+    terminalized: bool
+
+
+def sweep_zombie_states(
+    cfg: ProjectConfig,
+    registered_slugs: set[str],
+    *,
+    dry_run: bool = False,
+) -> list[ZombieSweepResult]:
+    """Registry-independent reaper for `status=running` zombies.
+
+    Scans a project's `.orchestrator/*.state.json` for UNREGISTERED files stuck
+    at `running` whose worker is gone (`state.is_zombie_state`), then
+    terminalizes + reaps them. This is the backstop for the "unregistered +
+    running" window that `tick-all`'s registry walk can never reach (#75): the
+    documented crash-recovery self-heal (architecture.md "Crash recovery") only
+    fires while the queue head is still present, so a fully-unregistered zombie
+    like `fm-docs-sweep` would otherwise sit at `running` forever.
+
+    Registered slugs are skipped — tick-all / the supervisor own them, and a
+    registered plan may legitimately sit claimless between phases. Corrupt /
+    stale-schema files are skipped (operator's `clu doctor` surfaces those).
+    Idempotent: re-checks the zombie predicate under the lock so a concurrent
+    tick that just revived a plan isn't terminalized.
+
+    Scope: `tick-all` calls this once per project it visits, and it visits only
+    projects that appear in the registry. A project whose *every* plan is
+    unregistered is never visited, so its zombies are reachable only via
+    `clu doctor --project <that project>`. In practice a zombie shares a project
+    with live plans (the `fm-docs-sweep` incident did), so the auto-sweep covers
+    it; the all-unregistered-project case is the documented residual gap.
+    """
+    orch_dir = cfg.project_root / cfg.plan_dir / ORCHESTRATOR_DIR
+    results: list[ZombieSweepResult] = []
+    if not orch_dir.is_dir():
+        return results
+    suffix = ".state.json"
+    for path in sorted(orch_dir.glob(f"*{suffix}")):
+        slug = path.name[: -len(suffix)]
+        if slug in registered_slugs:
+            continue
+        try:
+            data = st.load(path)
+        except (OSError, ValueError, st.SchemaVersionMismatch):
+            continue
+        if not st.is_zombie_state(data):
+            continue
+        if dry_run:
+            results.append(ZombieSweepResult(slug, reaped=False, terminalized=False))
+            continue
+        # Re-load + re-check under the lock so a concurrent tick that just
+        # revived this plan isn't terminalized. Use `locked` (not `mutate`) and
+        # save only on the act path — `mutate` would re-write the unchanged file
+        # on the revived-no-op branch (needless atomic rewrite + mtime churn).
+        with st.locked(path):
+            live = st.load(path)
+            if not st.is_zombie_state(live):
+                continue
+            reap = st.reap_claim(live)
+            if live.get("current_claim"):
+                st.release_claim_and_emit(live, **cfg.coolant.release_kwargs())
+            st.terminalize(live, reason="zombie_sweep")
+            st.save_atomic(path, live)
+        results.append(
+            ZombieSweepResult(slug, reaped=bool(reap and reap.signaled), terminalized=True)
+        )
+    return results

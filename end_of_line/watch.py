@@ -137,6 +137,9 @@ _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
     ),
     st.EVENT_TASK_COMPLETED: lambda slug, e: f"{slug}: task {e.get('task', '?')} done",
     st.EVENT_PLAN_COMPLETED: lambda slug, e: f"{slug}: PLAN DONE",
+    st.EVENT_PLAN_ABANDONED: lambda slug, e: (
+        f"{slug}: ABANDONED" + (f" ({e.get('reason')})" if e.get("reason") else "")
+    ),
     st.EVENT_DISPATCH_FAILED: lambda slug, e: (
         f"{_phase_prefix(slug, e)}: dispatch failed — {_trunc(e.get('reason'))}"
     ),

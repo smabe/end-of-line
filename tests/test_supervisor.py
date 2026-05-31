@@ -231,13 +231,13 @@ class SupervisorTestCase(CluTestCase):
 
     def test_lease_expired_reaps_orphan_pid(self) -> None:
         self._claim_and_expire(pid=99999)
-        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
             mock_reap.return_value = st.ReapResult(
                 signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False
             )
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "lease_expired")
-        mock_reap.assert_called_once_with(99999, cmdline_match="/clu-phase test-plan a")
+        mock_reap.assert_called_once_with(99999, cmdline_match="test-plan")
         event_types = [e["type"] for e in self._read()["events"]]
         expired_idx = next(i for i, t in enumerate(event_types) if t == st.EVENT_LEASE_EXPIRED)
         reaped_idx = next(i for i, t in enumerate(event_types) if t == st.EVENT_PHASE_ORPHAN_REAPED)
@@ -245,7 +245,7 @@ class SupervisorTestCase(CluTestCase):
 
     def test_lease_expired_no_pid_skips_reap(self) -> None:
         self._claim_and_expire(pid=None)
-        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "lease_expired")
         mock_reap.assert_not_called()
@@ -255,7 +255,7 @@ class SupervisorTestCase(CluTestCase):
 
     def test_orphan_reaped_event_carries_signal(self) -> None:
         self._claim_and_expire(pid=88888)
-        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
             mock_reap.return_value = st.ReapResult(
                 signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False
             )
@@ -301,7 +301,7 @@ class SupervisorTestCase(CluTestCase):
                 return_value=False,
             ) as mock_alive,
             mock.patch(
-                "end_of_line.state.reap_orphan_pid",
+                "end_of_line.state.reap_orphan_pgroup",
                 return_value=reap_return,
             ) as mock_reap,
             mock.patch(
@@ -319,11 +319,11 @@ class SupervisorTestCase(CluTestCase):
         mock_alive.assert_called_once()
         self.assertEqual(
             mock_alive.call_args.kwargs["cmdline_match"],
-            "/clu-phase test-plan a",
+            "test-plan",
         )
         mock_reap.assert_called_once_with(
             original_claim["pid"],
-            cmdline_match="/clu-phase test-plan a",
+            cmdline_match="test-plan",
         )
         emit.assert_called_once()
         self.assertEqual(emit.call_args.kwargs["session_id"], original_token)
@@ -361,6 +361,36 @@ class SupervisorTestCase(CluTestCase):
         self.assertEqual(result.action, "idle")
         self.assertIsNotNone(self._read()["current_claim"])
 
+    def test_live_plan_style_worker_not_falsely_reaped(self) -> None:
+        # Regression (#75): the incident host's dispatch template is
+        # `/plan {plan_slug} ...`, which lacks the `/clu-phase` substring. With
+        # the old `/clu-phase <plan> <phase>` marker, claim_worker_alive saw a
+        # mismatch and falsely reported a LIVE worker dead — releasing + reaping
+        # a healthy worker. The slug marker IS present in this cmdline, so the
+        # worker is correctly seen alive and the dead-PID rule does not fire.
+        import subprocess
+        import sys
+        import time
+
+        worker = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", "/plan", "test-plan", "resume"],
+        )
+        time.sleep(0.3)
+        try:
+            self._claim_with_pid(pid=worker.pid, lease_expires="2099-01-01T00:00:00Z")
+            result = tick(self.state_path, self.cfg)
+            self.assertNotEqual(
+                result.action,
+                "worker_dead",
+                "a live /plan-style worker must not be declared dead",
+            )
+            self.assertIsNotNone(
+                self._read()["current_claim"], "the live claim must survive"
+            )
+        finally:
+            worker.terminate()
+            worker.wait()
+
     def test_dead_pid_reap_exception_does_not_block_release(self) -> None:
         # Ordering invariant: durable state (event + release) must complete
         # even if best-effort reap raises (e.g. `ps` timeout, OSError). If
@@ -373,7 +403,7 @@ class SupervisorTestCase(CluTestCase):
                 return_value=False,
             ),
             mock.patch(
-                "end_of_line.state.reap_orphan_pid",
+                "end_of_line.state.reap_orphan_pgroup",
                 side_effect=OSError("simulated ps failure"),
             ),
         ):
@@ -404,7 +434,7 @@ class SupervisorTestCase(CluTestCase):
                 return_value=False,
             ),
             mock.patch(
-                "end_of_line.state.reap_orphan_pid",
+                "end_of_line.state.reap_orphan_pgroup",
                 return_value=reap_return,
             ),
         ):
@@ -432,7 +462,7 @@ class SupervisorTestCase(CluTestCase):
         )
         with (
             mock.patch(
-                "end_of_line.state.reap_orphan_pid",
+                "end_of_line.state.reap_orphan_pgroup",
                 return_value=reap_return,
             ),
             mock.patch("end_of_line.supervisor.coolant.emit_stop") as emit,

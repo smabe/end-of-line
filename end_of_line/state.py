@@ -141,6 +141,7 @@ EVENT_PHASE_MAX_ATTEMPTS = "phase_max_attempts"
 EVENT_TASK_SPAWNED = "task_spawned"
 EVENT_TASK_COMPLETED = "task_completed"
 EVENT_PLAN_COMPLETED = "plan_completed"
+EVENT_PLAN_ABANDONED = "plan_abandoned"
 EVENT_DISPATCH_FAILED = "dispatch_failed"
 EVENT_SYSTEMIC_FAILURE = "systemic_failure"
 EVENT_PHASE_STALLED = "phase_stalled"
@@ -274,9 +275,9 @@ class ReapResult:
 def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
     """Liveness probe for the supervisor's `_detect_dead_pid` rule.
 
-    Mirrors `reap_orphan_pid`'s ESRCH/EPERM/cmdline-match contract. Returns
-    True when the PID is reachable AND (if `cmdline_match` is given) the
-    process cmdline contains the expected substring; False otherwise.
+    Returns True when the PID is reachable AND (if `cmdline_match` is given) the
+    process cmdline contains the expected substring; False otherwise. ESRCH →
+    dead (False); EPERM → exists-but-unsignalable, treated as alive (True).
 
     PID=None → True. The Popen-to-_stamp_pid race window leaves a brief
     period where current_claim is set but pid is not yet stamped — treat
@@ -291,7 +292,7 @@ def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
         return False
     except PermissionError:
         # EPERM means the process exists but we can't signal it (cross-user
-        # or sandboxed). Treat as alive — matches reap_orphan_pid's behavior.
+        # or sandboxed). Treat as alive — EPERM means the process exists.
         return True
     if cmdline_match is None:
         return True
@@ -312,40 +313,92 @@ def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
     return cmdline_match in result.stdout
 
 
-def reap_orphan_pid(pid: int, cmdline_match: str | None = None) -> ReapResult:
-    """Send SIGTERM to an orphaned worker PID, escalating to SIGKILL after 5s.
+def _pgroup_member_cmdlines(pgid: int) -> list[str]:
+    """Cmdlines of every live process currently in process group `pgid`.
 
-    PID-reuse guard: when cmdline_match is given, the process cmdline is
-    checked via `ps` before signaling. On mismatch returns without killing.
-    Do NOT use os.waitpid — we never forked this PID; WNOHANG → ECHILD.
+    Empty list on no members / `ps` failure. Used as the PID-reuse guard for
+    `reap_orphan_pgroup`: a recycled pgid won't carry our plan's marker.
     """
-    if cmdline_match is not None:
+    try:
+        # `-eo` (GNU/UNIX style) is the repo's portable convention — works on
+        # both macOS (BSD ps) and Linux (procps); BSD-style `-ax` risks procps
+        # personality differences. Empty `=` headers suppress the title line.
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-eo", "pgid=,command="],
             capture_output=True,
             text=True,
             timeout=2,
         )
-        if result.returncode != 0:
-            return ReapResult(None, False, False)
-        if cmdline_match not in result.stdout:
-            return ReapResult(None, False, True)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    cmdlines: list[str] = []
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        pg, cmd = parts
+        if pg.isdigit() and int(pg) == pgid:
+            cmdlines.append(cmd)
+    return cmdlines
+
+
+def reap_orphan_pgroup(pgid: int, cmdline_match: str | None = None) -> ReapResult:
+    """SIGTERM→SIGKILL an orphaned worker's whole process GROUP.
+
+    The clu worker is spawned `start_new_session=True`, so its PGID == its PID
+    and the backgrounded `clu heartbeat` subshell inherits that group. Reaping
+    the group takes worker + heartbeat together — a single-PID SIGTERM would
+    kill only the worker and leave the heartbeat reparented to launchd, looping
+    for hours (the #75 orphan). Reparenting changes the parent,
+    not the PGID, so `killpg` still reaches the heartbeat after the worker dies,
+    as long as any group member is alive.
+
+    Guards:
+      - `pgid <= 0` (0 == the *caller's own* group to killpg) or
+        `pgid == os.getpgid(0)` → no-op. Never signal the clu CLI / cron tick
+        that called us.
+      - PID-reuse: when `cmdline_match` is given, at least one live group member
+        must carry the marker before we signal. No members → "gone" (no-op);
+        members but no match → `cmdline_mismatch=True`, no signal.
+
+    Escalation: SIGTERM, poll 5s, then SIGKILL. Best-effort —
+    `ProcessLookupError`/`PermissionError` resolve to a no-op rather than
+    raising, so a reap during cleanup never crashes the command.
+    """
+    try:
+        own = os.getpgid(0)
+    except OSError:
+        own = None
+    if pgid <= 0 or pgid == own:
+        return ReapResult(None, False, False)
+
+    if cmdline_match is not None:
+        members = _pgroup_member_cmdlines(pgid)
+        if not any(cmdline_match in cmd for cmd in members):
+            # members present but unmatched → reused/unrelated group (mismatch);
+            # no members → already gone. Either way we do not signal.
+            return ReapResult(None, False, bool(members))
 
     try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
         return ReapResult(None, False, False)
 
     for _ in range(20):
         time.sleep(0.25)
         try:
-            os.kill(pid, 0)
+            os.killpg(pgid, 0)
         except ProcessLookupError:
             return ReapResult(SIGNAL_TERM, False, False)
 
     try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # EPERM here (e.g. only-remaining member changed credentials between
+        # SIGTERM and now) must not crash a best-effort cleanup — honor the
+        # no-op-on-failure contract the first killpg already follows.
         pass
     return ReapResult(SIGNAL_TERM_THEN_KILL, True, False)
 
@@ -750,6 +803,80 @@ def release_claim_and_emit(
         agent_type=coolant.AGENT_TYPE,
         script_override=coolant_script_override,
     )
+
+
+def terminalize(
+    data: dict,
+    *,
+    status: str = STATUS_HALTED,
+    event: str = EVENT_PLAN_ABANDONED,
+    **event_fields: Any,
+) -> bool:
+    """Flip a non-terminal plan to a terminal status + emit an audit event.
+
+    Compare-and-set: returns False (no status change, no event) when the plan
+    is already terminal, so a cron tick racing a manual cleanup can't
+    double-terminalize. Caller holds the `mutate` lock. Returns True when it
+    actually transitioned.
+
+    Closes the #75 zombie: `unregister` / the registry-independent sweep call
+    this so no state file is ever left at `running` after the registry row goes.
+    """
+    if data["status"] in TERMINAL_STATUSES:
+        return False
+    data["status"] = status
+    append_event(data, event, **event_fields)
+    return True
+
+
+def reap_claim(data: dict) -> ReapResult | None:
+    """Best-effort reap of the active claim's worker process GROUP.
+
+    Returns None when there's no claim or no recorded pgid/pid. Falls back to
+    `pid` for pre-#75 state files (pid == pgid: the worker is a session leader).
+    Uses the plan slug as the PID-reuse marker — see the inline note below for
+    why the slug, not `/clu-phase <plan> <phase>`.
+    """
+    claim = data.get("current_claim")
+    if not claim:
+        return None
+    pgid = claim.get("pgid") or claim.get("pid")
+    if not pgid:
+        return None
+    # Marker = the plan slug, NOT `/clu-phase <plan> <phase>`. The slug is the
+    # only token present in BOTH the worker cmdline (every dispatch template
+    # names the slug) AND the heartbeat cmdline (`clu heartbeat --plan <slug>`),
+    # so it matches whichever group member survives — critically the heartbeat,
+    # after the worker dies. pgid-scoping makes a slug-substring collision with
+    # an unrelated reused group a non-issue. No slug → no PID-reuse guard → refuse.
+    slug = data.get("plan_slug")
+    if not slug:
+        return None
+    return reap_orphan_pgroup(pgid, cmdline_match=slug)
+
+
+def is_zombie_state(data: dict) -> bool:
+    """A registry-independent zombie: `status=running` but nothing will ever
+    advance it. Callers restrict this to UNREGISTERED state files — a registered
+    running plan is owned by tick-all / the supervisor (which may legitimately
+    sit claimless between phases).
+
+    Two shapes, both from #75:
+      - claimless: running + no `current_claim` (the `fm-docs-sweep` zombie — it
+        never left `running` and has no worker).
+      - dead-claim: running + a claim whose worker PID is gone (an orphaned
+        worker that died unclean).
+
+    A running plan with a LIVE worker is NOT a zombie — the OS PID probe
+    (`claim_worker_alive`, authoritative over heartbeat TTL) is what gates this,
+    so a merely-slow worker is never reaped.
+    """
+    if data.get("status") != STATUS_RUNNING:
+        return False
+    claim = data.get("current_claim")
+    if not claim:
+        return True
+    return not claim_worker_alive(claim, cmdline_match=data.get("plan_slug"))
 
 
 def stamp_attestation(data: dict, kind: str, commit_sha: str) -> None:

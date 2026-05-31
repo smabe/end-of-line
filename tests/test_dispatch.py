@@ -278,6 +278,11 @@ class DispatchTestCase(CluTestCase):
         self.assertIsNotNone(claim)
         self.assertIn("pid", claim)
         self.assertIn("log_path", claim)
+        # The worker is spawned start_new_session=True, so it leads its own
+        # process group (pgid == pid). pgid is recorded so reapers can killpg
+        # the whole group (worker + heartbeat loop) — #75.
+        self.assertIn("pgid", claim)
+        self.assertEqual(claim["pgid"], claim["pid"])
 
     def test_healthy_spawn_emits_coolant_start(self) -> None:
         """A worker that survives the fast-fail window emits agent-start."""

@@ -636,6 +636,10 @@ def _stamp_pid(state_file: Path, result: TickResult, pid: int, log_path: Path) -
             claim = data.get("current_claim") or {}
             if claim.get("claimed_by") == result.token:
                 claim["pid"] = pid
+                # Worker spawned start_new_session=True ⇒ it leads its own
+                # process group, pgid == pid. Record it so cleanup reapers can
+                # killpg the whole group (worker + heartbeat loop) — #75.
+                claim["pgid"] = pid
                 claim["log_path"] = str(log_path)
                 data["current_claim"] = claim
     except _DISPATCH_FALLBACK_ERRORS as exc:
