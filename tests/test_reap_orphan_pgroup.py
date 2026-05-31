@@ -103,6 +103,20 @@ class TestReapOrphanPgroup(unittest.TestCase):
         finally:
             self._cleanup(leader)
 
+    def test_cmdline_match_prefix_collision_signals_nothing(self):
+        # #76: a group whose only marker is `w1-foo` must NOT be reaped when we
+        # search for slug `w1` — the hyphen is a token boundary, not a match.
+        leader = self._spawn_group(marker="w1-foo")
+        try:
+            pgid = os.getpgid(leader.pid)
+            result = reap_orphan_pgroup(pgid, cmdline_match="w1")
+            time.sleep(0.4)
+            self.assertIsNone(leader.poll(), "group should survive a prefix collision")
+            self.assertTrue(result.cmdline_mismatch)
+            self.assertIsNone(result.signaled)
+        finally:
+            self._cleanup(leader)
+
     def test_cmdline_match_reaps(self):
         marker = "REAP_PG_MARKER_12345"
         leader = self._spawn_group(marker=marker)

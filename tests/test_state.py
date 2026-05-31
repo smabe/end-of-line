@@ -408,6 +408,47 @@ class TestClaimWorkerAlive(unittest.TestCase):
                 )
             )
 
+    def _alive_with_cmdline(self, stdout: str, marker: str) -> bool:
+        """Run claim_worker_alive against a faked `ps` cmdline (#76)."""
+        from subprocess import CompletedProcess
+
+        with (
+            patch("end_of_line.state.os.kill", return_value=None),
+            patch(
+                "end_of_line.state.subprocess.run",
+                return_value=CompletedProcess(
+                    args=[], returncode=0, stdout=stdout, stderr=""
+                ),
+            ),
+        ):
+            return st.claim_worker_alive({"pid": 1}, cmdline_match=marker)
+
+    def test_cmdline_match_prefix_collision_returns_false(self) -> None:
+        # #76: slug `w1` died; a recycled PID now runs plan `w1-foo`'s worker.
+        # The hyphen must NOT count as a token boundary that lets `w1` match.
+        self.assertFalse(
+            self._alive_with_cmdline("claude /clu-phase w1-foo a", "w1")
+        )
+
+    def test_cmdline_match_underscore_collision_returns_false(self) -> None:
+        # `_` is in the slug charset too — `w1` must not match `w1_foo`.
+        self.assertFalse(
+            self._alive_with_cmdline("claude /clu-phase w1_foo a", "w1")
+        )
+
+    def test_cmdline_match_equals_separator_returns_true(self) -> None:
+        # Operator templates may emit `--plan=<slug>`; `=` is a valid boundary,
+        # so the whole-token match must still fire.
+        self.assertTrue(
+            self._alive_with_cmdline("clu heartbeat --plan=w1 --phase a", "w1")
+        )
+
+    def test_cmdline_match_exact_token_returns_true(self) -> None:
+        # The slug as its own whitespace-bounded token is the common case.
+        self.assertTrue(
+            self._alive_with_cmdline("clu heartbeat --plan w1 --phase a", "w1")
+        )
+
 
 class AppendCpuSampleTestCase(unittest.TestCase):
     def _claim(self) -> dict:
