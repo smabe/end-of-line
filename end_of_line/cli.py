@@ -1861,6 +1861,28 @@ def cmd_unregister_one(args) -> int:
     except st.InvalidSlug as exc:
         return _die(ExitCode.INVALID_SLUG, str(exc))
     cfg = load_project_config(args.project)
+    state_path = cfg.state_path(args.plan)
+    if state_path.exists():
+        try:
+            with st.mutate(state_path) as data:
+                if data["status"] not in st.TERMINAL_STATUSES:
+                    # Unregistering a non-terminal plan would otherwise leave a
+                    # zombie state file (status=running, not in registry,
+                    # invisible to tick-all's registry walk). Reap the worker
+                    # group, release any claim, and terminalize so nothing is
+                    # left at running (#75).
+                    st.reap_claim(data)
+                    if data.get("current_claim"):
+                        st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
+                    st.terminalize(data, reason="unregister")
+        except (OSError, ValueError, st.SchemaVersionMismatch) as exc:
+            # A corrupt / stale-schema state file must NOT block registry
+            # cleanup — unregister is the operator's tool for broken plans.
+            # Best-effort terminalize; always fall through to remove the row.
+            print(
+                f"warning: could not terminalize {args.plan!r} before unregister: {exc}",
+                file=sys.stderr,
+            )
     removed = registry.unregister(cfg.project_root, args.plan)
     msg = "Unregistered" if removed else "Not in registry"
     print(f"{msg}: {cfg.project_root}  →  {args.plan}")
@@ -4341,6 +4363,10 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 f"phase {args.phase!r} never started — pass `--really` to force-complete anyway",
             )
         if claim_on_phase:
+            # The worker died (that's why we're force-completing). Reap its
+            # process group before releasing so a lingering heartbeat loop
+            # can't orphan past the claim (#75); no-op if already gone.
+            st.reap_claim(data)
             st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
         st.append_event(
             data,

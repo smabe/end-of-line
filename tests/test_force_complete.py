@@ -11,6 +11,11 @@ fires normally on the next tick.
 from __future__ import annotations
 
 import io
+import os
+import subprocess
+import sys
+import threading
+import time
 import unittest
 from contextlib import redirect_stderr
 
@@ -37,6 +42,36 @@ class ForceCompleteTestCase(GitProjectTestCase):
         rc = main(self._argv("force-complete", "--phase", "a", "--commit", self.sha))
         self.assertEqual(rc, ExitCode.OK)
         self.assertIsNone(self._read()["current_claim"])
+
+    def test_force_complete_reaps_worker_group(self) -> None:
+        # Worker died after writing code; its process group (worker + heartbeat
+        # loop stand-in) must be reaped so it can't orphan past the claim (#75).
+        self._claim("a")
+        code = "import subprocess, time; subprocess.Popen(['sleep', '30']); time.sleep(30)"
+        leader = subprocess.Popen(
+            [sys.executable, "-c", code, "/clu-phase", "test-plan", "a"],
+            start_new_session=True,
+        )
+        time.sleep(0.6)
+        try:
+            with st.mutate(self.state_path) as data:
+                data["current_claim"]["pgid"] = leader.pid
+            waiter = threading.Thread(target=leader.wait, daemon=True)
+            waiter.start()
+            rc = main(self._argv("force-complete", "--phase", "a", "--commit", self.sha))
+            waiter.join(timeout=10)
+            self.assertEqual(rc, ExitCode.OK)
+            time.sleep(0.6)
+            alive = subprocess.run(
+                ["pgrep", "-g", str(leader.pid)], capture_output=True
+            ).returncode == 0
+            self.assertFalse(alive, "worker group should be reaped on force-complete")
+        finally:
+            try:
+                os.killpg(leader.pid, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
+            leader.wait()
 
     def test_force_complete_appends_operator_force_event(self) -> None:
         self._claim("a")

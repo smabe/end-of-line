@@ -141,6 +141,7 @@ EVENT_PHASE_MAX_ATTEMPTS = "phase_max_attempts"
 EVENT_TASK_SPAWNED = "task_spawned"
 EVENT_TASK_COMPLETED = "task_completed"
 EVENT_PLAN_COMPLETED = "plan_completed"
+EVENT_PLAN_ABANDONED = "plan_abandoned"
 EVENT_DISPATCH_FAILED = "dispatch_failed"
 EVENT_SYSTEMIC_FAILURE = "systemic_failure"
 EVENT_PHASE_STALLED = "phase_stalled"
@@ -842,6 +843,53 @@ def release_claim_and_emit(
         agent_type=coolant.AGENT_TYPE,
         script_override=coolant_script_override,
     )
+
+
+def terminalize(
+    data: dict,
+    *,
+    status: str = STATUS_HALTED,
+    event: str = EVENT_PLAN_ABANDONED,
+    **event_fields: Any,
+) -> bool:
+    """Flip a non-terminal plan to a terminal status + emit an audit event.
+
+    Compare-and-set: returns False (no status change, no event) when the plan
+    is already terminal, so a cron tick racing a manual cleanup can't
+    double-terminalize. Caller holds the `mutate` lock. Returns True when it
+    actually transitioned.
+
+    Closes the #75 zombie: `unregister` / the registry-independent sweep call
+    this so no state file is ever left at `running` after the registry row goes.
+    """
+    if data["status"] in TERMINAL_STATUSES:
+        return False
+    data["status"] = status
+    append_event(data, event, **event_fields)
+    return True
+
+
+def reap_claim(data: dict) -> ReapResult | None:
+    """Best-effort reap of the active claim's worker process GROUP.
+
+    Returns None when there's no claim or no recorded pgid/pid. Falls back to
+    `pid` for pre-#75 state files (pid == pgid: the worker is a session leader).
+    Uses the canonical `/clu-phase <plan> <phase>` cmdline marker as the
+    PID-reuse guard, matching the supervisor's reapers.
+    """
+    claim = data.get("current_claim")
+    if not claim:
+        return None
+    pgid = claim.get("pgid") or claim.get("pid")
+    if not pgid:
+        return None
+    phase_id = claim.get("phase_id")
+    if not phase_id:
+        # No phase_id → no cmdline marker → no PID-reuse guard. Refuse rather
+        # than risk killpg-ing a recycled, unrelated process group.
+        return None
+    marker = f"/clu-phase {data['plan_slug']} {phase_id}"
+    return reap_orphan_pgroup(pgid, cmdline_match=marker)
 
 
 def stamp_attestation(data: dict, kind: str, commit_sha: str) -> None:

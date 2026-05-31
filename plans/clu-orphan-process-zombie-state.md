@@ -75,12 +75,12 @@ the installed-skill drift that caused the live incident. Tracks
 - `end_of_line/state.py` — new `reap_plan_processes(claim, ...)` (or
   `reap_orphan_pgroup(pgid, cmdline_match)`): `os.killpg(pgid, SIGTERM)` →
   poll → `SIGKILL`, guarded `pgid > 0 and pgid != os.getpgid(0)`, cmdline-marker
-  check before signaling (reuse the `ps -p` pattern from `reap_orphan_pid`
-  `state.py:315-350`), `ProcessLookupError`→success / `PermissionError`→surface.
-  Plus a token-scoped straggler sweep for any `clu heartbeat … <token>` loop —
-  **backstop only** (verification shows the heartbeat shares the worker's pgroup,
-  so `killpg` already gets it; the sweep covers the medium-confidence inference
-  + any reparent-lingering edge). Unique token → no over-match.
+  check before signaling, `ProcessLookupError`/`PermissionError`→no-op.
+  **Token-scoped straggler sweep dropped** (operator decision): `killpg(pgid)`
+  reaches the heartbeat in every constructible case — verified shared-group, and
+  the worker-dead case (reparenting changes parent, not PGID, so the orphan
+  stays in the group). #72's worker-side `kill -0` backstops the only residual
+  gap. See Parking lot.
 - `end_of_line/dispatch.py` — `_stamp_pid` (`:632-642`): also record
   `claim["pgid"] = proc.pid` with a one-line comment citing the
   `start_new_session` pid==pgid invariant (cheap, removes the coupling to that
@@ -162,7 +162,12 @@ the installed-skill drift that caused the live incident. Tracks
   unregistered-while-running window.
 
 ## Parking lot
-(empty)
+- **Token-scoped straggler heartbeat sweep** — dropped from Phase 1 as
+  redundant: `killpg(claim["pgid"])` reaches the heartbeat in all constructible
+  cases (shared group; and after worker death the orphan keeps the PGID), and
+  #72's worker-side `kill -0` is the residual backstop. Add it only if a
+  real-world orphan is ever observed surviving `killpg` (would mean Claude
+  Code's Bash tool re-groups its commands after all).
 
 ---
 
