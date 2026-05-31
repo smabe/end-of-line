@@ -26,10 +26,16 @@ from typing import Any
 
 from . import coolant
 
+# Inner char-class body for a slug token — the single source of the slug
+# alphabet. Composed into `SLUG_PATTERN` below and into the cmdline token
+# boundary in `_cmdline_marker_present`, so the two never drift (drift here is
+# a security invariant: path traversal + unmatched inbound replies + the #76
+# substring-collision guard). The leading `[a-z0-9]` first-char rule is
+# deliberately narrower (no leading `_`/`-`) and stays separate.
+_SLUG_CHARS = r"a-z0-9_-"
 # Fragment (no anchors) so other modules can compose it into larger patterns
-# without redefining the character class — drift here is a security invariant
-# (path traversal + unmatched inbound replies).
-SLUG_PATTERN = r"[a-z0-9][a-z0-9_-]{0,63}"
+# without redefining the character class.
+SLUG_PATTERN = rf"[a-z0-9][{_SLUG_CHARS}]{{0,63}}"
 _SLUG_RE = re.compile(rf"^{SLUG_PATTERN}$")
 
 
@@ -272,12 +278,34 @@ class ReapResult:
     cmdline_mismatch: bool
 
 
+# A slug token in a cmdline must be bounded by non-slug chars — not matched as
+# a bare substring (#76). A bare `marker in cmdline` false-matches slug prefixes
+# (`w1` inside `w1-foo`) and incidental substrings (log paths). `\b` is wrong
+# here: Python `\w` excludes `-` but includes `_`, so `\bw1\b` would match
+# `w1-foo` and miss `w1_foo`. Anchor on the slug alphabet (`_SLUG_CHARS`,
+# shared with `SLUG_PATTERN`) instead.
+_SLUG_CHAR = rf"[{_SLUG_CHARS}]"
+
+
+def _cmdline_marker_present(cmdline: str, marker: str) -> bool:
+    """True when `marker` appears in `cmdline` as a whole slug-delimited token.
+
+    The marker is bounded by any non-slug char (whitespace, `=`, `/`, quotes)
+    or a string edge — so `--plan w1`, `--plan=w1`, and `/clu-phase w1 a` all
+    match `w1`, while `w1-foo` / `w1_foo` do not. Multi-token markers
+    (`/clu-phase foo bar`) are bounded only at their two ends.
+    """
+    pattern = rf"(?<!{_SLUG_CHAR}){re.escape(marker)}(?!{_SLUG_CHAR})"
+    return re.search(pattern, cmdline) is not None
+
+
 def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
     """Liveness probe for the supervisor's `_detect_dead_pid` rule.
 
     Returns True when the PID is reachable AND (if `cmdline_match` is given) the
-    process cmdline contains the expected substring; False otherwise. ESRCH →
-    dead (False); EPERM → exists-but-unsignalable, treated as alive (True).
+    process cmdline carries the expected marker as a whole slug-delimited token
+    (see `_cmdline_marker_present`); False otherwise. ESRCH → dead (False);
+    EPERM → exists-but-unsignalable, treated as alive (True).
 
     PID=None → True. The Popen-to-_stamp_pid race window leaves a brief
     period where current_claim is set but pid is not yet stamped — treat
@@ -310,7 +338,7 @@ def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
         return True
     if result.returncode != 0:
         return False
-    return cmdline_match in result.stdout
+    return _cmdline_marker_present(result.stdout, cmdline_match)
 
 
 def _pgroup_member_cmdlines(pgid: int) -> list[str]:
@@ -376,7 +404,7 @@ def reap_orphan_pgroup(pgid: int, cmdline_match: str | None = None) -> ReapResul
 
     if cmdline_match is not None:
         members = _pgroup_member_cmdlines(pgid)
-        if not any(cmdline_match in cmd for cmd in members):
+        if not any(_cmdline_marker_present(cmd, cmdline_match) for cmd in members):
             # members present but unmatched → reused/unrelated group (mismatch);
             # no members → already gone. Either way we do not signal.
             return ReapResult(None, False, bool(members))
@@ -847,8 +875,9 @@ def reap_claim(data: dict) -> ReapResult | None:
     # only token present in BOTH the worker cmdline (every dispatch template
     # names the slug) AND the heartbeat cmdline (`clu heartbeat --plan <slug>`),
     # so it matches whichever group member survives — critically the heartbeat,
-    # after the worker dies. pgid-scoping makes a slug-substring collision with
-    # an unrelated reused group a non-issue. No slug → no PID-reuse guard → refuse.
+    # after the worker dies. The token-anchored match (`_cmdline_marker_present`)
+    # plus pgid-scoping makes a slug collision with an unrelated reused group a
+    # non-issue. No slug → no PID-reuse guard → refuse.
     slug = data.get("plan_slug")
     if not slug:
         return None
