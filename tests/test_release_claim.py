@@ -280,7 +280,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
             escalated_kill=False,
             cmdline_mismatch=False,
         )
-        with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result) as mock:
+        with patch("end_of_line.state.reap_orphan_pgroup", return_value=fake_result) as mock:
             rc = main(self._argv("release-claim", "--force"))
         self.assertEqual(rc, 0)
         mock.assert_called_once()
@@ -292,7 +292,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
         from unittest.mock import patch
 
         self._write(lambda d: _stamp_claim(d, heartbeat_age_seconds=30))
-        with patch("end_of_line.state.reap_orphan_pid") as mock:
+        with patch("end_of_line.state.reap_orphan_pgroup") as mock:
             rc = main(self._argv("release-claim", "--force"))
         self.assertEqual(rc, 0)
         mock.assert_not_called()
@@ -313,7 +313,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
             escalated_kill=False,
             cmdline_mismatch=False,
         )
-        with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
+        with patch("end_of_line.state.reap_orphan_pgroup", return_value=fake_result):
             main(self._argv("release-claim", "--force"))
         events = self._read()["events"]
         types = [e["type"] for e in events]
@@ -337,7 +337,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
             escalated_kill=True,
             cmdline_mismatch=False,
         )
-        with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
+        with patch("end_of_line.state.reap_orphan_pgroup", return_value=fake_result):
             main(self._argv("release-claim", "--force"))
         evt = self._orphan_reaped_events()[0]
         self.assertEqual(evt["signaled"], "SIGTERM+SIGKILL")
@@ -360,7 +360,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
             escalated_kill=False,
             cmdline_mismatch=True,
         )
-        with patch("end_of_line.state.reap_orphan_pid", return_value=fake_result):
+        with patch("end_of_line.state.reap_orphan_pgroup", return_value=fake_result):
             main(self._argv("release-claim", "--force"))
         evt = self._orphan_reaped_events()[0]
         self.assertTrue(evt["cmdline_mismatch"])

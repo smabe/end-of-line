@@ -3,10 +3,10 @@
 TDD: written before the implementation. They should fail until
 `reap_orphan_pgroup` lands in `state.py`.
 
-Why a group reaper distinct from `reap_orphan_pid`: the clu worker is spawned
-with `start_new_session=True`, so its PGID == its PID and the backgrounded
-`clu heartbeat` subshell inherits that group. `reap_orphan_pid` SIGTERMs only
-the worker PID — the heartbeat then reparents to launchd and loops for hours
+Why reap the whole GROUP: the clu worker is spawned with
+`start_new_session=True`, so its PGID == its PID and the backgrounded
+`clu heartbeat` subshell inherits that group. A single-PID SIGTERM kills only
+the worker — the heartbeat then reparents to launchd and loops for hours
 (the #75 orphan). `os.killpg` takes the whole group at once.
 """
 

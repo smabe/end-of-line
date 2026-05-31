@@ -231,7 +231,7 @@ class SupervisorTestCase(CluTestCase):
 
     def test_lease_expired_reaps_orphan_pid(self) -> None:
         self._claim_and_expire(pid=99999)
-        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
             mock_reap.return_value = st.ReapResult(
                 signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False
             )
@@ -245,7 +245,7 @@ class SupervisorTestCase(CluTestCase):
 
     def test_lease_expired_no_pid_skips_reap(self) -> None:
         self._claim_and_expire(pid=None)
-        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "lease_expired")
         mock_reap.assert_not_called()
@@ -255,7 +255,7 @@ class SupervisorTestCase(CluTestCase):
 
     def test_orphan_reaped_event_carries_signal(self) -> None:
         self._claim_and_expire(pid=88888)
-        with mock.patch("end_of_line.state.reap_orphan_pid") as mock_reap:
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
             mock_reap.return_value = st.ReapResult(
                 signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False
             )
@@ -301,7 +301,7 @@ class SupervisorTestCase(CluTestCase):
                 return_value=False,
             ) as mock_alive,
             mock.patch(
-                "end_of_line.state.reap_orphan_pid",
+                "end_of_line.state.reap_orphan_pgroup",
                 return_value=reap_return,
             ) as mock_reap,
             mock.patch(
@@ -403,7 +403,7 @@ class SupervisorTestCase(CluTestCase):
                 return_value=False,
             ),
             mock.patch(
-                "end_of_line.state.reap_orphan_pid",
+                "end_of_line.state.reap_orphan_pgroup",
                 side_effect=OSError("simulated ps failure"),
             ),
         ):
@@ -434,7 +434,7 @@ class SupervisorTestCase(CluTestCase):
                 return_value=False,
             ),
             mock.patch(
-                "end_of_line.state.reap_orphan_pid",
+                "end_of_line.state.reap_orphan_pgroup",
                 return_value=reap_return,
             ),
         ):
@@ -462,7 +462,7 @@ class SupervisorTestCase(CluTestCase):
         )
         with (
             mock.patch(
-                "end_of_line.state.reap_orphan_pid",
+                "end_of_line.state.reap_orphan_pgroup",
                 return_value=reap_return,
             ),
             mock.patch("end_of_line.supervisor.coolant.emit_stop") as emit,

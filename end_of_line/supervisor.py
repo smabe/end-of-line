@@ -611,10 +611,13 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         script_override=config.coolant.script_dir,
                     )
                 if pid:
-                    reap = st.reap_orphan_pid(
-                        pid,
-                        cmdline_match=data["plan_slug"],
-                    )
+                    # Reap the whole process GROUP, not just the worker PID:
+                    # the backgrounded heartbeat loop is in the worker's pgroup
+                    # and would otherwise reparent to launchd and survive — the
+                    # #75 orphan. Robust to #72-skill-drift, unlike a single-PID
+                    # reap that relies on the worker-side `kill -0` self-clean.
+                    pgid = claim.get("pgid") or pid
+                    reap = st.reap_orphan_pgroup(pgid, cmdline_match=data["plan_slug"])
                     st.append_event(
                         data,
                         st.EVENT_PHASE_ORPHAN_REAPED,
@@ -642,9 +645,9 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 cmdline_match=cmdline_match,
             ):
                 # Order matters: durable state first (event + release +
-                # coolant), best-effort reap last. If `reap_orphan_pid`
-                # raises (e.g. ps timeout), the claim is already released
-                # and the event is on disk — next tick won't re-fire.
+                # coolant), best-effort reap last. If the reap raises (e.g.
+                # ps timeout), the claim is already released and the event is
+                # on disk — next tick won't re-fire.
                 st.append_event(
                     data,
                     st.EVENT_PHASE_WORKER_DEAD,
@@ -657,7 +660,9 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                     coolant_script_override=config.coolant.script_dir,
                 )
                 try:
-                    st.reap_orphan_pid(pid, cmdline_match=cmdline_match)
+                    # Group reap (worker + heartbeat), see lease-expiry note above.
+                    pgid = claim.get("pgid") or pid
+                    st.reap_orphan_pgroup(pgid, cmdline_match=cmdline_match)
                 except Exception:
                     pass
                 return _attach(

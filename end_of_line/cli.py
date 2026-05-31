@@ -3587,13 +3587,18 @@ def cmd_tick_all(args) -> int:
     # worktree conflict scan), first-match-wins per ADR-0002.
     # Re-read registry.entries() — claim state mutated above is what the
     # busy gate needs to see.
-    seen: dict[Path, None] = {}
+    # Build the project set AND the per-project registered-slug map from one
+    # registry read — the zombie sweep below needs the slugs and there's no
+    # reason to re-read registry.json once per project.
+    slugs_by_project: dict[Path, set[str]] = {}
     for row in registry.entries():
         try:
-            seen.setdefault(Path(row.project_root).resolve(), None)
+            slugs_by_project.setdefault(Path(row.project_root).resolve(), set()).add(
+                row.plan_slug
+            )
         except OSError:
             continue
-    for project_root in sorted(seen):
+    for project_root in sorted(slugs_by_project):
         try:
             project_cfg = load_project_config(project_root)
             plans = cross_plan_rules.load_plans_for_project(project_root, project_cfg)
@@ -3604,10 +3609,9 @@ def cmd_tick_all(args) -> int:
             # Registry-independent zombie sweep: terminalize + reap any
             # unregistered state file stuck at status=running whose worker is
             # gone — the backstop tick-all's registry walk can't reach (#75).
-            registered = {
-                e.plan_slug for e in registry.entries_for_project(project_root)
-            }
-            for z in supervisor.sweep_zombie_states(project_cfg, registered):
+            for z in supervisor.sweep_zombie_states(
+                project_cfg, slugs_by_project[project_root]
+            ):
                 print(
                     f"zombie-sweep {z.plan_slug} @ {project_root}: terminalized"
                     + (" + reaped worker group" if z.reaped else "")
@@ -4039,11 +4043,14 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
         st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
         st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
         if pid:
-            # Slug marker, not `/clu-phase <plan> <phase>` — the latter is
-            # absent from non-clu-phase dispatch templates, making the reap a
-            # silent no-op there (#75).
-            reap = st.reap_orphan_pid(
-                pid,
+            # Group reap (worker + heartbeat) with the slug marker — same
+            # mechanism as force-complete/unregister/sweep, so the operator's
+            # release-claim path doesn't leave an orphaned heartbeat (#75). The
+            # slug marker also matches non-clu-phase dispatch templates, where
+            # `/clu-phase <plan> <phase>` would be a silent no-op.
+            pgid = claim.get("pgid") or pid
+            reap = st.reap_orphan_pgroup(
+                pgid,
                 cmdline_match=data["plan_slug"],
             )
             st.append_event(

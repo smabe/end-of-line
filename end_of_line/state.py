@@ -275,9 +275,9 @@ class ReapResult:
 def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
     """Liveness probe for the supervisor's `_detect_dead_pid` rule.
 
-    Mirrors `reap_orphan_pid`'s ESRCH/EPERM/cmdline-match contract. Returns
-    True when the PID is reachable AND (if `cmdline_match` is given) the
-    process cmdline contains the expected substring; False otherwise.
+    Returns True when the PID is reachable AND (if `cmdline_match` is given) the
+    process cmdline contains the expected substring; False otherwise. ESRCH →
+    dead (False); EPERM → exists-but-unsignalable, treated as alive (True).
 
     PID=None → True. The Popen-to-_stamp_pid race window leaves a brief
     period where current_claim is set but pid is not yet stamped — treat
@@ -292,7 +292,7 @@ def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
         return False
     except PermissionError:
         # EPERM means the process exists but we can't signal it (cross-user
-        # or sandboxed). Treat as alive — matches reap_orphan_pid's behavior.
+        # or sandboxed). Treat as alive — EPERM means the process exists.
         return True
     if cmdline_match is None:
         return True
@@ -311,44 +311,6 @@ def claim_worker_alive(claim: dict, cmdline_match: str | None = None) -> bool:
     if result.returncode != 0:
         return False
     return cmdline_match in result.stdout
-
-
-def reap_orphan_pid(pid: int, cmdline_match: str | None = None) -> ReapResult:
-    """Send SIGTERM to an orphaned worker PID, escalating to SIGKILL after 5s.
-
-    PID-reuse guard: when cmdline_match is given, the process cmdline is
-    checked via `ps` before signaling. On mismatch returns without killing.
-    Do NOT use os.waitpid — we never forked this PID; WNOHANG → ECHILD.
-    """
-    if cmdline_match is not None:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if result.returncode != 0:
-            return ReapResult(None, False, False)
-        if cmdline_match not in result.stdout:
-            return ReapResult(None, False, True)
-
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return ReapResult(None, False, False)
-
-    for _ in range(20):
-        time.sleep(0.25)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return ReapResult(SIGNAL_TERM, False, False)
-
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    return ReapResult(SIGNAL_TERM_THEN_KILL, True, False)
 
 
 def _pgroup_member_cmdlines(pgid: int) -> list[str]:
@@ -387,9 +349,9 @@ def reap_orphan_pgroup(pgid: int, cmdline_match: str | None = None) -> ReapResul
 
     The clu worker is spawned `start_new_session=True`, so its PGID == its PID
     and the backgrounded `clu heartbeat` subshell inherits that group. Reaping
-    the group takes worker + heartbeat together — unlike `reap_orphan_pid`,
-    which SIGTERMs only the worker PID and leaves the heartbeat reparented to
-    launchd, looping for hours (the #75 orphan). Reparenting changes the parent,
+    the group takes worker + heartbeat together — a single-PID SIGTERM would
+    kill only the worker and leave the heartbeat reparented to launchd, looping
+    for hours (the #75 orphan). Reparenting changes the parent,
     not the PGID, so `killpg` still reaches the heartbeat after the worker dies,
     as long as any group member is alive.
 
@@ -401,9 +363,9 @@ def reap_orphan_pgroup(pgid: int, cmdline_match: str | None = None) -> ReapResul
         must carry the marker before we signal. No members → "gone" (no-op);
         members but no match → `cmdline_mismatch=True`, no signal.
 
-    Mirrors `reap_orphan_pid`'s escalation: SIGTERM, poll 5s, then SIGKILL.
-    Best-effort — `ProcessLookupError`/`PermissionError` resolve to a no-op
-    rather than raising, so a reap during cleanup never crashes the command.
+    Escalation: SIGTERM, poll 5s, then SIGKILL. Best-effort —
+    `ProcessLookupError`/`PermissionError` resolve to a no-op rather than
+    raising, so a reap during cleanup never crashes the command.
     """
     try:
         own = os.getpgid(0)
@@ -421,9 +383,7 @@ def reap_orphan_pgroup(pgid: int, cmdline_match: str | None = None) -> ReapResul
 
     try:
         os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        return ReapResult(None, False, False)
-    except PermissionError:
+    except (ProcessLookupError, PermissionError):
         return ReapResult(None, False, False)
 
     for _ in range(20):
