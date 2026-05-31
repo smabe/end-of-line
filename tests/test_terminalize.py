@@ -74,13 +74,13 @@ class TestReapClaim(unittest.TestCase):
         data = {"plan_slug": "p", "current_claim": {"phase_id": "a", "claimed_by": "t"}}
         self.assertIsNone(st.reap_claim(data))
 
-    def test_claim_with_pgid_but_no_phase_id_refuses(self):
-        # No phase_id → no cmdline marker → reaping would have no PID-reuse
+    def test_claim_without_slug_refuses(self):
+        # No plan_slug → no cmdline marker → reaping would have no PID-reuse
         # guard. reap_claim must refuse rather than killpg a possibly-reused
         # group; a live process at that pgid must survive.
-        leader = _spawn_marked_group("/clu-phase test-plan a")
+        leader = _spawn_marked_group("clu heartbeat --plan test-plan")
         try:
-            data = {"plan_slug": "test-plan", "current_claim": {"pgid": leader.pid}}
+            data = {"plan_slug": "", "current_claim": {"pgid": leader.pid, "phase_id": "a"}}
             self.assertIsNone(st.reap_claim(data))
             time.sleep(0.3)
             self.assertTrue(_group_alive(leader.pid), "must not reap without a marker")
@@ -90,6 +90,37 @@ class TestReapClaim(unittest.TestCase):
             except (ProcessLookupError, PermissionError):
                 pass
             leader.wait()
+
+    def test_reaps_heartbeat_after_worker_died(self):
+        # The hard case: the worker (group leader) exits, leaving only the
+        # heartbeat alive. Its cmdline is `clu heartbeat --plan <slug>`, which
+        # does NOT contain `/clu-phase <plan> <phase>` — only the bare slug. The
+        # slug marker matches it; the old phase-marker would have missed it.
+        # The surviving child carries the slug (`--plan test-plan`), mirroring a
+        # real heartbeat; the leader (worker) carries no slug and exits.
+        code = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)',"
+            " 'clu', 'heartbeat', '--plan', 'test-plan'])\n"
+        )
+        leader = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+        leader.wait(timeout=5)  # leader exits; the slug-bearing child lives on
+        time.sleep(0.3)
+        try:
+            self.assertTrue(_group_alive(leader.pid), "heartbeat stand-in should be alive")
+            data = {
+                "plan_slug": "test-plan",
+                "current_claim": {"phase_id": "a", "pgid": leader.pid, "claimed_by": "tok"},
+            }
+            result = st.reap_claim(data)
+            self.assertIsNotNone(result.signaled, "slug marker must match the surviving heartbeat")
+            time.sleep(0.6)
+            self.assertFalse(_group_alive(leader.pid), "orphaned heartbeat reaped")
+        finally:
+            try:
+                os.killpg(leader.pid, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
 
     def test_reaps_worker_group_with_marker(self):
         leader = _spawn_marked_group("/clu-phase test-plan a")

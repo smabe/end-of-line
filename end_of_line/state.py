@@ -883,13 +883,40 @@ def reap_claim(data: dict) -> ReapResult | None:
     pgid = claim.get("pgid") or claim.get("pid")
     if not pgid:
         return None
-    phase_id = claim.get("phase_id")
-    if not phase_id:
-        # No phase_id → no cmdline marker → no PID-reuse guard. Refuse rather
-        # than risk killpg-ing a recycled, unrelated process group.
+    # Marker = the plan slug, NOT `/clu-phase <plan> <phase>`. The slug is the
+    # only token present in BOTH the worker cmdline (every dispatch template
+    # names the slug) AND the heartbeat cmdline (`clu heartbeat --plan <slug>`),
+    # so it matches whichever group member survives — critically the heartbeat,
+    # after the worker dies. pgid-scoping makes a slug-substring collision with
+    # an unrelated reused group a non-issue. No slug → no PID-reuse guard → refuse.
+    slug = data.get("plan_slug")
+    if not slug:
         return None
-    marker = f"/clu-phase {data['plan_slug']} {phase_id}"
-    return reap_orphan_pgroup(pgid, cmdline_match=marker)
+    return reap_orphan_pgroup(pgid, cmdline_match=slug)
+
+
+def is_zombie_state(data: dict) -> bool:
+    """A registry-independent zombie: `status=running` but nothing will ever
+    advance it. Callers restrict this to UNREGISTERED state files — a registered
+    running plan is owned by tick-all / the supervisor (which may legitimately
+    sit claimless between phases).
+
+    Two shapes, both from #75:
+      - claimless: running + no `current_claim` (the `fm-docs-sweep` zombie — it
+        never left `running` and has no worker).
+      - dead-claim: running + a claim whose worker PID is gone (an orphaned
+        worker that died unclean).
+
+    A running plan with a LIVE worker is NOT a zombie — the OS PID probe
+    (`claim_worker_alive`, authoritative over heartbeat TTL) is what gates this,
+    so a merely-slow worker is never reaped.
+    """
+    if data.get("status") != STATUS_RUNNING:
+        return False
+    claim = data.get("current_claim")
+    if not claim:
+        return True
+    return not claim_worker_alive(claim, cmdline_match=data.get("plan_slug"))
 
 
 def stamp_attestation(data: dict, kind: str, commit_sha: str) -> None:

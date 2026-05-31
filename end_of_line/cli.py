@@ -2461,9 +2461,26 @@ def cmd_doctor(args) -> int:
     _print_effort_health(cfg)
     _print_stuck_tool_health(cfg)
     _print_worker_idle_health(cfg)
+    _print_zombie_health(cfg)
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _print_zombie_health(cfg: ProjectConfig) -> None:
+    """Dry-run report of registry-independent `status=running` zombies (#75).
+
+    Quiet when there are none — matches the other doctor health printers. The
+    automatic terminalize+reap happens in `clu tick-all`; doctor only previews
+    so the operator sees what would be swept without acting.
+    """
+    registered = {e.plan_slug for e in registry.entries_for_project(cfg.project_root)}
+    zombies = supervisor.sweep_zombie_states(cfg, registered, dry_run=True)
+    if not zombies:
+        return
+    print("Zombie state files (status=running, unregistered, worker gone):")
+    for z in zombies:
+        print(f"  {z.plan_slug} — would terminalize + reap (auto-swept by `clu tick-all`)")
 
 
 def _print_stuck_tool_health(
@@ -3548,6 +3565,17 @@ def cmd_tick_all(args) -> int:
             if result is not None:
                 for kind, body in result.notifies:
                     notify.notify(project_cfg.notify, kind, body)
+            # Registry-independent zombie sweep: terminalize + reap any
+            # unregistered state file stuck at status=running whose worker is
+            # gone — the backstop tick-all's registry walk can't reach (#75).
+            registered = {
+                e.plan_slug for e in registry.entries_for_project(project_root)
+            }
+            for z in supervisor.sweep_zombie_states(project_cfg, registered):
+                print(
+                    f"zombie-sweep {z.plan_slug} @ {project_root}: terminalized"
+                    + (" + reaped worker group" if z.reaped else "")
+                )
         except Exception as exc:
             print(
                 f"tick-all post-loop @ {project_root}: {type(exc).__name__}: {exc}",
