@@ -4003,9 +4003,12 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
         st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
         st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
         if pid:
+            # Slug marker, not `/clu-phase <plan> <phase>` — the latter is
+            # absent from non-clu-phase dispatch templates, making the reap a
+            # silent no-op there (#75).
             reap = st.reap_orphan_pid(
                 pid,
-                cmdline_match=f"/clu-phase {data['plan_slug']} {phase}",
+                cmdline_match=data["plan_slug"],
             )
             st.append_event(
                 data,

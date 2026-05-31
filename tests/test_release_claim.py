@@ -286,7 +286,7 @@ class ReleaseClaimTestCase(GitProjectTestCase):
         mock.assert_called_once()
         args, kwargs = mock.call_args
         self.assertEqual(args[0], 99999)
-        self.assertEqual(kwargs["cmdline_match"], "/clu-phase test-plan A")
+        self.assertEqual(kwargs["cmdline_match"], "test-plan")
 
     def test_release_claim_no_pid_skips_reap(self) -> None:
         from unittest.mock import patch

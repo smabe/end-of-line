@@ -874,8 +874,8 @@ def reap_claim(data: dict) -> ReapResult | None:
 
     Returns None when there's no claim or no recorded pgid/pid. Falls back to
     `pid` for pre-#75 state files (pid == pgid: the worker is a session leader).
-    Uses the canonical `/clu-phase <plan> <phase>` cmdline marker as the
-    PID-reuse guard, matching the supervisor's reapers.
+    Uses the plan slug as the PID-reuse marker — see the inline note below for
+    why the slug, not `/clu-phase <plan> <phase>`.
     """
     claim = data.get("current_claim")
     if not claim:

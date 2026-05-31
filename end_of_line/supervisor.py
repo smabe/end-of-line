@@ -613,7 +613,7 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 if pid:
                     reap = st.reap_orphan_pid(
                         pid,
-                        cmdline_match=f"/clu-phase {data['plan_slug']} {phase_id}",
+                        cmdline_match=data["plan_slug"],
                     )
                     st.append_event(
                         data,
@@ -631,7 +631,12 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             # tick-side half of the fix; the shell-side `kill -0 $WORKER_PID`
             # loop condition in /clu-phase SKILL.md ships in the same change
             # as the worker-side half.
-            cmdline_match = f"/clu-phase {data['plan_slug']} {phase_id}"
+            # Marker = the plan slug, present in EVERY dispatch template's worker
+            # cmdline. The old `/clu-phase <plan> <phase>` marker is absent from
+            # `/plan ...`-style templates (e.g. the incident host's), so it made
+            # claim_worker_alive falsely report a LIVE worker dead — releasing +
+            # "reaping" a healthy worker — and made the reap itself a no-op.
+            cmdline_match = data["plan_slug"]
             if pid and not st.claim_worker_alive(
                 claim,
                 cmdline_match=cmdline_match,
