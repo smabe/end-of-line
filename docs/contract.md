@@ -27,6 +27,12 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     "started_at": "ISO8601",
     "last_heartbeat_at": "ISO8601",
     "attempts": 1,
+    // pid: stamped by dispatch._stamp_pid after Popen. pgid == pid because
+    // the worker is spawned start_new_session=True (it leads its own process
+    // group); reapers killpg(pgid) to take the worker + heartbeat loop
+    // together. pre-#75 state files have pid but no pgid — reapers fall back.
+    "pid": 12345,
+    "pgid": 12345,
     // Optional, lazy-init. Absent until the worker stamps via `clu verify`
     // or `clu attest`. Each entry: {"at": ISO8601_Z, "commit_sha": str}.
     // Stamp is "stale" if commit_sha != current HEAD.
@@ -146,6 +152,10 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 
 - `worktree_missing` — emitted by `dispatch_for_tick` when `state.worktree` exists but `path` is either gone from disk or no longer a valid git working dir (operator deleted the dir, or ran `git worktree prune`). The plan is paused (status → PAUSED), the just-made claim is released without burning a phase attempt, and a KIND_HALTED iMessage names the path. Recovery: restore the dir or hand-edit `state.worktree`, then `clu resume`.
 - `worktree_conflict_warning` — emitted by `clu tick-all`'s post-loop conflict scan when two active plans in the same project both lack a worktree record. Only the lexicographically-smaller slug in the pair emits the event (`other_slug` names the peer); both plans update their `in_conflict_with` field. Auto-clears when one side transitions out of "active" (claim ends or status leaves RUNNING).
+
+### Cleanup / terminalization semantics
+
+- `plan_abandoned` — emitted by `state.terminalize` when a non-terminal (`running`) plan is torn down: `clu unregister` of a still-running plan, or the registry-independent zombie sweep (`supervisor.sweep_zombie_states`). The status flips to `halted` (no new `abandoned` status — the event carries the provenance) and the worker process group is best-effort reaped. `terminalize` is compare-and-set: a no-op on an already-terminal plan, so a cron tick racing a manual cleanup can't double-fire it. The `reason` field distinguishes `"unregister"` from `"zombie_sweep"`. Additive-optional: no `schema_version` bump.
 
 ### Operator claim-control event semantics
 

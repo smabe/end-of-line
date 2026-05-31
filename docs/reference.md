@@ -85,6 +85,20 @@ the file.
   `last_heartbeat_at`; no event written (would flood the log).
 - `heartbeat_age_seconds(claim)`, `is_claim_stalled(claim, threshold)` —
   what supervisor and fleet view use to derive stalled status.
+- `terminalize(data, *, status=halted, event=plan_abandoned, **fields)` —
+  compare-and-set flip of a non-terminal plan to a terminal status +
+  audit event; no-op (returns False) if already terminal. Used by
+  `unregister` and the zombie sweep. (#75)
+- `reap_orphan_pid(pid, cmdline_match=None)` /
+  `reap_orphan_pgroup(pgid, cmdline_match=None)` — SIGTERM→poll→SIGKILL a
+  single worker PID / its whole process group (`os.killpg`). The group
+  reaper takes worker + heartbeat together (the worker is a session
+  leader, pgid == pid); guards `pgid != getpgid(0)` and a cmdline marker
+  before signaling. `reap_claim(data)` wraps the group reaper using the
+  plan slug as the marker.
+- `is_zombie_state(data)` — True when `status=running` and (no claim OR
+  the worker PID is gone). Callers restrict it to unregistered files; the
+  zombie sweep's predicate. (#75)
 - `add_blocker(...)`, `answer_blocker(blocker_id, answer)`,
   `resolve_blocker_answer(data, blocker_id, raw)` — blocker lifecycle.
   `resolve_*` translates "2" → option-text so the event log records the
@@ -225,6 +239,13 @@ itself — `dispatch_for_tick` does that after the lock is released.
 
 - `tick(state_path, config)` — entry point. Walks the nine-priority
   chain (see `architecture.md`) and returns a `TickResult`.
+- `sweep_zombie_states(cfg, registered_slugs, *, dry_run=False)` — the
+  registry-independent reaper. Scans a project's `.orchestrator/*.state.json`
+  for unregistered files at `status=running` whose worker is gone
+  (`state.is_zombie_state`), terminalizes + reaps them, and returns a
+  list of `ZombieSweepResult`. Run automatically per project by
+  `cmd_tick_all` and dry-run by `cmd_doctor`. Backstops the
+  unregistered-while-running window the registry walk can't reach (#75).
 - `TickResult` — dataclass with `action`, `detail`, `phase_id`, `token`,
   `notify_body` (rendered iMessage for actions that should ping), and
   `side_notifies: list[tuple[kind, body]]` (gap-fill emissions that
@@ -1092,8 +1113,13 @@ through this.
 - `cmd_doctor(args)` — smoke-test what a worker subprocess sees:
   prints the effective PATH (after `dispatch.build_worker_env`),
   resolves common tools (`claude`, `gh`, `git`, `python3`), and exits
-  `OK` / `GENERIC` based on whether the required ones are found. No
-  state writes — purely diagnostic.
+  `OK` / `GENERIC` based on whether the required ones are found. Also
+  runs read-only health printers: notify / coolant / effort / stuck-tool
+  / worker-idle, a **zombie-sweep dry-run preview**
+  (`_print_zombie_health` → `supervisor.sweep_zombie_states(..., dry_run=True)`),
+  and a **skill-drift guard** (`_print_skill_drift_health` — SHA-256
+  compares each bundled skill against `~/.claude/skills/<name>/SKILL.md`,
+  warns on mismatch). No state writes — purely diagnostic.
 - `cmd_watch(args)` — streaming state-event feed. Resolves state
   paths from the registry (single plan, all plans in a project, or
   registry-wide with `--all`), then delegates to
