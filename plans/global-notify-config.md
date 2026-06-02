@@ -45,8 +45,21 @@ project's `.orchestrator.json`. Per-project config still wins where it speaks up
      281-285 block, incl. legacy `imessage.to`), merge global-as-base / local-overrides
      by `kind`; resolve quiet_hours local-else-global.
 - `tests/test_config_global.py` — new file, TDD coverage (see Done criteria).
+- `tests/test_config_channels.py` — **added at review (Scope Check):** `ChannelsMigrationTestCase`
+  is non-isolated and asserts channel counts; once `load_project_config` reads the global
+  file it reads the operator's real `~/.config/clu/config.json`. Isolate its XDG.
 - `docs/operations.md` — new "Global notify config (all projects)" section after the
   per-channel setup sections (~line 806, after the Discord setup block).
+
+**XDG-dedup refactor (added at review — its own commit):** the `XDG_CONFIG_HOME`-vs-`~/.config`
+base resolution is duplicated across 8 sites (incl. the new `global_config_path`). Extract
+`clu_config_dir()` into `end_of_line/_xdg_guard.py` and rewire the exact-pattern sites:
+`config.py`, `registry.py`, `monitor.py`, `notify_imessage.py`, `inbox.py`,
+`hooks/clu_session_start.py`, `hooks/clu_inbox_surface.py`. Pure refactor (XDG-honoring sites
+only); the drifted `Path.home()/.config` hardcodes in `notify_imessage_inbound.py` /
+`notify_discord*.py` are EXCLUDED — they don't honor XDG today and converting them is a
+behavior change needing its own pass. Full suite is the regression guard + a unit test for
+`clu_config_dir()`.
 
 ## Merge algorithm (the load-bearing detail)
 ```python

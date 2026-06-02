@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import state as st
+from ._xdg_guard import assert_xdg_safe
 
 CONFIG_FILENAME = ".orchestrator.json"
 ORCHESTRATOR_DIR = ".orchestrator"
@@ -270,6 +271,57 @@ def _validate_stuck_tool_threshold(raw: dict, key: str, default: int) -> int:
     return value
 
 
+def global_config_path() -> Path:
+    """Machine-wide `~/.config/clu/config.json` (XDG-aware, mirrors
+    `registry.registry_path`). Holds shared notify channels + quiet_hours that
+    every project inherits (global-notify-config)."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base) if base else Path.home() / ".config"
+    path = root / "clu" / "config.json"
+    assert_xdg_safe(path)
+    return path
+
+
+def _parse_quiet_hours(raw_value: object) -> tuple[str, str] | None:
+    """Coerce a `quiet_hours` JSON value to a 2-tuple, else None.
+
+    Only a 2-element list/tuple is valid. Guarding on the list/tuple type (not
+    just `len == 2`) rejects a 2-char string (`"ab"` → `('a','b')`) or a 2-key
+    dict, which would otherwise pass a bare length check and feed garbage
+    downstream.
+    """
+    if isinstance(raw_value, (list, tuple)) and len(raw_value) == 2:
+        return (raw_value[0], raw_value[1])
+    return None
+
+
+def _load_global_notify() -> tuple[tuple[ChannelSpec, ...], tuple[str, str] | None]:
+    """Read the global config's notify block → (channels, quiet_hours).
+
+    The global file is optional and machine-wide: a missing / empty / malformed
+    file (or one bad channel) must NOT break every project load, so we fail open
+    to `((), None)`. A missing file is silent (the common case); any other
+    failure — bad JSON, non-object shapes, an invalid channel — is loud on
+    stderr so the operator knows their shared notify config is being ignored,
+    but never fatal. `assert_xdg_safe` (inside `global_config_path`) is
+    deliberately NOT caught: it must fail loud when a test forgets isolation.
+    """
+    path = global_config_path()
+    try:
+        text = path.read_text()
+    except OSError:
+        return (), None
+    try:
+        raw = json.loads(text)
+        notify_raw = raw.get("notify", {})
+        channels = tuple(_validate_channel(c) for c in notify_raw.get("channels", []))
+        quiet_hours = _parse_quiet_hours(notify_raw.get("quiet_hours"))
+    except (json.JSONDecodeError, ConfigError, AttributeError, TypeError) as exc:
+        print(f"config: ignoring malformed global notify config ({path}): {exc}", file=sys.stderr)
+        return (), None
+    return channels, quiet_hours
+
+
 def load_project_config(project_root: Path) -> ProjectConfig:
     project_root = project_root.resolve()
     cfg_path = project_root / CONFIG_FILENAME
@@ -286,7 +338,16 @@ def load_project_config(project_root: Path) -> ProjectConfig:
     if channels_raw is None:
         legacy_to = (notify_raw.get("imessage") or {}).get("to")
         channels_raw = [{"kind": "imessage", "to": legacy_to, "enabled": True}] if legacy_to else []
-    channels = tuple(_validate_channel(c) for c in channels_raw)
+    local_channels = tuple(_validate_channel(c) for c in channels_raw)
+    # Merge the machine-wide global config as base, project channels override.
+    # Drop a global channel only when the project speaks for that kind (override
+    # or a {kind, enabled:false} mask); keep ALL local channels so multiple
+    # same-kind locals aren't collapsed (global-notify-config).
+    global_channels, global_quiet = _load_global_notify()
+    local_kinds = {c.kind for c in local_channels}
+    channels = tuple(g for g in global_channels if g.kind not in local_kinds) + local_channels
+    local_quiet = _parse_quiet_hours(quiet)
+    notify_quiet = local_quiet if local_quiet is not None else global_quiet
     return ProjectConfig(
         project_root=project_root,
         plan_dir=raw.get("plan_dir", "plans"),
@@ -299,7 +360,7 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         ),
         notify=NotifySpec(
             channels=channels,
-            quiet_hours=tuple(quiet) if quiet and len(quiet) == 2 else None,
+            quiet_hours=notify_quiet,
             inbound_auto_tick=bool(notify_raw.get("inbound_auto_tick", True)),
         ),
         test_command=raw.get("test_command") or None,
