@@ -768,24 +768,38 @@ platform-specific privileges.
 
 **One-time Discord app setup:**
 
+> Discord's official quick-start
+> ([docs.discord.com/developers/getting-started](https://docs.discord.com/developers/getting-started))
+> is written around slash commands and steers you toward the Installation page and the
+> `applications.commands` scope. clu uses **bot DMs**, not slash commands — ignore that
+> path and use the `bot`-scope OAuth2 flow below.
+
 1. Go to `https://discord.com/developers/applications` → "New Application" → name it
-   (e.g. "clu").
-2. Under "Bot": enable the bot, copy the **Bot Token**.
-3. Enable **Message Content Intent** under "Privileged Gateway Intents".
-4. Under "OAuth2 → URL Generator": scope = `bot`, permissions = "Send Messages" +
-   "Read Messages/View Channels". Copy the generated URL and open it to invite the bot
-   to a personal server (create one if needed).
+   (e.g. "clu"). On the **General Information** page, copy the **Application ID** — this
+   doubles as the bot's user ID (`bot_user_id`, needed by the inbound poller).
+2. Under "Bot": click "Reset Token" and copy the **Bot Token**. You can't view it again
+   without regenerating, so stash it in a password manager.
+3. Enable **Message Content Intent** under "Privileged Gateway Intents". (Approval is
+   only required once the bot is in 100+ servers; a personal one-server bot just toggles
+   it on.) The inbound poller needs this to read your reply text.
+4. Under "OAuth2 → URL Generator": scope = `bot` (only — **not** `applications.commands`),
+   permissions = "Send Messages" (Text Permissions) + "View Channels" (General
+   Permissions — this is Discord's renamed "Read Messages"). Nothing else is needed.
+   Copy the generated URL and open it to invite the bot to a personal server (create one
+   if needed).
 5. In your server settings → "Privacy Settings": enable "Allow direct messages from
-   server members."
+   server members." clu DMs you rather than posting in a channel, so this gate must be open.
 6. Get your **user ID**: Settings → Advanced → enable Developer Mode, then right-click
    your own username → "Copy User ID."
 
-Add to `.orchestrator.json`:
+Add to `.orchestrator.json` (`bot_user_id` is the Application ID from step 1; required
+only for the inbound poller, but harmless to include always):
 
 ```json
 "notify": {
   "channels": [
-    {"kind": "discord", "bot_token": "Bot.Token.Here", "user_id": "123456789"}
+    {"kind": "discord", "bot_token": "Bot.Token.Here",
+     "user_id": "123456789", "bot_user_id": "987654321"}
   ],
   "quiet_hours": ["22:00", "08:00"]
 }
@@ -805,12 +819,71 @@ systemctl --user enable --now clu-discord-inbound
 
 Verify with `clu notify-test --channel discord`.
 
+## Global notify config (all projects)
+
+Define your notification channels **once** and have every clu project inherit them,
+instead of pasting the same Discord/iMessage block into each project's
+`.orchestrator.json`. Channels live in a machine-wide file:
+
+```
+~/.config/clu/config.json     ($XDG_CONFIG_HOME/clu/config.json if XDG is set)
+```
+
+```json
+{
+  "notify": {
+    "channels": [
+      {"kind": "discord", "bot_token": "Bot.Token.Here",
+       "user_id": "123456789", "bot_user_id": "987654321"}
+    ],
+    "quiet_hours": ["22:00", "08:00"]
+  }
+}
+```
+
+**Lock down the permissions** — this file holds your bot token:
+
+```bash
+chmod 600 ~/.config/clu/config.json
+```
+
+Plaintext + `chmod 600` is the right baseline for a single-user host: `~/.config` is
+**not** a git repo, so the token never enters a project's tracked tree (a strictly safer
+home than the per-project `.orchestrator.json`). Keep credentials in this global file
+only — projects reference a channel by `kind`; never re-embed the token per project, or
+rotation becomes an N-file edit.
+
+### How global and per-project config merge
+
+A project's `.orchestrator.json` is layered **on top of** the global config, keyed by
+channel `kind`:
+
+| In the project's `.orchestrator.json` | Result |
+|---|---|
+| (no `notify.channels`, or `channels: []`) | inherits the global channels as-is |
+| a channel of the **same kind** as a global one | the project channel **replaces** the global one |
+| a channel of a **new kind** | **added** alongside the inherited global channels |
+| `{"kind": "discord", "enabled": false}` (mask stub) | the inherited global discord is **disabled** for this project |
+| legacy `notify.imessage.to` | normalized to an iMessage channel, then merged — so legacy projects still inherit global channels too |
+
+`quiet_hours`: the project's value wins if set, otherwise the global value applies.
+
+The global file is **optional and fail-open**: if it's missing, empty, or malformed, it's
+ignored (a malformed file logs one line to stderr) — a typo in the shared config can never
+break a project's load. With no global file present, every project behaves exactly as
+before.
+
+To silence one noisy project while keeping the global setup, mask each kind with a
+`{"kind": "...", "enabled": false}` stub (or use `clu --no-notify <cmd>` for a single run).
+
 ## Setup: clu-watch only (zero external transport)
 
 Skip outbound transport entirely — clu's inbox hook surfaces events into the active
 Claude Code session on your next message. No iMessage handle, no bot token needed.
 
-1. `channels: []` (empty or omit `notify.channels`) in `.orchestrator.json`.
+1. `channels: []` (empty or omit `notify.channels`) in `.orchestrator.json`, **and** no
+   `~/.config/clu/config.json` (a global config would otherwise be inherited — see
+   [Global notify config](#global-notify-config-all-projects)).
 2. Run `/clu-monitor` once in Claude Code to install the inbox hook.
 
 All notification events still appear in the Claude Code session when you're at your
@@ -825,7 +898,7 @@ Four levers, from narrowest to broadest:
 | Per-kind `kinds` filter | Channel only fires for listed notification kinds | Yes |
 | `"enabled": false` on a channel | Channel silenced, config kept | Yes |
 | `clu --no-notify <cmd>` | Single CLI invocation | N/A |
-| `channels: []` | Permanent silence; inbox writes still happen | Yes |
+| `channels: []` | Silence — **unless** a global `~/.config/clu/config.json` is inherited; mask each kind with `{"kind": "...", "enabled": false}` to override that | Yes |
 
 **Per-kind filter** — fire only on halts and blockers:
 ```json

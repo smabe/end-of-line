@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from end_of_line.config import (
     CONFIG_FILENAME,
@@ -13,12 +11,18 @@ from end_of_line.config import (
     load_project_config,
 )
 
+from tests import CluTestCase
 
-class ChannelsMigrationTestCase(unittest.TestCase):
+
+class ChannelsMigrationTestCase(CluTestCase):
+    """Extends CluTestCase so `load_project_config` (which now reads the global
+    config) resolves to the isolated temp XDG dir, not the operator's real
+    ~/.config/clu/config.json — keeping these channel-count assertions hermetic."""
+
     def setUp(self) -> None:
-        self._tmp = TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name).resolve()
+        super().setUp()
+        self.root = self.tmp_path / "proj"
+        self.root.mkdir()
 
     def _write(self, raw: dict) -> None:
         (self.root / CONFIG_FILENAME).write_text(json.dumps(raw))

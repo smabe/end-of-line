@@ -125,9 +125,9 @@ def _per_plan_arming_block(slugs: list[str]) -> str:
 
 
 def _log_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / "clu" / "session_start_hook.log"
+    from end_of_line._xdg_guard import clu_config_dir  # local — avoid module-load cost
+
+    return clu_config_dir() / "session_start_hook.log"
 
 
 def main() -> int:

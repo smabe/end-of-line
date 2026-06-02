@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from . import notify_discord_http
 from . import state as st
+from ._xdg_guard import clu_config_dir
 
 if TYPE_CHECKING:
     from .config import ChannelSpec
@@ -36,7 +37,7 @@ class DiscordNotifier:
         self.bot_token = bot_token
         self.user_id = user_id
         # DM channel ID cache (keyed by user_id in the JSON file)
-        self.state_path = state_path or Path.home() / ".config" / "clu" / "discord_state.json"
+        self.state_path = state_path or clu_config_dir() / "discord_state.json"
         # Optional: .orchestrator/ dir for persisting notify_metadata on blockers
         self._state_root = state_root
 

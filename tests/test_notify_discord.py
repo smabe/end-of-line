@@ -59,6 +59,15 @@ class DiscordNotifierBasicTestCase(CluTestCase):
         self.assertEqual(n.bot_token, "T")
         self.assertEqual(n.user_id, "U")
 
+    def test_default_state_path_honors_xdg(self):
+        # No explicit state_path → resolves under clu_config_dir(), which
+        # CluTestCase points at the isolated temp XDG dir (not real ~/.config).
+        from end_of_line._xdg_guard import clu_config_dir
+
+        n = DiscordNotifier("T", "U")
+        self.assertEqual(n.state_path, clu_config_dir() / "discord_state.json")
+        self.assertTrue(str(n.state_path).startswith(str(self.tmp_path)))
+
 
 # ---------------------------------------------------------------------------
 # Send behaviour

@@ -14,6 +14,21 @@ from pathlib import Path
 _SENTINEL = "CLU_TEST_MODE"
 
 
+def clu_config_dir() -> Path:
+    """clu's config directory: `$XDG_CONFIG_HOME/clu` (default `~/.config/clu`).
+
+    Single source for the XDG-base resolution previously copy-pasted across
+    registry, monitor, inbox, notify, the session/inbox hooks, and the global
+    config loader. Returns the directory only and does NOT call
+    `assert_xdg_safe` — callers append their filename and assert the final path
+    themselves where appropriate (the hooks intentionally skip the assert,
+    matching prior behavior).
+    """
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base) if base else Path.home() / ".config"
+    return root / "clu"
+
+
 def assert_xdg_safe(path: Path) -> None:
     if not os.environ.get(_SENTINEL):
         return

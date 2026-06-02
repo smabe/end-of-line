@@ -25,6 +25,7 @@ from pathlib import Path
 # UserPromptSubmit hook invokes it that way, with no package context. The
 # pipx venv that installed end_of_line guarantees the absolute import resolves.
 from end_of_line import inbox, registry
+from end_of_line._xdg_guard import clu_config_dir
 from end_of_line.notify_base import BlockerDetail, open_blockers_with_details
 
 MAX_EVENTS = 20
@@ -131,9 +132,7 @@ def _wedge_sections(events: list[dict]) -> list[str]:
 
 
 def _log_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / "clu" / "inbox_hook.log"
+    return clu_config_dir() / "inbox_hook.log"
 
 
 def _resolve_project_root() -> str:

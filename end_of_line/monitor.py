@@ -23,19 +23,16 @@ never load-bearing.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from . import state as st
-from ._xdg_guard import assert_xdg_safe
+from ._xdg_guard import assert_xdg_safe, clu_config_dir
 
 SCHEMA_VERSION = 2
 
 
 def marker_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    path = root / "clu" / "monitor.json"
+    path = clu_config_dir() / "monitor.json"
     assert_xdg_safe(path)
     return path
 

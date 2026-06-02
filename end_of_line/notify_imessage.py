@@ -7,13 +7,12 @@ the body never touches the AppleScript source.
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ._xdg_guard import assert_xdg_safe
+from ._xdg_guard import assert_xdg_safe, clu_config_dir
 
 if TYPE_CHECKING:
     from .config import ChannelSpec
@@ -43,9 +42,7 @@ def imessage_log_path() -> Path:
     (Automation permission denied, buddy lookup failed, Messages.app
     not running) land here so a missed iMessage isn't undebuggable.
     """
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    path = root / "clu" / "imessage.log"
+    path = clu_config_dir() / "imessage.log"
     assert_xdg_safe(path)
     return path
 

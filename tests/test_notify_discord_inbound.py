@@ -74,6 +74,19 @@ def _make_registry_loader(entries: list[registry.PlanEntry]):
 # ---------------------------------------------------------------------------
 
 
+class DiscordInboundDefaultPathsTestCase(CluTestCase):
+    """Default cursor/state paths honor XDG (resolve under clu_config_dir())."""
+
+    def test_default_paths_honor_xdg(self):
+        from end_of_line._xdg_guard import clu_config_dir
+        from end_of_line.notify_discord_inbound import DiscordInboundPoller
+
+        poller = DiscordInboundPoller(bot_token="T", user_id="U", bot_user_id="BOT")
+        self.assertEqual(poller.cursor_path, clu_config_dir() / "discord_cursor.json")
+        self.assertEqual(poller._state_path, clu_config_dir() / "discord_state.json")
+        self.assertTrue(str(poller.cursor_path).startswith(str(self.tmp_path)))
+
+
 class DiscordInboundPollerBase(CluTestCase):
     def setUp(self):
         super().setUp()
