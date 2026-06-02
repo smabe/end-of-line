@@ -179,14 +179,18 @@ def _validate_channel(raw: dict) -> ChannelSpec:
         raise ConfigError(
             f"notify.channels: unknown kind {kind!r} (expected one of {sorted(_KNOWN_KINDS)})"
         )
-    for required in _KIND_REQUIRED.get(kind, []):
-        if not raw.get(required):
-            raise ConfigError(
-                f"notify.channels[kind={kind!r}]: missing required field {required!r}"
-            )
+    enabled = bool(raw.get("enabled", True))
+    # Disabled channels are exempt from required-field validation: a
+    # `{"kind": "discord", "enabled": false}` mask stub disables an inherited
+    # global channel without restating its credentials (global-notify-config).
+    if enabled:
+        for required in _KIND_REQUIRED.get(kind, []):
+            if not raw.get(required):
+                raise ConfigError(
+                    f"notify.channels[kind={kind!r}]: missing required field {required!r}"
+                )
     kinds_raw = raw.get("kinds")
     kinds = frozenset(kinds_raw) if kinds_raw is not None else None
-    enabled = bool(raw.get("enabled", True))
     params = {k: v for k, v in raw.items() if k not in {"kind", "kinds", "enabled"}}
     return ChannelSpec(kind=kind, kinds=kinds, enabled=enabled, params=params)
 
