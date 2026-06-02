@@ -768,24 +768,38 @@ platform-specific privileges.
 
 **One-time Discord app setup:**
 
+> Discord's official quick-start
+> ([docs.discord.com/developers/getting-started](https://docs.discord.com/developers/getting-started))
+> is written around slash commands and steers you toward the Installation page and the
+> `applications.commands` scope. clu uses **bot DMs**, not slash commands — ignore that
+> path and use the `bot`-scope OAuth2 flow below.
+
 1. Go to `https://discord.com/developers/applications` → "New Application" → name it
-   (e.g. "clu").
-2. Under "Bot": enable the bot, copy the **Bot Token**.
-3. Enable **Message Content Intent** under "Privileged Gateway Intents".
-4. Under "OAuth2 → URL Generator": scope = `bot`, permissions = "Send Messages" +
-   "Read Messages/View Channels". Copy the generated URL and open it to invite the bot
-   to a personal server (create one if needed).
+   (e.g. "clu"). On the **General Information** page, copy the **Application ID** — this
+   doubles as the bot's user ID (`bot_user_id`, needed by the inbound poller).
+2. Under "Bot": click "Reset Token" and copy the **Bot Token**. You can't view it again
+   without regenerating, so stash it in a password manager.
+3. Enable **Message Content Intent** under "Privileged Gateway Intents". (Approval is
+   only required once the bot is in 100+ servers; a personal one-server bot just toggles
+   it on.) The inbound poller needs this to read your reply text.
+4. Under "OAuth2 → URL Generator": scope = `bot` (only — **not** `applications.commands`),
+   permissions = "Send Messages" (Text Permissions) + "View Channels" (General
+   Permissions — this is Discord's renamed "Read Messages"). Nothing else is needed.
+   Copy the generated URL and open it to invite the bot to a personal server (create one
+   if needed).
 5. In your server settings → "Privacy Settings": enable "Allow direct messages from
-   server members."
+   server members." clu DMs you rather than posting in a channel, so this gate must be open.
 6. Get your **user ID**: Settings → Advanced → enable Developer Mode, then right-click
    your own username → "Copy User ID."
 
-Add to `.orchestrator.json`:
+Add to `.orchestrator.json` (`bot_user_id` is the Application ID from step 1; required
+only for the inbound poller, but harmless to include always):
 
 ```json
 "notify": {
   "channels": [
-    {"kind": "discord", "bot_token": "Bot.Token.Here", "user_id": "123456789"}
+    {"kind": "discord", "bot_token": "Bot.Token.Here",
+     "user_id": "123456789", "bot_user_id": "987654321"}
   ],
   "quiet_hours": ["22:00", "08:00"]
 }
