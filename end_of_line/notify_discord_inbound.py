@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import notify_discord_http, registry, state_locator
 from . import state as st
+from ._xdg_guard import clu_config_dir
 from .notify_base import OpenBlocker, Reply
 from .notify_imessage_inbound import _cli_dispatch
 
@@ -42,8 +43,8 @@ class DiscordInboundPoller:
         self.bot_token = bot_token
         self.user_id = user_id
         self.bot_user_id = bot_user_id
-        self.cursor_path = cursor_path or Path.home() / ".config" / "clu" / "discord_cursor.json"
-        self._state_path = state_path or Path.home() / ".config" / "clu" / "discord_state.json"
+        self.cursor_path = cursor_path or clu_config_dir() / "discord_cursor.json"
+        self._state_path = state_path or clu_config_dir() / "discord_state.json"
         self._registry_loader = registry_loader or registry.entries
         self._dm_channel_id: str | None = None
 
