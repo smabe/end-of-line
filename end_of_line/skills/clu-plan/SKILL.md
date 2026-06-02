@@ -181,9 +181,23 @@ web dimensions on a "pure docs/config" basis.
 **Consolidate as ground truth.** Walk away with: the corrected
 understanding of the touched area; any forced binary decisions from
 the reuse / exclusion specialists, with the recommended option (baked
-into the draft as the default — see Step 3); and a list of claims
-research could NOT verify — these become `TODO: verify <claim>`
-markers in the draft, never written as fact.
+into the draft as the default — see Step 3); and **no unverified
+claims**. There is no `TODO: verify` channel. If research couldn't
+close a question, that's the signal Step 2 isn't done — finish it
+before drafting. The only things research legitimately can't close are
+(a) genuine operator decisions (surfaced at approval, Step 4) and
+(b) empirical/runtime unknowns that truly need a running app or live
+system — these become the master's Diagnosis falsifiable test or the
+algorithmic load-test, never Locked-decisions facts. **(b) has a
+membership test — apply it, don't self-certify into it:** a question
+is empirical ONLY if a Read / grep / doc-fetch *this session* genuinely
+can't close it. If reading the code or docs would settle it, it is NOT
+empirical — verify it now. The tell that this is failing is a sub-plan
+whose acceptance says "verify X" where X is statically checkable (does
+this function branch on that flag? does this type have that field?) —
+that's the Step 2 work you skipped, not a deferral. For anything else
+that can't be verified, STOP before drafting and resolve it with the
+operator — never carry an unverified claim into the master.
 
 ### Step 3: Draft all files in memory
 
@@ -203,14 +217,17 @@ ship.
 - **Every factual claim is backed by Step 2 findings.** Cite file:line
   / URL+section in the master and sub-plans wherever a claim depends on
   a verified source.
-- **TODO markers are mandatory for unverified specifics.** Any cited
-  path, function name, schema field, config key, version, or external
-  behavior is either verified in Step 2 (stated as fact with a
-  citation) or written as `TODO: verify <thing>` — never as bare fact.
-  This matters more in clu than in `/plan`: a cold-context worker reads
-  the master's Locked-decisions paths as settled and won't re-check
-  them. Absence of a TODO marker means positive verification, not
-  absence of doubt.
+- **Verify or block — no deferral channel.** Every cited path,
+  function name, schema field, config key, version, or external
+  behavior is verified in Step 2 and stated as fact with a file:line /
+  URL+section citation — or the plan isn't drafted. There is no
+  `TODO: verify`, no "I'll confirm during the phase," no placeholder.
+  If you can't verify it, STOP and resolve it with the operator first.
+  This is *stricter* in clu than in `/plan`: a cold-context worker
+  reads the master's Locked-decisions paths as settled and has no
+  operator to ask — an unverified path ships as wrong dispatch. The
+  guess/fact line is enforced by absence: every claim in the master is
+  verified, not "unmarked."
 - **Bake forced binary decisions in as the recommended option.** If
   the reuse specialist recommended a refactor-first split, draft the
   Sessions index with that refactor as the first row. If the exclusion
@@ -389,10 +406,6 @@ to the operator with this exact framing:
 > scope based on `<file:line>` dependency on `<included items>`. To
 > keep the exclusion, give me the one-sentence invariant that makes it
 > safe.
->
-> [If any TODO markers remain]
-> **Unverified claims still in the master/sub-plans:** `<list>`. Step 2
-> couldn't verify these — sanity-check before approving.
 
 Then **wait**. Do not write to disk. Silence is not approval. If the
 operator picks copy-and-defer for a reuse decision, record the
@@ -619,13 +632,31 @@ after step 1. Don't run `clu init` without explicit operator intent.
   an iron-clad invariant. Across worktrees the asymmetry auto-merges
   silently (project CLAUDE.md: "Non-goals are claims that need proof").
 
-- **TODO markers are mandatory for unverified specifics.** Any cited
-  path, function name, schema field, config key, version, or external
-  behavior in the master or a sub-plan is either verified in Step 2
-  (stated as fact with file:line / URL+section) or written as
-  `TODO: verify <thing>`. A cold-context worker reads Locked-decisions
-  paths as settled and won't re-check them — an unmarked wrong path
-  ships as wrong dispatch.
+- **No research deferrals — verify or block.** Every cited path,
+  function name, schema field, config key, version, or external
+  behavior in the master or a sub-plan is verified in Step 2 and
+  stated as fact with a file:line / URL+section citation — or the plan
+  isn't drafted. There is no `TODO: verify` channel, no placeholder,
+  no carve-out. If a claim can't be closed by research, STOP before
+  drafting and resolve it with the operator (provide access, run it,
+  or pull it from scope). This is *stricter* than `/plan`: a
+  cold-context worker reads Locked-decisions paths as settled and has
+  no operator to ask — an unverified path ships as wrong dispatch. The
+  only things research legitimately can't close are (a) genuine
+  operator decisions (surfaced at approval, Step 4) and (b) empirical/
+  runtime unknowns that truly need a running app or live system (the
+  master's Diagnosis falsifiable test or the algorithmic load-test),
+  never Locked-decisions facts.
+
+- **Sub-plan failure modes are not a sink for unresolved
+  verifications.** Each `## Failure modes to watch` entry must be a
+  genuine runtime/integration risk, not a fact you didn't look up
+  wearing risk's clothing. A conditional whose antecedent is
+  statically checkable ("*if* this endpoint doesn't return X…") must
+  be resolved during Step 2 — phrasing an unverified fact as an "if"
+  does not exempt it from verify-or-block; the rule bites on the
+  antecedent. A legitimate failure mode is one whose outcome stays
+  uncertain *after* everything statically knowable is verified.
 
 - **Perf/bug plans: run the Diagnosis falsifiable test in Step 2,
   BEFORE drafting the Sessions index.** Fill the master's Diagnosis
