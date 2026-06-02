@@ -14,6 +14,24 @@ from pathlib import Path
 from unittest import mock
 
 from end_of_line import inbox, monitor, registry
+from end_of_line._xdg_guard import clu_config_dir
+
+
+class CluConfigDirTestCase(unittest.TestCase):
+    """clu_config_dir() resolves $XDG_CONFIG_HOME/clu, else ~/.config/clu."""
+
+    def test_respects_xdg_config_home(self):
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/custom/xdg"}):
+            self.assertEqual(clu_config_dir(), Path("/custom/xdg") / "clu")
+
+    def test_falls_back_to_home_config(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            self.assertEqual(clu_config_dir(), Path.home() / ".config" / "clu")
+
+    def test_empty_xdg_config_home_falls_back(self):
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}):
+            self.assertEqual(clu_config_dir(), Path.home() / ".config" / "clu")
 
 
 class XdgGuardRaisesTestCase(unittest.TestCase):

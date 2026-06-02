@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import state as st
-from ._xdg_guard import assert_xdg_safe
+from ._xdg_guard import assert_xdg_safe, clu_config_dir
 
 CONFIG_FILENAME = ".orchestrator.json"
 ORCHESTRATOR_DIR = ".orchestrator"
@@ -275,9 +275,7 @@ def global_config_path() -> Path:
     """Machine-wide `~/.config/clu/config.json` (XDG-aware, mirrors
     `registry.registry_path`). Holds shared notify channels + quiet_hours that
     every project inherits (global-notify-config)."""
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    path = root / "clu" / "config.json"
+    path = clu_config_dir() / "config.json"
     assert_xdg_safe(path)
     return path
 

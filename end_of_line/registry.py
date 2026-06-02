@@ -12,12 +12,11 @@ per-plan state files.
 
 from __future__ import annotations
 
-import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import state as st
-from ._xdg_guard import assert_xdg_safe
+from ._xdg_guard import assert_xdg_safe, clu_config_dir
 
 SCHEMA_VERSION = 1
 
@@ -30,9 +29,7 @@ class PlanEntry:
 
 
 def registry_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    path = root / "clu" / "registry.json"
+    path = clu_config_dir() / "registry.json"
     assert_xdg_safe(path)
     return path
 
