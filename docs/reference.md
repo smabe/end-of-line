@@ -899,9 +899,12 @@ the view is an independent check that a worker is producing work.
 - `format_detail(rows, *, width) -> list[str]` — detail view; each worker
   is a block with a metadata line plus full, word-wrapped COMMAND and
   SAYING (never truncated). Toggled live with `w`.
-- `run(*, once, interval, project_filter, projects_root, stream) -> int`
+- `run(*, once, interval, project_filter, projects_root, stream, cols) -> int`
   — entry point: curses when attached to a TTY (`q` quits, `w` toggles
-  detail), a single plain snapshot for `--once` or non-TTY.
+  detail), a single plain snapshot for `--once` or non-TTY. `cols` (the
+  `--cols` flag) narrows the compact table to a subset of metric columns
+  via the `top_registry` table pane; `None` is today's full 8-column
+  `format_rows` output, byte-for-byte.
 
 **Invariants and gotchas**
 
@@ -924,6 +927,49 @@ the view is an independent check that a worker is producing work.
 - `dispatch.py` for `{session_id}` generation + `_stamp_pid` stamping.
 - `operations.md` § "Watching workers — `clu top`" for usage, the
   `{session_id}` placeholder, and the `w` detail toggle.
+
+### `top_registry.py`
+
+The metric/pane registry for `clu top` (clu-top-tui Phase 1). Each of
+today's 8 table columns is now a self-contained `Metric`; the compact
+table is a `Pane`. A new column or pane is added in *this* file — no
+edits to the draw loop or the layout engine.
+
+**Key types and functions**
+
+- `Metric` (frozen dataclass) — `{key, label, compute(snapshot, row) -> v,
+  render(v, width) -> cell, sort_key, cost, align, fixed_width, max_width}`.
+  `compute` pulls a value off the row dict; `render` formats one cell. The
+  split lets a metric sort by the raw value and lets a future cross-row
+  metric reach the whole `Snapshot` without touching the renderer.
+- `Pane` (frozen dataclass) — `{kind, metric_keys, render(snapshot, *,
+  width, cols)}`. The one built-in `table` pane is byte-identical to
+  `top.format_rows` for the default column set (it delegates straight to
+  it); a `--cols` subset takes a small composition path over the named
+  metrics instead.
+- `Snapshot` — wraps one tick's `gather_rows()` so the JSONL parse happens
+  once; a per-tick value object, never cached across ticks (a stale
+  snapshot would show last tick's workers).
+- `register_metric(...)` / `register_pane(...)` — decorators that populate
+  the `METRICS` / `PANES` module dicts. `DEFAULT_COLS` is the 8-column
+  order; `metric_keys()` is the known-key set `--cols` validates against.
+- `safe_render(pane, snapshot, *, width, cols) -> list[str]` — the
+  per-pane error boundary: a pane whose render raises becomes a single
+  inline error band, so one bad pane never crashes the TUI.
+- `parse_cols(spec) -> tuple[str, ...]` — parse/validate a `--cols a,b,c`
+  spec; raises `ValueError` (→ clean argparse usage error) on an unknown
+  key or empty spec.
+
+**Invariants and gotchas**
+
+- **`gather_rows()`'s row dict is a FROZEN wire contract (D10):** `clu
+  serve` reads the same 13 keys off `/api/workers` and renders them in its
+  own JS, with zero shared code. Every metric reads FROM the row dict;
+  none reshapes it. `tests/test_top.py:GatherRowsWireContractTest` is the
+  guard — it asserts the 13 keys by exact name.
+- Import direction (no module-level cycle): `top_registry` imports pure
+  helpers from `top` at module level; `top` imports `top_registry` lazily,
+  inside its render functions (mirrors `top_render`).
 
 ### `webserver.py`
 

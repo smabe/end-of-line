@@ -53,6 +53,7 @@ from . import (
     state_locator,
     supervisor,
     top,
+    top_registry,
     watch,
 )
 from . import (
@@ -1195,6 +1196,14 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help="Refresh interval seconds (default: 1.5).",
+    )
+    p_top.add_argument(
+        "--cols",
+        type=_cols_type,
+        default=None,
+        metavar="KEY,KEY,…",
+        help="Comma-separated metric columns to show (default: all). "
+        "Known keys: " + ", ".join(top_registry.metric_keys()) + ".",
     )
 
     p_serve = sub.add_parser(
@@ -4017,6 +4026,16 @@ def cmd_watch(args) -> int:
         return _die(ExitCode.UNKNOWN_TASK, str(exc))
 
 
+def _cols_type(spec: str) -> tuple[str, ...]:
+    """argparse `type=` for `--cols`: validate against the registered metric
+    keys, surfacing an unknown/empty spec as a clean usage error (exit 2) rather
+    than a traceback or a half-built dashboard."""
+    try:
+        return top_registry.parse_cols(spec)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def cmd_top(args) -> int:
     """Live `top`-like dashboard of active workers. Delegates to top.run, which
     picks curses (TTY) vs a single plain snapshot (--once / non-TTY)."""
@@ -4024,6 +4043,7 @@ def cmd_top(args) -> int:
         once=getattr(args, "once", False),
         interval=args.interval if args.interval is not None else 1.5,
         project_filter=getattr(args, "project", None),
+        cols=getattr(args, "cols", None),
     )
 
 

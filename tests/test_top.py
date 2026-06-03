@@ -575,5 +575,175 @@ class CursesSurfaceTest(unittest.TestCase):
         self.assertLessEqual(n, 5)
 
 
+# --- Phase 1: the Metric/Pane registry + gather_rows wire contract ----------
+
+# The 13 keys clu serve's JS reads off /api/workers (web/index.html:235 toView).
+# Hardcoded on purpose — a constant edited in lockstep with assemble_row would
+# defeat the guard. If you rename/drop a key in assemble_row/gather_rows, this
+# list is the thing that must scream first. (D10 in plans/clu-top-tui-master.md)
+_WIRE_CONTRACT_KEYS = frozenset({
+    "project", "plan", "phase_id", "alive", "ran_seconds",
+    "last_activity_seconds", "heartbeat_age_seconds", "last_command",
+    "command_running", "last_write", "last_write_seconds", "last_text", "tokens",
+})
+
+
+class GatherRowsWireContractTest(GitProjectTestCase):
+    """The frozen seam between the TUI and `clu serve` — gather_rows' row dict.
+
+    No curses test catches a key rename; only this does. Keep it asserting
+    every one of the 13 keys, by exact name."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._pr = TemporaryDirectory()
+        self.addCleanup(self._pr.cleanup)
+        self.projects_root = Path(self._pr.name)
+
+    def test_row_carries_all_thirteen_keys_unrenamed(self) -> None:
+        self._claim("a")
+        rows = top.gather_rows(projects_root=self.projects_root)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(set(rows[0]), _WIRE_CONTRACT_KEYS)
+
+
+class MetricRegistryTest(unittest.TestCase):
+    """Each built-in metric is a pure (compute, render) pair — no curses."""
+
+    def setUp(self) -> None:
+        from end_of_line import top_registry
+
+        self.reg = top_registry
+        self.snap = top_registry.Snapshot([_draw_row()])
+
+    def test_eight_columns_registered(self) -> None:
+        self.assertEqual(
+            tuple(self.reg.DEFAULT_COLS),
+            ("name", "ran", "act", "hb", "pid", "cmd", "wrote", "saying"),
+        )
+        for key in self.reg.DEFAULT_COLS:
+            self.assertIn(key, self.reg.METRICS)
+
+    def test_name_metric_compute_and_render(self) -> None:
+        m = self.reg.METRICS["name"]
+        v = m.compute(self.snap, _draw_row(project="myrepo", plan="routing", phase_id="impl"))
+        self.assertEqual(v, "myrepo/routing·impl")
+        cell = m.render(v, 24)
+        self.assertEqual(len(cell), 24)  # left-padded to width
+        self.assertTrue(cell.startswith("myrepo/routing·impl"))
+
+    def test_ran_metric_renders_human_age_right_aligned(self) -> None:
+        m = self.reg.METRICS["ran"]
+        self.assertEqual(m.compute(self.snap, _draw_row(ran_seconds=90)), 90)
+        self.assertEqual(m.render(90, 7), "  1m30s")  # right-aligned in 7
+
+    def test_pid_metric_ok_dead(self) -> None:
+        m = self.reg.METRICS["pid"]
+        self.assertEqual(m.render(True, 4), "  ok")
+        self.assertEqual(m.render(False, 4), "dead")
+
+    def test_cmd_metric_running_star_and_clean(self) -> None:
+        m = self.reg.METRICS["cmd"]
+        v = m.compute(self.snap, _draw_row(command_running=True, last_command="git\nlog"))
+        self.assertEqual(v, "*git log")  # running star + newline collapsed
+
+    def test_saying_metric_dash_when_empty(self) -> None:
+        m = self.reg.METRICS["saying"]
+        self.assertEqual(m.compute(self.snap, _draw_row(last_text=None)), "—")
+
+
+class TablePaneTest(unittest.TestCase):
+    def setUp(self) -> None:
+        from end_of_line import top_registry
+
+        self.reg = top_registry
+        self.rows = [_draw_row(), _draw_row(phase_id="two", last_text="other")]
+        self.snap = top_registry.Snapshot(self.rows)
+        self.pane = top_registry.PANES["table"]
+
+    def test_default_is_byte_identical_to_format_rows(self) -> None:
+        for width in (40, 80, 120, 200):
+            with self.subTest(width=width):
+                got = self.pane.render(self.snap, width=width)
+                self.assertEqual(got, top.format_rows(self.rows, width=width))
+
+    def test_cols_subset_shows_only_selected_metrics(self) -> None:
+        lines = self.pane.render(self.snap, width=120, cols=("saying", "cmd"))
+        header = lines[0]
+        self.assertIn("SAYING", header)
+        self.assertIn("COMMAND", header)
+        # The numeric identity columns are gone in a saying/cmd-only view.
+        self.assertNotIn("RAN", header)
+        self.assertNotIn("PID", header)
+        body = "\n".join(lines[1:])
+        self.assertIn("pytest -k routing", body)
+
+    def test_cols_subset_clamped_to_width(self) -> None:
+        lines = self.pane.render(
+            self.snap, width=50, cols=("name", "saying")
+        )
+        self.assertTrue(all(len(ln) <= 50 for ln in lines))
+
+
+class PaneErrorBoundaryTest(unittest.TestCase):
+    """A pane that raises in render is contained: an inline error band, and
+    every other pane still draws."""
+
+    def setUp(self) -> None:
+        from end_of_line import top_registry
+
+        self.reg = top_registry
+        self.snap = top_registry.Snapshot([_draw_row()])
+
+    def test_raising_pane_yields_error_band(self) -> None:
+        def _boom(snapshot, *, width, cols=None):
+            raise RuntimeError("kaboom")
+
+        boom = self.reg.Pane(kind="boom", metric_keys=(), render=_boom)
+        band = self.reg.safe_render(boom, self.snap, width=80)
+        self.assertEqual(len(band), 1)
+        self.assertIn("boom", band[0])
+        self.assertIn("error", band[0].lower())
+        self.assertLessEqual(len(band[0]), 80)
+
+    def test_sibling_pane_unaffected(self) -> None:
+        table = self.reg.PANES["table"]
+        out = self.reg.safe_render(table, self.snap, width=120)
+        self.assertTrue(any("SAYING" in ln for ln in out))
+
+
+class ParseColsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        from end_of_line import top_registry
+
+        self.reg = top_registry
+
+    def test_valid_keys_accepted(self) -> None:
+        self.assertEqual(self.reg.parse_cols("saying,cmd"), ("saying", "cmd"))
+        self.assertEqual(self.reg.parse_cols(" name , ran "), ("name", "ran"))
+
+    def test_unknown_key_rejected(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            self.reg.parse_cols("saying,bogus")
+        self.assertIn("bogus", str(ctx.exception))
+
+    def test_empty_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self.reg.parse_cols("")
+        with self.assertRaises(ValueError):
+            self.reg.parse_cols(" , ,")
+
+
+class ColsCliTest(unittest.TestCase):
+    def test_unknown_col_is_a_clean_usage_error(self) -> None:
+        from end_of_line.cli import main
+
+        # argparse validates the `type=` before cmd_top runs -> SystemExit(2),
+        # not a traceback or a half-built dashboard.
+        with self.assertRaises(SystemExit) as ctx:
+            main(["top", "--cols", "bogus"])
+        self.assertEqual(ctx.exception.code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

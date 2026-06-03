@@ -218,7 +218,12 @@ clu top                 # curses live view, all registered plans
 clu top --project .     # scope to one project
 clu top --once          # one plain snapshot (also the default when piped)
 clu top --interval 3    # refresh seconds (default 1.5)
+clu top --cols saying,cmd   # show only these metric columns (default: all)
 ```
+
+`--cols` takes a comma-separated subset of the metric keys `name, ran, act, hb,
+pid, cmd, wrote, saying` (an unknown key is a clean usage error). With no
+`--cols`, the table is the full 8 columns as before.
 
 In the live view: **`q`** quits, **`w`** toggles detail mode. Columns size to
 the terminal — the text fields use all available width and truncate only when

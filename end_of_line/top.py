@@ -432,6 +432,18 @@ def format_detail(rows: list[dict], *, width: int = 120) -> list[str]:
     return out
 
 
+def _compact_lines(rows: list[dict], *, width: int, cols: tuple[str, ...] | None) -> list[str]:
+    """The compact worker table. Default (`cols is None`) is `format_rows`
+    verbatim; a `--cols` subset routes through the table pane (registry), behind
+    its per-pane error boundary. Lazy import mirrors how `_run_curses` already
+    imports its render modules — keeps the module-level cycle out."""
+    if not cols:
+        return format_rows(rows, width=width)
+    from end_of_line.top_registry import PANES, Snapshot, safe_render
+
+    return safe_render(PANES["table"], Snapshot(rows), width=width, cols=cols)
+
+
 def render_once(
     stream,
     *,
@@ -439,6 +451,7 @@ def render_once(
     project_filter: Path | None = None,
     now: _dt.datetime | None = None,
     width: int | None = None,
+    cols: tuple[str, ...] | None = None,
 ) -> int:
     """Write a single snapshot to `stream`. Used for `--once` and non-TTY.
 
@@ -447,29 +460,39 @@ def render_once(
     if width is None:
         width = shutil.get_terminal_size((120, 24)).columns
     rows = gather_rows(projects_root=projects_root, now=now, project_filter=project_filter)
-    for line in format_rows(rows, width=width):
+    for line in _compact_lines(rows, width=width, cols=cols):
         stream.write(line + "\n")
     return 0
 
 
-def _draw(surface, rows: list[dict], *, detail: bool, hint: str) -> None:
+def _draw(surface, rows: list[dict], *, detail: bool, hint: str, cols: tuple[str, ...] | None = None) -> None:
     """Draw one frame of the dashboard onto a `Surface`.
 
     The seam that makes the curses loop testable: identical logic to the old
     inner draw — pick compact/detail, append a blank line + the key hint, write
-    each line within the surface's height. `format_rows`/`format_detail` fit
-    their own lines to width; the hint is the one raw line, so clip it to width
-    here (the old loop relied on `addnstr`'s cap for it). Each producer fitting
-    its own rows keeps the property test honest — a `BufferSurface` records what
-    we asked to draw, untruncated, so an over-width row is detectable.
+    each line within the surface's height. The producers fit their own lines to
+    width; the hint is the one raw line, so clip it to width here (the old loop
+    relied on `addnstr`'s cap for it). Each producer fitting its own rows keeps
+    the property test honest — a `BufferSurface` records what we asked to draw,
+    untruncated, so an over-width row is detectable. `--cols` only narrows the
+    compact table; detail keeps its own full-wrap behavior.
     """
-    body = (format_detail if detail else format_rows)(rows, width=surface.width)
+    if detail:
+        body = format_detail(rows, width=surface.width)
+    else:
+        body = _compact_lines(rows, width=surface.width, cols=cols)
     lines = body + ["", hint[: surface.width]]
     for y, line in enumerate(lines[: surface.height]):
         surface.addstr(y, 0, line)
 
 
-def _run_curses(*, interval: float, project_filter: Path | None, projects_root: Path) -> int:
+def _run_curses(
+    *,
+    interval: float,
+    project_filter: Path | None,
+    projects_root: Path,
+    cols: tuple[str, ...] | None = None,
+) -> int:
     import curses
     import locale
 
@@ -488,7 +511,7 @@ def _run_curses(*, interval: float, project_filter: Path | None, projects_root: 
             rows = gather_rows(projects_root=projects_root, project_filter=project_filter)
             hint = f"q quit · w {'compact' if detail else 'detail'}"
             stdscr.erase()
-            _draw(CursesSurface(stdscr), rows, detail=detail, hint=hint)
+            _draw(CursesSurface(stdscr), rows, detail=detail, hint=hint, cols=cols)
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in (ord("q"), ord("Q")):
@@ -509,10 +532,14 @@ def run(
     project_filter: Path | None = None,
     projects_root: Path = PROJECTS_ROOT,
     stream=None,
+    cols: tuple[str, ...] | None = None,
 ) -> int:
     """Entry point for `clu top`. Curses when attached to a TTY; otherwise (or
-    with --once) a single plain snapshot."""
+    with --once) a single plain snapshot. `cols` narrows the compact table to
+    the named metric columns (default: all)."""
     stream = stream or sys.stdout
     if once or not stream.isatty():
-        return render_once(stream, projects_root=projects_root, project_filter=project_filter)
-    return _run_curses(interval=interval, project_filter=project_filter, projects_root=projects_root)
+        return render_once(stream, projects_root=projects_root, project_filter=project_filter, cols=cols)
+    return _run_curses(
+        interval=interval, project_filter=project_filter, projects_root=projects_root, cols=cols
+    )
