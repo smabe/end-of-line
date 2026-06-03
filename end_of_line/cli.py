@@ -29,6 +29,7 @@ import os
 import platform
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -38,6 +39,8 @@ from pathlib import Path
 from . import (
     coolant,
     cross_plan_rules,
+    demo,
+    demo_worker,
     dispatch,
     dry_merge,
     fleet,
@@ -1252,6 +1255,50 @@ def main(argv: list[str] | None = None) -> int:
         "Token + transcript are then sent unencrypted.",
     )
 
+    p_demo_worker = sub.add_parser(
+        "demo-worker",
+        help="(internal) synthetic demo worker — dispatched by `clu demo`, not "
+        "for direct use.",
+    )
+    # `plan` is a bare positional so the slug surfaces space-bounded in the
+    # worker's cmdline — the #83 reaper kills a worker whose cmdline lacks the
+    # slug as a whole token. See demo_worker.command_template.
+    p_demo_worker.add_argument("plan", help="Demo plan slug")
+    p_demo_worker.add_argument("--phase", required=True)
+    p_demo_worker.add_argument("--token", required=True, help="Worker claim token")
+    p_demo_worker.add_argument(
+        "--project", type=Path, required=True, help="Project root (callback target + transcript cwd)"
+    )
+    p_demo_worker.add_argument("--session-id", required=True, dest="session_id")
+    p_demo_worker.add_argument("--scenario", required=True, choices=list(demo_worker.SCENARIOS))
+    p_demo_worker.add_argument(
+        "--max-steps", type=int, default=demo_worker.DEFAULT_MAX_STEPS, dest="max_steps"
+    )
+    p_demo_worker.add_argument(
+        "--step-seconds", type=float, default=demo_worker.DEFAULT_STEP_SECONDS, dest="step_seconds"
+    )
+
+    p_demo = sub.add_parser(
+        "demo",
+        help="Verify your install: stand up a synthetic demo fleet (busy / idle "
+        "/ blocked / dead workers) through clu's real pipeline, visible in "
+        "`clu top` / `clu serve`. Ctrl-C tears it all down. `clu demo down` "
+        "cleans up any leftover demo state.",
+    )
+    p_demo.add_argument(
+        "subcommand",
+        nargs="?",
+        choices=["down"],
+        default=None,
+        help="`down` tears down leftover demo state and exits (no fleet launched).",
+    )
+    p_demo.add_argument(
+        "--serve",
+        action="store_true",
+        default=False,
+        help="Also serve the live web dashboard (like `clu serve`) until Ctrl-C.",
+    )
+
     p_notify_test = sub.add_parser(
         "notify-test",
         help="Send a test notification through configured channels and report "
@@ -1384,6 +1431,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_top(args)
     if args.cmd == "serve":
         return cmd_serve(args)
+    if args.cmd == "demo-worker":
+        return cmd_demo_worker(args)
+    if args.cmd == "demo":
+        return cmd_demo(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
     if args.cmd == "answer":
@@ -2553,10 +2604,28 @@ def cmd_doctor(args) -> int:
     _print_stuck_tool_health(cfg)
     _print_worker_idle_health(cfg)
     _print_zombie_health(cfg)
+    _print_demo_sweep_health()
     _print_skill_drift_health()
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _print_demo_sweep_health() -> None:
+    """Report leftover `clu demo` plans (host-wide, `demo-` prefix).
+
+    A `clu demo` run hard-killed before its teardown ran leaves `demo-*`
+    registrations + a demo_root tree. Host-wide, not project-scoped: demo plans
+    register under demo_root(), not the operator's project. Quiet when clean —
+    matches the other printers. Cleanup is `clu demo down` (doctor stays
+    read-only and never unregisters).
+    """
+    stray = demo.sweep()
+    if not stray:
+        return
+    print("Leftover `clu demo` plans (clean up with `clu demo down`):")
+    for slug in stray:
+        print(f"  {slug} — synthetic demo plan still registered")
 
 
 def _print_skill_drift_health() -> None:
@@ -3985,6 +4054,84 @@ def cmd_serve(args) -> int:
         return webserver.serve(cfg)
     except OSError as exc:
         return _die(ExitCode.GENERIC, f"could not bind {cfg.host}:{cfg.port}: {exc}")
+
+
+def _demo_terminate(_signum, _frame) -> None:
+    """SIGTERM -> KeyboardInterrupt so `clu demo`'s teardown `finally` runs on a
+    `kill` as well as a Ctrl-C (SIGINT already raises it)."""
+    raise KeyboardInterrupt
+
+
+def cmd_demo(args) -> int:
+    """Foreground demo orchestrator: stand the fleet up, block until Ctrl-C /
+    SIGTERM, then guarantee teardown in `finally`. `clu demo down` is the
+    leftover-cleanup path. Notify is suppressed process-wide — none of init /
+    tick / teardown should reach the operator's phone."""
+    # Process-wide suppress covers the in-process init/tick/teardown path; the
+    # scaffolded config's notify mask covers the out-of-process cron supervisor
+    # (which never calls this). Together: the demo never reaches the phone.
+    notify.set_global_suppress(True)
+    if args.subcommand == "down":
+        removed = demo.down()
+        print(f"clu demo: tore down {len(removed)} demo plan(s): {', '.join(removed) or '(none)'}")
+        return ExitCode.OK
+
+    # up() + the wait are all inside the try so the teardown `finally` runs even
+    # if a dispatch raises mid-launch — otherwise a partial fleet leaks. Install
+    # the SIGTERM trap first so a `kill` during up() still unwinds to teardown.
+    signal.signal(signal.SIGTERM, _demo_terminate)
+    try:
+        plans = demo.up()
+        print("clu demo: launched a synthetic fleet through the real pipeline —")
+        for p in plans:
+            print(f"  • {p.slug}  ({p.scenario})")
+        print("\n  Watch it:   clu top        (or: clu serve)")
+        print("  The blocked worker is answerable with:  clu answer")
+        print("  Ctrl-C tears the whole fleet down.\n")
+        if args.serve:
+            from . import webserver
+
+            cfg = webserver.build_config(
+                lan=False,
+                host=None,
+                port=8787,
+                project_filter=None,
+                include_transcript=True,
+                cert=None,
+                key=None,
+                http=False,
+            )
+            webserver.serve(cfg)  # blocks until Ctrl-C
+        else:
+            signal.pause()  # park until SIGINT/SIGTERM, zero wakeups
+    except KeyboardInterrupt:
+        pass
+    finally:
+        removed = demo.down()
+        print(f"\nclu demo: cleaned up {len(removed)} demo plan(s).")
+    return ExitCode.OK
+
+
+def cmd_demo_worker(args) -> int:
+    """Dispatched-only: run one synthetic demo worker. `clu demo` scaffolds the
+    plans whose `dispatch.command` invokes this; the operator never calls it.
+
+    Suppress notifications process-wide: the `block` scenario invokes the real
+    `clu block` callback in-process, which would otherwise fire a real iMessage/
+    Discord push (the operator's global notify config is inherited). The demo is
+    a synthetic verify tool — it must never reach the operator's phone (non-goal:
+    "the demo never notifies"; the blocked row is answered via `clu answer`)."""
+    notify.set_global_suppress(True)
+    return demo_worker.run_worker(
+        args.plan,
+        args.phase,
+        args.token,
+        args.scenario,
+        project=args.project,
+        session_id=args.session_id,
+        max_steps=args.max_steps,
+        step_seconds=args.step_seconds,
+    )
 
 
 def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:

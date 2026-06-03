@@ -187,6 +187,28 @@ class DoctorCommandTestCase(unittest.TestCase):
         after = state_path.stat().st_mtime_ns
         self.assertEqual(before, after)
 
+    # ---- demo sweep section ---------------------------------------------------
+
+    def test_doctor_reports_leftover_demo_plans(self) -> None:
+        # A demo-* registration left behind by a hard-killed `clu demo` must
+        # surface, pointing the operator at `clu demo down`.
+        from end_of_line import registry
+
+        demo_proj = self.project / "demo-busy"
+        demo_proj.mkdir()
+        registry.register(demo_proj, "demo-busy")
+        self._write_cfg(path=os.environ["PATH"])
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn("demo-busy", stdout)
+        self.assertIn("clu demo down", stdout)
+
+    def test_doctor_quiet_when_no_demo_plans(self) -> None:
+        self._write_cfg(path=os.environ["PATH"])
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("clu demo down", stdout)
+
     # ---- coolant section ------------------------------------------------------
 
     def test_doctor_reports_coolant_disabled(self) -> None:
