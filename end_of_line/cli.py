@@ -1194,6 +1194,64 @@ def main(argv: list[str] | None = None) -> int:
         help="Refresh interval seconds (default: 1.5).",
     )
 
+    p_serve = sub.add_parser(
+        "serve",
+        help="Self-host the `clu top` worker dashboard as a web page. "
+        "Localhost-only, read-only: serves the Tron dashboard at GET / and live "
+        "worker rows at GET /api/workers (polled). Ctrl-C to stop.",
+    )
+    p_serve.add_argument(
+        "--port",
+        type=int,
+        default=8787,
+        help="TCP port to bind on localhost (default: 8787).",
+    )
+    p_serve.add_argument(
+        "--project",
+        type=Path,
+        default=None,
+        help="Scope to one project's plans (default: every registered plan).",
+    )
+    p_serve.add_argument(
+        "--no-transcript",
+        action="store_true",
+        default=False,
+        help="Omit transcript-derived fields (last command / SAYING / last "
+        "write) from /api/workers — metrics only.",
+    )
+    p_serve.add_argument(
+        "--lan",
+        action="store_true",
+        default=False,
+        help="Make the dashboard reachable from your LAN (e.g. your phone): "
+        "bind one auto-detected LAN IP, require an auto-generated token, "
+        "enforce a Host-header allowlist, and serve auto self-signed HTTPS.",
+    )
+    p_serve.add_argument(
+        "--host",
+        default=None,
+        help="Explicit bind address (overrides --lan's auto-detected IP). A "
+        "non-loopback host is treated like --lan (token + HTTPS required).",
+    )
+    p_serve.add_argument(
+        "--cert",
+        default=None,
+        help="TLS certificate PEM (with --key) instead of an auto self-signed "
+        "cert.",
+    )
+    p_serve.add_argument(
+        "--key",
+        default=None,
+        help="TLS private-key PEM (with --cert).",
+    )
+    p_serve.add_argument(
+        "--http",
+        action="store_true",
+        default=False,
+        help="Serve plaintext HTTP even on a LAN bind (loud cleartext warning). "
+        "Token + transcript are then sent unencrypted.",
+    )
+
     p_notify_test = sub.add_parser(
         "notify-test",
         help="Send a test notification through configured channels and report "
@@ -1324,6 +1382,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_watch(args)
     if args.cmd == "top":
         return cmd_top(args)
+    if args.cmd == "serve":
+        return cmd_serve(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
     if args.cmd == "answer":
@@ -3896,6 +3956,35 @@ def cmd_top(args) -> int:
         interval=args.interval if args.interval is not None else 1.5,
         project_filter=getattr(args, "project", None),
     )
+
+
+def cmd_serve(args) -> int:
+    """Self-host the worker dashboard over HTTP(S) (read-only).
+
+    Blocks in `serve_forever` until Ctrl-C. A configuration problem (bad cert,
+    no openssl, unsafe bind) or a bind failure (e.g. EADDRINUSE) surfaces as a
+    clean `_die` rather than a traceback.
+    """
+    from . import webserver
+
+    try:
+        cfg = webserver.build_config(
+            lan=getattr(args, "lan", False),
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", 8787),
+            project_filter=getattr(args, "project", None),
+            include_transcript=not getattr(args, "no_transcript", False),
+            cert=getattr(args, "cert", None),
+            key=getattr(args, "key", None),
+            http=getattr(args, "http", False),
+        )
+    except webserver.ConfigError as exc:
+        return _die(ExitCode.INVALID_VALUE, str(exc))
+
+    try:
+        return webserver.serve(cfg)
+    except OSError as exc:
+        return _die(ExitCode.GENERIC, f"could not bind {cfg.host}:{cfg.port}: {exc}")
 
 
 def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:
