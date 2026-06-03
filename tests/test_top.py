@@ -13,13 +13,17 @@ in-file `cwd` field and reject `isSidechain` transcripts.
 from __future__ import annotations
 
 import datetime as _dt
+import io
 import json
 import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from end_of_line import top
+from end_of_line import registry, top
+from end_of_line import state as st
+
+from tests import GitProjectTestCase
 
 
 def _write_jsonl(path: Path, records: list[dict], *, mtime: float | None = None) -> Path:
@@ -262,6 +266,106 @@ class AssembleRowTest(unittest.TestCase):
                                        "last_activity_ts": None, "command_running": False, "tokens": None},
                                now=self._now())
         self.assertFalse(row["alive"])
+
+
+class GatherRowsTest(GitProjectTestCase):
+    """End-to-end: registered plan + active claim + transcript -> one row."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._pr = TemporaryDirectory()
+        self.addCleanup(self._pr.cleanup)
+        self.projects_root = Path(self._pr.name)
+        # The registered project_root is resolved at register time; build the
+        # transcript's dir + cwd field from that exact string so the locator
+        # confirms the match (resolve()/symlink drift would otherwise miss).
+        self.reg_root = registry.entries()[0].project_root
+
+    def _transcript(self, records: list[dict]) -> Path:
+        d = self.projects_root / top.encode_project_dir(self.reg_root)
+        return _write_jsonl(d / "sess.jsonl", records, mtime=1000)
+
+    def test_active_claim_with_transcript_becomes_row(self) -> None:
+        self._claim("a")
+        self._transcript([
+            _asst(tool="Bash", tool_input={"command": "pytest -q"}, tool_id="b1", cwd=self.reg_root),
+            _asst(tool="Write", tool_input={"file_path": "/r/x.py"}, tool_id="w1", cwd=self.reg_root),
+        ])
+        rows = top.gather_rows(projects_root=self.projects_root)
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["plan"], "test-plan")
+        self.assertEqual(r["phase_id"], "a")
+        self.assertEqual(r["last_command"], "pytest -q")
+        self.assertEqual(r["last_write"], "/r/x.py")
+        self.assertTrue(r["alive"])  # claim has no pid -> liveness probe True
+
+    def test_no_active_claim_no_row(self) -> None:
+        self.assertEqual(top.gather_rows(projects_root=self.projects_root), [])
+
+    def test_active_claim_without_transcript_still_rows(self) -> None:
+        self._claim("a")
+        rows = top.gather_rows(projects_root=self.projects_root)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["last_command"])
+        self.assertEqual(rows[0]["phase_id"], "a")
+
+
+class FormatRowsTest(unittest.TestCase):
+    def _row(self, **over) -> dict:
+        base = {
+            "project": "myrepo", "plan": "routing", "phase_id": "impl",
+            "ran_seconds": 600, "heartbeat_age_seconds": 18, "alive": True,
+            "last_command": "pytest -k routing", "command_running": False,
+            "last_write": "/repo/routing.py", "last_write_seconds": 4,
+            "last_text": "tests pass, wiring next", "last_activity_seconds": 2, "tokens": None,
+        }
+        base.update(over)
+        return base
+
+    def test_header_and_row_fields_present(self) -> None:
+        lines = top.format_rows([self._row()])
+        self.assertTrue(any("PLAN" in ln and "RAN" in ln for ln in lines))
+        body = "\n".join(lines[1:])
+        for token in ("routing", "impl", "pytest -k routing", "routing.py"):
+            self.assertIn(token, body)
+
+    def test_running_indicator(self) -> None:
+        lines = top.format_rows([self._row(command_running=True)])
+        self.assertIn("*", "\n".join(lines[1:]))
+
+    def test_dead_worker_marked(self) -> None:
+        lines = top.format_rows([self._row(alive=False)])
+        self.assertIn("dead", "\n".join(lines[1:]).lower())
+
+    def test_multiline_text_stays_one_row(self) -> None:
+        # A multi-line assistant message or command must not spill a worker
+        # across rows / corrupt the grid — newlines collapse to spaces.
+        lines = top.format_rows([self._row(last_text="line1\nline2\nline3",
+                                           last_command="git commit -m 'a\nb'")], width=200)
+        self.assertEqual(len(lines), 2)  # header + exactly one row
+        self.assertNotIn("\n", lines[1])
+        self.assertIn("line1 line2 line3", lines[1])
+        self.assertIn("git commit -m 'a b'", lines[1])
+
+    def test_clamped_to_width(self) -> None:
+        lines = top.format_rows([self._row(last_text="x" * 500)], width=60)
+        self.assertTrue(all(len(ln) <= 60 for ln in lines))
+
+    def test_empty_rows_still_has_header(self) -> None:
+        lines = top.format_rows([])
+        self.assertTrue(lines and "PLAN" in lines[0])
+
+
+class RenderOnceTest(GitProjectTestCase):
+    def test_writes_snapshot_to_stream(self) -> None:
+        self._claim("a")
+        out = io.StringIO()
+        rc = top.render_once(out, projects_root=Path(self.tmp_path) / "noproj")
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("test-plan", text)
+        self.assertIn("PLAN", text)
 
 
 class HumanAgeTest(unittest.TestCase):

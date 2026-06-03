@@ -49,6 +49,7 @@ from . import (
     state_blocker,
     state_locator,
     supervisor,
+    top,
     watch,
 )
 from . import (
@@ -1165,6 +1166,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Poll interval seconds (default: 1.0 single-project, 5.0 with --all)",
     )
 
+    p_top = sub.add_parser(
+        "top",
+        help="Live `top`-like view of what every active worker is doing now: "
+        "phase + start elapsed, last command, last file write, last activity, "
+        "heartbeat age, PID liveness, last assistant line. Read-only. Quit "
+        "with 'q'. Sourced from the worker's own transcript + OS state, so it "
+        "is an independent check that workers are producing work.",
+    )
+    p_top.add_argument(
+        "--project",
+        type=Path,
+        default=None,
+        help="Scope to one project's plans (default: every registered plan).",
+    )
+    p_top.add_argument(
+        "--once",
+        action="store_true",
+        default=False,
+        help="Print one plain snapshot and exit (also the default when stdout "
+        "is not a TTY, e.g. piped).",
+    )
+    p_top.add_argument(
+        "--interval",
+        type=float,
+        default=None,
+        help="Refresh interval seconds (default: 1.5).",
+    )
+
     p_notify_test = sub.add_parser(
         "notify-test",
         help="Send a test notification through configured channels and report "
@@ -1293,6 +1322,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_blockers(args)
     if args.cmd == "watch":
         return cmd_watch(args)
+    if args.cmd == "top":
+        return cmd_top(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
     if args.cmd == "answer":
@@ -3855,6 +3886,16 @@ def cmd_watch(args) -> int:
         )
     except FileNotFoundError as exc:
         return _die(ExitCode.UNKNOWN_TASK, str(exc))
+
+
+def cmd_top(args) -> int:
+    """Live `top`-like dashboard of active workers. Delegates to top.run, which
+    picks curses (TTY) vs a single plain snapshot (--once / non-TTY)."""
+    return top.run(
+        once=getattr(args, "once", False),
+        interval=args.interval if args.interval is not None else 1.5,
+        project_filter=getattr(args, "project", None),
+    )
 
 
 def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:

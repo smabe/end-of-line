@@ -19,8 +19,10 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import sys
 from pathlib import Path
 
+from end_of_line import registry
 from end_of_line import state as st
 
 PROJECTS_ROOT = Path.home() / ".claude" / "projects"
@@ -267,3 +269,135 @@ def assemble_row(claim: dict, activity: dict, now: _dt.datetime | None = None) -
         "last_activity_seconds": _age_seconds(activity.get("last_activity_ts"), now),
         "tokens": activity.get("tokens"),
     }
+
+
+def gather_rows(
+    *,
+    projects_root: Path = PROJECTS_ROOT,
+    now: _dt.datetime | None = None,
+    project_filter: Path | None = None,
+) -> list[dict]:
+    """One row per active claim across every registered plan (optionally scoped
+    to `project_filter`). Tolerant at the per-plan level: a plan with no live
+    claim, or whose state / transcript can't be read, contributes nothing
+    rather than raising. A corrupt host registry is not swallowed — it surfaces
+    rather than masquerading as an empty dashboard.
+    """
+    rows: list[dict] = []
+    for e in registry.entries():
+        if project_filter is not None and Path(e.project_root).resolve() != Path(project_filter).resolve():
+            continue
+        data = registry.load_entry_state(e)
+        if not data:
+            continue
+        claim = data.get("current_claim")
+        if not claim:
+            continue
+        wt = st.get_worktree(data)
+        cwd = Path(wt["path"]) if wt and wt.get("path") else Path(e.project_root)
+        tpath = locate_transcript(cwd, projects_root=projects_root, session_id=claim.get("session_id"))
+        records = tail_records(tpath) if tpath else []
+        row = assemble_row(claim, extract_activity(records), now=now)
+        row["plan"] = e.plan_slug
+        row["project"] = Path(e.project_root).name
+        rows.append(row)
+    return rows
+
+
+def _cell(text: str, width: int) -> str:
+    """Fit one free-text field to `width`: collapse newlines / control chars to
+    spaces (so a multi-line command or assistant message can't break the
+    one-row-per-worker layout), then truncate with an ellipsis."""
+    clean = "".join(c if c.isprintable() else " " for c in text)
+    return clean if len(clean) <= width else clean[: max(0, width - 1)] + "…"
+
+
+def format_rows(rows: list[dict], *, width: int = 120) -> list[str]:
+    """Render rows to fixed-width lines (header first). Pure — the curses and
+    plain renderers both build their output from this so the layout has one
+    source of truth. Every line is clamped to `width`.
+    """
+    header = (
+        f"{'PROJECT/PLAN·PHASE':32} {'RAN':>7} {'ACT':>6} {'HB':>6} "
+        f"{'PID':>4}  {'COMMAND':28} {'WROTE':22} SAYING"
+    )
+    out = [header[:width]]
+    for r in rows:
+        name = f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}"
+        pid = "ok" if r.get("alive") else "dead"
+        run = "*" if r.get("command_running") else " "
+        cmd = run + (r.get("last_command") or "—")
+        w = r.get("last_write")
+        wrote = f"{Path(w).name} {human_age(r.get('last_write_seconds'))}" if w else "—"
+        line = (
+            f"{_cell(name, 32):32} {human_age(r.get('ran_seconds')):>7} "
+            f"{human_age(r.get('last_activity_seconds')):>6} "
+            f"{human_age(r.get('heartbeat_age_seconds')):>6} {pid:>4}  "
+            f"{_cell(cmd, 28):28} {_cell(wrote, 22):22} {_cell(r.get('last_text') or '—', 80)}"
+        )
+        out.append(line[:width])
+    return out
+
+
+def render_once(
+    stream,
+    *,
+    projects_root: Path = PROJECTS_ROOT,
+    project_filter: Path | None = None,
+    now: _dt.datetime | None = None,
+    width: int = 120,
+) -> int:
+    """Write a single snapshot to `stream`. Used for `--once` and non-TTY."""
+    rows = gather_rows(projects_root=projects_root, now=now, project_filter=project_filter)
+    for line in format_rows(rows, width=width):
+        stream.write(line + "\n")
+    return 0
+
+
+def _run_curses(*, interval: float, project_filter: Path | None, projects_root: Path) -> int:
+    import curses
+    import locale
+
+    try:
+        locale.setlocale(locale.LC_ALL, "")  # honor UTF-8 for the glyphs
+    except locale.Error:
+        pass  # misconfigured/forwarded locale — fall back to the C locale
+
+    def _loop(stdscr) -> int:
+        curses.curs_set(0)
+        stdscr.timeout(max(100, int(interval * 1000)))  # getch doubles as the pace + quit poll
+        while True:
+            maxy, maxx = stdscr.getmaxyx()
+            rows = gather_rows(projects_root=projects_root, project_filter=project_filter)
+            lines = format_rows(rows, width=maxx - 1)
+            stdscr.erase()
+            for y, line in enumerate(lines[: maxy - 1]):
+                try:
+                    stdscr.addnstr(y, 0, line, maxx - 1)
+                except curses.error:
+                    pass
+            stdscr.refresh()
+            ch = stdscr.getch()
+            if ch in (ord("q"), ord("Q")):
+                return 0
+
+    try:
+        return curses.wrapper(_loop)
+    except KeyboardInterrupt:
+        return 0
+
+
+def run(
+    *,
+    once: bool = False,
+    interval: float = 1.5,
+    project_filter: Path | None = None,
+    projects_root: Path = PROJECTS_ROOT,
+    stream=None,
+) -> int:
+    """Entry point for `clu top`. Curses when attached to a TTY; otherwise (or
+    with --once) a single plain snapshot."""
+    stream = stream or sys.stdout
+    if once or not stream.isatty():
+        return render_once(stream, projects_root=projects_root, project_filter=project_filter)
+    return _run_curses(interval=interval, project_filter=project_filter, projects_root=projects_root)
