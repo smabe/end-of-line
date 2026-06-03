@@ -925,6 +925,69 @@ the view is an independent check that a worker is producing work.
 - `operations.md` § "Watching workers — `clu top`" for usage, the
   `{session_id}` placeholder, and the `w` detail toggle.
 
+### `webserver.py`
+
+The `clu serve` command — a read-only web dashboard over the same
+`top.gather_rows()` data. Where `top.py` renders to curses, this serves
+the rows as JSON to a bundled HTML page (`web/index.html`). Localhost-only
+and unauthenticated by default; one `--lan` switch flips on the entire
+security layer (token auth, Host-header allowlist, auto self-signed HTTPS).
+
+**Key types and functions**
+
+- `ServeConfig` — the resolved run config the server + handler close over:
+  bind `host`/`port`, `project_filter`, `include_transcript`, `token` (None
+  → no auth gate), `host_allowlist`, `tls` context. `__post_init__` fills
+  the allowlist from the bind host + loopback names.
+- `build_config(*, lan, host, port, …, cert, key, http) -> ServeConfig` —
+  the one place the security policy lives: resolves the bind host (loopback
+  default / `--lan` LAN-IP / explicit `--host`), provisions a token for any
+  exposed bind, enforces the "exposed bind needs a token" guardrail, and
+  selects TLS (explicit `--cert/--key` > auto self-signed > `--http`
+  cleartext). Raises `ConfigError` on an unsafe or contradictory config.
+- `workers_json(*, project_filter, include_transcript) -> bytes` —
+  `gather_rows()` as JSON; `include_transcript=False` drops the
+  transcript-content fields (the `--no-transcript` feed).
+- `make_handler(*, index_html, cfg)` — builds the
+  `BaseHTTPRequestHandler`. `_dispatch` enforces, in order: Host-allowlist
+  (`421`) → `/login` cookie mint → auth gate (`401`) → exact-match routes
+  (`/`, `/api/workers`, else `404`). Request logging is silenced; a
+  `gather_rows` exception yields `500` without killing the thread.
+- `build_server(cfg) -> _Server` — `ThreadingHTTPServer` (reuse-address,
+  daemon threads); wraps the listening socket in TLS when `cfg.tls` is set
+  (a wrap failure → `ConfigError`). `_Server.handle_error` is silenced so a
+  scanned LAN server doesn't spew tracebacks.
+- `serve(cfg) -> int` — installs SIGINT/SIGTERM handlers (shutdown fires on
+  a separate thread to avoid the `serve_forever` deadlock), prints the
+  banner (login URL + LAN/cleartext warnings, flushed), blocks in
+  `serve_forever`.
+- `detect_lan_ip()` — primary outbound IPv4 via the UDP-connect trick.
+  `load_or_create_token()` / `ensure_self_signed()` — token + cert
+  provisioning, written `0600`-from-birth (`mkstemp`+`os.replace`; openssl
+  under `umask 0o077`). `_san_for` validates the bind value before it
+  reaches the cert SAN; openssl is always an arg-list (`shell=False`), with
+  a temp-config fallback for `-addext`-less builds.
+
+**Invariants and gotchas**
+
+- Auth comparison is `hmac.compare_digest` on both the `Bearer` header and
+  the `clu_session` cookie; the token is never empty (None or 43 chars).
+- The Host-allowlist is the primary DNS-rebinding defense and runs before
+  auth. An absent `Host` is tolerated only on the unauthenticated loopback
+  default; any exposed bind rejects it.
+- Every worker-derived string in `web/index.html` is inserted via an
+  `esc()` helper, never raw `innerHTML` — `/api/workers` carries
+  semi-untrusted LLM/tool text (commands, SAYING, file paths).
+- The page is read once at startup via `importlib.resources` (`web/*.html`
+  package-data) and served from in-memory bytes by exact-match route —
+  never a directory handler (no path traversal).
+
+**See also**
+
+- `cli.py` `cmd_serve` for the flag-parsing wrapper.
+- `top.py` `gather_rows` for the row shape both surfaces share.
+- `operations.md` § "Serving the dashboard on the web — `clu serve`".
+
 ### `fleet.py`
 
 Pure projection: take every registry entry, project into a one-line
