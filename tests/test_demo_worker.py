@@ -159,5 +159,185 @@ class DemoWorkerLoadTest(GitProjectTestCase):
         self.assertGreaterEqual(r["last_activity_seconds"], 0)
 
 
+class ScenarioActionTest(unittest.TestCase):
+    """The pure per-step planner that drives run_worker's loop."""
+
+    def test_busy_always_writes(self) -> None:
+        for step in range(6):
+            self.assertEqual(demo_worker.scenario_action("busy", step), demo_worker.ACT_WRITE)
+
+    def test_idle_writes_then_goes_quiet(self) -> None:
+        # idle produces a couple steps of work, then heartbeats only so ACT climbs.
+        acts = [demo_worker.scenario_action("idle", s) for s in range(5)]
+        self.assertEqual(acts[0], demo_worker.ACT_WRITE)
+        self.assertEqual(acts[1], demo_worker.ACT_WRITE)
+        self.assertEqual(acts[2], demo_worker.ACT_QUIET)
+        self.assertEqual(acts[4], demo_worker.ACT_QUIET)
+
+    def test_block_works_then_blocks(self) -> None:
+        self.assertEqual(demo_worker.scenario_action("block", 0), demo_worker.ACT_WRITE)
+        self.assertEqual(demo_worker.scenario_action("block", 1), demo_worker.ACT_WRITE)
+        self.assertEqual(demo_worker.scenario_action("block", 2), demo_worker.ACT_BLOCK)
+
+    def test_dead_works_then_dies(self) -> None:
+        self.assertEqual(demo_worker.scenario_action("dead", 0), demo_worker.ACT_WRITE)
+        self.assertEqual(demo_worker.scenario_action("dead", 2), demo_worker.ACT_DEAD)
+
+    def test_unknown_scenario_defaults_to_write(self) -> None:
+        self.assertEqual(demo_worker.scenario_action("???", 0), demo_worker.ACT_WRITE)
+
+
+class RunWorkerTest(unittest.TestCase):
+    """The paced loop, exercised with an injected runner/clock/sleep so no real
+    subprocess, sleep, or wall-clock is touched."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.projects_root = Path(self._tmp.name)
+        self.cwd = "/x/demo-proj"
+        self.calls: list[list[str]] = []
+        self.sleeps: list[float] = []
+
+    def _runner(self, argv: list[str]) -> int:
+        self.calls.append(argv)
+        return 0
+
+    def _run(self, scenario: str, max_steps: int = 5) -> int:
+        return demo_worker.run_worker(
+            "demo-busy",
+            "a",
+            "tok",
+            scenario,
+            project=self.cwd,
+            session_id="s",
+            projects_root=self.projects_root,
+            max_steps=max_steps,
+            step_seconds=0.0,
+            clock=lambda: "2026-06-03T00:00:00Z",
+            sleep=self.sleeps.append,
+            runner=self._runner,
+        )
+
+    def _transcript_records(self) -> list[dict]:
+        path = demo_worker.transcript_path(self.cwd, "s", self.projects_root)
+        return top.tail_records(path) if path.exists() else []
+
+    def _assistant_count(self) -> int:
+        return sum(1 for r in self._transcript_records() if r.get("type") == "assistant")
+
+    def test_busy_writes_and_heartbeats_every_step(self) -> None:
+        self._run("busy", max_steps=3)
+        self.assertEqual(self._assistant_count(), 3)
+        self.assertEqual([c[0] for c in self.calls], ["heartbeat", "heartbeat", "heartbeat"])
+        hb = self.calls[0]
+        for token in ("--project", self.cwd, "--plan", "demo-busy", "--phase", "a", "--token", "tok"):
+            self.assertIn(token, hb)
+        # busy never exits early -> it slept after every step.
+        self.assertEqual(len(self.sleeps), 3)
+
+    def test_busy_transcript_parses_as_running(self) -> None:
+        self._run("busy", max_steps=2)
+        self.assertTrue(top.extract_activity(self._transcript_records())["command_running"])
+
+    def test_idle_stops_writing_but_keeps_heartbeating(self) -> None:
+        self._run("idle", max_steps=4)
+        # Wrote only the pre-quiet steps; heartbeat fired every step (still alive).
+        self.assertEqual(self._assistant_count(), 2)
+        self.assertEqual([c[0] for c in self.calls], ["heartbeat"] * 4)
+
+    def test_block_calls_block_then_returns_before_max_steps(self) -> None:
+        self._run("block", max_steps=9)
+        self.assertEqual(self._assistant_count(), 2)
+        self.assertEqual([c[0] for c in self.calls], ["heartbeat", "heartbeat", "block"])
+        block = self.calls[-1]
+        for token in ("--project", "--plan", "demo-busy", "--phase", "a", "--token", "tok", "--question"):
+            self.assertIn(token, block)
+        # Returned at the block step -> never slept a 3rd time.
+        self.assertEqual(len(self.sleeps), 2)
+
+    def test_dead_exits_without_callback_orphaning_the_claim(self) -> None:
+        self._run("dead", max_steps=9)
+        self.assertEqual(self._assistant_count(), 2)
+        # Only the pre-death heartbeats; no block, no final callback.
+        self.assertEqual([c[0] for c in self.calls], ["heartbeat", "heartbeat"])
+
+
+class CommandTemplateTest(unittest.TestCase):
+    def test_surfaces_slug_space_bounded_for_83_reaper(self) -> None:
+        # The #83 footgun: the supervisor reaps a worker whose cmdline doesn't
+        # carry the slug as a whole token. The rendered command must pass
+        # state._cmdline_marker_present, or live demo workers get killed.
+        tmpl = demo_worker.command_template("busy")
+        rendered = tmpl.format(
+            plan_slug="demo-busy",
+            phase_id="a",
+            token="t",
+            project="/x/demo-proj",
+            state_file="/x/s.json",
+            session_id="sess-1",
+        )
+        self.assertTrue(st._cmdline_marker_present(rendered, "demo-busy"))
+        self.assertIn("demo-worker", rendered)
+        self.assertIn("--scenario busy", rendered)
+
+    def test_opts_into_session_id_so_dispatch_stamps_it(self) -> None:
+        # {session_id} in the template makes dispatch generate + stamp the id,
+        # giving the locator its deterministic filename.
+        self.assertIn("{session_id}", demo_worker.command_template("idle"))
+
+    def test_each_scenario_bakes_its_own_scenario_flag(self) -> None:
+        for scenario in demo_worker.SCENARIOS:
+            self.assertIn(f"--scenario {scenario}", demo_worker.command_template(scenario))
+
+
+class DemoWorkerCliTest(unittest.TestCase):
+    """`clu demo-worker` is dispatched-only; verify the subparser wires its args
+    straight through to run_worker (patched so no loop/subprocess runs)."""
+
+    def test_cli_parses_and_delegates_to_run_worker(self) -> None:
+        from unittest import mock
+
+        from end_of_line.cli import main
+
+        with mock.patch("end_of_line.demo_worker.run_worker", return_value=0) as rw:
+            rc = main([
+                "demo-worker", "demo-busy",
+                "--phase", "a", "--token", "tok",
+                "--project", "/x/demo-proj",
+                "--session-id", "sess-1",
+                "--scenario", "busy",
+                "--max-steps", "0",
+            ])
+        self.assertEqual(rc, 0)
+        rw.assert_called_once()
+        pos, kwargs = rw.call_args
+        self.assertEqual(pos[0], "demo-busy")  # plan slug, positional
+        self.assertEqual(pos[3], "busy")  # scenario, positional
+        self.assertEqual(kwargs["session_id"], "sess-1")
+        self.assertEqual(kwargs["max_steps"], 0)
+        self.assertEqual(str(kwargs["project"]), "/x/demo-proj")
+
+    def test_cli_suppresses_notifications(self) -> None:
+        # The block scenario invokes the real `clu block` callback in-process,
+        # which would push a real iMessage/Discord alert. The demo must never
+        # reach the operator's phone.
+        from unittest import mock
+
+        from end_of_line.cli import main
+
+        with mock.patch("end_of_line.demo_worker.run_worker", return_value=0), \
+             mock.patch("end_of_line.notify.set_global_suppress") as suppress:
+            main([
+                "demo-worker", "demo-busy",
+                "--phase", "a", "--token", "tok",
+                "--project", "/x/demo-proj",
+                "--session-id", "sess-1",
+                "--scenario", "block",
+                "--max-steps", "0",
+            ])
+        suppress.assert_called_once_with(True)
+
+
 if __name__ == "__main__":
     unittest.main()

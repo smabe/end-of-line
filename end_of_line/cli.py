@@ -38,6 +38,7 @@ from pathlib import Path
 from . import (
     coolant,
     cross_plan_rules,
+    demo_worker,
     dispatch,
     dry_merge,
     fleet,
@@ -1252,6 +1253,29 @@ def main(argv: list[str] | None = None) -> int:
         "Token + transcript are then sent unencrypted.",
     )
 
+    p_demo_worker = sub.add_parser(
+        "demo-worker",
+        help="(internal) synthetic demo worker — dispatched by `clu demo`, not "
+        "for direct use.",
+    )
+    # `plan` is a bare positional so the slug surfaces space-bounded in the
+    # worker's cmdline — the #83 reaper kills a worker whose cmdline lacks the
+    # slug as a whole token. See demo_worker.command_template.
+    p_demo_worker.add_argument("plan", help="Demo plan slug")
+    p_demo_worker.add_argument("--phase", required=True)
+    p_demo_worker.add_argument("--token", required=True, help="Worker claim token")
+    p_demo_worker.add_argument(
+        "--project", type=Path, required=True, help="Project root (callback target + transcript cwd)"
+    )
+    p_demo_worker.add_argument("--session-id", required=True, dest="session_id")
+    p_demo_worker.add_argument("--scenario", required=True, choices=list(demo_worker.SCENARIOS))
+    p_demo_worker.add_argument(
+        "--max-steps", type=int, default=demo_worker.DEFAULT_MAX_STEPS, dest="max_steps"
+    )
+    p_demo_worker.add_argument(
+        "--step-seconds", type=float, default=demo_worker.DEFAULT_STEP_SECONDS, dest="step_seconds"
+    )
+
     p_notify_test = sub.add_parser(
         "notify-test",
         help="Send a test notification through configured channels and report "
@@ -1384,6 +1408,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_top(args)
     if args.cmd == "serve":
         return cmd_serve(args)
+    if args.cmd == "demo-worker":
+        return cmd_demo_worker(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
     if args.cmd == "answer":
@@ -3985,6 +4011,28 @@ def cmd_serve(args) -> int:
         return webserver.serve(cfg)
     except OSError as exc:
         return _die(ExitCode.GENERIC, f"could not bind {cfg.host}:{cfg.port}: {exc}")
+
+
+def cmd_demo_worker(args) -> int:
+    """Dispatched-only: run one synthetic demo worker. `clu demo` scaffolds the
+    plans whose `dispatch.command` invokes this; the operator never calls it.
+
+    Suppress notifications process-wide: the `block` scenario invokes the real
+    `clu block` callback in-process, which would otherwise fire a real iMessage/
+    Discord push (the operator's global notify config is inherited). The demo is
+    a synthetic verify tool — it must never reach the operator's phone (non-goal:
+    "the demo never notifies"; the blocked row is answered via `clu answer`)."""
+    notify.set_global_suppress(True)
+    return demo_worker.run_worker(
+        args.plan,
+        args.phase,
+        args.token,
+        args.scenario,
+        project=args.project,
+        session_id=args.session_id,
+        max_steps=args.max_steps,
+        step_seconds=args.step_seconds,
+    )
 
 
 def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:
