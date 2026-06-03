@@ -56,7 +56,9 @@ For the *why* behind each, see
 
 - **`end_of_line/`** — the `clu` package. `cli.py` is the CLI surface;
   `state.py` the schema; `supervisor.py` the tick loop; `notify_*.py`
-  pluggable channels (iMessage / Discord / watch); `hooks/` ships
+  pluggable channels (iMessage / Discord / watch); `watch.py` streams
+  state events / `top.py` is the `clu top` worker dashboard (reads worker
+  transcripts); `hooks/` ships
   Claude Code SessionStart + PreToolUse hooks; `skills/` bundles
   `/clu-plan`, `/clu-phase`, `/clu-reply`, `/clu-monitor`,
   `/audit-skill` (drift audit of a SKILL.md against current code).

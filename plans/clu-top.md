@@ -103,4 +103,13 @@ an independent check that workers are actually producing work.
 - Full `unittest` suite green; report the count (current baseline 1490).
 
 ## Parking lot
-(empty at start)
+- **Manual column sizing (operator-requested, later).** The auto-layout sizes
+  columns to content + terminal width; add a way to pin/widen specific columns
+  (e.g. always-full COMMAND, or a fixed name width) for operators who want
+  control over the trade-off. Possibly a keybind to cycle a column's priority,
+  or a `--cols`/config spec. Surfaced 2026-06-02 after the parallel mock run.
+- **Follow subagent/sidechain transcripts** so COMMAND reflects work happening
+  inside a worker's spawned subagents, not just its top-level turn (v1 non-goal).
+- **Validate `clu complete --commits` against real git history** — the other
+  half of the trust story (verify claimed commits actually exist/were authored
+  in the claim window).

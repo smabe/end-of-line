@@ -852,6 +852,79 @@ emits one concise line per meaningful transition to stdout.
 - `operations.md` § "Live in-session feed (`clu watch`)" for usage and
   Monitor-tool pairing.
 
+### `top.py`
+
+Read-only `top`-like dashboard of every active worker on the host (the
+`clu top` command). Where `watch.py` *streams* state events, this is a
+*snapshot poller*: each tick it joins each plan's claim state with the
+worker's own Claude Code session transcript and renders one row per
+active worker. The command / file-write / assistant-line columns come
+from the transcript (harness-written), not the worker's self-report — so
+the view is an independent check that a worker is producing work.
+
+**Key types and functions**
+
+- `gather_rows(*, projects_root, now, project_filter) -> list[dict]` —
+  one render-row per active claim across every registered plan
+  (`registry.entries()` → `registry.load_entry_state`), optionally scoped
+  to one project. Derives the worker cwd (worktree path or project root),
+  locates + tails its transcript, joins the activity with claim state.
+  Tolerant at the per-plan level (an unreadable plan/transcript
+  contributes nothing); a corrupt host registry surfaces rather than
+  rendering an empty dashboard.
+- `locate_transcript(cwd, projects_root, session_id=None) -> Path | None`
+  — finds the transcript under `~/.claude/projects/<encoded-cwd>/`. With
+  `session_id` (stamped on the claim when `dispatch.command` uses
+  `{session_id}`) it reads the exact `<id>.jsonl`; otherwise it
+  forward-encodes the cwd, confirms each candidate by its in-file `cwd`
+  field, rejects `isSidechain` subagent transcripts, and picks the
+  newest. The cwd encoding is lossy and non-reversible (every non-alnum
+  char → `-`), so in-file confirmation — never the dir name alone — is
+  load-bearing. A stamped id whose exact file is absent falls back to
+  cwd-matching.
+- `tail_records(path, want=60) -> list[dict]` — bounded seek-from-end
+  read of the last `want` JSON records; tolerates a half-written final
+  line and undecodable lines.
+- `extract_activity(records) -> dict` — defensive reduce to the latest
+  signals (last Bash command + running flag, last file write, last
+  assistant text, last-activity timestamp, token usage). Switches on
+  `type`, tolerates string-or-array `message.content` and unknown kinds
+  (the transcript schema drifts across Claude Code versions).
+- `format_rows(rows, *, width) -> list[str]` — compact view, one row per
+  worker, single source of layout. Columns size to `width` by priority:
+  name / command / wrote get their full content first, SAYING absorbs the
+  remainder; all three shrink proportionally only when the terminal is
+  too narrow. Free-text cells collapse newlines/control chars so one
+  worker stays on one line.
+- `format_detail(rows, *, width) -> list[str]` — detail view; each worker
+  is a block with a metadata line plus full, word-wrapped COMMAND and
+  SAYING (never truncated). Toggled live with `w`.
+- `run(*, once, interval, project_filter, projects_root, stream) -> int`
+  — entry point: curses when attached to a TTY (`q` quits, `w` toggles
+  detail), a single plain snapshot for `--once` or non-TTY.
+
+**Invariants and gotchas**
+
+- `format_rows` / `format_detail` / `extract_activity` / `tail_records` /
+  `locate_transcript` are pure over their inputs — testable with fixture
+  JSONL, no curses or registry setup.
+- The transcript is written by the *worker's* Claude Code harness, so it
+  is independent of the worker LLM's self-report — but it is not a
+  third-party observer. The fully-external columns are PID liveness
+  (`state.claim_worker_alive`, a `kill -0` probe) and the git-based
+  cross-checks (parking-lot, not yet built).
+- v1 follows only the worker's MAIN session, not its subagent/sidechain
+  transcripts; the main transcript still advances (the `Agent` tool_use
+  and its result) while subagents run, so liveness/progress detection is
+  unaffected.
+
+**See also**
+
+- `cli.py` `cmd_top` for the argument-parsing wrapper.
+- `dispatch.py` for `{session_id}` generation + `_stamp_pid` stamping.
+- `operations.md` § "Watching workers — `clu top`" for usage, the
+  `{session_id}` placeholder, and the `w` detail toggle.
+
 ### `fleet.py`
 
 Pure projection: take every registry entry, project into a one-line

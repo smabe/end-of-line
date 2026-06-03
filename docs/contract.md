@@ -33,6 +33,13 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     // together. pre-#75 state files have pid but no pgid — reapers fall back.
     "pid": 12345,
     "pgid": 12345,
+    // Optional. Stamped by dispatch._stamp_pid ONLY when dispatch.command
+    // includes a real {session_id} placeholder (e.g. `claude --session-id
+    // {session_id} ...`): clu generates the uuid, hands it to Claude Code,
+    // and records it so `clu top` reads the worker's transcript by exact
+    // filename. Absent when the command omits the placeholder (Claude Code
+    // then picks its own id and `clu top` falls back to cwd-matching).
+    "session_id": "bb35bdb6-70d5-46f7-8b3c-2c8a686566ea",
     // Optional, lazy-init. Absent until the worker stamps via `clu verify`
     // or `clu attest`. Each entry: {"at": ISO8601_Z, "commit_sha": str}.
     // Stamp is "stale" if commit_sha != current HEAD.
