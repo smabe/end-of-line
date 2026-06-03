@@ -452,9 +452,28 @@ def render_once(
     return 0
 
 
+def _draw(surface, rows: list[dict], *, detail: bool, hint: str) -> None:
+    """Draw one frame of the dashboard onto a `Surface`.
+
+    The seam that makes the curses loop testable: identical logic to the old
+    inner draw — pick compact/detail, append a blank line + the key hint, write
+    each line within the surface's height. `format_rows`/`format_detail` fit
+    their own lines to width; the hint is the one raw line, so clip it to width
+    here (the old loop relied on `addnstr`'s cap for it). Each producer fitting
+    its own rows keeps the property test honest — a `BufferSurface` records what
+    we asked to draw, untruncated, so an over-width row is detectable.
+    """
+    body = (format_detail if detail else format_rows)(rows, width=surface.width)
+    lines = body + ["", hint[: surface.width]]
+    for y, line in enumerate(lines[: surface.height]):
+        surface.addstr(y, 0, line)
+
+
 def _run_curses(*, interval: float, project_filter: Path | None, projects_root: Path) -> int:
     import curses
     import locale
+
+    from end_of_line.top_render import CursesSurface  # lazy — avoids an import cycle
 
     try:
         locale.setlocale(locale.LC_ALL, "")  # honor UTF-8 for the glyphs
@@ -466,17 +485,10 @@ def _run_curses(*, interval: float, project_filter: Path | None, projects_root: 
         curses.curs_set(0)
         stdscr.timeout(max(100, int(interval * 1000)))  # getch doubles as the pace + quit poll
         while True:
-            maxy, maxx = stdscr.getmaxyx()
             rows = gather_rows(projects_root=projects_root, project_filter=project_filter)
-            body = (format_detail if detail else format_rows)(rows, width=maxx - 1)
             hint = f"q quit · w {'compact' if detail else 'detail'}"
-            lines = body + ["", hint]
             stdscr.erase()
-            for y, line in enumerate(lines[: maxy - 1]):
-                try:
-                    stdscr.addnstr(y, 0, line, maxx - 1)
-                except curses.error:
-                    pass
+            _draw(CursesSurface(stdscr), rows, detail=detail, hint=hint)
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in (ord("q"), ord("Q")):

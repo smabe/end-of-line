@@ -425,5 +425,155 @@ class HumanAgeTest(unittest.TestCase):
         self.assertEqual(top.human_age(None), "—")
 
 
+# --- Phase 0: the Surface/Rect rendering seam (clu-top-tui) -----------------
+
+
+def _draw_row(**over) -> dict:
+    """A populated render row to stress the draw path through a Surface."""
+    base = {
+        "project": "myrepo", "plan": "routing", "phase_id": "impl",
+        "ran_seconds": 600, "heartbeat_age_seconds": 18, "alive": True,
+        "last_command": "pytest -k routing", "command_running": True,
+        "last_write": "/repo/routing.py", "last_write_seconds": 4,
+        "last_text": "tests pass, wiring next", "last_activity_seconds": 2, "tokens": None,
+    }
+    base.update(over)
+    return base
+
+
+class RectTest(unittest.TestCase):
+    def test_frozen_geometry(self) -> None:
+        from end_of_line.top_render import Rect
+
+        r = Rect(1, 2, 30, 10)
+        self.assertEqual((r.x, r.y, r.w, r.h), (1, 2, 30, 10))
+        with self.assertRaises(Exception):
+            r.x = 5  # frozen — assignment must fail
+
+    def test_value_semantics(self) -> None:
+        # Frozen → hashable + equal-by-value: the layout engine will key dicts
+        # and dedup regions by Rect, so value semantics are part of the contract.
+        from end_of_line.top_render import Rect
+
+        self.assertEqual(Rect(1, 2, 3, 4), Rect(1, 2, 3, 4))
+        self.assertNotEqual(Rect(1, 2, 3, 4), Rect(1, 2, 3, 5))
+        self.assertEqual(len({Rect(0, 0, 1, 1), Rect(0, 0, 1, 1)}), 1)
+
+
+class BufferSurfaceTest(unittest.TestCase):
+    def test_reports_width_and_height(self) -> None:
+        from end_of_line.top_render import BufferSurface
+
+        s = BufferSurface(40, 12)
+        self.assertEqual(s.width, 40)
+        self.assertEqual(s.height, 12)
+
+    def test_records_addstr_calls(self) -> None:
+        from end_of_line.top_render import BufferSurface
+
+        s = BufferSurface(40, 12)
+        s.addstr(0, 0, "hello")
+        s.addstr(1, 2, "world")
+        self.assertEqual(s.cells, [(0, 0, "hello"), (1, 2, "world")])
+
+    def test_does_not_truncate_so_overwidth_is_visible(self) -> None:
+        # A faithless BufferSurface that clipped to width would make the
+        # property test tautological. It must record what the draw code asked
+        # to write, so an over-width line is detectable.
+        from end_of_line.top_render import BufferSurface
+
+        s = BufferSurface(4, 12)
+        s.addstr(0, 0, "way too long")
+        self.assertEqual(s.cells[0][2], "way too long")
+
+    def test_clips_rows_outside_height(self) -> None:
+        from end_of_line.top_render import BufferSurface
+
+        s = BufferSurface(40, 2)
+        s.addstr(5, 0, "off screen")
+        self.assertEqual(s.cells, [])
+
+
+class SurfacePropertyTest(unittest.TestCase):
+    """The seam's payoff: drive the real draw path across every geometry via a
+    BufferSurface (no terminal) and prove it never raises and never emits a row
+    wider than the surface. Impossible before the Surface seam existed."""
+
+    GEOMETRIES = (
+        [(w, h) for w in range(6) for h in range(6)]
+        + [(200, 5), (30, 120), (1, 1), (80, 24)]
+    )
+
+    def test_never_raises_and_rows_fit_width(self) -> None:
+        from end_of_line.top_render import BufferSurface
+
+        rows = [_draw_row(), _draw_row(last_text="x" * 500, last_command="y" * 400)]
+        for w, h in self.GEOMETRIES:
+            for detail in (False, True):
+                with self.subTest(w=w, h=h, detail=detail):
+                    s = BufferSurface(w, h)
+                    top._draw(s, rows, detail=detail, hint="q quit · w detail")
+                    for y, x, text in s.cells:
+                        self.assertLessEqual(
+                            len(text), s.width,
+                            f"row {y!r} exceeds width {s.width} ({text!r})",
+                        )
+
+    def test_empty_rows_still_safe(self) -> None:
+        from end_of_line.top_render import BufferSurface
+
+        for w, h in self.GEOMETRIES:
+            s = BufferSurface(w, h)
+            top._draw(s, [], detail=False, hint="q quit")
+            for _y, _x, text in s.cells:
+                self.assertLessEqual(len(text), s.width)
+
+
+class CursesSurfaceTest(unittest.TestCase):
+    def _win(self, maxy: int, maxx: int, raise_on=None):
+        import curses
+
+        class _FakeWin:
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, int, str, int]] = []
+
+            def getmaxyx(self):
+                return (maxy, maxx)
+
+            def addnstr(self, y, x, text, n):
+                self.calls.append((y, x, text, n))
+                if raise_on is not None and (y, x) == raise_on:
+                    raise curses.error("addnstr: returned ERR")
+
+        return _FakeWin()
+
+    def test_width_height_reserve_bottom_right(self) -> None:
+        # Today's loop reserves the bottom-right cell (addnstr to maxx-1,
+        # lines[:maxy-1]); the surface bakes that in so the draw stays clean.
+        from end_of_line.top_render import CursesSurface
+
+        s = CursesSurface(self._win(24, 80))
+        self.assertEqual(s.width, 79)
+        self.assertEqual(s.height, 23)
+
+    def test_bottom_right_curses_error_is_swallowed(self) -> None:
+        from end_of_line.top_render import CursesSurface
+
+        win = self._win(2, 6, raise_on=(0, 0))
+        s = CursesSurface(win)
+        # Must not propagate — real curses raises on the last cell.
+        s.addstr(0, 0, "boom")
+
+    def test_truncates_to_width(self) -> None:
+        from end_of_line.top_render import CursesSurface
+
+        win = self._win(24, 6)  # width -> 5
+        s = CursesSurface(win)
+        s.addstr(0, 0, "abcdefghij")
+        y, x, text, n = win.calls[0]
+        self.assertLessEqual(len(text), 5)
+        self.assertLessEqual(n, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
