@@ -214,11 +214,17 @@ A read-only `top`-like dashboard of every active worker on the host. Run it in
 a side window and leave it up:
 
 ```bash
-clu top                 # curses live view, all registered plans; q to quit
+clu top                 # curses live view, all registered plans
 clu top --project .     # scope to one project
 clu top --once          # one plain snapshot (also the default when piped)
 clu top --interval 3    # refresh seconds (default 1.5)
 ```
+
+In the live view: **`q`** quits, **`w`** toggles detail mode. Columns size to
+the terminal — the text fields use all available width and truncate only when
+content genuinely won't fit, so a wider window shows more. Detail mode stacks
+each worker into a small block with full, word-wrapped COMMAND and SAYING (never
+truncated, at the cost of vertical space).
 
 One row per active claim:
 

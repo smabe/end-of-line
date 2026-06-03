@@ -363,6 +363,43 @@ class FormatRowsTest(unittest.TestCase):
         lines = top.format_rows([self._row(last_text="x" * 500)], width=60)
         self.assertTrue(all(len(ln) <= 60 for ln in lines))
 
+    def test_wide_terminal_shows_full_name_and_command(self) -> None:
+        # The bug report: a wide terminal still truncated name/command because
+        # the caps were hardcoded. Columns must expand to fill the width.
+        r = self._row(
+            plan="workout-logging-bulletproof",
+            last_command="cd /Users/smabe/projects/HealthData-workout-logging-bulletproof && pytest",
+            last_text="y" * 40,
+        )
+        body = top.format_rows([r], width=400)[1]
+        self.assertNotIn("…", body)
+        self.assertIn("workout-logging-bulletproof", body)
+        self.assertIn("HealthData-workout-logging-bulletproof && pytest", body)
+
+
+class FormatDetailTest(unittest.TestCase):
+    def _row(self, **over) -> dict:
+        base = {
+            "project": "myrepo", "plan": "routing", "phase_id": "impl",
+            "ran_seconds": 600, "heartbeat_age_seconds": 18, "alive": True,
+            "last_command": "pytest", "command_running": True,
+            "last_write": "/repo/x.py", "last_write_seconds": 4,
+            "last_text": "ok", "last_activity_seconds": 2, "tokens": None,
+        }
+        base.update(over)
+        return base
+
+    def test_long_command_wraps_not_truncated(self) -> None:
+        cmd = "cd /a/very/long/path && " + " ".join(f"token{i}" for i in range(40))
+        lines = top.format_detail([self._row(last_command=cmd)], width=60)
+        self.assertTrue(all(len(ln) <= 60 for ln in lines))
+        joined = " ".join(ln.strip() for ln in lines)
+        self.assertNotIn("…", joined)
+        self.assertIn("token39", joined)  # last token survived via wrapping
+
+    def test_empty(self) -> None:
+        self.assertEqual(top.format_detail([]), ["(no active workers)"])
+
     def test_empty_rows_still_has_header(self) -> None:
         lines = top.format_rows([])
         self.assertTrue(lines and "PLAN" in lines[0])

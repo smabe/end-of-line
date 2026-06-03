@@ -19,7 +19,9 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import shutil
 import sys
+import textwrap
 from pathlib import Path
 
 from end_of_line import registry
@@ -306,38 +308,127 @@ def gather_rows(
     return rows
 
 
-def _cell(text: str, width: int) -> str:
-    """Fit one free-text field to `width`: collapse newlines / control chars to
-    spaces (so a multi-line command or assistant message can't break the
-    one-row-per-worker layout), then truncate with an ellipsis."""
-    clean = "".join(c if c.isprintable() else " " for c in text)
-    return clean if len(clean) <= width else clean[: max(0, width - 1)] + "…"
+def _clean(text: str) -> str:
+    """Collapse newlines / control chars to spaces so a multi-line command or
+    assistant message can't break a single row's layout."""
+    return "".join(c if c.isprintable() else " " for c in text)
+
+
+def _fit(text: str, width: int) -> str:
+    """Truncate a (already-cleaned) field to `width` with an ellipsis."""
+    if width <= 0:
+        return ""
+    return text if len(text) <= width else text[: max(0, width - 1)] + "…"
+
+
+# Header labels for the flexible (width-driven) columns.
+_NAME_HDR, _CMD_HDR, _WROTE_HDR, _SAY_HDR = "PROJECT/PLAN·PHASE", "COMMAND", "WROTE", "SAYING"
+# The fixed numeric columns (RAN/ACT/HB/PID) sum to 23; with 7 single-space
+# gaps between the 8 columns, non-flex overhead is 30.
+_FIXED_OVERHEAD = 30
+_FLEX_MIN = {"name": 12, "cmd": 10, "wrote": 6, "saying": 12}
+_FLEX_MAX = {"name": 60, "cmd": 160, "wrote": 32, "saying": 600}
+
+
+def _row_cells(r: dict) -> tuple[str, str, str, str]:
+    name = _clean(f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}")
+    run = "*" if r.get("command_running") else ""
+    cmd = _clean(run + (r.get("last_command") or "—"))
+    w = r.get("last_write")
+    wrote = _clean(f"{Path(w).name} {human_age(r.get('last_write_seconds'))}" if w else "—")
+    saying = _clean(r.get("last_text") or "—")
+    return name, cmd, wrote, saying
+
+
+def _flex_widths(cells: list[tuple[str, str, str, str]], width: int) -> dict[str, int]:
+    """Width for each flexible column, sized to the terminal.
+
+    Priority: name / command / wrote (the worker's identity + current action)
+    get their full content first; SAYING — a long prose line where truncation
+    is acceptable — absorbs whatever width is left over. Only when name+cmd+
+    wrote alone overflow do those three shrink proportionally."""
+    budget = max(40, width - _FIXED_OVERHEAD)
+    want = {"name": len(_NAME_HDR), "cmd": len(_CMD_HDR), "wrote": len(_WROTE_HDR), "saying": len(_SAY_HDR)}
+    for name, cmd, wrote, saying in cells:
+        want["name"] = max(want["name"], len(name))
+        want["cmd"] = max(want["cmd"], len(cmd))
+        want["wrote"] = max(want["wrote"], len(wrote))
+        want["saying"] = max(want["saying"], len(saying))
+    want = {k: min(v, _FLEX_MAX[k]) for k, v in want.items()}
+
+    core = want["name"] + want["cmd"] + want["wrote"]
+    if core + _FLEX_MIN["saying"] <= budget:
+        # Identity/action columns fit in full; SAYING takes the remainder.
+        return {**{k: want[k] for k in ("name", "cmd", "wrote")},
+                "saying": min(want["saying"], budget - core)}
+    # Even the core overflows: give SAYING its floor and shrink the rest to fit.
+    saying = _FLEX_MIN["saying"]
+    avail = max(3, budget - saying)
+    return {
+        "name": max(_FLEX_MIN["name"], want["name"] * avail // core),
+        "cmd": max(_FLEX_MIN["cmd"], want["cmd"] * avail // core),
+        "wrote": max(_FLEX_MIN["wrote"], want["wrote"] * avail // core),
+        "saying": saying,
+    }
+
+
+def _row_line(name, ran, act, hb, pid, cmd, wrote, saying, cw: dict[str, int]) -> str:
+    return (
+        f"{name:<{cw['name']}} {ran:>7} {act:>6} {hb:>6} {pid:>4} "
+        f"{cmd:<{cw['cmd']}} {wrote:<{cw['wrote']}} {saying}"
+    )
 
 
 def format_rows(rows: list[dict], *, width: int = 120) -> list[str]:
-    """Render rows to fixed-width lines (header first). Pure — the curses and
-    plain renderers both build their output from this so the layout has one
-    source of truth. Every line is clamped to `width`.
-    """
-    header = (
-        f"{'PROJECT/PLAN·PHASE':32} {'RAN':>7} {'ACT':>6} {'HB':>6} "
-        f"{'PID':>4}  {'COMMAND':28} {'WROTE':22} SAYING"
+    """Compact view: one row per worker, columns sized to `width` so the text
+    fields use all available space and truncate only when content genuinely
+    won't fit. Pure — both renderers build from this. Header first."""
+    cells = [_row_cells(r) for r in rows]
+    cw = _flex_widths(cells, width)
+    header = _row_line(
+        _fit(_NAME_HDR, cw["name"]), "RAN", "ACT", "HB", "PID",
+        _fit(_CMD_HDR, cw["cmd"]), _fit(_WROTE_HDR, cw["wrote"]), _SAY_HDR, cw,
     )
     out = [header[:width]]
-    for r in rows:
-        name = f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}"
-        pid = "ok" if r.get("alive") else "dead"
-        run = "*" if r.get("command_running") else " "
-        cmd = run + (r.get("last_command") or "—")
-        w = r.get("last_write")
-        wrote = f"{Path(w).name} {human_age(r.get('last_write_seconds'))}" if w else "—"
-        line = (
-            f"{_cell(name, 32):32} {human_age(r.get('ran_seconds')):>7} "
-            f"{human_age(r.get('last_activity_seconds')):>6} "
-            f"{human_age(r.get('heartbeat_age_seconds')):>6} {pid:>4}  "
-            f"{_cell(cmd, 28):28} {_cell(wrote, 22):22} {_cell(r.get('last_text') or '—', 80)}"
+    for (name, cmd, wrote, saying), r in zip(cells, rows):
+        line = _row_line(
+            _fit(name, cw["name"]),
+            human_age(r.get("ran_seconds")), human_age(r.get("last_activity_seconds")),
+            human_age(r.get("heartbeat_age_seconds")), "ok" if r.get("alive") else "dead",
+            _fit(cmd, cw["cmd"]), _fit(wrote, cw["wrote"]), _fit(saying, cw["saying"]), cw,
         )
         out.append(line[:width])
+    return out
+
+
+def _wrap_field(label: str, text: str, width: int) -> list[str]:
+    """A labelled, word-wrapped block — full text, no truncation, hanging indent."""
+    pieces = textwrap.wrap(_clean(text), max(20, width - 7)) or ["—"]
+    lines = [f"  {label:<4} {pieces[0]}"]
+    lines.extend(f"       {cont}" for cont in pieces[1:])
+    return [ln[:width] for ln in lines]
+
+
+def format_detail(rows: list[dict], *, width: int = 120) -> list[str]:
+    """Detail view: each worker is a small block — a metadata line plus full,
+    word-wrapped COMMAND and SAYING. Nothing truncates, at the cost of height."""
+    if not rows:
+        return ["(no active workers)"]
+    out: list[str] = []
+    for r in rows:
+        name = _clean(f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}")
+        meta = (
+            f"RAN {human_age(r.get('ran_seconds'))} · ACT {human_age(r.get('last_activity_seconds'))} · "
+            f"HB {human_age(r.get('heartbeat_age_seconds'))} · {'ok' if r.get('alive') else 'dead'}"
+        )
+        out.append(f"{name}   {meta}"[:width])
+        run = "* " if r.get("command_running") else ""
+        out.extend(_wrap_field("CMD", run + (r.get("last_command") or "—"), width))
+        w = r.get("last_write")
+        if w:
+            out.append(_clean(f"  WROTE {Path(w).name} {human_age(r.get('last_write_seconds'))}")[:width])
+        out.extend(_wrap_field("SAY", r.get("last_text") or "—", width))
+        out.append("")
     return out
 
 
@@ -347,9 +438,14 @@ def render_once(
     projects_root: Path = PROJECTS_ROOT,
     project_filter: Path | None = None,
     now: _dt.datetime | None = None,
-    width: int = 120,
+    width: int | None = None,
 ) -> int:
-    """Write a single snapshot to `stream`. Used for `--once` and non-TTY."""
+    """Write a single snapshot to `stream`. Used for `--once` and non-TTY.
+
+    Width defaults to the terminal's, so a wide terminal gets wide columns even
+    in snapshot mode; falls back to 120 when there's no terminal (piped)."""
+    if width is None:
+        width = shutil.get_terminal_size((120, 24)).columns
     rows = gather_rows(projects_root=projects_root, now=now, project_filter=project_filter)
     for line in format_rows(rows, width=width):
         stream.write(line + "\n")
@@ -366,12 +462,15 @@ def _run_curses(*, interval: float, project_filter: Path | None, projects_root: 
         pass  # misconfigured/forwarded locale — fall back to the C locale
 
     def _loop(stdscr) -> int:
+        detail = False
         curses.curs_set(0)
         stdscr.timeout(max(100, int(interval * 1000)))  # getch doubles as the pace + quit poll
         while True:
             maxy, maxx = stdscr.getmaxyx()
             rows = gather_rows(projects_root=projects_root, project_filter=project_filter)
-            lines = format_rows(rows, width=maxx - 1)
+            body = (format_detail if detail else format_rows)(rows, width=maxx - 1)
+            hint = f"q quit · w {'compact' if detail else 'detail'}"
+            lines = body + ["", hint]
             stdscr.erase()
             for y, line in enumerate(lines[: maxy - 1]):
                 try:
@@ -382,6 +481,8 @@ def _run_curses(*, interval: float, project_filter: Path | None, projects_root: 
             ch = stdscr.getch()
             if ch in (ord("q"), ord("Q")):
                 return 0
+            if ch in (ord("w"), ord("W")):
+                detail = not detail
 
     try:
         return curses.wrapper(_loop)
