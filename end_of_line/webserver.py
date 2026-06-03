@@ -1,39 +1,335 @@
 """`clu serve` — self-hosted web dashboard for `clu top`.
 
-Phase 1: localhost-only, read-only. Serves the bundled Tron "End of Line"
-dashboard at `GET /` and the live worker rows at `GET /api/workers`
-(`top.gather_rows()` as JSON, polled by the page every ~1.5s). The `--lan`
-security layer (token auth, Host-header allowlist, auto self-signed TLS) lands
-in a later phase; this module deliberately binds loopback only for now.
+Serves the Tron "End of Line" dashboard at `GET /` and the live worker rows at
+`GET /api/workers` (`top.gather_rows()` as JSON, polled by the page every
+~1.5s). Localhost-only and unauthenticated by default; a single `--lan` switch
+(via `build_config`) flips on the whole security layer at once: bind one
+auto-detected LAN IP, require a token, enforce a Host-header allowlist, and
+serve auto self-signed HTTPS.
 
-Design constraints baked in here, do not regress:
+Security constraints baked in here, do not regress:
 - **Exact-match routing** to one bundled file — never `SimpleHTTPRequestHandler`
   over a directory (that follows symlinks and serves the cwd).
-- **`gather_rows` may raise** (corrupt registry): every request is wrapped so a
+- **Host-header allowlist is the primary DNS-rebinding defense** — enforced on
+  every request before auth, before routing → 421 on mismatch.
+- **Token auth** (when configured): `hmac.compare_digest` against a
+  `Bearer` header or the `clu_session` cookie; `/login?token=` mints the cookie
+  (`HttpOnly; SameSite=Strict`, `Secure` under TLS). Never expose a non-loopback
+  bind without a token (`build_config` guardrail).
+- **`gather_rows` may raise** (corrupt registry): the request is wrapped so a
   failure yields 500 without killing the handler thread or the server.
-- **Silenced request logging** — request lines can carry paths/tokens; they are
-  never written to stderr.
+- **Silenced request logging** — request lines carry paths and could carry a
+  `?token=`; they are never written to stderr.
+- **openssl is invoked via an arg list** (never `shell=True`); the bind value is
+  validated before it reaches the certificate SAN.
 - **`shutdown()` must fire off the `serve_forever` thread** or it deadlocks; the
   signal handler in `serve` spawns a one-shot thread for it.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import hmac
+import http.cookies
 import importlib.resources
+import ipaddress
 import json
+import os
+import re
+import secrets
 import signal
+import socket
+import ssl
+import subprocess
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from . import top
+from ._xdg_guard import clu_config_dir
 
-# Worker-derived transcript fields dropped by `--no-transcript`. These are the
+# Worker-derived transcript content dropped by `--no-transcript`. These are the
 # semi-untrusted LLM/tool strings; omitting them yields a metrics-only feed.
 _TRANSCRIPT_FIELDS = ("last_command", "last_text", "last_write")
 
+# Host header values that are always loopback-safe.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+COOKIE_NAME = "clu_session"
 
+
+class ConfigError(Exception):
+    """A serve configuration the operator must fix (bad cert, no openssl, an
+    unsafe bind). Surfaces as a clean `_die`, never a traceback."""
+
+
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+@dataclasses.dataclass
+class ServeConfig:
+    """Everything the server + handler need. Built from CLI flags by
+    `build_config`; constructed directly in tests."""
+
+    host: str = "127.0.0.1"
+    port: int = 8787
+    project_filter: Path | None = None
+    include_transcript: bool = True
+    token: str | None = None  # None → no auth gate (loopback default)
+    host_allowlist: frozenset[str] = dataclasses.field(default_factory=frozenset)
+    tls: ssl.SSLContext | None = None  # None → plaintext
+
+    def __post_init__(self) -> None:
+        if not self.host_allowlist:
+            self.host_allowlist = host_allowlist_for(self.host)
+
+
+def host_allowlist_for(host: str) -> frozenset[str]:
+    """The Host-header values a request may carry: the bind host + loopback."""
+    return frozenset({host.lower(), *LOOPBACK_HOSTS})
+
+
+def _is_loopback(bind: str) -> bool:
+    """True for `localhost` and every loopback IP (the whole 127.0.0.0/8 block
+    and `::1`), so a `127.0.0.2` alias isn't misread as an exposed bind."""
+    if bind.lower() in LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(bind).is_loopback
+    except ValueError:
+        return False
+
+
+def detect_lan_ip() -> str:
+    """The machine's primary outbound IPv4, via the UDP-connect trick (no
+    packets are actually sent). Raises `ConfigError` with no usable route."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError as exc:
+        raise ConfigError(
+            "could not detect a LAN IP (no network?); pass --host explicitly"
+        ) from exc
+    finally:
+        s.close()
+
+
+def token_path() -> Path:
+    return clu_config_dir() / "serve_token"
+
+
+def load_or_create_token() -> str:
+    """The shared bearer token, generated once and cached `0600`. Reused across
+    runs so the operator's bookmarked `/login?token=` URL keeps working."""
+    path = token_path()
+    if path.exists():
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    token = secrets.token_urlsafe(32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_secret(path, token)
+    return token
+
+
+def _write_secret(path: Path, text: str) -> None:
+    """Write a secret atomically and at mode 0600 from birth — `mkstemp` creates
+    the temp at 0600, and `os.replace` swaps it in without ever exposing the
+    final path at a wider mode (the create-then-chmod pattern leaves a
+    world-readable window). Mirrors `state.save_atomic`."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def cert_paths() -> tuple[Path, Path]:
+    base = clu_config_dir()
+    return base / "serve_cert.pem", base / "serve_key.pem"
+
+
+def _san_for(bind: str) -> str:
+    """Build (and validate) the certificate SAN for `bind`. An IP becomes
+    `IP:…`, a hostname `DNS:…`; both pin `localhost` too. Rejects anything that
+    isn't a real IP or a conservative hostname before it reaches openssl."""
+    try:
+        ip = ipaddress.ip_address(bind)
+        return f"IP:{ip},DNS:localhost"
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", bind):
+            raise ConfigError(f"invalid bind host for certificate: {bind!r}")
+        return f"DNS:{bind},DNS:localhost"
+
+
+class _AddextUnsupported(Exception):
+    """The installed openssl lacks `-addext` (older OpenSSL / LibreSSL)."""
+
+
+def ensure_self_signed(bind: str, cert: Path, key: Path) -> None:
+    """Mint a self-signed cert (SAN = bind + localhost) at `cert`/`key` if not
+    already cached. Cached pair is reused untouched (stable cert across runs)."""
+    if cert.exists() and key.exists():
+        return
+    san = _san_for(bind)
+    cert.parent.mkdir(parents=True, exist_ok=True)
+    # Tighten umask so openssl creates the private key 0600 from birth rather
+    # than world-readable-then-chmod (a TOCTOU window). Runs single-threaded at
+    # startup; _lock_down stays as a backstop. Restored in finally.
+    old_umask = os.umask(0o077)
+    try:
+        try:
+            _openssl_addext(san, cert, key)
+        except _AddextUnsupported:
+            _openssl_config(san, cert, key)
+    finally:
+        os.umask(old_umask)
+
+
+def _lock_down(cert: Path, key: Path) -> None:
+    os.chmod(cert, 0o600)
+    os.chmod(key, 0o600)
+
+
+_OPENSSL_BASE = [
+    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+    "-days", "825",
+]
+
+
+def _openssl_addext(san: str, cert: Path, key: Path) -> None:
+    cmd = [
+        *_OPENSSL_BASE,
+        "-keyout", str(key), "-out", str(cert),
+        "-subj", "/CN=clu serve",
+        "-addext", f"subjectAltName={san}",
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            "openssl not found on PATH; pass --cert/--key or use --http"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").lower()
+        if b"addext" in stderr or b"unknown option" in stderr:
+            raise _AddextUnsupported() from exc
+        raise ConfigError(
+            f"openssl failed: {(exc.stderr or b'').decode(errors='replace')[:200]}"
+        ) from exc
+    _lock_down(cert, key)
+
+
+def _openssl_config(san: str, cert: Path, key: Path) -> None:
+    """Fallback for openssl builds without `-addext`: pass the SAN through a
+    temp config file's `x509_extensions` instead."""
+    config = (
+        "[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n"
+        "[dn]\nCN=clu serve\n"
+        f"[v3]\nsubjectAltName={san}\n"
+    )
+    fd, cfg_path = tempfile.mkstemp(suffix=".cnf")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(config)
+        cmd = [
+            *_OPENSSL_BASE,
+            "-keyout", str(key), "-out", str(cert),
+            "-config", cfg_path,
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except FileNotFoundError as exc:
+            raise ConfigError(
+                "openssl not found on PATH; pass --cert/--key or use --http"
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            raise ConfigError(
+                f"openssl failed: {(exc.stderr or b'').decode(errors='replace')[:200]}"
+            ) from exc
+        _lock_down(cert, key)
+    finally:
+        os.unlink(cfg_path)
+
+
+def build_tls_context(certfile: Path, keyfile: Path) -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        ctx.load_cert_chain(str(certfile), str(keyfile))
+    except (OSError, ssl.SSLError) as exc:
+        raise ConfigError(f"could not load cert/key: {exc}") from exc
+    return ctx
+
+
+def build_config(
+    *,
+    lan: bool = False,
+    host: str | None = None,
+    port: int = 8787,
+    project_filter: Path | None = None,
+    include_transcript: bool = True,
+    cert: str | None = None,
+    key: str | None = None,
+    http: bool = False,
+) -> ServeConfig:
+    """Resolve CLI flags into a `ServeConfig`, applying the security policy:
+    LAN-IP detection, token provisioning, the non-loopback-needs-a-token
+    guardrail, and TLS selection. This is the one place that decides whether the
+    server is exposed, authenticated, and encrypted."""
+    if host:
+        bind = host
+    elif lan:
+        bind = detect_lan_ip()
+    else:
+        bind = "127.0.0.1"
+
+    # `exposed` = reachable off this machine → needs a token. `--lan` always
+    # counts as exposed even if the detected IP looked loopback for some reason;
+    # a bind that isn't loopback is exposed regardless of the flag.
+    exposed = lan or not _is_loopback(bind)
+    token = load_or_create_token() if exposed else None
+    if exposed and not token:
+        # Reachable guard: an exposed bind must never be tokenless. Fires if
+        # token provisioning is ever changed to return falsy.
+        raise ConfigError(
+            f"refusing to expose {bind} without a token; use --lan"
+        )
+
+    # TLS: explicit --cert/--key wins; otherwise an exposed bind defaults to
+    # auto self-signed HTTPS unless --http opts into cleartext.
+    if (cert or key) and http:
+        raise ConfigError("--http conflicts with --cert/--key (cleartext vs TLS)")
+    tls: ssl.SSLContext | None = None
+    if cert or key:
+        if not (cert and key):
+            raise ConfigError("--cert and --key must be given together")
+        tls = build_tls_context(Path(cert), Path(key))
+    elif exposed and not http:
+        cert_file, key_file = cert_paths()
+        ensure_self_signed(bind, cert_file, key_file)
+        tls = build_tls_context(cert_file, key_file)
+
+    return ServeConfig(
+        host=bind,
+        port=port,
+        project_filter=project_filter,
+        include_transcript=include_transcript,
+        token=token,
+        tls=tls,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Page + data
+# --------------------------------------------------------------------------- #
 def load_index_html() -> str:
     """Read the bundled dashboard page via `importlib.resources` (works in an
     editable checkout and inside a wheel, given the `web/*.html` package-data)."""
@@ -46,7 +342,7 @@ def load_index_html() -> str:
 
 def workers_json(*, project_filter: Path | None = None, include_transcript: bool = True) -> bytes:
     """`gather_rows()` shaped for the wire. With `include_transcript=False`,
-    drop the transcript-derived fields so the feed carries metrics only."""
+    drop the transcript-content fields so the feed carries metrics only."""
     rows = top.gather_rows(project_filter=project_filter)
     if not include_transcript:
         for row in rows:
@@ -55,8 +351,11 @@ def workers_json(*, project_filter: Path | None = None, include_transcript: bool
     return json.dumps(rows).encode("utf-8")
 
 
-def make_handler(*, index_html: str, project_filter: Path | None, include_transcript: bool):
-    """Build a `BaseHTTPRequestHandler` closed over the page + feed config."""
+# --------------------------------------------------------------------------- #
+# Handler
+# --------------------------------------------------------------------------- #
+def make_handler(*, index_html: str, cfg: ServeConfig):
+    """Build a `BaseHTTPRequestHandler` closed over the page + config."""
     page = index_html.encode("utf-8")
 
     class _Handler(BaseHTTPRequestHandler):
@@ -71,22 +370,74 @@ def make_handler(*, index_html: str, project_filter: Path | None, include_transc
         def do_GET(self):
             self._dispatch(head=False)
 
+        # -- gates ---------------------------------------------------------- #
+        def _host_allowed(self) -> bool:
+            raw = self.headers.get("Host")
+            if not raw:
+                # Absent Host is tolerated only on the unauthenticated loopback
+                # default (simple HTTP/1.0 tooling). On any exposed/tokened bind
+                # a missing Host is rejected — legit browsers always send one,
+                # and the allowlist is the primary DNS-rebinding defense.
+                return cfg.token is None
+            if raw.startswith("["):  # [::1]:port
+                hostname = raw[1: raw.find("]")] if "]" in raw else raw
+            else:
+                hostname = raw.rsplit(":", 1)[0] if ":" in raw else raw
+            return hostname.lower() in cfg.host_allowlist
+
+        def _cookie(self, name: str) -> str | None:
+            raw = self.headers.get("Cookie")
+            if not raw:
+                return None
+            jar = http.cookies.SimpleCookie()
+            try:
+                jar.load(raw)
+            except http.cookies.CookieError:
+                return None
+            morsel = jar.get(name)
+            return morsel.value if morsel else None
+
+        def _authed(self) -> bool:
+            if cfg.token is None:
+                return True  # no auth configured (loopback default)
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                if hmac.compare_digest(auth[len("Bearer "):], cfg.token):
+                    return True
+            cookie = self._cookie(COOKIE_NAME)
+            return cookie is not None and hmac.compare_digest(cookie, cfg.token)
+
+        # -- dispatch ------------------------------------------------------- #
         def _dispatch(self, *, head: bool) -> None:
             try:
+                # 1. DNS-rebinding defense — before auth, before routing.
+                if not self._host_allowed():
+                    self._respond(421, b"misdirected request\n", "text/plain; charset=utf-8", head=head)
+                    return
+
                 path = urlsplit(self.path).path
+
+                # 2. /login mints the session cookie (only when auth is on).
+                if path == "/login" and cfg.token is not None:
+                    self._handle_login(head=head)
+                    return
+
+                # 3. Auth gate.
+                if cfg.token is not None and not self._authed():
+                    self._respond(401, b"unauthorized\n", "text/plain; charset=utf-8", head=head)
+                    return
+
+                # 4. Routes (exact match only).
                 if path == "/":
                     self._respond(200, page, "text/html; charset=utf-8", head=head)
                 elif path == "/api/workers":
                     body = workers_json(
-                        project_filter=project_filter,
-                        include_transcript=include_transcript,
+                        project_filter=cfg.project_filter,
+                        include_transcript=cfg.include_transcript,
                     )
                     self._respond(
-                        200,
-                        body,
-                        "application/json; charset=utf-8",
-                        head=head,
-                        extra={"Cache-Control": "no-store"},
+                        200, body, "application/json; charset=utf-8",
+                        head=head, extra={"Cache-Control": "no-store"},
                     )
                 else:
                     self._respond(404, b"not found\n", "text/plain; charset=utf-8", head=head)
@@ -94,14 +445,23 @@ def make_handler(*, index_html: str, project_filter: Path | None, include_transc
                 # Corrupt registry / transcript: 500, but keep the thread and
                 # the server alive. Never leak the traceback to the client.
                 try:
-                    self._respond(
-                        500,
-                        b"internal server error\n",
-                        "text/plain; charset=utf-8",
-                        head=head,
-                    )
+                    self._respond(500, b"internal server error\n", "text/plain; charset=utf-8", head=head)
                 except Exception:
                     pass
+
+        def _handle_login(self, *, head: bool) -> None:
+            token = (parse_qs(urlsplit(self.path).query).get("token") or [""])[0]
+            if hmac.compare_digest(token, cfg.token):
+                attrs = f"{COOKIE_NAME}={cfg.token}; HttpOnly; SameSite=Strict; Path=/"
+                if cfg.tls is not None:
+                    attrs += "; Secure"
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Set-Cookie", attrs)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._respond(401, b"unauthorized\n", "text/plain; charset=utf-8", head=head)
 
         def _respond(self, code: int, body: bytes, ctype: str, *, head: bool, extra=None) -> None:
             self.send_response(code)
@@ -123,41 +483,61 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def handle_error(self, request, client_address):
+        # A LAN-exposed server gets scanned constantly: a failed TLS handshake
+        # (plain HTTP hitting the HTTPS port) or a dropped connection must not
+        # spew tracebacks to stderr. Per-request handler errors are already
+        # turned into 500s inside the handler; this only swallows transport-
+        # level noise on accept/handshake. serve_forever keeps running.
+        pass
 
-def build_server(
-    host: str,
-    port: int,
-    *,
-    project_filter: Path | None = None,
-    include_transcript: bool = True,
-) -> _Server:
-    """Construct (and bind) the server. Raises `OSError` on a bind failure
-    (e.g. EADDRINUSE) — the caller turns that into a clean exit. Kept separate
+
+def build_server(cfg: ServeConfig) -> _Server:
+    """Construct (and bind) the server from a config. Raises `OSError` on a bind
+    failure (e.g. EADDRINUSE), `ConfigError` if the TLS wrap fails. Kept separate
     from `serve` so tests can drive it without installing signal handlers."""
-    handler = make_handler(
-        index_html=load_index_html(),
-        project_filter=project_filter,
-        include_transcript=include_transcript,
-    )
-    return _Server((host, port), handler)
+    handler = make_handler(index_html=load_index_html(), cfg=cfg)
+    server = _Server((cfg.host, cfg.port), handler)
+    if cfg.tls is not None:
+        try:
+            # Wrap the listening socket: accept() then returns TLS connections.
+            server.socket = cfg.tls.wrap_socket(server.socket, server_side=True)
+        except (OSError, ssl.SSLError) as exc:
+            server.server_close()
+            raise ConfigError(f"could not start TLS: {exc}") from exc
+    return server
 
 
-def serve(
-    *,
-    host: str = "127.0.0.1",
-    port: int = 8787,
-    project_filter: Path | None = None,
-    include_transcript: bool = True,
-) -> int:
+def _print_banner(cfg: ServeConfig, scheme: str, host: str, port: int) -> None:
+    base = f"{scheme}://{host}:{port}"
+    lines: list[str] = []
+    if cfg.token:
+        # The operator's terminal — printing the token here is intended (it is
+        # the shareable entry point); the no-log rule is about request logs.
+        lines.append(f"clu serve → {base}/login?token={cfg.token}")
+        lines.append("  open that URL once; it sets a read-only session cookie.")
+    else:
+        lines.append(f"clu serve → {base}/  (localhost, read-only; Ctrl-C to stop)")
+    if cfg.host.lower() not in LOOPBACK_HOSTS:
+        lines.append(
+            f"  ⚠ reachable on your LAN at {cfg.host} — anyone on this network "
+            "with the token can view worker activity."
+        )
+        if cfg.tls is None:
+            lines.append(
+                "  ⚠ CLEARTEXT (--http): token + transcript are sent "
+                "unencrypted and are sniffable on shared Wi-Fi."
+            )
+    # Flush: when stdout is redirected (not a TTY) it block-buffers, which would
+    # hide the login URL the operator needs until the process exits.
+    print("\n".join(lines), flush=True)
+
+
+def serve(cfg: ServeConfig) -> int:
     """Run the dashboard server until SIGINT/SIGTERM. Blocks in
     `serve_forever`. Binds before installing signal handlers so a bind error
     surfaces to the caller untouched."""
-    httpd = build_server(
-        host,
-        port,
-        project_filter=project_filter,
-        include_transcript=include_transcript,
-    )
+    httpd = build_server(cfg)
 
     def _stop(_signum, _frame) -> None:
         # shutdown() blocks until serve_forever returns; calling it from this
@@ -167,8 +547,9 @@ def serve(
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
+    scheme = "https" if cfg.tls is not None else "http"
     bound_host, bound_port = httpd.server_address[:2]
-    print(f"clu serve → http://{bound_host}:{bound_port}/  (read-only; Ctrl-C to stop)")
+    _print_banner(cfg, scheme, bound_host, bound_port)
     try:
         httpd.serve_forever()
     finally:

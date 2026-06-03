@@ -1219,6 +1219,38 @@ def main(argv: list[str] | None = None) -> int:
         help="Omit transcript-derived fields (last command / SAYING / last "
         "write) from /api/workers — metrics only.",
     )
+    p_serve.add_argument(
+        "--lan",
+        action="store_true",
+        default=False,
+        help="Make the dashboard reachable from your LAN (e.g. your phone): "
+        "bind one auto-detected LAN IP, require an auto-generated token, "
+        "enforce a Host-header allowlist, and serve auto self-signed HTTPS.",
+    )
+    p_serve.add_argument(
+        "--host",
+        default=None,
+        help="Explicit bind address (overrides --lan's auto-detected IP). A "
+        "non-loopback host is treated like --lan (token + HTTPS required).",
+    )
+    p_serve.add_argument(
+        "--cert",
+        default=None,
+        help="TLS certificate PEM (with --key) instead of an auto self-signed "
+        "cert.",
+    )
+    p_serve.add_argument(
+        "--key",
+        default=None,
+        help="TLS private-key PEM (with --cert).",
+    )
+    p_serve.add_argument(
+        "--http",
+        action="store_true",
+        default=False,
+        help="Serve plaintext HTTP even on a LAN bind (loud cleartext warning). "
+        "Token + transcript are then sent unencrypted.",
+    )
 
     p_notify_test = sub.add_parser(
         "notify-test",
@@ -3927,24 +3959,32 @@ def cmd_top(args) -> int:
 
 
 def cmd_serve(args) -> int:
-    """Self-host the worker dashboard over HTTP (localhost, read-only).
+    """Self-host the worker dashboard over HTTP(S) (read-only).
 
-    Blocks in `serve_forever` until Ctrl-C. A bind failure (e.g. EADDRINUSE)
-    surfaces as a clean `_die` rather than a traceback.
+    Blocks in `serve_forever` until Ctrl-C. A configuration problem (bad cert,
+    no openssl, unsafe bind) or a bind failure (e.g. EADDRINUSE) surfaces as a
+    clean `_die` rather than a traceback.
     """
     from . import webserver
 
-    host = "127.0.0.1"
-    port = getattr(args, "port", 8787)
     try:
-        return webserver.serve(
-            host=host,
-            port=port,
+        cfg = webserver.build_config(
+            lan=getattr(args, "lan", False),
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", 8787),
             project_filter=getattr(args, "project", None),
             include_transcript=not getattr(args, "no_transcript", False),
+            cert=getattr(args, "cert", None),
+            key=getattr(args, "key", None),
+            http=getattr(args, "http", False),
         )
+    except webserver.ConfigError as exc:
+        return _die(ExitCode.INVALID_VALUE, str(exc))
+
+    try:
+        return webserver.serve(cfg)
     except OSError as exc:
-        return _die(ExitCode.GENERIC, f"could not bind {host}:{port}: {exc}")
+        return _die(ExitCode.GENERIC, f"could not bind {cfg.host}:{cfg.port}: {exc}")
 
 
 def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:
