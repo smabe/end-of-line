@@ -135,6 +135,17 @@ class LocateTranscriptTest(unittest.TestCase):
             top.locate_transcript(Path(cwd), projects_root=self.root, session_id="nope")
         )
 
+    def test_session_id_missing_file_falls_back_to_cwd_match(self) -> None:
+        # A stamped id whose exact file isn't present yet must not blank the
+        # worker — fall back to confirming a cwd-matching transcript.
+        cwd = "/x/a-b"
+        d = self.root / top.encode_project_dir(Path(cwd))
+        f = _write_jsonl(d / "actual.jsonl", [_asst(cwd=cwd)], mtime=1000)
+        self.assertEqual(
+            top.locate_transcript(Path(cwd), projects_root=self.root, session_id="not-written-yet"),
+            f,
+        )
+
     def test_session_id_rejects_sidechain_and_cwd_mismatch(self) -> None:
         # The deterministic-id path must still confirm: a misrouted id pointing
         # at a sidechain (or another cwd's session) must not surface.

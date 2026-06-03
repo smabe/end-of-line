@@ -101,7 +101,9 @@ def locate_transcript(
         cand = d / f"{session_id}.jsonl"
         if cand.exists() and _confirms(cand, target):
             return cand
-        return None
+        # Exact file absent (launch window before the transcript appears, or an
+        # unexpected filename) — fall through to cwd-matching rather than
+        # reporting no activity for a live worker.
     if not d.is_dir():
         return None
     # A cwd dir accumulates many session files (retries) plus sidechain

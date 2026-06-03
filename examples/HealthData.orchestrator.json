@@ -2,7 +2,7 @@
   "plan_dir": "plans",
   "dispatch": {
     "kind": "shell",
-    "command": "claude --print '/plan {plan_slug}  (resume phase {phase_id}; state at {state_file})'"
+    "command": "claude --session-id {session_id} --print '/plan {plan_slug}  (resume phase {phase_id}; state at {state_file})'"
   },
   "notify": {
     "push": true,
