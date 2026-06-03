@@ -465,25 +465,35 @@ def render_once(
     return 0
 
 
-def _draw(surface, rows: list[dict], *, detail: bool, hint: str, cols: tuple[str, ...] | None = None) -> None:
-    """Draw one frame of the dashboard onto a `Surface`.
+_HINT = "q quit · w layout"
 
-    The seam that makes the curses loop testable: identical logic to the old
-    inner draw — pick compact/detail, append a blank line + the key hint, write
-    each line within the surface's height. The producers fit their own lines to
-    width; the hint is the one raw line, so clip it to width here (the old loop
-    relied on `addnstr`'s cap for it). Each producer fitting its own rows keeps
-    the property test honest — a `BufferSurface` records what we asked to draw,
-    untruncated, so an over-width row is detectable. `--cols` only narrows the
-    compact table; detail keeps its own full-wrap behavior.
-    """
-    if detail:
-        body = format_detail(rows, width=surface.width)
-    else:
-        body = _compact_lines(rows, width=surface.width, cols=cols)
-    lines = body + ["", hint[: surface.width]]
-    for y, line in enumerate(lines[: surface.height]):
-        surface.addstr(y, 0, line)
+
+def _render_region(role: str, snapshot, rect, *, cols: tuple[str, ...] | None, hint: str) -> list[str]:
+    """Lines for one pane region, each routed through the registry's per-pane
+    error boundary so a single bad pane degrades to an inline band, never a
+    crash. The `hint` is the one raw string the layout owns, so clip it to the
+    region width here (the panes fit their own rows)."""
+    from end_of_line.top_registry import PANES, safe_render
+
+    if role == "hint":
+        return [hint[: rect.w]]
+    pane = PANES.get(role if role != "list" else "table")
+    if pane is None:
+        return []
+    return safe_render(pane, snapshot, width=rect.w, cols=cols if role == "list" else None)
+
+
+def _draw_panes(surface, snapshot, layout, *, cols: tuple[str, ...] | None = None, hint: str = "") -> None:
+    """Render every pane of `layout` into its `Rect` on `surface`.
+
+    The seam that makes the curses loop testable: a `BufferSurface` drives this
+    across every geometry and forced preset (property test) without a terminal.
+    Each pane fits its own rows to its region width; `CursesSurface` clips per
+    cell as a backstop, so an off-by-one `Rect` can never corrupt the grid."""
+    for role, rect in layout.rects.items():
+        lines = _render_region(role, snapshot, rect, cols=cols, hint=hint)
+        for i, line in enumerate(lines[: rect.h]):
+            surface.addstr(rect.y + i, rect.x, line)
 
 
 def _run_curses(
@@ -496,28 +506,47 @@ def _run_curses(
     import curses
     import locale
 
-    from end_of_line.top_render import CursesSurface  # lazy — avoids an import cycle
+    # lazy imports — avoid an import cycle (top_render/top_layout/top_registry
+    # all import pure helpers from `top` at their module level).
+    from end_of_line.top_layout import AppState, LayoutEngine, next_preset
+    from end_of_line.top_registry import Snapshot
+    from end_of_line.top_render import CursesSurface
 
     try:
         locale.setlocale(locale.LC_ALL, "")  # honor UTF-8 for the glyphs
     except locale.Error:
         pass  # misconfigured/forwarded locale — fall back to the C locale
 
+    engine = LayoutEngine()
+    app = AppState()
+
     def _loop(stdscr) -> int:
-        detail = False
         curses.curs_set(0)
-        stdscr.timeout(max(100, int(interval * 1000)))  # getch doubles as the pace + quit poll
+        stdscr.keypad(True)  # deliver arrow keys + KEY_RESIZE as keysyms
+        stdscr.timeout(max(100, int(interval * 1000)))  # getch doubles as pace + quit poll
         while True:
             rows = gather_rows(projects_root=projects_root, project_filter=project_filter)
-            hint = f"q quit · w {'compact' if detail else 'detail'}"
+            snapshot = Snapshot(rows)
+            # Lay out within the surface's usable area (it reserves the
+            # bottom-right cell), not raw getmaxyx, so rects never reach the
+            # corner curses raises on.
+            surface = CursesSurface(stdscr)
+            app.geometry = (surface.width, surface.height)
+            layout = engine.layout(surface.width, surface.height, override=app.layout_preset)
             stdscr.erase()
-            _draw(CursesSurface(stdscr), rows, detail=detail, hint=hint, cols=cols)
-            stdscr.refresh()
+            _draw_panes(surface, snapshot, layout, cols=cols, hint=_HINT)
+            # Single window, but use the flicker-free pair so adding derwins
+            # later is a drop-in: stage all writes, then one screen update.
+            stdscr.noutrefresh()
+            curses.doupdate()
             ch = stdscr.getch()
             if ch in (ord("q"), ord("Q")):
                 return 0
             if ch in (ord("w"), ord("W")):
-                detail = not detail
+                app.layout_preset = next_preset(app.layout_preset)
+            # KEY_RESIZE needs no special case: the next iteration reads the new
+            # getmaxyx, recomputes rects, and erase()+redraws. keypad(True) keeps
+            # it from being misread as a printable key.
 
     try:
         return curses.wrapper(_loop)

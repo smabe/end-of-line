@@ -286,6 +286,42 @@ def _table(snapshot: Snapshot, *, width: int, cols: tuple[str, ...] | None = Non
     return out
 
 
+def fleet_summary(rows: list[dict], width: int) -> str:
+    """The one-line fleet header: `N running · N dead · oldest-ACT Xm`.
+
+    Mirrors `web/index.html:251` `header()` — counts come straight from the
+    snapshot rows, the same row dicts `clu serve` renders. There is deliberately
+    no "blocked" count: a worker that calls `clu block` releases its claim
+    (`cli.cmd_block` → `release_claim_and_emit`), so a blocked plan has no
+    `current_claim` and never reaches `gather_rows` (`top.gather_rows` skips
+    claimless plans). The web header omits "blocked" for exactly this reason."""
+    if not rows:
+        return _fit("no active workers", width)
+    alive = [r for r in rows if r.get("alive")]
+    running = len(alive)
+    dead = len(rows) - running
+    acts = [r.get("last_activity_seconds") for r in alive if r.get("last_activity_seconds") is not None]
+    oldest = human_age(max(acts)) if acts else "—"
+    return _fit(f"{running} running · {dead} dead · oldest-ACT {oldest}", width)
+
+
+@register_pane(kind="header", metric_keys=())
+def _header(snapshot: Snapshot, *, width: int, cols: tuple[str, ...] | None = None) -> list[str]:
+    """Fleet-summary header pane — one line of fleet-wide counts."""
+    return [fleet_summary(snapshot.rows, width)]
+
+
+@register_pane(kind="detail", metric_keys=DEFAULT_COLS)
+def _detail(snapshot: Snapshot, *, width: int, cols: tuple[str, ...] | None = None) -> list[str]:
+    """Detail pane — full, word-wrapped per-worker blocks. Phase 3 makes it
+    selection-aware (the selected worker, full untruncated SAYING + transcript
+    tail); today it mirrors `top.format_detail` for the whole fleet so the split
+    and stacked geometries have something real to render."""
+    from end_of_line.top import format_detail
+
+    return format_detail(snapshot.rows, width=width)
+
+
 # --------------------------------------------------------------------------- #
 # --cols parsing — validated against the registered metric keys
 # --------------------------------------------------------------------------- #

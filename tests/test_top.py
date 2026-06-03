@@ -494,41 +494,6 @@ class BufferSurfaceTest(unittest.TestCase):
         self.assertEqual(s.cells, [])
 
 
-class SurfacePropertyTest(unittest.TestCase):
-    """The seam's payoff: drive the real draw path across every geometry via a
-    BufferSurface (no terminal) and prove it never raises and never emits a row
-    wider than the surface. Impossible before the Surface seam existed."""
-
-    GEOMETRIES = (
-        [(w, h) for w in range(6) for h in range(6)]
-        + [(200, 5), (30, 120), (1, 1), (80, 24)]
-    )
-
-    def test_never_raises_and_rows_fit_width(self) -> None:
-        from end_of_line.top_render import BufferSurface
-
-        rows = [_draw_row(), _draw_row(last_text="x" * 500, last_command="y" * 400)]
-        for w, h in self.GEOMETRIES:
-            for detail in (False, True):
-                with self.subTest(w=w, h=h, detail=detail):
-                    s = BufferSurface(w, h)
-                    top._draw(s, rows, detail=detail, hint="q quit · w detail")
-                    for y, x, text in s.cells:
-                        self.assertLessEqual(
-                            len(text), s.width,
-                            f"row {y!r} exceeds width {s.width} ({text!r})",
-                        )
-
-    def test_empty_rows_still_safe(self) -> None:
-        from end_of_line.top_render import BufferSurface
-
-        for w, h in self.GEOMETRIES:
-            s = BufferSurface(w, h)
-            top._draw(s, [], detail=False, hint="q quit")
-            for _y, _x, text in s.cells:
-                self.assertLessEqual(len(text), s.width)
-
-
 class CursesSurfaceTest(unittest.TestCase):
     def _win(self, maxy: int, maxx: int, raise_on=None):
         import curses
@@ -743,6 +708,205 @@ class ColsCliTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             main(["top", "--cols", "bogus"])
         self.assertEqual(ctx.exception.code, 2)
+
+
+# --- Phase 2: the layout engine + fleet header (clu-top-tui) ----------------
+
+
+class ChoosePresetTest(unittest.TestCase):
+    """The verified width ladder (D2): width-primary, with a rows floor that
+    forces the wide-short strip and a tiny-terminal fallback."""
+
+    def _preset(self, w: int, h: int) -> str:
+        from end_of_line.top_layout import choose_preset
+
+        return choose_preset(w, h)
+
+    def test_width_ladder_at_tall_height(self) -> None:
+        self.assertEqual(self._preset(80, 24), "split")
+        self.assertEqual(self._preset(120, 40), "split")
+        self.assertEqual(self._preset(79, 24), "stacked")  # just under the split rung
+        self.assertEqual(self._preset(50, 24), "stacked")
+        self.assertEqual(self._preset(49, 24), "master")   # just under the stacked rung
+        self.assertEqual(self._preset(30, 120), "master")  # phone: narrow but tall
+
+    def test_rows_floor_forces_strip_even_when_wide(self) -> None:
+        # The wide-short dock under coolant: plenty of columns, few rows.
+        self.assertEqual(self._preset(200, 5), "strip")
+        self.assertEqual(self._preset(100, 11), "strip")   # 11 < 12 floor
+        self.assertEqual(self._preset(100, 12), "split")   # 12 is not < 12
+
+    def test_tiny_terminal_falls_back_to_one_line(self) -> None:
+        self.assertEqual(self._preset(1, 1), "fallback")
+        self.assertEqual(self._preset(33, 1), "fallback")
+        self.assertEqual(self._preset(34, 1), "strip")     # width floor cleared
+
+
+class LayoutEngineTest(unittest.TestCase):
+    def setUp(self) -> None:
+        from end_of_line.top_layout import LayoutEngine
+
+        self.engine = LayoutEngine()
+
+    def test_split_places_list_left_detail_right_no_overlap(self) -> None:
+        from end_of_line.top_render import Rect
+
+        lay = self.engine.layout(80, 24)
+        self.assertEqual(lay.preset, "split")
+        self.assertEqual(lay.rects["header"], Rect(0, 0, 80, 1))
+        lst, det = lay.rects["list"], lay.rects["detail"]
+        self.assertEqual(lst.x, 0)
+        self.assertEqual(lst.y, 1)               # under the header
+        self.assertEqual(det.x, lst.x + lst.w + 1)  # 1-col divider channel, no overlap
+        self.assertEqual(lst.w + det.w + 1, 80)     # halves + divider fill the width
+        self.assertEqual(lst.y, det.y)
+        self.assertEqual(lst.h, det.h)
+        self.assertEqual(lay.rects["hint"], Rect(0, 23, 80, 1))
+
+    def test_stacked_places_list_top_detail_bottom(self) -> None:
+        lay = self.engine.layout(60, 24)
+        self.assertEqual(lay.preset, "stacked")
+        lst, det = lay.rects["list"], lay.rects["detail"]
+        self.assertEqual(lst.x, 0)
+        self.assertEqual(det.x, 0)
+        self.assertEqual(lst.w, 60)
+        self.assertEqual(det.w, 60)
+        self.assertEqual(det.y, lst.y + lst.h + 1)  # 1-row divider beneath the list
+        self.assertEqual(lst.h + det.h + 1, 22)     # halves + divider = 24 - header - hint
+
+    def test_master_is_list_only_no_detail(self) -> None:
+        lay = self.engine.layout(40, 24)
+        self.assertEqual(lay.preset, "master")
+        self.assertNotIn("detail", lay.rects)
+        self.assertEqual(lay.rects["list"].w, 40)
+
+    def test_strip_is_list_only_with_header(self) -> None:
+        lay = self.engine.layout(200, 5)
+        self.assertEqual(lay.preset, "strip")
+        self.assertNotIn("detail", lay.rects)
+        self.assertIn("header", lay.rects)
+        self.assertEqual(lay.rects["list"].w, 200)
+
+    def test_resize_changes_layout(self) -> None:
+        wide = self.engine.layout(80, 24)
+        narrow = self.engine.layout(40, 24)
+        self.assertNotEqual(wide.preset, narrow.preset)
+        self.assertIn("detail", wide.rects)
+        self.assertNotIn("detail", narrow.rects)
+
+    def test_override_forces_preset(self) -> None:
+        lay = self.engine.layout(40, 24, override="split")
+        self.assertEqual(lay.preset, "split")
+        self.assertIn("detail", lay.rects)        # forced split even though w<80
+
+    def test_degenerate_geometry_is_safe(self) -> None:
+        for w, h in ((0, 0), (0, 10), (10, 0)):
+            lay = self.engine.layout(w, h)
+            self.assertIsInstance(lay.rects, dict)  # never raises
+
+
+class NextPresetTest(unittest.TestCase):
+    def test_w_cycles_auto_then_each_preset(self) -> None:
+        from end_of_line.top_layout import next_preset
+
+        seen = [None]
+        cur = None
+        for _ in range(5):
+            cur = next_preset(cur)
+            seen.append(cur)
+        # Cycles through the meaningful presets and returns to auto (None).
+        self.assertEqual(seen[1:5], ["split", "stacked", "master", "strip"])
+        self.assertIsNone(next_preset("strip"))
+
+
+class FleetSummaryTest(unittest.TestCase):
+    def _rows(self) -> list[dict]:
+        return [
+            _draw_row(alive=True, last_activity_seconds=2),
+            _draw_row(alive=True, last_activity_seconds=300),
+            _draw_row(alive=False, last_activity_seconds=None),
+        ]
+
+    def test_counts_running_dead_and_oldest_act(self) -> None:
+        from end_of_line.top_registry import fleet_summary
+
+        line = fleet_summary(self._rows(), 80)
+        self.assertIn("2 running", line)
+        self.assertIn("1 dead", line)
+        self.assertIn("oldest-ACT", line)
+        self.assertIn("5m00s", line)  # human_age(max(2, 300)) over the alive rows
+
+    def test_empty_says_no_active_workers(self) -> None:
+        from end_of_line.top_registry import fleet_summary
+
+        self.assertIn("no active workers", fleet_summary([], 80))
+
+    def test_clamped_to_width(self) -> None:
+        from end_of_line.top_registry import fleet_summary
+
+        self.assertLessEqual(len(fleet_summary(self._rows(), 12)), 12)
+
+    def test_registered_as_header_pane(self) -> None:
+        from end_of_line.top_registry import PANES, Snapshot, safe_render
+
+        out = safe_render(PANES["header"], Snapshot(self._rows()), width=80)
+        self.assertEqual(len(out), 1)
+        self.assertIn("running", out[0])
+
+
+class DetailPaneTest(unittest.TestCase):
+    def test_mirrors_format_detail_for_the_fleet(self) -> None:
+        from end_of_line.top_registry import PANES, Snapshot
+
+        rows = [_draw_row(), _draw_row(phase_id="two")]
+        got = PANES["detail"].render(Snapshot(rows), width=120)
+        self.assertEqual(got, top.format_detail(rows, width=120))
+
+
+class LayoutDrawPropertyTest(unittest.TestCase):
+    """Phase 0's property, now over the real Phase 2 draw path: drive the layout
+    engine + pane rendering across every geometry (and every forced preset) via a
+    BufferSurface — assert it never raises and never emits a row wider than the
+    surface. This is the regression guard the curses loop is otherwise untestable
+    for; it supersedes the Phase-0 `_draw` property test 1:1."""
+
+    GEOMETRIES = (
+        [(w, h) for w in range(6) for h in range(6)]
+        + [(200, 5), (30, 120), (1, 1), (80, 24), (60, 24), (40, 50)]
+    )
+
+    def test_never_raises_and_rows_fit_width(self) -> None:
+        from end_of_line.top_layout import LayoutEngine
+        from end_of_line.top_registry import Snapshot
+        from end_of_line.top_render import BufferSurface
+
+        engine = LayoutEngine()
+        rows = [_draw_row(), _draw_row(last_text="x" * 500, last_command="y" * 400)]
+        snap = Snapshot(rows)
+        for w, h in self.GEOMETRIES:
+            for override in (None, "split", "stacked", "master", "strip"):
+                with self.subTest(w=w, h=h, override=override):
+                    s = BufferSurface(w, h)
+                    layout = engine.layout(w, h, override=override)
+                    top._draw_panes(s, snap, layout, hint="q quit · w layout")
+                    for y, _x, text in s.cells:
+                        self.assertLessEqual(
+                            len(text), s.width,
+                            f"row {y!r} exceeds width {s.width} ({text!r})",
+                        )
+
+    def test_empty_rows_still_safe(self) -> None:
+        from end_of_line.top_layout import LayoutEngine
+        from end_of_line.top_registry import Snapshot
+        from end_of_line.top_render import BufferSurface
+
+        engine = LayoutEngine()
+        snap = Snapshot([])
+        for w, h in self.GEOMETRIES:
+            s = BufferSurface(w, h)
+            top._draw_panes(s, snap, engine.layout(w, h), hint="q quit")
+            for _y, _x, text in s.cells:
+                self.assertLessEqual(len(text), s.width)
 
 
 if __name__ == "__main__":
