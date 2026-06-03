@@ -29,6 +29,7 @@ import os
 import platform
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -38,6 +39,7 @@ from pathlib import Path
 from . import (
     coolant,
     cross_plan_rules,
+    demo,
     demo_worker,
     dispatch,
     dry_merge,
@@ -1276,6 +1278,27 @@ def main(argv: list[str] | None = None) -> int:
         "--step-seconds", type=float, default=demo_worker.DEFAULT_STEP_SECONDS, dest="step_seconds"
     )
 
+    p_demo = sub.add_parser(
+        "demo",
+        help="Verify your install: stand up a synthetic demo fleet (busy / idle "
+        "/ blocked / dead workers) through clu's real pipeline, visible in "
+        "`clu top` / `clu serve`. Ctrl-C tears it all down. `clu demo down` "
+        "cleans up any leftover demo state.",
+    )
+    p_demo.add_argument(
+        "subcommand",
+        nargs="?",
+        choices=["down"],
+        default=None,
+        help="`down` tears down leftover demo state and exits (no fleet launched).",
+    )
+    p_demo.add_argument(
+        "--serve",
+        action="store_true",
+        default=False,
+        help="Also serve the live web dashboard (like `clu serve`) until Ctrl-C.",
+    )
+
     p_notify_test = sub.add_parser(
         "notify-test",
         help="Send a test notification through configured channels and report "
@@ -1410,6 +1433,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(args)
     if args.cmd == "demo-worker":
         return cmd_demo_worker(args)
+    if args.cmd == "demo":
+        return cmd_demo(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
     if args.cmd == "answer":
@@ -4011,6 +4036,62 @@ def cmd_serve(args) -> int:
         return webserver.serve(cfg)
     except OSError as exc:
         return _die(ExitCode.GENERIC, f"could not bind {cfg.host}:{cfg.port}: {exc}")
+
+
+def _demo_terminate(_signum, _frame) -> None:
+    """SIGTERM -> KeyboardInterrupt so `clu demo`'s teardown `finally` runs on a
+    `kill` as well as a Ctrl-C (SIGINT already raises it)."""
+    raise KeyboardInterrupt
+
+
+def cmd_demo(args) -> int:
+    """Foreground demo orchestrator: stand the fleet up, block until Ctrl-C /
+    SIGTERM, then guarantee teardown in `finally`. `clu demo down` is the
+    leftover-cleanup path. Notify is suppressed process-wide — none of init /
+    tick / teardown should reach the operator's phone."""
+    # Process-wide suppress covers the in-process init/tick/teardown path; the
+    # scaffolded config's notify mask covers the out-of-process cron supervisor
+    # (which never calls this). Together: the demo never reaches the phone.
+    notify.set_global_suppress(True)
+    if args.subcommand == "down":
+        removed = demo.down()
+        print(f"clu demo: tore down {len(removed)} demo plan(s): {', '.join(removed) or '(none)'}")
+        return ExitCode.OK
+
+    # up() + the wait are all inside the try so the teardown `finally` runs even
+    # if a dispatch raises mid-launch — otherwise a partial fleet leaks. Install
+    # the SIGTERM trap first so a `kill` during up() still unwinds to teardown.
+    signal.signal(signal.SIGTERM, _demo_terminate)
+    try:
+        plans = demo.up()
+        print("clu demo: launched a synthetic fleet through the real pipeline —")
+        for p in plans:
+            print(f"  • {p.slug}  ({p.scenario})")
+        print("\n  Watch it:   clu top        (or: clu serve)")
+        print("  The blocked worker is answerable with:  clu answer")
+        print("  Ctrl-C tears the whole fleet down.\n")
+        if args.serve:
+            from . import webserver
+
+            cfg = webserver.build_config(
+                lan=False,
+                host=None,
+                port=8787,
+                project_filter=None,
+                include_transcript=True,
+                cert=None,
+                key=None,
+                http=False,
+            )
+            webserver.serve(cfg)  # blocks until Ctrl-C
+        else:
+            signal.pause()  # park until SIGINT/SIGTERM, zero wakeups
+    except KeyboardInterrupt:
+        pass
+    finally:
+        removed = demo.down()
+        print(f"\nclu demo: cleaned up {len(removed)} demo plan(s).")
+    return ExitCode.OK
 
 
 def cmd_demo_worker(args) -> int:
