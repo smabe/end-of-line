@@ -98,9 +98,13 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 .dh{font-family:"Orbitron";font-weight:700;letter-spacing:.06em;font-size:15px;color:#eafcff;margin-bottom:2px;text-shadow:0 0 10px #36e6ff44}
 .dh .ph{color:var(--cy)}
 .health-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:14px}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 16px;font-size:12px;margin-bottom:14px}
+/* minmax(0,1fr): a bare 1fr track has min-width:auto and refuses to shrink
+   below its content, so a long unbreakable path (CMD / wrote) pushes the whole
+   panel past a phone's width. minmax(0,…) lets it shrink; overflow-wrap on the
+   value then breaks the path instead of clipping off-screen. (Issue #87.) */
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 16px;font-size:12px;margin-bottom:14px}
 .kv .k{color:var(--dim);letter-spacing:.04em}
-.kv .v{color:var(--ink)} .kv .v.cy{color:var(--cy)} .kv .v.warn{color:var(--amber)}
+.kv .v{color:var(--ink);min-width:0;overflow-wrap:anywhere} .kv .v.cy{color:var(--cy)} .kv .v.warn{color:var(--amber)}
 .saybox{border:1px solid var(--edge);border-radius:7px;padding:10px 12px;background:#04141c66;margin-bottom:12px}
 .saybox .lbl{font-size:10px;letter-spacing:.22em;color:var(--cy-dim);text-transform:uppercase;margin-bottom:6px}
 .saybox .txt{color:#cfeef6;font-size:12.5px;white-space:pre-wrap;word-break:break-word}
@@ -248,34 +252,82 @@ function toView(r){
 // Identity of a worker — stable across polls even as the list reorders.
 function wkey(w){ return `${w.proj} ${w.plan} ${w.phase}`; }
 
-function header(){
+// ---- in-place rendering ----------------------------------------------------
+// The DOM is rebuilt only when its *shape* changes (geometry, drill, the empty
+// state, or the set/order of worker identities). On every other poll we patch
+// live values into the existing nodes — nothing is recreated, so the drill
+// view's entrance animation doesn't replay, infinite dot pulses keep their
+// phase, and selection / scroll / text-selection survive. (Issue #88.)
+let shapeKey = null;
+let rowRefs = new Map();   // wkey -> {el, dot, bdg, sub, met}
+let sbRef = null, detailRef = null, tickerRef = null;
+
+// Write innerHTML only when it actually changed — skips needless repaints and
+// keeps animated children (the running-* star) from restarting every poll.
+function setHTML(el, html){ if (el && el._h !== html){ el._h = html; el.innerHTML = html; } }
+
+// Everything that, when it changes, forces a structural rebuild rather than a
+// value patch. Selection and all live metrics are deliberately NOT here — they
+// patch in place. `connected` only matters structurally while the fleet is
+// empty (the connecting… vs no-workers message).
+function shapeOf(){
+  const empty = WORKERS.length === 0;
+  return JSON.stringify([view, drill, empty, empty ? connected : 0, WORKERS.map(wkey)]);
+}
+
+// Status-bar inner content (counts) — patched into the persistent #sb element.
+function statusInner(){
   if (!WORKERS.length){
     const msg = connected ? "no active workers" : "connecting…";
-    return `<div class="statusbar"><span class="run">${esc(msg)}</span><span class="age"></span></div>`;
+    return `<span class="run">${esc(msg)}</span><span class="age"></span>`;
   }
   const alive = WORKERS.filter(w => !w.dead);
   const r = alive.length, d = WORKERS.length - r;
   const acts = alive.map(w => w.act).filter(x => x != null);
   const oldest = acts.length ? age(Math.max(...acts)) : "—";
-  return `<div class="statusbar"><span class="run">${r} running</span><span class="sep">·</span>` +
-    `<span class="dead">${d} dead</span><span class="age">oldest-ACT ${oldest}</span></div>`;
+  return `<span class="run">${r} running</span><span class="sep">·</span>` +
+    `<span class="dead">${d} dead</span><span class="age">oldest-ACT ${oldest}</span>`;
 }
 // The running-* only makes sense beside a visible command; under
 // --no-transcript the command is hidden, so suppress the star too.
 function runStar(w){ return w.running && w.cmd !== "—" ? `<span class="star">*</span> ` : ""; }
-function rowHTML(w, i){
-  const badge = w.dead ? `<span class="badge dead">DEAD</span>` : "";
-  const star = runStar(w);
-  const sub = `<div class="sub"><span class="cmd">${star}${esc(w.cmd)}</span> · ACT ${age(w.act)}</div>`;
-  const metrics = w.dead
-    ? `<div class="metrics"><span>— pid gone —</span></div>`
-    : `<div class="metrics"><span>RAN <b>${age(w.ran)}</b></span>` +
+// A row's identity-stable parts (project/plan·phase) are built once; the dot,
+// DEAD badge, sub-line, and metrics are slots patched on every poll.
+function buildRow(w){
+  const el = document.createElement("div");
+  el.className = "row";
+  el.dataset.key = wkey(w);
+  el.innerHTML =
+    `<span class="dot"></span>` +
+    `<div class="who"><div class="id">${esc(w.proj)}/${esc(w.plan)}` +
+      `<span class="ph">·${esc(w.phase)}</span> <span class="bdg"></span></div>` +
+      `<div class="sub"></div></div>` +
+    `<div class="metrics"></div>`;
+  const refs = {
+    el,
+    dot: el.querySelector(".dot"),
+    bdg: el.querySelector(".bdg"),
+    sub: el.querySelector(".sub"),
+    met: el.querySelector(".metrics"),
+  };
+  el.onclick = () => {
+    const i = WORKERS.findIndex(x => wkey(x) === el.dataset.key);
+    if (i >= 0) sel = i;
+    if (view === "phone") drill = true;
+    render();
+  };
+  return refs;
+}
+function patchRow(refs, w, isSel){
+  refs.el.className = "row" + (isSel ? " sel" : "");
+  refs.dot.className = "dot " + DOT[w.health];
+  setHTML(refs.bdg, w.dead ? `<span class="badge dead">DEAD</span>` : "");
+  setHTML(refs.sub, `<span class="cmd">${runStar(w)}${esc(w.cmd)}</span> · ACT ${age(w.act)}`);
+  setHTML(refs.met, w.dead
+    ? `<span>— pid gone —</span>`
+    : `<span>RAN <b>${age(w.ran)}</b></span>` +
       `<span class="${actCls(w)}">ACT <b>${age(w.act)}</b></span>` +
-      `<span>HB <b>${age(w.hb)}</b></span></div>`;
-  return `<div class="row ${i === sel ? 'sel' : ''}" data-i="${i}">
-    <span class="dot ${DOT[w.health]}"></span>
-    <div class="who"><div class="id">${esc(w.proj)}/${esc(w.plan)}<span class="ph">·${esc(w.phase)}</span> ${badge}</div>${sub}</div>
-    ${metrics}</div>`;
+      `<span>HB <b>${age(w.hb)}</b></span>`);
 }
 function detailHTML(w){
   const hc = w.dead
@@ -299,47 +351,74 @@ function detailHTML(w){
     <div class="saybox"><div class="lbl">saying</div><div class="txt">${sayTxt}</div></div>`;
 }
 function render(){
-  const stage = document.getElementById("stage");
+  // Toolbar bits live outside #stage and always persist — just sync their state.
   document.querySelectorAll(".seg button").forEach(b => b.classList.toggle("on", b.dataset.v === view));
   const live = document.getElementById("live");
   if (live){ live.style.color = connected ? "var(--teal)" : "var(--amber)"; }
   const livetxt = document.getElementById("livetxt");
   if (livetxt){ livetxt.textContent = connected ? "live" : "offline"; }
 
+  if (WORKERS.length){
+    if (sel >= WORKERS.length) sel = WORKERS.length - 1;
+    if (sel < 0) sel = 0;
+  }
+  const key = shapeOf();
+  if (key !== shapeKey){ shapeKey = key; buildShell(); }
+  patch();
+}
+
+// Rebuild the panel skeleton with persistent, addressable containers (#sb / #lst
+// / #dtl / #tck) and one element per worker. Called only when shapeOf() changes.
+function buildShell(){
+  const stage = document.getElementById("stage");
+  rowRefs = new Map(); sbRef = detailRef = tickerRef = null;
+
   if (!WORKERS.length){
-    stage.innerHTML = `<div class="panel">${header()}<div class="body">` +
+    stage.innerHTML = `<div class="panel"><div class="statusbar" id="sb"></div><div class="body">` +
       `<div class="list" style="padding:24px 16px;color:var(--dim)">` +
       `${connected ? "No active workers right now." : "Connecting to clu serve…"}</div></div>` +
       `<div class="foot"><b>w</b> geometry · read-only</div></div>`;
+    sbRef = document.getElementById("sb");
     return;
   }
-  if (sel >= WORKERS.length) sel = WORKERS.length - 1;
-  if (sel < 0) sel = 0;
-  const w = WORKERS[sel];
+
+  let shell;
   if (view === "split"){
-    stage.innerHTML = `<div class="panel">${header()}<div class="body">
-      <div class="list">${WORKERS.map(rowHTML).join("")}</div>
-      <div class="divider"></div>
-      <div class="detail">${detailHTML(w)}</div>
-    </div><div class="foot"><b>↑↓</b> select · <b>w</b> geometry · <b>?</b> help · read-only</div></div>`;
+    shell = `<div class="panel"><div class="statusbar" id="sb"></div><div class="body">` +
+      `<div class="list" id="lst"></div><div class="divider"></div>` +
+      `<div class="detail" id="dtl"></div></div>` +
+      `<div class="foot"><b>↑↓</b> select · <b>w</b> geometry · <b>?</b> help · read-only</div></div>`;
   } else if (view === "strip"){
-    const ticker = `▌ ${esc(w.proj)}/${esc(w.plan)}·${esc(w.phase)} — <b>${esc((w.say || "").slice(0, 90))}</b>`;
-    stage.innerHTML = `<div class="panel strip">${header()}
-      <div class="body"><div class="list">${WORKERS.map(rowHTML).join("")}</div></div>
-      <div class="ticker">${ticker}</div>
-      <div class="foot"><b>↑↓</b> select · <b>w</b> geometry · <b>?</b> help · read-only</div></div>`;
+    shell = `<div class="panel strip"><div class="statusbar" id="sb"></div>` +
+      `<div class="body"><div class="list" id="lst"></div></div>` +
+      `<div class="ticker" id="tck"></div>` +
+      `<div class="foot"><b>↑↓</b> select · <b>w</b> geometry · <b>?</b> help · read-only</div></div>`;
   } else {
-    stage.innerHTML = `<div class="phonewrap"><div class="panel phone ${drill ? 'drill' : ''}">${header()}
-      <div class="body"><div class="list">${WORKERS.map(rowHTML).join("")}</div></div>
-      <div class="drillview">${detailHTML(w)}</div>
-      <div class="foot"><span class="nav-list"><b>↑↓</b> sel · <b>↵</b> open</span><span class="nav-drill"><b>↑↓</b> scroll · <b>esc</b> back</span></div>
-    </div></div>`;
+    shell = `<div class="phonewrap"><div class="panel phone ${drill ? 'drill' : ''}">` +
+      `<div class="statusbar" id="sb"></div>` +
+      `<div class="body"><div class="list" id="lst"></div></div>` +
+      `<div class="drillview" id="dtl"></div>` +
+      `<div class="foot"><span class="nav-list"><b>↑↓</b> sel · <b>↵</b> open</span>` +
+        `<span class="nav-drill"><b>↑↓</b> scroll · <b>esc</b> back</span></div></div></div>`;
   }
-  stage.querySelectorAll(".row").forEach(r => r.onclick = () => {
-    sel = +r.dataset.i;
-    if (view === "phone") drill = true;
-    render();
-  });
+  stage.innerHTML = shell;
+  sbRef = document.getElementById("sb");
+  detailRef = document.getElementById("dtl");   // null in strip view
+  tickerRef = document.getElementById("tck");   // null unless strip view
+  const lst = document.getElementById("lst");
+  WORKERS.forEach(w => { const refs = buildRow(w); rowRefs.set(wkey(w), refs); lst.appendChild(refs.el); });
+}
+
+// Patch live values into the existing shell — no nodes recreated.
+function patch(){
+  setHTML(sbRef, statusInner());
+  if (!WORKERS.length) return;
+  WORKERS.forEach((w, i) => { const refs = rowRefs.get(wkey(w)); if (refs) patchRow(refs, w, i === sel); });
+  const w = WORKERS[sel];
+  // Only build the (non-trivial) detail / ticker strings for the container the
+  // current geometry actually has — strip has no detail, split/phone no ticker.
+  if (detailRef) setHTML(detailRef, detailHTML(w));
+  if (tickerRef) setHTML(tickerRef, `▌ ${esc(w.proj)}/${esc(w.plan)}·${esc(w.phase)} — <b>${esc((w.say || "").slice(0, 90))}</b>`);
 }
 function move(d){
   if (!WORKERS.length) return;
