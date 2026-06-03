@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clu serve // END OF LINE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --void:#03060a; --grid:#0a2230; --panel:#060d14cc; --edge:#0e3a4a;
+  --cy:#36e6ff; --cy-dim:#1a93a8; --cy-deep:#0c5566;
+  --amber:#ffb22e; --red:#ff4d52; --teal:#27d39a; --ink:#aeccd6;
+  --dim:#4d6b78; --faint:#2c4853;
+  --glow:0 0 6px var(--cy), 0 0 14px #36e6ff55;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--void); color:var(--ink);
+  font-family:"JetBrains Mono",ui-monospace,Menlo,monospace; font-size:13px; line-height:1.5;
+  overflow-x:hidden; -webkit-font-smoothing:antialiased;
+}
+/* tron grid floor + vignette + scanlines */
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(120% 90% at 50% -10%, #06222e55, transparent 60%),
+    repeating-linear-gradient(0deg, transparent 0 33px, #0b2c3a22 33px 34px),
+    repeating-linear-gradient(90deg, transparent 0 33px, #0b2c3a18 33px 34px);
+  mask:radial-gradient(130% 100% at 50% 30%, #000 55%, transparent 100%);}
+body::after{content:"";position:fixed;inset:0;z-index:60;pointer-events:none;mix-blend-mode:overlay;opacity:.45;
+  background:repeating-linear-gradient(0deg, #00000000 0 2px, #0006 2px 3px);}
+.wrap{position:relative;z-index:1;max-width:1240px;margin:0 auto;padding:30px 22px 80px}
+/* header */
+header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+.brand{font-family:"Orbitron",sans-serif;font-weight:900;letter-spacing:.18em;font-size:26px;color:#eafcff;
+  text-shadow:0 0 10px #36e6ff77,0 0 26px #36e6ff33}
+.brand b{color:var(--cy)}
+.eol{font-family:"Orbitron",sans-serif;font-size:11px;letter-spacing:.4em;color:var(--cy-dim);align-self:center}
+.tag{color:var(--dim);max-width:620px;margin:2px 0 20px;font-size:12px}
+.tag b{color:var(--ink)}
+/* toolbar */
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+.seg{display:flex;border:1px solid var(--edge);border-radius:7px;overflow:hidden;background:#04101799}
+.seg button{font:600 11px/1 "JetBrains Mono";letter-spacing:.12em;color:var(--dim);background:transparent;
+  border:0;padding:9px 14px;cursor:pointer;text-transform:uppercase;transition:.18s}
+.seg button:hover{color:var(--ink)}
+.seg button.on{color:#021016;background:var(--cy);box-shadow:0 0 16px #36e6ff66}
+.live{display:flex;align-items:center;gap:7px;color:var(--teal);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.live i{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor;animation:beat 1.6s infinite}
+.keys{margin-left:auto;color:var(--faint);font-size:11px;letter-spacing:.04em}
+.keys b{color:var(--cy-dim)}
+/* panel chrome with bracket corners */
+.panel{position:relative;background:var(--panel);border:1px solid var(--edge);border-radius:10px;
+  box-shadow:0 0 0 1px #0a232e inset, 0 24px 60px #0009, 0 0 60px #0b394722;backdrop-filter:blur(2px)}
+.panel::before,.panel::after{content:"";position:absolute;width:16px;height:16px;border:2px solid var(--cy);opacity:.7}
+.panel::before{top:-1px;left:-1px;border-right:0;border-bottom:0;border-radius:10px 0 0 0}
+.panel::after{bottom:-1px;right:-1px;border-left:0;border-top:0;border-radius:0 0 10px 0}
+.statusbar{display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1px solid var(--edge);
+  font-size:11.5px;letter-spacing:.05em;color:var(--cy);text-transform:uppercase}
+.statusbar .run{color:var(--teal)} .statusbar .blk{color:var(--amber)} .statusbar .dead{color:var(--red)}
+.statusbar .sep{color:var(--faint)} .statusbar .age{margin-left:auto;color:var(--dim);text-transform:none}
+.foot{padding:8px 16px;border-top:1px solid var(--edge);color:var(--dim);font-size:11px;letter-spacing:.03em}
+.foot b{color:var(--cy)}
+/* body split */
+.body{display:flex}
+.list{flex:1 1 52%;min-width:0;padding:6px 0}
+.divider{width:1px;background:linear-gradient(180deg,transparent,var(--edge) 12%,var(--edge) 88%,transparent)}
+.detail{flex:1 1 48%;min-width:0;padding:14px 18px}
+/* rows */
+.row{display:grid;grid-template-columns:18px 1fr auto;gap:10px;align-items:center;padding:6px 16px;cursor:pointer;
+  border-left:3px solid transparent;transition:background .15s,border-color .15s}
+.row:hover{background:#0a212c66}
+.row.sel{background:linear-gradient(90deg,#0c3a4a66,#0c3a4a14);border-left-color:var(--cy);box-shadow:inset 0 0 30px #36e6ff14}
+.dot{width:9px;height:9px;border-radius:50%;justify-self:center}
+.dot.ok{background:var(--teal);box-shadow:0 0 8px var(--teal);animation:beat 2.4s infinite}
+.dot.warn{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+.dot.dead{background:var(--red);box-shadow:0 0 8px var(--red);animation:none}
+.who{display:flex;flex-direction:column;min-width:0}
+.who .id{color:#dff6fb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.who .id .ph{color:var(--cy)}
+.who .sub{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.who .sub .cmd{color:var(--cy-dim)}
+.badge{font-size:9.5px;font-weight:700;letter-spacing:.1em;padding:1px 5px;border-radius:3px}
+.badge.blk{color:var(--amber);border:1px solid var(--amber)}
+.badge.dead{color:var(--red);border:1px solid var(--red)}
+.metrics{display:flex;gap:14px;font-size:11px;color:var(--dim);white-space:nowrap}
+.metrics b{color:var(--ink);font-weight:500}
+.metrics .a-ok{color:var(--teal)} .metrics .a-warn{color:var(--amber)}
+.star{color:var(--teal);animation:blink 1s steps(2) infinite}
+/* detail pane */
+.dh{font-family:"Orbitron";font-weight:700;letter-spacing:.06em;font-size:15px;color:#eafcff;margin-bottom:2px;text-shadow:0 0 10px #36e6ff44}
+.dh .ph{color:var(--cy)}
+.health-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:14px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 16px;font-size:12px;margin-bottom:14px}
+.kv .k{color:var(--dim);letter-spacing:.04em}
+.kv .v{color:var(--ink)} .kv .v.cy{color:var(--cy)} .kv .v.warn{color:var(--amber)}
+.saybox{border:1px solid var(--edge);border-radius:7px;padding:10px 12px;background:#04141c66;margin-bottom:12px}
+.saybox .lbl{font-size:10px;letter-spacing:.22em;color:var(--cy-dim);text-transform:uppercase;margin-bottom:6px}
+.saybox .txt{color:#cfeef6;font-size:12.5px;white-space:pre-wrap;word-break:break-word}
+/* STRIP view */
+.strip .detail,.strip .divider{display:none}
+.strip .row{grid-template-columns:18px 240px 1fr auto}
+.strip .metrics{gap:18px}
+.strip .ticker{padding:7px 16px;border-top:1px solid var(--edge);color:var(--dim);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.strip .ticker b{color:var(--cy)}
+/* PHONE view */
+.phonewrap{display:flex;justify-content:center}
+.phone{width:380px;max-width:100%}
+.phone .body{flex-direction:column}
+.phone .divider{display:none}
+.phone .detail{display:none}
+.phone .row{grid-template-columns:16px 1fr auto}
+.phone .metrics{display:none}
+.phone .who .sub{display:block}
+.phone.drill .list,.phone.drill .statusbar .age{display:none}
+.phone .drillview{display:none;padding:14px 16px}
+.phone.drill .drillview{display:block;animation:rise .35s}
+.phone.drill .foot .nav-list{display:none}
+.phone .foot .nav-drill{display:none}
+.phone.drill .foot .nav-drill{display:inline}
+/* help overlay */
+.help{position:fixed;inset:0;z-index:80;background:#020a0ecc;display:none;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+.help.on{display:flex}
+.help .card{width:440px;max-width:90vw;border:1px solid var(--cy);border-radius:10px;background:#04121a;padding:22px 26px;box-shadow:0 0 40px #36e6ff33}
+.help h3{font-family:"Orbitron";letter-spacing:.1em;color:var(--cy);font-size:14px;margin-bottom:14px}
+.help dl{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;font-size:12.5px}
+.help dt{color:#eafcff} .help dt kbd{border:1px solid var(--edge);border-radius:4px;padding:1px 6px;color:var(--cy);background:#06161e}
+.help dd{color:var(--dim)}
+.note{color:var(--faint);font-size:11.5px;margin-top:14px;letter-spacing:.02em}
+.note b{color:var(--cy-dim)}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes beat{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes blink{50%{opacity:.15}}
+@media(max-width:560px){.brand{font-size:20px}.detail{display:none}.divider{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">clu&nbsp;<b>serve</b></div>
+    <div class="eol">// END&nbsp;OF&nbsp;LINE</div>
+  </header>
+  <p class="tag">Live web view of autonomous workers — activity read from each worker's transcript, never its self-report. <b>Pick a geometry</b> below; <b>↑↓</b> selects, the detail pane tracks the cursor live.</p>
+
+  <div class="toolbar">
+    <div class="seg" id="seg">
+      <button data-v="split" class="on">Split</button>
+      <button data-v="strip">Strip</button>
+      <button data-v="phone">Phone</button>
+    </div>
+    <div class="live" id="live"><i></i><span id="livetxt">live</span></div>
+    <div class="keys"><b>↑↓</b>/jk select · <b>w</b> geometry · <b>↵</b> open · <b>esc</b> back · <b>?</b> help</div>
+  </div>
+
+  <div id="stage"></div>
+
+  <p class="note">Read-only dashboard served by <b>clu serve</b> — polls <b>/api/workers</b> every 1.5s. No destructive controls, ever.</p>
+</div>
+
+<div class="help" id="help"><div class="card">
+  <h3>KEYBINDS</h3>
+  <dl>
+    <dt><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>j</kbd> <kbd>k</kbd></dt><dd>move selection</dd>
+    <dt><kbd>↵</kbd> Enter</dt><dd>drill into worker (phone view)</dd>
+    <dt><kbd>esc</kbd></dt><dd>back / close</dd>
+    <dt><kbd>w</kbd></dt><dd>cycle geometry: split → strip → phone</dd>
+    <dt><kbd>?</kbd></dt><dd>this help</dd>
+  </dl>
+  <p class="note">esc / ? to close</p>
+</div></div>
+
+<script>
+"use strict";
+
+// --- XSS guard: every worker-derived string is inserted via esc(), never
+// raw-interpolated into innerHTML. /api/workers carries semi-untrusted
+// LLM/tool text (commands, SAYING, file paths) — a field containing
+// <img src=x onerror=...> or <script> must render inert. ---
+function esc(s){
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]
+  ));
+}
+
+let WORKERS = [];
+let sel = 0, view = "split", drill = false, connected = false;
+let lastPayload = null;
+
+const pad = n => String(n).padStart(2, "0");
+function age(s){
+  if (s == null) return "—";
+  s = Math.max(0, Math.floor(s));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m" + pad(s % 60) + "s";
+  return Math.floor(s / 3600) + "h" + pad(Math.floor(s / 60) % 60) + "m";
+}
+function tnum(n){
+  if (n == null) return "—";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return Math.round(n / 1e3) + "K";
+  return String(n);
+}
+// `tokens` arrives as the raw Anthropic usage dict (input/output/cache_* counts),
+// not a scalar. Sum the numeric values (drift-proof against new key names) into
+// one total; null/empty → null so tnum() shows "—".
+function tokenTotal(usage){
+  if (usage == null) return null;
+  if (typeof usage === "number") return usage;
+  if (typeof usage !== "object") return null;
+  let total = 0, seen = false;
+  for (const v of Object.values(usage)){
+    if (typeof v === "number"){ total += v; seen = true; }
+  }
+  return seen ? total : null;
+}
+const DOT = {ok:"ok", warn:"warn", dead:"dead"};
+function actCls(w){
+  if (w.dead || w.act == null) return "";
+  return w.act <= 15 ? "a-ok" : w.act <= 60 ? "" : "a-warn";
+}
+
+// Map one /api/workers row (top.assemble_row shape) into the view model.
+function toView(r){
+  const alive = r.alive !== false;
+  const act = r.last_activity_seconds;
+  const health = !alive ? "dead" : (act == null || act > 60) ? "warn" : "ok";
+  return {
+    proj: r.project, plan: r.plan, phase: r.phase_id,
+    health, dead: !alive,
+    ran: r.ran_seconds, act, hb: r.heartbeat_age_seconds,
+    cmd: r.last_command || "—", running: !!r.command_running,
+    wrote: r.last_write || "—", wroteAge: r.last_write_seconds,
+    say: r.last_text || "", tokens: tokenTotal(r.tokens),
+  };
+}
+// Identity of a worker — stable across polls even as the list reorders.
+function wkey(w){ return `${w.proj} ${w.plan} ${w.phase}`; }
+
+function header(){
+  if (!WORKERS.length){
+    const msg = connected ? "no active workers" : "connecting…";
+    return `<div class="statusbar"><span class="run">${esc(msg)}</span><span class="age"></span></div>`;
+  }
+  const alive = WORKERS.filter(w => !w.dead);
+  const r = alive.length, d = WORKERS.length - r;
+  const acts = alive.map(w => w.act).filter(x => x != null);
+  const oldest = acts.length ? age(Math.max(...acts)) : "—";
+  return `<div class="statusbar"><span class="run">${r} running</span><span class="sep">·</span>` +
+    `<span class="dead">${d} dead</span><span class="age">oldest-ACT ${oldest}</span></div>`;
+}
+// The running-* only makes sense beside a visible command; under
+// --no-transcript the command is hidden, so suppress the star too.
+function runStar(w){ return w.running && w.cmd !== "—" ? `<span class="star">*</span> ` : ""; }
+function rowHTML(w, i){
+  const badge = w.dead ? `<span class="badge dead">DEAD</span>` : "";
+  const star = runStar(w);
+  const sub = `<div class="sub"><span class="cmd">${star}${esc(w.cmd)}</span> · ACT ${age(w.act)}</div>`;
+  const metrics = w.dead
+    ? `<div class="metrics"><span>— pid gone —</span></div>`
+    : `<div class="metrics"><span>RAN <b>${age(w.ran)}</b></span>` +
+      `<span class="${actCls(w)}">ACT <b>${age(w.act)}</b></span>` +
+      `<span>HB <b>${age(w.hb)}</b></span></div>`;
+  return `<div class="row ${i === sel ? 'sel' : ''}" data-i="${i}">
+    <span class="dot ${DOT[w.health]}"></span>
+    <div class="who"><div class="id">${esc(w.proj)}/${esc(w.plan)}<span class="ph">·${esc(w.phase)}</span> ${badge}</div>${sub}</div>
+    ${metrics}</div>`;
+}
+function detailHTML(w){
+  const hc = w.dead
+    ? `<span style="color:var(--red)">● dead</span>`
+    : w.health === "warn"
+      ? `<span style="color:var(--amber)">● idle</span>`
+      : `<span style="color:var(--teal)">● ok</span>`;
+  const star = runStar(w);
+  const ac = actCls(w);
+  const sayTxt = w.say ? esc(w.say) : `<span style="color:var(--faint)">—</span>`;
+  return `<div class="dh">${esc(w.proj)} / ${esc(w.plan)} <span class="ph">· ${esc(w.phase)}</span></div>
+    <div class="health-chip">${hc}</div>
+    <div class="kv">
+      <span class="k">RAN</span><span class="v">${age(w.ran)}</span>
+      <span class="k">ACT</span><span class="v ${ac === 'a-ok' ? 'cy' : ac === 'a-warn' ? 'warn' : ''}">${age(w.act)}</span>
+      <span class="k">HB</span><span class="v">${age(w.hb)}</span>
+      <span class="k">tokens</span><span class="v">${tnum(w.tokens)}</span>
+      <span class="k">wrote</span><span class="v">${esc(w.wrote)}${w.wroteAge != null && w.wrote !== "—" ? ` <span style="color:var(--dim)">(${age(w.wroteAge)})</span>` : ""}</span>
+      <span class="k">CMD</span><span class="v cy">${star}${esc(w.cmd)}</span>
+    </div>
+    <div class="saybox"><div class="lbl">saying</div><div class="txt">${sayTxt}</div></div>`;
+}
+function render(){
+  const stage = document.getElementById("stage");
+  document.querySelectorAll(".seg button").forEach(b => b.classList.toggle("on", b.dataset.v === view));
+  const live = document.getElementById("live");
+  if (live){ live.style.color = connected ? "var(--teal)" : "var(--amber)"; }
+  const livetxt = document.getElementById("livetxt");
+  if (livetxt){ livetxt.textContent = connected ? "live" : "offline"; }
+
+  if (!WORKERS.length){
+    stage.innerHTML = `<div class="panel">${header()}<div class="body">` +
+      `<div class="list" style="padding:24px 16px;color:var(--dim)">` +
+      `${connected ? "No active workers right now." : "Connecting to clu serve…"}</div></div>` +
+      `<div class="foot"><b>w</b> geometry · read-only</div></div>`;
+    return;
+  }
+  if (sel >= WORKERS.length) sel = WORKERS.length - 1;
+  if (sel < 0) sel = 0;
+  const w = WORKERS[sel];
+  if (view === "split"){
+    stage.innerHTML = `<div class="panel">${header()}<div class="body">
+      <div class="list">${WORKERS.map(rowHTML).join("")}</div>
+      <div class="divider"></div>
+      <div class="detail">${detailHTML(w)}</div>
+    </div><div class="foot"><b>↑↓</b> select · <b>w</b> geometry · <b>?</b> help · read-only</div></div>`;
+  } else if (view === "strip"){
+    const ticker = `▌ ${esc(w.proj)}/${esc(w.plan)}·${esc(w.phase)} — <b>${esc((w.say || "").slice(0, 90))}</b>`;
+    stage.innerHTML = `<div class="panel strip">${header()}
+      <div class="body"><div class="list">${WORKERS.map(rowHTML).join("")}</div></div>
+      <div class="ticker">${ticker}</div>
+      <div class="foot"><b>↑↓</b> select · <b>w</b> geometry · <b>?</b> help · read-only</div></div>`;
+  } else {
+    stage.innerHTML = `<div class="phonewrap"><div class="panel phone ${drill ? 'drill' : ''}">${header()}
+      <div class="body"><div class="list">${WORKERS.map(rowHTML).join("")}</div></div>
+      <div class="drillview">${detailHTML(w)}</div>
+      <div class="foot"><span class="nav-list"><b>↑↓</b> sel · <b>↵</b> open</span><span class="nav-drill"><b>↑↓</b> scroll · <b>esc</b> back</span></div>
+    </div></div>`;
+  }
+  stage.querySelectorAll(".row").forEach(r => r.onclick = () => {
+    sel = +r.dataset.i;
+    if (view === "phone") drill = true;
+    render();
+  });
+}
+function move(d){
+  if (!WORKERS.length) return;
+  sel = (sel + d + WORKERS.length) % WORKERS.length;
+  render();
+}
+function setView(v){ view = v; drill = false; render(); }
+
+document.getElementById("seg").onclick = e => { if (e.target.dataset.v) setView(e.target.dataset.v); };
+addEventListener("keydown", e => {
+  const help = document.getElementById("help");
+  if (e.key === "?"){ help.classList.toggle("on"); return; }
+  if (e.key === "Escape"){
+    if (help.classList.contains("on")) help.classList.remove("on");
+    else if (drill){ drill = false; render(); }
+    return;
+  }
+  if (["ArrowDown", "j"].includes(e.key)){ move(1); e.preventDefault(); }
+  else if (["ArrowUp", "k"].includes(e.key)){ move(-1); e.preventDefault(); }
+  else if (e.key === "w"){ setView(view === "split" ? "strip" : view === "strip" ? "phone" : "split"); }
+  else if (e.key === "Enter" && view === "phone"){ drill = true; render(); }
+});
+
+async function poll(){
+  try{
+    const res = await fetch("/api/workers", {cache: "no-store"});
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const text = await res.text();
+    // Byte-identical payload (idle / all-dead fleet) → skip the full re-render
+    // so selection, scroll, and text selection survive.
+    if (text === lastPayload && connected) return;
+    lastPayload = text;
+    const data = JSON.parse(text);
+    // Re-resolve the cursor by worker identity, not raw index: when a worker
+    // above the cursor drops out, the highlight must follow its worker, not
+    // jump to whatever now sits at the old index.
+    const prevKey = WORKERS.length ? wkey(WORKERS[sel]) : null;
+    WORKERS = Array.isArray(data) ? data.map(toView) : [];
+    connected = true;
+    if (prevKey != null){
+      const idx = WORKERS.findIndex(w => wkey(w) === prevKey);
+      sel = idx >= 0 ? idx : Math.min(sel, WORKERS.length - 1);
+    }
+    if (sel < 0) sel = 0;
+  }catch(_e){
+    connected = false;
+    lastPayload = null;
+  }
+  render();
+}
+const _h = location.hash.slice(1);
+if (["split", "strip", "phone"].includes(_h)) view = _h;
+render();
+poll();
+setInterval(poll, 1500);
+</script>
+</body>
+</html>
