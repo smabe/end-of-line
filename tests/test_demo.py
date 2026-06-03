@@ -60,6 +60,19 @@ class ScaffoldTest(CluTestCase):
 
 
 class UpTest(CluTestCase):
+    def test_up_init_suppresses_the_notify_wizard(self) -> None:
+        # `clu demo` runs in a TTY, so init must pass --no-notify-prompt or its
+        # interactive "Wire iMessage? / Wire Discord?" wizard fires per plan and
+        # clobbers the masked config. (The test env's non-TTY stdin would hide a
+        # regression, so assert the flag is passed explicitly.)
+        calls: list[list[str]] = []
+        with mock.patch("end_of_line.demo._cli", side_effect=lambda a: calls.append(a) or 0), \
+             mock.patch("end_of_line.demo._dispatch"):
+            demo.up(["busy"])
+        init_calls = [c for c in calls if c and c[0] == "init"]
+        self.assertTrue(init_calls)
+        self.assertIn("--no-notify-prompt", init_calls[0])
+
     def test_up_inits_and_registers_without_spawning(self) -> None:
         with mock.patch("end_of_line.demo._dispatch") as disp:
             plans = demo.up(["busy", "idle"])

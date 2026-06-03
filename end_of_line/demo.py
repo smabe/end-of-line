@@ -108,7 +108,11 @@ def up(scenarios=demo_worker.SCENARIOS, *, root: Path | None = None) -> list[Dem
     """Scaffold, init (auto-registers), and dispatch each demo plan."""
     plans = scaffold(scenarios, root=root)
     for plan in plans:
-        _cli(["init", "--project", str(plan.project_root), "--plan", plan.slug])
+        # --no-notify-prompt: `clu demo` runs in the operator's terminal (a
+        # TTY), so without this `cmd_init`'s interactive "Wire iMessage? / Wire
+        # Discord?" wizard fires for every demo plan AND overwrites the masked
+        # notify config we just scaffolded. The demo configures notify itself.
+        _cli(["init", "--no-notify-prompt", "--project", str(plan.project_root), "--plan", plan.slug])
         _dispatch(plan)
     return plans
 
