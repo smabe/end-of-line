@@ -2604,10 +2604,28 @@ def cmd_doctor(args) -> int:
     _print_stuck_tool_health(cfg)
     _print_worker_idle_health(cfg)
     _print_zombie_health(cfg)
+    _print_demo_sweep_health()
     _print_skill_drift_health()
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _print_demo_sweep_health() -> None:
+    """Report leftover `clu demo` plans (host-wide, `demo-` prefix).
+
+    A `clu demo` run hard-killed before its teardown ran leaves `demo-*`
+    registrations + a demo_root tree. Host-wide, not project-scoped: demo plans
+    register under demo_root(), not the operator's project. Quiet when clean —
+    matches the other printers. Cleanup is `clu demo down` (doctor stays
+    read-only and never unregisters).
+    """
+    stray = demo.sweep()
+    if not stray:
+        return
+    print("Leftover `clu demo` plans (clean up with `clu demo down`):")
+    for slug in stray:
+        print(f"  {slug} — synthetic demo plan still registered")
 
 
 def _print_skill_drift_health() -> None:

@@ -325,6 +325,54 @@ bind without a token.
 > — token included — into that log file. The token is long-lived; treat the log
 > like the token file (or read the token from `~/.config/clu/serve_token`).
 
+## Verify your install — `clu demo`
+
+Before you point clu at a real plan, confirm the whole pipeline works end to
+end with one command:
+
+```bash
+clu demo
+```
+
+This stands up a synthetic fleet — four throwaway `demo-*` plans, one per
+worker personality — and runs each through clu's **real** init → tick → claim →
+transcript pipeline. No real LLM, no token cost, fully deterministic. In a
+second terminal, watch them light up:
+
+```bash
+clu top          # or: clu serve  (clu demo --serve does this for you)
+```
+
+You'll see four live rows:
+
+| Plan | What it does |
+|---|---|
+| `demo-busy` | works continuously — a live `*` command, fresh ACT |
+| `demo-idle` | works briefly, then goes quiet — ACT climbs while HB stays fresh |
+| `demo-block` | opens a blocker (answerable with `clu answer`) and exits |
+| `demo-dead` | exits mid-work — flagged **dead** by PID-liveness detection |
+
+If those four render, your install is healthy: dispatch, claiming, transcript
+location, the dashboard, heartbeats, blockers, and dead-worker detection all
+work. (The blocked and dead rows are the point — they prove the failure paths
+surface, not just the happy path.)
+
+**Teardown is guaranteed.** Press Ctrl-C and the demo kills every worker,
+unregisters every `demo-*` plan, and removes its scratch tree under
+`~/.config/clu/demo`. The demo never notifies — it can't reach your phone even
+though it exercises the `block` path.
+
+If a `clu demo` was ever hard-killed before its teardown ran, leftovers are
+caught two ways:
+
+```bash
+clu demo down    # remove any orphaned demo-* state and exit
+clu doctor       # reports leftover demo plans (and points you at `clu demo down`)
+```
+
+`clu doctor` stays read-only: it reports leftover demo state but never
+unregisters — `clu demo down` is the cleanup.
+
 ## First plan walkthrough
 
 A clean end-to-end against a real project.

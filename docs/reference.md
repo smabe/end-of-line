@@ -988,6 +988,101 @@ security layer (token auth, Host-header allowlist, auto self-signed HTTPS).
 - `top.py` `gather_rows` for the row shape both surfaces share.
 - `operations.md` § "Serving the dashboard on the web — `clu serve`".
 
+### `demo_worker.py`
+
+The synthetic, deterministic core of `clu demo` (the verify-the-install
+tool). Fabricates real-format Claude Code session transcripts so `clu top` /
+`clu serve` render live demo rows without a real LLM — zero token cost, fully
+deterministic. The records must satisfy `top.py`'s locator/parser contract
+exactly, or the dashboard shows empty rows.
+
+**Key types and functions**
+
+- `SCENARIOS = ("busy", "idle", "block", "dead")` — the four demo
+  personalities, in dashboard order. `ACT_WRITE / ACT_QUIET / ACT_BLOCK /
+  ACT_DEAD` — the per-step actions the loop dispatches on.
+- `transcript_path(cwd, session_id, projects_root) -> Path` — reconstructs
+  the exact path the locator globs (`encode_project_dir(cwd)/<session_id>.jsonl`).
+- `build_records(scenario, step, *, cwd, session_id, now) -> list[dict]` — one
+  step of synthetic work as JSONL records. Every record carries the real `cwd`
+  and `isSidechain: False` (the locator's requirement) and exercises every
+  `extract_activity` branch (a Bash command, a Write, an assistant line, token
+  usage). `now` is the `...Z` stamp the parser ages into ACT. `busy`/`block`/
+  `dead` leave the Bash command running (a live `*`); `idle` resolves it.
+- `scenario_action(scenario, step) -> str` — the pure per-step planner: `busy`
+  always works; `idle` works `_IDLE_WRITE_STEPS` then goes quiet; `block`/`dead`
+  work `_PRE_LIFECYCLE_STEPS` then run their lifecycle event.
+- `command_template(scenario, *, python) -> str` — the `.orchestrator.json`
+  `dispatch.command`. Surfaces `{plan_slug}` as a bare, space-bounded positional
+  (the #83 cmdline-marker reaper needs the slug as a whole token) and
+  `{session_id}` so dispatch stamps a deterministic transcript filename.
+- `run_worker(plan, phase_id, token, scenario, *, project, session_id, …) -> int`
+  — the paced loop: write + heartbeat every `step_seconds` (default 5s, lease-
+  safe), bounded by `max_steps` (~1h; teardown is the normal exit). `block`
+  opens a blocker and returns; `dead` returns with no callback so dead-PID
+  detection flags it. `clock` / `sleep` / `runner` are injectable so tests run
+  with no wall-clock, sleep, or subprocess.
+
+**Invariants and gotchas**
+
+- The default `runner` invokes `clu heartbeat` / `clu block` in-process via
+  `cli.main` — the demo worker is already a `clu` process, so this exercises
+  the real token-validated callbacks without a subprocess.
+- `cmd_demo_worker` calls `notify.set_global_suppress(True)`: the in-process
+  `block` callback would otherwise fire a real iMessage/Discord push.
+- The default `clock` is `state.utcnow` — the single source of truth for the
+  dashboard `...Z` stamp.
+
+**See also**
+
+- `top.py` `extract_activity` / `locate_transcript` for the contract the
+  records satisfy.
+- `demo.py` for the orchestration that scaffolds + dispatches these workers.
+
+### `demo.py`
+
+The `clu demo` orchestration: scaffold + run + tear down a synthetic fleet
+that verifies an install end-to-end. Decision A (operator-approved): demo plans
+live in the *real* registry, namespaced `demo-`, so the operator's own
+`clu top` / `clu serve` see them — with guaranteed teardown bounding orphan risk.
+
+**Key types and functions**
+
+- `DEMO_SLUG_PREFIX = "demo-"` · `demo_root() -> Path` — the throwaway project
+  tree under `clu_config_dir()/demo`.
+- `scaffold(scenarios, *, root) -> list[DemoPlan]` — writes one project per
+  scenario (each needs its own `dispatch.command`, so each gets its own
+  `.orchestrator.json` + one-phase master). The config masks every inherited
+  global notify channel (`{kind, enabled: false}` per backend in
+  `notify._NOTIFIER_REGISTRY`). Pure filesystem.
+- `up(scenarios, *, root) -> list[DemoPlan]` — scaffold → `init` (auto-registers)
+  → `tick` (dispatches each worker). `_dispatch` is split out so tests stub the
+  real subprocess spawn.
+- `sweep() -> list[str]` — every `demo-*` slug in the registry (host-wide; the
+  `clu doctor` printer uses it).
+- `down(*, root, projects_root) -> list[str]` — teardown: reap each live worker
+  pgroup (`reap_orphan_pgroup`, slug-guarded against PID reuse), drop each
+  project's whole transcript dir (re-dispatch mints a fresh `session_id` per
+  attempt, so one session file would miss prior ones), unregister every `demo-*`
+  plan, remove the tree. Idempotent; never touches non-demo entries.
+
+**Invariants and gotchas**
+
+- The notify mask is the *only* defense for the out-of-process cron supervisor
+  (which would otherwise notify about the demo's dead worker); `cmd_demo` also
+  `set_global_suppress` for the in-process path.
+- `cmd_demo` runs `up()` and the foreground wait inside the teardown
+  `try/finally`, with the SIGTERM trap installed first, so a partial-launch
+  failure or a `kill` mid-launch still unwinds to `down()`.
+- Project roots are `.resolve()`d so the registered root matches dispatch's
+  `{project}` (both resolve), keeping the locator's cwd comparison exact.
+
+**See also**
+
+- `demo_worker.py` for the synthetic worker `up` dispatches.
+- `cli.py` `cmd_demo` / `cmd_demo_worker` / `_print_demo_sweep_health`.
+- `operations.md` § "Verify your install — `clu demo`".
+
 ### `fleet.py`
 
 Pure projection: take every registry entry, project into a one-line
