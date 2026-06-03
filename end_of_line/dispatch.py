@@ -13,8 +13,10 @@ import json
 import os
 import re
 import shlex
+import string
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from . import coolant, notify
@@ -145,6 +147,21 @@ def _match_systemic_signature(log_path: Path, *, rc: int) -> str | None:
     return None
 
 
+def _template_uses_session_id(cmd_tmpl: str) -> bool:
+    """True iff the command has a real `{session_id}` format field.
+
+    A substring test would misfire on escaped `{{session_id}}` (which
+    `str.format` renders as the literal text and consumes no argument) — that
+    would stamp a uuid the worker never receives. `Formatter().parse` reports
+    escaped braces as literal text with no field name, so this distinguishes
+    them.
+    """
+    try:
+        return any(field == "session_id" for _, field, _, _ in string.Formatter().parse(cmd_tmpl))
+    except ValueError:
+        return False
+
+
 def dispatch_for_tick(
     result: TickResult,
     cfg: ProjectConfig,
@@ -167,12 +184,20 @@ def dispatch_for_tick(
     if cfg.dispatch.kind != "shell":
         raise ValueError(f"unknown dispatch kind: {cfg.dispatch.kind}")
 
+    # Generate a session id ONLY when the command opts in via {session_id}
+    # (e.g. `claude --session-id {session_id} ...`). Then the worker's
+    # transcript filename is known here, so we stamp it on the claim and
+    # `clu top` finds the transcript deterministically. Without the
+    # placeholder, Claude Code picks its own id, so stamping ours would lie —
+    # leave it unset and let `clu top` fall back to cwd-matching.
+    session_id = str(uuid.uuid4()) if _template_uses_session_id(cmd_tmpl) else None
     cmd = cmd_tmpl.format(
         plan_slug=shlex.quote(plan_slug),
         phase_id=shlex.quote(result.phase_id),
         token=shlex.quote(result.token or ""),
         project=shlex.quote(str(cfg.project_root)),
         state_file=shlex.quote(str(state_file)),
+        session_id=shlex.quote(session_id or ""),
     )
 
     log_dir = state_file.parent / "logs"
@@ -282,7 +307,7 @@ def dispatch_for_tick(
         )
         return False
 
-    _stamp_pid(state_file, result, proc.pid, log_path)
+    _stamp_pid(state_file, result, proc.pid, log_path, session_id)
     if cfg.coolant.enabled:
         coolant.emit_start(
             session_id=result.token or "",
@@ -629,8 +654,14 @@ def _release_with_failure(state_file: Path, result: TickResult, *, reason: str) 
         print(f"dispatch: failed to record dispatch_failed: {exc}", file=sys.stderr)
 
 
-def _stamp_pid(state_file: Path, result: TickResult, pid: int, log_path: Path) -> None:
-    """Best-effort pid/log_path stamping on the active claim."""
+def _stamp_pid(
+    state_file: Path,
+    result: TickResult,
+    pid: int,
+    log_path: Path,
+    session_id: str | None = None,
+) -> None:
+    """Best-effort pid/log_path/session_id stamping on the active claim."""
     try:
         with st.mutate(state_file) as data:
             claim = data.get("current_claim") or {}
@@ -641,6 +672,9 @@ def _stamp_pid(state_file: Path, result: TickResult, pid: int, log_path: Path) -
                 # killpg the whole group (worker + heartbeat loop) — #75.
                 claim["pgid"] = pid
                 claim["log_path"] = str(log_path)
+                if session_id is not None:
+                    # Deterministic transcript filename for `clu top` (#session-id).
+                    claim["session_id"] = session_id
                 data["current_claim"] = claim
     except _DISPATCH_FALLBACK_ERRORS as exc:
         print(f"dispatch: failed to stamp pid: {exc}", file=sys.stderr)

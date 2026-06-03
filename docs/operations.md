@@ -208,6 +208,62 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
 | `<project>/plans/.orchestrator/logs/<phase>.<token>.log` | Per-worker stderr |
 | `<project>/plans/.orchestrator/<plan>.state.json` | Plan state (single source of truth) |
 
+## Watching workers — `clu top`
+
+A read-only `top`-like dashboard of every active worker on the host. Run it in
+a side window and leave it up:
+
+```bash
+clu top                 # curses live view, all registered plans
+clu top --project .     # scope to one project
+clu top --once          # one plain snapshot (also the default when piped)
+clu top --interval 3    # refresh seconds (default 1.5)
+```
+
+In the live view: **`q`** quits, **`w`** toggles detail mode. Columns size to
+the terminal — the text fields use all available width and truncate only when
+content genuinely won't fit, so a wider window shows more. Detail mode stacks
+each worker into a small block with full, word-wrapped COMMAND and SAYING (never
+truncated, at the cost of vertical space).
+
+One row per active claim:
+
+```
+PROJECT/PLAN·PHASE          RAN     ACT     HB  PID  COMMAND              WROTE          SAYING
+HealthData/logging·impl  25m25s    15s    51s   ok  pytest -k logging    logging.py 4s  tests pass, wiring next
+```
+
+- **RAN** — elapsed since the current claim was dispatched (resets on re-dispatch).
+- **ACT** — age of the most recent transcript entry (the finest "is it doing
+  things" clock; far tighter than the heartbeat).
+- **HB** — heartbeat age. **PID** — `ok`/`dead` (a live `kill -0` probe, so a
+  dead worker is flagged, never shown as quietly idle).
+- **COMMAND** — last Bash command (`*` prefix = still running).
+  **WROTE** — last file edited + how long ago. **SAYING** — last assistant line.
+
+The command/write/saying columns come from the worker's Claude Code transcript
+(`~/.claude/projects/<enc>/<id>.jsonl`) — written by the harness as tools
+actually run — and PID/heartbeat from the OS and state. None of it is the
+worker LLM's self-report, so `clu top` is an independent check that a worker is
+producing work, not just claiming to.
+
+### Deterministic transcript lookup — the `{session_id}` placeholder
+
+By default `clu top` finds a worker's transcript by encoding its working
+directory to the `~/.claude/projects/` dir and confirming the match by the
+in-file `cwd` field. That works, but the encoding is lossy and a dir can hold
+many sessions. For an exact, unambiguous match, add `{session_id}` to your
+`dispatch.command` so clu hands Claude Code a known id:
+
+```json
+"command": "claude --session-id {session_id} --print '/plan {plan_slug} (resume phase {phase_id}; state at {state_file})'"
+```
+
+clu then generates one uuid per dispatch, passes it to `--session-id`, and
+stamps it on the claim; `clu top` reads the transcript file directly. Omit the
+placeholder and clu stamps nothing — Claude Code picks its own id and `clu top`
+falls back to cwd-matching.
+
 ## First plan walkthrough
 
 A clean end-to-end against a real project.

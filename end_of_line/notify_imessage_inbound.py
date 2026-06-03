@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +17,7 @@ from pathlib import Path
 
 from . import registry, state_locator
 from . import state as st
-from ._xdg_guard import assert_xdg_safe
+from ._xdg_guard import assert_xdg_safe, clu_config_dir
 from .config import load_project_config
 from .notify_base import OpenBlocker, Reply
 
@@ -32,20 +31,15 @@ OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS = 60.0
 APPLE_EPOCH_OFFSET_SECONDS = 978_307_200  # Unix → Apple-epoch (Jan 1 2001).
 
 
-def _xdg_clu_dir() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    return Path(base) / "clu" if base else Path.home() / ".config" / "clu"
-
-
 def inbound_state_path() -> Path:
     """Lazy path resolution — env-driven so CluTestCase isolation works."""
-    path = _xdg_clu_dir() / "inbound_state.json"
+    path = clu_config_dir() / "inbound_state.json"
     assert_xdg_safe(path)
     return path
 
 
 def outbound_pending_path() -> Path:
-    path = _xdg_clu_dir() / "outbound_pending.json"
+    path = clu_config_dir() / "outbound_pending.json"
     assert_xdg_safe(path)
     return path
 

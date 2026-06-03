@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 
 from end_of_line import state as st
@@ -283,6 +284,43 @@ class DispatchTestCase(CluTestCase):
         # the whole group (worker + heartbeat loop) — #75.
         self.assertIn("pgid", claim)
         self.assertEqual(claim["pgid"], claim["pid"])
+
+    def test_session_id_placeholder_substituted_and_stamped(self) -> None:
+        # When the command opts in to {session_id}, dispatch generates one uuid,
+        # substitutes it into the command, AND stamps the same value on the
+        # claim — so `clu top` can find the transcript deterministically.
+        sentinel = self.project / "sid.captured"
+        cfg = self._cfg(f"sh -c 'printf \"%s\" {{session_id}} > {sentinel}'")
+        ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertTrue(ok)
+        claim = json.loads(self.state_path.read_text())["current_claim"]
+        sid = claim["session_id"]
+        uuid.UUID(sid)  # raises if not a valid uuid
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not sentinel.exists():
+            time.sleep(0.05)
+        self.assertTrue(sentinel.exists(), "session_id sentinel never written")
+        self.assertEqual(sentinel.read_text(), sid)
+
+    def test_no_session_id_placeholder_leaves_claim_unstamped(self) -> None:
+        # Commands that don't opt in must not get a session_id — Claude Code
+        # generates its own, so a stamp would be a lie (top falls back to
+        # cwd-matching instead).
+        cfg = self._cfg("sleep 3")
+        ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertTrue(ok)
+        claim = json.loads(self.state_path.read_text())["current_claim"]
+        self.assertIsNone(claim.get("session_id"))
+
+    def test_escaped_session_id_braces_do_not_stamp(self) -> None:
+        # `{{session_id}}` is a literal, not a format field — must NOT generate
+        # or stamp a uuid (it would never reach the worker, and a phantom stamp
+        # suppresses clu top's cwd fallback).
+        cfg = self._cfg("sh -c 'echo {{session_id}} && sleep 3'")
+        ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertTrue(ok)
+        claim = json.loads(self.state_path.read_text())["current_claim"]
+        self.assertIsNone(claim.get("session_id"))
 
     def test_healthy_spawn_emits_coolant_start(self) -> None:
         """A worker that survives the fast-fail window emits agent-start."""
