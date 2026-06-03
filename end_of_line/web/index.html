@@ -29,7 +29,9 @@ body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
     repeating-linear-gradient(0deg, transparent 0 33px, #0b2c3a22 33px 34px),
     repeating-linear-gradient(90deg, transparent 0 33px, #0b2c3a18 33px 34px);
   mask:radial-gradient(130% 100% at 50% 30%, #000 55%, transparent 100%);}
-body::after{content:"";position:fixed;inset:0;z-index:60;pointer-events:none;mix-blend-mode:overlay;opacity:.45;
+/* scanlines: plain low-opacity overlay. NO mix-blend-mode — a full-viewport
+   blend mode forces the GPU to re-composite the whole page every frame. */
+body::after{content:"";position:fixed;inset:0;z-index:60;pointer-events:none;opacity:.22;
   background:repeating-linear-gradient(0deg, #00000000 0 2px, #0006 2px 3px);}
 .wrap{position:relative;z-index:1;max-width:1240px;margin:0 auto;padding:30px 22px 80px}
 /* header */
@@ -52,8 +54,11 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 .keys{margin-left:auto;color:var(--faint);font-size:11px;letter-spacing:.04em}
 .keys b{color:var(--cy-dim)}
 /* panel chrome with bracket corners */
+/* No backdrop-filter: blur(2px) re-blurs the backdrop every frame on the GPU.
+   The panel bg is already ~80% opaque over a faint static grid, so the blur was
+   barely visible — dropping it is the biggest single efficiency win. */
 .panel{position:relative;background:var(--panel);border:1px solid var(--edge);border-radius:10px;
-  box-shadow:0 0 0 1px #0a232e inset, 0 24px 60px #0009, 0 0 60px #0b394722;backdrop-filter:blur(2px)}
+  box-shadow:0 0 0 1px #0a232e inset, 0 24px 60px #0009, 0 0 60px #0b394722}
 .panel::before,.panel::after{content:"";position:absolute;width:16px;height:16px;border:2px solid var(--cy);opacity:.7}
 .panel::before{top:-1px;left:-1px;border-right:0;border-bottom:0;border-radius:10px 0 0 0}
 .panel::after{bottom:-1px;right:-1px;border-left:0;border-top:0;border-radius:0 0 10px 0}
@@ -121,7 +126,7 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 .phone .foot .nav-drill{display:none}
 .phone.drill .foot .nav-drill{display:inline}
 /* help overlay */
-.help{position:fixed;inset:0;z-index:80;background:#020a0ecc;display:none;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+.help{position:fixed;inset:0;z-index:80;background:#020a0eec;display:none;align-items:center;justify-content:center}
 .help.on{display:flex}
 .help .card{width:440px;max-width:90vw;border:1px solid var(--cy);border-radius:10px;background:#04121a;padding:22px 26px;box-shadow:0 0 40px #36e6ff33}
 .help h3{font-family:"Orbitron";letter-spacing:.1em;color:var(--cy);font-size:14px;margin-bottom:14px}
@@ -133,6 +138,11 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 @keyframes beat{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes blink{50%{opacity:.15}}
+/* Pause every animation when the tab is backgrounded (toggled from JS on
+   visibilitychange) so a hidden dashboard costs ~nothing. */
+body.hidden-tab *{animation-play-state:paused !important}
+/* Respect the OS "reduce motion" setting — and save the repaints. */
+@media(prefers-reduced-motion:reduce){*{animation:none !important}}
 @media(max-width:560px){.brand{font-size:20px}.detail{display:none}.divider{display:none}}
 </style>
 </head>
@@ -382,9 +392,19 @@ async function poll(){
 }
 const _h = location.hash.slice(1);
 if (["split", "strip", "phone"].includes(_h)) view = _h;
+
+// Only poll while the tab is visible. A backgrounded dashboard does no network,
+// no re-render, and no animation — it idles at ~zero cost until you return.
+let pollTimer = null;
+function startPolling(){ if (pollTimer === null){ poll(); pollTimer = setInterval(poll, 1500); } }
+function stopPolling(){ if (pollTimer !== null){ clearInterval(pollTimer); pollTimer = null; } }
+document.addEventListener("visibilitychange", () => {
+  document.body.classList.toggle("hidden-tab", document.hidden);
+  if (document.hidden) stopPolling(); else startPolling();  // resume + immediate refresh
+});
+
 render();
-poll();
-setInterval(poll, 1500);
+if (!document.hidden) startPolling();
 </script>
 </body>
 </html>

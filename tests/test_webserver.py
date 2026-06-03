@@ -8,6 +8,7 @@ LAN-IP detection, the `build_config` security policy + guardrail, and TLS.
 """
 
 import json
+import re
 import ssl
 import threading
 import unittest
@@ -128,6 +129,19 @@ class IndexResourceTest(CluTestCase):
         self.assertIn("function tokenTotal(", html)
         self.assertIn("function wkey(", html)
         self.assertIn("findIndex", html)
+
+    def test_frontend_avoids_continuous_gpu_compositing(self):
+        html = webserver.load_index_html()
+        # Strip /* */ block comments first so the guard asserts on real CSS
+        # declarations, not on explanatory prose that mentions these properties.
+        code = re.sub(r"/\*.*?\*/", "", html, flags=re.DOTALL)
+        # Both force a full-viewport GPU recomposite every frame, forever — the
+        # dashboard's idle-cost hog.
+        self.assertNotIn("backdrop-filter:blur(", code)
+        self.assertNotIn("mix-blend-mode:", code)
+        # Work is gated on tab visibility, and motion is opt-out-able.
+        self.assertIn("visibilitychange", html)
+        self.assertIn("prefers-reduced-motion", html)
 
 
 class ServerIntegrationTest(_ServerCase):
