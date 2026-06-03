@@ -19,7 +19,6 @@ token usage) so a `busy` worker lights up all four dashboard columns.
 from __future__ import annotations
 
 import json
-import sys
 import time
 from collections import namedtuple
 from pathlib import Path
@@ -156,18 +155,22 @@ def scenario_action(scenario: str, step: int) -> str:
     return ACT_WRITE
 
 
-def command_template(scenario: str, *, python: str | None = None) -> str:
+def command_template(scenario: str) -> str:
     """The `.orchestrator.json` `dispatch.command` template for a demo plan.
 
-    `{plan_slug}` is a bare, space-bounded positional so the supervisor's #83
-    cmdline-marker reaper recognizes the live worker — a slug buried in a longer
-    token reads as 'dead' and gets killed. `{session_id}` opts the dispatcher
-    into generating + stamping a session id, giving the locator a deterministic
-    transcript filename. dispatch.py substitutes the `{...}` fields at spawn.
+    Invokes the bare `clu` console script — PATH-resolved and cwd-independent,
+    matching every other clu worker callback. (A `{sys.executable} -m
+    end_of_line.cli` form breaks because the worker spawns with cwd set to the
+    demo project dir, where `end_of_line` isn't importable unless the running
+    python happens to have it installed.) `{plan_slug}` is a bare,
+    space-bounded positional so the supervisor's #83 cmdline-marker reaper
+    recognizes the live worker — a slug buried in a longer token reads as
+    'dead' and gets killed. `{session_id}` opts the dispatcher into generating
+    + stamping a session id, giving the locator a deterministic transcript
+    filename. dispatch.py substitutes the `{...}` fields at spawn.
     """
-    python = python or sys.executable
     return (
-        f"{python} -m end_of_line.cli demo-worker {{plan_slug}} "
+        f"clu demo-worker {{plan_slug}} "
         f"--phase {{phase_id}} --token {{token}} --project {{project}} "
         f"--session-id {{session_id}} --scenario {scenario}"
     )

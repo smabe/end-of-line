@@ -13,11 +13,13 @@ the worker — the heartbeat then reparents to launchd and loops for hours
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 from end_of_line.state import (
     SIGNAL_TERM,
@@ -116,6 +118,29 @@ class TestReapOrphanPgroup(unittest.TestCase):
             self.assertIsNone(result.signaled)
         finally:
             self._cleanup(leader)
+
+    def test_poll_tolerates_eperm_then_confirms_death(self):
+        # A transient EPERM on the liveness poll (a group member mid-exit, or
+        # the pgid briefly racing another owner) must NOT crash the reaper —
+        # it keeps polling until ESRCH confirms the group is gone. Exposed by
+        # `clu demo down` reaping a live worker group during teardown.
+        poll_calls = []
+
+        def fake_killpg(pgid, sig):
+            if sig == 0:
+                poll_calls.append(sig)
+                if len(poll_calls) == 1:
+                    raise PermissionError(1, "Operation not permitted")
+                raise ProcessLookupError  # group gone on the next poll
+            return None  # SIGTERM succeeds
+
+        with mock.patch("end_of_line.state.os.killpg", side_effect=fake_killpg), \
+             mock.patch("end_of_line.state.os.getpgid", return_value=999), \
+             mock.patch("end_of_line.state.time.sleep"):
+            result = reap_orphan_pgroup(424242)
+
+        self.assertEqual(result.signaled, SIGNAL_TERM)
+        self.assertEqual(len(poll_calls), 2)  # polled past the EPERM, didn't crash
 
     def test_cmdline_match_reaps(self):
         marker = "REAP_PG_MARKER_12345"

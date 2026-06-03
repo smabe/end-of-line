@@ -420,6 +420,13 @@ def reap_orphan_pgroup(pgid: int, cmdline_match: str | None = None) -> ReapResul
             os.killpg(pgid, 0)
         except ProcessLookupError:
             return ReapResult(SIGNAL_TERM, False, False)
+        except PermissionError:
+            # Transient EPERM (a group member mid-exit, or the pgid briefly
+            # racing another owner) means we can't confirm death THIS poll —
+            # keep polling rather than crash the caller. The SIGTERM/SIGKILL
+            # killpg calls already tolerate EPERM; this poll must too, or a
+            # best-effort reap (e.g. `clu demo down`'s teardown) blows up.
+            continue
 
     try:
         os.killpg(pgid, signal.SIGKILL)
