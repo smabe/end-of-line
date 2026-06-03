@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clu top // END OF LINE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --void:#03060a; --grid:#0a2230; --panel:#060d14cc; --edge:#0e3a4a;
+  --cy:#36e6ff; --cy-dim:#1a93a8; --cy-deep:#0c5566;
+  --amber:#ffb22e; --red:#ff4d52; --teal:#27d39a; --ink:#aeccd6;
+  --dim:#4d6b78; --faint:#2c4853;
+  --glow:0 0 6px var(--cy), 0 0 14px #36e6ff55;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--void); color:var(--ink);
+  font-family:"JetBrains Mono",ui-monospace,Menlo,monospace; font-size:13px; line-height:1.5;
+  overflow-x:hidden; -webkit-font-smoothing:antialiased;
+}
+/* tron grid floor + vignette + scanlines */
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(120% 90% at 50% -10%, #06222e55, transparent 60%),
+    repeating-linear-gradient(0deg, transparent 0 33px, #0b2c3a22 33px 34px),
+    repeating-linear-gradient(90deg, transparent 0 33px, #0b2c3a18 33px 34px);
+  mask:radial-gradient(130% 100% at 50% 30%, #000 55%, transparent 100%);}
+body::after{content:"";position:fixed;inset:0;z-index:60;pointer-events:none;mix-blend-mode:overlay;opacity:.45;
+  background:repeating-linear-gradient(0deg, #00000000 0 2px, #0006 2px 3px);}
+.wrap{position:relative;z-index:1;max-width:1240px;margin:0 auto;padding:30px 22px 80px}
+/* header */
+header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+.brand{font-family:"Orbitron",sans-serif;font-weight:900;letter-spacing:.18em;font-size:26px;color:#eafcff;
+  text-shadow:0 0 10px #36e6ff77,0 0 26px #36e6ff33}
+.brand b{color:var(--cy)}
+.eol{font-family:"Orbitron",sans-serif;font-size:11px;letter-spacing:.4em;color:var(--cy-dim);align-self:center}
+.tag{color:var(--dim);max-width:620px;margin:2px 0 20px;font-size:12px}
+.tag b{color:var(--ink)}
+/* toolbar */
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+.seg{display:flex;border:1px solid var(--edge);border-radius:7px;overflow:hidden;background:#04101799}
+.seg button{font:600 11px/1 "JetBrains Mono";letter-spacing:.12em;color:var(--dim);background:transparent;
+  border:0;padding:9px 14px;cursor:pointer;text-transform:uppercase;transition:.18s}
+.seg button:hover{color:var(--ink)}
+.seg button.on{color:#021016;background:var(--cy);box-shadow:0 0 16px #36e6ff66}
+.live{display:flex;align-items:center;gap:7px;color:var(--teal);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.live i{width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px var(--teal);animation:beat 1.6s infinite}
+.keys{margin-left:auto;color:var(--faint);font-size:11px;letter-spacing:.04em}
+.keys b{color:var(--cy-dim)}
+/* panel chrome with bracket corners */
+.panel{position:relative;background:var(--panel);border:1px solid var(--edge);border-radius:10px;
+  box-shadow:0 0 0 1px #0a232e inset, 0 24px 60px #0009, 0 0 60px #0b394722;backdrop-filter:blur(2px)}
+.panel::before,.panel::after{content:"";position:absolute;width:16px;height:16px;border:2px solid var(--cy);opacity:.7}
+.panel::before{top:-1px;left:-1px;border-right:0;border-bottom:0;border-radius:10px 0 0 0}
+.panel::after{bottom:-1px;right:-1px;border-left:0;border-top:0;border-radius:0 0 10px 0}
+.statusbar{display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1px solid var(--edge);
+  font-size:11.5px;letter-spacing:.05em;color:var(--cy);text-transform:uppercase}
+.statusbar .run{color:var(--teal)} .statusbar .blk{color:var(--amber)} .statusbar .dead{color:var(--red)}
+.statusbar .sep{color:var(--faint)} .statusbar .age{margin-left:auto;color:var(--dim);text-transform:none}
+.foot{padding:8px 16px;border-top:1px solid var(--edge);color:var(--dim);font-size:11px;letter-spacing:.03em}
+.foot b{color:var(--cy)}
+/* body split */
+.body{display:flex}
+.list{flex:1 1 52%;min-width:0;padding:6px 0}
+.divider{width:1px;background:linear-gradient(180deg,transparent,var(--edge) 12%,var(--edge) 88%,transparent)}
+.detail{flex:1 1 48%;min-width:0;padding:14px 18px}
+/* rows */
+.row{display:grid;grid-template-columns:18px 1fr auto;gap:10px;align-items:center;padding:6px 16px;cursor:pointer;
+  border-left:3px solid transparent;transition:background .15s,border-color .15s;opacity:0;animation:rise .5s forwards}
+.row:hover{background:#0a212c66}
+.row.sel{background:linear-gradient(90deg,#0c3a4a66,#0c3a4a14);border-left-color:var(--cy);box-shadow:inset 0 0 30px #36e6ff14}
+.dot{width:9px;height:9px;border-radius:50%;justify-self:center}
+.dot.ok{background:var(--teal);box-shadow:0 0 8px var(--teal);animation:beat 2.4s infinite}
+.dot.warn{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+.dot.dead{background:var(--red);box-shadow:0 0 8px var(--red);animation:none}
+.who{display:flex;flex-direction:column;min-width:0}
+.who .id{color:#dff6fb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.who .id .ph{color:var(--cy)}
+.who .sub{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.who .sub .cmd{color:var(--cy-dim)}
+.badge{font-size:9.5px;font-weight:700;letter-spacing:.1em;padding:1px 5px;border-radius:3px}
+.badge.blk{color:var(--amber);border:1px solid var(--amber)}
+.badge.dead{color:var(--red);border:1px solid var(--red)}
+.metrics{display:flex;gap:14px;font-size:11px;color:var(--dim);white-space:nowrap}
+.metrics b{color:var(--ink);font-weight:500}
+.metrics .a-ok{color:var(--teal)} .metrics .a-warn{color:var(--amber)}
+.star{color:var(--teal);animation:blink 1s steps(2) infinite}
+/* detail pane */
+.dh{font-family:"Orbitron";font-weight:700;letter-spacing:.06em;font-size:15px;color:#eafcff;margin-bottom:2px;text-shadow:0 0 10px #36e6ff44}
+.dh .ph{color:var(--cy)}
+.health-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:14px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 16px;font-size:12px;margin-bottom:14px}
+.kv .k{color:var(--dim);letter-spacing:.04em}
+.kv .v{color:var(--ink)} .kv .v.cy{color:var(--cy)} .kv .v.warn{color:var(--amber)}
+.saybox{border:1px solid var(--edge);border-radius:7px;padding:10px 12px;background:#04141c66;margin-bottom:12px}
+.saybox .lbl{font-size:10px;letter-spacing:.22em;color:var(--cy-dim);text-transform:uppercase;margin-bottom:6px}
+.saybox .txt{color:#cfeef6;font-size:12.5px}
+.tail .lbl{font-size:10px;letter-spacing:.22em;color:var(--faint);text-transform:uppercase;margin:4px 0 6px}
+.tail .ln{display:flex;gap:8px;color:var(--dim);font-size:11.5px;padding:2px 0}
+.tail .ln .t{color:var(--cy-dim);min-width:42px} .tail .ln .x{color:var(--ink)} .tail .ln .x.run{color:var(--teal)}
+/* STRIP view */
+.strip .detail,.strip .divider{display:none}
+.strip .row{grid-template-columns:18px 240px 1fr auto}
+.strip .metrics{gap:18px}
+.strip .ticker{padding:7px 16px;border-top:1px solid var(--edge);color:var(--dim);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.strip .ticker b{color:var(--cy)}
+/* PHONE view */
+.phonewrap{display:flex;justify-content:center}
+.phone{width:380px;max-width:100%}
+.phone .body{flex-direction:column}
+.phone .divider{display:none}
+.phone .detail{display:none}
+.phone .row{grid-template-columns:16px 1fr auto}
+.phone .metrics{display:none}
+.phone .who .sub{display:block}
+.phone.drill .list,.phone.drill .statusbar .age{display:none}
+.phone .drillview{display:none;padding:14px 16px}
+.phone.drill .drillview{display:block;animation:rise .35s}
+.phone.drill .foot .nav-list{display:none}
+.phone .foot .nav-drill{display:none}
+.phone.drill .foot .nav-drill{display:inline}
+/* help overlay */
+.help{position:fixed;inset:0;z-index:80;background:#020a0ecc;display:none;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+.help.on{display:flex}
+.help .card{width:440px;max-width:90vw;border:1px solid var(--cy);border-radius:10px;background:#04121a;padding:22px 26px;box-shadow:0 0 40px #36e6ff33}
+.help h3{font-family:"Orbitron";letter-spacing:.1em;color:var(--cy);font-size:14px;margin-bottom:14px}
+.help dl{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;font-size:12.5px}
+.help dt{color:#eafcff} .help dt kbd{border:1px solid var(--edge);border-radius:4px;padding:1px 6px;color:var(--cy);background:#06161e}
+.help dd{color:var(--dim)}
+.note{color:var(--faint);font-size:11.5px;margin-top:14px;letter-spacing:.02em}
+.note b{color:var(--cy-dim)}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes beat{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes blink{50%{opacity:.15}}
+@media(max-width:560px){.brand{font-size:20px}.detail{display:none}.divider{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">clu&nbsp;<b>top</b></div>
+    <div class="eol">// END&nbsp;OF&nbsp;LINE</div>
+  </header>
+  <p class="tag">Live view of autonomous workers — activity read from each worker's transcript, never its self-report. <b>Pick a geometry</b> below; <b>↑↓</b> selects, the detail pane tracks the cursor live.</p>
+
+  <div class="toolbar">
+    <div class="seg" id="seg">
+      <button data-v="split" class="on">Split</button>
+      <button data-v="strip">Strip</button>
+      <button data-v="phone">Phone</button>
+    </div>
+    <div class="live"><i></i>live</div>
+    <div class="keys"><b>↑↓</b>/jk select · <b>w</b> geometry · <b>↵</b> open · <b>esc</b> back · <b>?</b> help</div>
+  </div>
+
+  <div id="stage"></div>
+
+  <p class="note">Prototype of the proposed redesign — interaction is real (keyboard + click), clocks tick live. Geometry auto-selects from terminal size in the real build; here the buttons / <b>w</b> stand in. Design ref: <b>plans/clu-top-tui-master.md</b>.</p>
+</div>
+
+<div class="help" id="help"><div class="card">
+  <h3>KEYBINDS</h3>
+  <dl>
+    <dt><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>j</kbd> <kbd>k</kbd></dt><dd>move selection (sticky by identity)</dd>
+    <dt><kbd>↵</kbd> Enter</dt><dd>drill into worker (fullscreen on narrow)</dd>
+    <dt><kbd>esc</kbd></dt><dd>back / close</dd>
+    <dt><kbd>w</kbd></dt><dd>cycle geometry: split → strip → phone</dd>
+    <dt><kbd>?</kbd></dt><dd>this help</dd>
+    <dt><kbd>q</kbd></dt><dd>quit (read-only — no destructive keys, ever)</dd>
+  </dl>
+  <p class="note">esc / ? to close</p>
+</div></div>
+
+<script>
+const WORKERS = [
+  { proj:"HealthData", plan:"workout-logging", phase:"impl", health:"ok",
+    ran:1512, act:7, hb:51, pid:34301, cmd:"pytest -k logging", running:true,
+    wrote:"logging.py", wroteAge:4, tokens:"1.24M", cost:"$3.40", attempts:"1/3", lease:"12m",
+    say:"tests pass for the empty case — now wiring the multi-set case and asserting the cursor reset fires before the summary writes…",
+    tail:[["edit","logging.py"],["bash","pytest -k logging",1],["read","test_logging.py"]] },
+  { proj:"end-of-line", plan:"clu-top", phase:"two", health:"warn",
+    ran:122, act:41, hb:9, pid:41173, cmd:"git log HEAD ^main", running:false,
+    wrote:"—", wroteAge:0, tokens:"412K", cost:"$1.10", attempts:"1/3", lease:"28m",
+    say:"checking the diff before I commit the responsive-layout change — want to confirm nothing in the column allocator regressed…",
+    tail:[["bash","git diff --stat"],["read","top.py"],["bash","git log HEAD ^main"]] },
+  { proj:"recipe-api", plan:"migrate", phase:"db", health:"ok",
+    ran:488, act:2, hb:12, pid:39042, cmd:"alembic upgrade head", running:true,
+    wrote:"0007_up.py", wroteAge:9, tokens:"680K", cost:"$1.85", attempts:"1/3", lease:"19m",
+    say:"applying migration 0007 — adding the cursor index and backfilling created_at in batches of 500…",
+    tail:[["write","0007_up.py"],["bash","alembic upgrade head",1]] },
+  { proj:"notify", plan:"discord", phase:"fix", health:"warn", blocked:true,
+    ran:840, act:180, hb:0, pid:38110, cmd:"awaiting operator", running:false,
+    wrote:"—", wroteAge:0, tokens:"905K", cost:"$2.55", attempts:"2/3", lease:"06m",
+    say:"BLOCKED — need to know which webhook field carries the thread id; asked the operator via iMessage and paused.",
+    tail:[["read","webhook.py"],["block","asked operator — thread id?"]] },
+  { proj:"foo", plan:"bar", phase:"three", health:"dead", dead:true,
+    ran:360, act:0, hb:0, pid:0, cmd:"— pid gone —", running:false,
+    wrote:"—", wroteAge:0, tokens:"210K", cost:"$0.60", attempts:"3/3", lease:"—",
+    say:"(no transcript — worker process died holding the lease)",
+    tail:[["dead","pid 37880 vanished"]] },
+];
+let sel = 0, view = "split", drill = false;
+
+const pad = n => String(n).padStart(2,"0");
+function age(s){ s=Math.max(0,Math.floor(s)); if(s<60)return s+"s"; if(s<3600)return Math.floor(s/60)+"m"+pad(s%60)+"s"; return Math.floor(s/3600)+"h"+pad(Math.floor(s/60)%60)+"m"; }
+const DOT = {ok:"ok",warn:"warn",dead:"dead"};
+function actCls(w){ if(w.dead)return""; return w.act<=15?"a-ok":w.act<=60?"":"a-warn"; }
+
+function header(){
+  const r=WORKERS.filter(w=>!w.dead&&!w.blocked).length, b=WORKERS.filter(w=>w.blocked).length, d=WORKERS.filter(w=>w.dead).length;
+  const oldest=age(Math.max(...WORKERS.filter(w=>!w.dead).map(w=>w.act)));
+  return `<div class="statusbar"><span class="run">${r} running</span><span class="sep">·</span><span class="blk">${b} blocked</span><span class="sep">·</span><span class="dead">${d} dead</span><span class="age">oldest-ACT ${oldest}</span></div>`;
+}
+function rowHTML(w,i){
+  const badge = w.dead?`<span class="badge dead">DEAD</span>`:w.blocked?`<span class="badge blk">BLK</span>`:"";
+  const star = w.running?`<span class="star">*</span> `:"";
+  const sub = `<div class="sub"><span class="cmd">${star}${w.cmd}</span> · ACT ${age(w.act)}</div>`;
+  const metrics = w.dead?`<div class="metrics"><span>— pid gone —</span></div>`:
+    `<div class="metrics"><span>RAN <b>${age(w.ran)}</b></span><span class="${actCls(w)}">ACT <b>${age(w.act)}</b></span><span>HB <b>${w.hb?age(w.hb):"—"}</b></span></div>`;
+  return `<div class="row ${i===sel?'sel':''}" data-i="${i}" style="animation-delay:${i*55}ms">
+    <span class="dot ${DOT[w.health]}"></span>
+    <div class="who"><div class="id">${w.proj}/${w.plan}<span class="ph">·${w.phase}</span> ${badge}</div>${sub}</div>
+    ${metrics}</div>`;
+}
+function detailHTML(w){
+  const hc = w.dead?`<span style="color:var(--red)">● dead</span>`:w.blocked?`<span style="color:var(--amber)">● blocked</span>`:`<span style="color:var(--teal)">● ok</span>`;
+  const star = w.running?`<span class="star">*</span> `:"";
+  return `<div class="dh">${w.proj} / ${w.plan} <span class="ph">· ${w.phase}</span></div>
+    <div class="health-chip">${hc}</div>
+    <div class="kv">
+      <span class="k">RAN</span><span class="v">${age(w.ran)}</span>
+      <span class="k">ACT</span><span class="v ${actCls(w)==='a-ok'?'cy':actCls(w)==='a-warn'?'warn':''}">${age(w.act)}</span>
+      <span class="k">HB</span><span class="v">${w.hb?age(w.hb):"—"}</span>
+      <span class="k">PID</span><span class="v">${w.pid||"—"}</span>
+      <span class="k">attempts</span><span class="v ${w.attempts[0]>='2'?'warn':''}">${w.attempts}</span>
+      <span class="k">lease</span><span class="v">${w.lease} left</span>
+      <span class="k">tokens</span><span class="v">${w.tokens} · ${w.cost}</span>
+      <span class="k">wrote</span><span class="v">${w.wrote}${w.wroteAge?` <span style="color:var(--dim)">(${age(w.wroteAge)})</span>`:""}</span>
+      <span class="k">CMD</span><span class="v cy">${star}${w.cmd}</span>
+    </div>
+    <div class="saybox"><div class="lbl">saying</div><div class="txt">${w.say}</div></div>
+    <div class="tail"><div class="lbl">recent</div>${w.tail.map(t=>`<div class="ln"><span class="t">${t[0]}</span><span class="x ${t[2]?'run':''}">${t[1]}${t[2]?' (running '+age(w.act)+')':''}</span></div>`).join("")}</div>`;
+}
+function render(){
+  const stage = document.getElementById("stage");
+  document.querySelectorAll(".seg button").forEach(b=>b.classList.toggle("on",b.dataset.v===view));
+  const w = WORKERS[sel];
+  if(view==="split"){
+    stage.innerHTML = `<div class="panel"><div class="">${header()}<div class="body">
+      <div class="list">${WORKERS.map(rowHTML).join("")}</div>
+      <div class="divider"></div>
+      <div class="detail">${detailHTML(w)}</div>
+    </div><div class="foot"><b>q</b> quit · <b>↑↓</b> select · <b>Tab</b> focus detail · <b>w</b> geometry · <b>?</b> help</div></div></div>`;
+  } else if(view==="strip"){
+    stage.innerHTML = `<div class="panel strip">${header()}
+      <div class="body"><div class="list">${WORKERS.map(rowHTML).join("")}</div></div>
+      <div class="ticker">▌ ${w.proj}/${w.plan}·${w.phase} — <b>${w.say.slice(0,90)}…</b></div>
+      <div class="foot"><b>q</b> quit · <b>↑↓</b> select · <b>w</b> geometry · <b>?</b> help</div></div>`;
+  } else {
+    stage.innerHTML = `<div class="phonewrap"><div class="panel phone ${drill?'drill':''}">${header()}
+      <div class="body"><div class="list">${WORKERS.map(rowHTML).join("")}</div></div>
+      <div class="drillview">${detailHTML(w)}</div>
+      <div class="foot"><span class="nav-list"><b>↑↓</b> sel · <b>↵</b> open · <b>q</b> quit</span><span class="nav-drill"><b>↑↓</b> scroll · <b>esc</b> back</span></div>
+    </div></div>`;
+  }
+  stage.querySelectorAll(".row").forEach(r=>r.onclick=()=>{sel=+r.dataset.i; if(view==="phone")drill=true; render();});
+}
+function move(d){ sel=(sel+d+WORKERS.length)%WORKERS.length; render(); }
+function setView(v){ view=v; drill=false; render(); }
+document.getElementById("seg").onclick=e=>{ if(e.target.dataset.v) setView(e.target.dataset.v); };
+addEventListener("keydown",e=>{
+  const help=document.getElementById("help");
+  if(e.key==="?"){help.classList.toggle("on");return;}
+  if(e.key==="Escape"){ if(help.classList.contains("on"))help.classList.remove("on"); else if(drill){drill=false;render();} return;}
+  if(["ArrowDown","j"].includes(e.key)){move(1);e.preventDefault();}
+  else if(["ArrowUp","k"].includes(e.key)){move(-1);e.preventDefault();}
+  else if(e.key==="w"){setView(view==="split"?"strip":view==="strip"?"phone":"split");}
+  else if(e.key==="Enter"&&view==="phone"){drill=true;render();}
+});
+// live tick — clocks advance; running workers periodically "act"
+let t=0;
+setInterval(()=>{
+  t++;
+  WORKERS.forEach(w=>{ if(w.dead)return; w.ran++; if(w.hb)w.hb++; w.act++; });
+  // simulate a running worker producing activity every few seconds
+  WORKERS.forEach(w=>{ if(w.running && t%4===0 && Math.random()<.6){ w.act=Math.floor(Math.random()*3); } });
+  // only re-render the live numbers without rebuilding focus
+  const w=WORKERS[sel];
+  document.querySelectorAll(".row").forEach((r,i)=>{
+    const ww=WORKERS[i]; if(ww.dead)return;
+    const m=r.querySelector(".metrics");
+    if(m && view!=="phone") m.innerHTML=`<span>RAN <b>${age(ww.ran)}</b></span><span class="${actCls(ww)}">ACT <b>${age(ww.act)}</b></span><span>HB <b>${ww.hb?age(ww.hb):"—"}</b></span>`;
+    const sub=r.querySelector(".sub"); if(sub){const star=ww.running?'<span class="star">*</span> ':''; sub.innerHTML=`<span class="cmd">${star}${ww.cmd}</span> · ACT ${age(ww.act)}`;}
+  });
+},1000);
+const _h=location.hash.slice(1); if(["split","strip","phone"].includes(_h))view=_h;
+render();
+</script>
+</body>
+</html>

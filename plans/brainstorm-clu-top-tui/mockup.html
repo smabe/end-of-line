@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clu top — modular TUI mockup</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#0b0e14; --chrome:#161b22; --border:#2b3340;
+    --fg:#c9d1d9; --dim:#6e7681; --faint:#484f58;
+    --green:#3fb950; --amber:#d29922; --red:#f85149; --blue:#58a6ff;
+    --sel:#1f6feb33; --selbar:#58a6ff; --hdr:#1c2128; --accent:#bc8cff;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:#05070a; color:var(--fg);
+    font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    padding:32px 20px 64px;
+  }
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--dim);margin:0 0 28px;max-width:880px}
+  .sub code{color:var(--accent)}
+  section{margin:0 auto 40px;max-width:1180px}
+  .label{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);margin:0 0 8px;font-weight:600}
+  .note{color:var(--dim);font-size:12px;margin:6px 0 0}
+  /* terminal window chrome */
+  .term{background:var(--panel);border:1px solid var(--border);border-radius:9px;overflow:hidden;box-shadow:0 8px 30px #0008}
+  .titlebar{background:var(--chrome);padding:7px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border)}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+  .ttl{color:var(--dim);font-size:11px;margin-left:6px}
+  .screen{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.55;padding:0;white-space:pre;overflow:auto}
+  .screen .pad{padding:8px 12px}
+  /* tui bits */
+  .bar{background:var(--hdr);color:var(--blue);padding:5px 12px;border-bottom:1px solid var(--border);font-weight:600}
+  .bar .b{color:var(--amber)} .bar .d{color:var(--red)} .bar .dim{color:var(--dim);font-weight:400}
+  .foot{background:var(--hdr);color:var(--dim);padding:5px 12px;border-top:1px solid var(--border)}
+  .foot b{color:var(--fg);font-weight:600}
+  .g{color:var(--green)} .a{color:var(--amber)} .rd{color:var(--red)}
+  .dim{color:var(--dim)} .faint{color:var(--faint)} .run{color:var(--green)} .blue{color:var(--blue)}
+  .row{padding:2px 12px;display:block}
+  .row.sel{background:var(--sel);box-shadow:inset 3px 0 0 var(--selbar)}
+  .split{display:flex}
+  .split .list{flex:0 0 46%;border-right:1px solid var(--border)}
+  .split .detail{flex:1;min-width:0}
+  .detail .pad{padding:8px 14px}
+  .k{color:var(--dim)} .v{color:var(--fg)}
+  .say{color:var(--fg)} .saylbl{color:var(--accent)}
+  .sechdr{color:var(--faint);border-top:1px dashed var(--border);margin-top:6px;padding-top:4px;display:block}
+  .badge{color:var(--red);font-weight:600}.badgeblk{color:var(--amber);font-weight:600}
+  .phones{display:flex;gap:24px;flex-wrap:wrap}
+  .phone{flex:0 0 360px;max-width:360px}
+  .cap{color:var(--dim);font-size:11px;margin:0 0 6px}
+  .arrow{align-self:center;color:var(--accent);font-size:24px;padding:0 4px}
+  @media(max-width:820px){.phones{flex-direction:column}.phone{flex-basis:auto;max-width:100%}}
+</style>
+</head>
+<body>
+  <h1>clu top — modular multi-pane TUI</h1>
+  <p class="sub">Proposed redesign mockup. Same fleet shown in three geometries the layout engine auto-selects from <code>getmaxyx()</code>. Health glyph fuses PID + heartbeat + activity + stuck-command into one signal: <span class="g">🟢 ok</span> · <span class="a">🟡 watch</span> · <span class="rd">🔴 dead</span>. Read-only — no destructive keys.</p>
+
+  <!-- ① WIDE-SHORT STRIP -->
+  <section>
+    <p class="label">① Wide &amp; short — strip docked under coolant (glance mode, ~6 rows)</p>
+    <div class="term">
+      <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="ttl">clu top · strip</span></div>
+      <div class="screen">
+<span class="bar">clu top · 4 running · <span class="b">1 blocked</span> · <span class="d">1 dead</span> <span class="dim">· oldest-ACT 41s</span></span>
+<span class="row"><span class="g">🟢</span> <span class="v">HealthData/workout-logging·impl</span>  <span class="dim">RAN</span> 25m <span class="dim">ACT</span>  <span class="g">7s</span>  <span class="blue">pytest -k logging</span>      logging.py  <span class="dim">tests pass, wir…</span></span>
+<span class="row"><span class="a">🟡</span> <span class="v">end-of-line/clu-top·two</span>          <span class="dim">RAN</span>  2m <span class="dim">ACT</span> <span class="a">41s</span>  <span class="blue">git log HEAD ^main</span>     —           <span class="dim">checking the di…</span></span>
+<span class="row"><span class="g">🟢</span> <span class="v">recipe-api/migrate·db</span>            <span class="dim">RAN</span>  8m <span class="dim">ACT</span>  <span class="g">2s</span>  <span class="blue">alembic upgrade head</span>   0007_up.py  <span class="dim">applying migrat…</span></span>
+<span class="row"><span class="a">🟡</span> <span class="v">notify/discord·fix</span>  <span class="badgeblk">❗BLOCKED</span>     <span class="dim">RAN</span> 14m <span class="dim">ACT</span>  3m  <span class="faint">(awaiting operator)</span>    —           <span class="dim">waiting on a re…</span></span>
+<span class="row"><span class="rd">🔴</span> <span class="v">foo/bar·three</span>  <span class="badge">DEAD</span>              <span class="dim">RAN</span>  6m <span class="faint">— pid gone —</span></span>
+<span class="foot"><b>q</b> quit · <b>↑↓</b> select · <b>w</b> layout · <b>?</b> help</span>
+      </div>
+    </div>
+    <p class="note">At only 3 rows it collapses further: drop the header + legend, keep the list and a single pinned SAYING ticker for the selected worker.</p>
+  </section>
+
+  <!-- ② NORMAL SPLIT -->
+  <section>
+    <p class="label">② Normal — master list + live detail pane (≥80 cols, tall)</p>
+    <div class="term">
+      <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="ttl">clu top</span></div>
+      <div class="screen split">
+        <div class="list">
+<span class="bar">4 running · <span class="b">1 blk</span> · <span class="d">1 dead</span> <span class="dim">· oldest 41s</span></span>
+<span class="row dim" style="color:var(--faint)">WORKER                        RAN   ACT   HB</span>
+<span class="row sel"><span class="g">🟢</span> <span class="v">HealthData/logging·impl</span>      25m   <span class="g">7s</span   >  51s</span>
+<span class="row"><span class="a">🟡</span> end-of-line/clu-top·two        2m  <span class="a">41s</span>    9s</span>
+<span class="row"><span class="g">🟢</span> recipe-api/migrate·db          8m   <span class="g">2s</span>   12s</span>
+<span class="row"><span class="a">🟡</span> notify/discord·fix <span class="badgeblk">❗BLK</span>     14m   3m    —</span>
+<span class="row"><span class="rd">🔴</span> foo/bar·three <span class="badge">DEAD</span>          6m    —    —</span>
+        </div>
+        <div class="detail">
+          <div class="pad">
+<span class="v" style="color:var(--accent);font-weight:600">HealthData / workout-logging · impl</span>   <span class="g">🟢 ok</span>
+
+<span class="k">RAN</span> <span class="v">25m12s</span>   <span class="k">ACT</span> <span class="g">7s</span>   <span class="k">HB</span> <span class="v">51s</span>   <span class="k">PID</span> <span class="v">34301</span>
+<span class="k">attempts</span> <span class="v">1/3</span>     <span class="k">lease</span> <span class="v">12m left</span>
+<span class="k">tokens</span> <span class="v">1.24M</span> · <span class="v">~$3.40</span>    <span class="k">wrote</span> <span class="v">logging.py</span> <span class="dim">(4s)</span>
+<span class="k">CMD</span>  <span class="g">*</span> <span class="blue">pytest -k logging</span>
+
+<span class="saylbl">SAY</span>  <span class="say">tests pass for the empty case — now wiring</span>
+     <span class="say">the multi-set case and asserting the cursor</span>
+     <span class="say">reset fires before the summary writes…</span>
+<span class="sechdr">─ recent ─────────────────────────────────</span>
+ <span class="dim">·</span> <span class="v">Edit</span> <span class="dim">logging.py</span>
+ <span class="dim">·</span> <span class="v">Bash</span> <span class="blue">pytest -k logging</span> <span class="g">(running 7s)</span>
+ <span class="dim">·</span> <span class="v">Read</span> <span class="dim">test_logging.py</span>
+          </div>
+        </div>
+      </div>
+      <div class="screen"><span class="foot"><b>q</b> quit · <b>↑↓</b> select · <b>Tab</b> focus detail · <b>w</b> layout · <b>?</b> help</span></div>
+    </div>
+    <p class="note">The detail pane is a live projection of the selected (▌) worker. <b>Tab</b> moves focus into it so <b>↑↓</b> scroll the SAYING / transcript tail without moving the selection.</p>
+  </section>
+
+  <!-- ③ PHONE -->
+  <section>
+    <p class="label">③ Tall &amp; narrow — phone over ssh (~45 cols): stacked list → Enter drills to fullscreen detail</p>
+    <div class="phones">
+      <div class="phone">
+        <p class="cap">list view</p>
+        <div class="term">
+          <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="ttl">ssh · clu top</span></div>
+          <div class="screen">
+<span class="bar">4 run · <span class="b">1 blk</span> · <span class="d">1 dead</span></span>
+<span class="row sel"><span class="g">🟢</span> <span class="v">HealthData/logging·impl</span>
+   <span class="dim">pytest -k logging · ACT</span> <span class="g">7s</span></span>
+<span class="row"><span class="a">🟡</span> end-of-line/clu-top·two
+   <span class="dim">git log HEAD ^main · 41s</span></span>
+<span class="row"><span class="g">🟢</span> recipe-api/migrate·db
+   <span class="dim">alembic upgrade · ACT</span> <span class="g">2s</span></span>
+<span class="row"><span class="a">🟡</span> notify/discord·fix <span class="badgeblk">❗BLK</span>
+   <span class="dim">awaiting operator · 3m</span></span>
+<span class="row"><span class="rd">🔴</span> foo/bar·three <span class="badge">DEAD</span></span>
+<span class="foot"><b>↑↓</b> sel · <b>↵</b> open · <b>q</b> quit</span>
+          </div>
+        </div>
+      </div>
+      <div class="arrow">↵→</div>
+      <div class="phone">
+        <p class="cap">fullscreen detail (after Enter)</p>
+        <div class="term">
+          <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="ttl">ssh · detail</span></div>
+          <div class="screen">
+<span class="bar" style="color:var(--accent)">HealthData/logging·impl <span class="g">🟢</span></span>
+<span class="pad"><span class="k">RAN</span> <span class="v">25m</span>  <span class="k">ACT</span> <span class="g">7s</span>  <span class="k">HB</span> <span class="v">51s</span>
+<span class="k">attempts</span> <span class="v">1/3</span> · <span class="k">lease</span> <span class="v">12m</span>
+<span class="k">tokens</span> <span class="v">1.24M · ~$3.40</span>
+<span class="k">CMD</span> <span class="blue">pytest -k logging</span>
+
+<span class="saylbl">SAY</span> <span class="say">tests pass for the empty</span>
+    <span class="say">case — now wiring the</span>
+    <span class="say">multi-set case and</span>
+    <span class="say">asserting the cursor</span>
+    <span class="say">reset fires before the</span>
+    <span class="say">summary writes…</span></span>
+<span class="foot"><b>↑↓</b> scroll · <b>Esc</b> back</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="note">Width &lt; 50 cols ⇒ no side-by-side split. The phone gets a dense stacked list; <b>Enter</b> opens one worker fullscreen with the untruncated SAYING (the #1 reason to open it from bed), <b>Esc</b> returns.</p>
+  </section>
+
+  <section>
+    <p class="label">Layout selection (width-driven, per prior art)</p>
+    <div class="screen" style="background:var(--panel);border:1px solid var(--border);border-radius:9px"><span class="pad"><span class="dim">cols ≥ 80          </span> → <span class="v">② master list + detail side-by-side</span>
+<span class="dim">cols 50–80         </span> → <span class="v">list above, detail stacked below</span>
+<span class="dim">cols &lt; 50          </span> → <span class="v">③ list only; Enter → fullscreen detail</span>
+<span class="dim">rows &lt; 12          </span> → <span class="v">① strip: list only / 1-line ticker</span>
+<span class="dim">&lt; 34×2             </span> → <span class="v">one-line fallback string</span></span></div>
+    <p class="note">No tool flips by aspect ratio — htop/k9s/lazygit/btop all threshold on width. This ladder models both your geometries while matching that prior art (open question #2).</p>
+  </section>
+</body>
+</html>
