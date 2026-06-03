@@ -118,6 +118,10 @@ class IndexResourceTest(CluTestCase):
         self.assertIn("/api/workers", html)
         self.assertIn("END OF LINE", html)
 
+    def test_load_apple_icon_returns_png_bytes(self):
+        data = webserver.load_apple_icon()
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+
     def test_frontend_escapes_worker_derived_strings(self):
         html = webserver.load_index_html()
         self.assertIn("function esc(", html)
@@ -180,6 +184,12 @@ class ServerIntegrationTest(_ServerCase):
         self.assertEqual(resp2.status, 200)
         self.assertIn(b"END OF LINE", body2)
 
+    def test_apple_touch_icon_served(self):
+        resp, body = self._get(self.port, "/apple-touch-icon.png")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "image/png")
+        self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
+
 
 # --------------------------------------------------------------------------- #
 # Phase 2 — Host-header allowlist (DNS-rebinding defense), lands FIRST
@@ -241,6 +251,14 @@ class AuthTest(_ServerCase):
     def test_unauthenticated_request_401(self):
         resp, _ = self._get(self.port, "/")
         self.assertEqual(resp.status, 401)
+
+    def test_apple_touch_icon_served_before_auth_gate(self):
+        # The icon is a static, non-sensitive asset served before the auth gate,
+        # so a browser favicon / iOS home-screen fetch carrying no token still
+        # gets it (200) — unlike the 401 protecting "/" and "/api/workers".
+        resp, body = self._get(self.port, "/apple-touch-icon.png")
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(body.startswith(b"\x89PNG"))
 
     def test_login_valid_token_sets_cookie_and_redirects(self):
         resp, _ = self._get(self.port, f"/login?token={self.TOKEN}")

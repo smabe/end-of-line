@@ -340,6 +340,16 @@ def load_index_html() -> str:
     )
 
 
+def load_apple_icon() -> bytes:
+    """Read the bundled apple-touch-icon PNG (the phone home-screen icon),
+    served at `/apple-touch-icon.png`. Package-data via the `web/*.png` glob."""
+    return (
+        importlib.resources.files("end_of_line")
+        .joinpath("web", "apple-touch-icon.png")
+        .read_bytes()
+    )
+
+
 def workers_json(*, project_filter: Path | None = None, include_transcript: bool = True) -> bytes:
     """`gather_rows()` shaped for the wire. With `include_transcript=False`,
     drop the transcript-content fields so the feed carries metrics only."""
@@ -357,6 +367,7 @@ def workers_json(*, project_filter: Path | None = None, include_transcript: bool
 def make_handler(*, index_html: str, cfg: ServeConfig):
     """Build a `BaseHTTPRequestHandler` closed over the page + config."""
     page = index_html.encode("utf-8")
+    apple_icon = load_apple_icon()
 
     class _Handler(BaseHTTPRequestHandler):
         # Silence default access logging: request lines could carry paths or a
@@ -417,17 +428,27 @@ def make_handler(*, index_html: str, cfg: ServeConfig):
 
                 path = urlsplit(self.path).path
 
-                # 2. /login mints the session cookie (only when auth is on).
+                # 2. Static, non-sensitive icon — served before the auth gate so
+                #    a browser favicon / iOS home-screen fetch (which need not
+                #    carry the token) resolves. Discloses no worker data.
+                if path == "/apple-touch-icon.png":
+                    self._respond(
+                        200, apple_icon, "image/png",
+                        head=head, extra={"Cache-Control": "max-age=86400"},
+                    )
+                    return
+
+                # 3. /login mints the session cookie (only when auth is on).
                 if path == "/login" and cfg.token is not None:
                     self._handle_login(head=head)
                     return
 
-                # 3. Auth gate.
+                # 4. Auth gate.
                 if cfg.token is not None and not self._authed():
                     self._respond(401, b"unauthorized\n", "text/plain; charset=utf-8", head=head)
                     return
 
-                # 4. Routes (exact match only).
+                # 5. Routes (exact match only).
                 if path == "/":
                     self._respond(200, page, "text/html; charset=utf-8", head=head)
                 elif path == "/api/workers":
