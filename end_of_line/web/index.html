@@ -21,6 +21,10 @@
   --amber:#ffb22e; --red:#ff4d52; --teal:#27d39a; --ink:#aeccd6;
   --dim:#4d6b78; --faint:#2c4853;
   --glow:0 0 6px var(--cy), 0 0 14px #36e6ff55;
+  /* Default UI scale — the page is sized in fixed px, so this `zoom` reflows
+     the whole thing larger by default (≈ browser 125%) for readability. Bump
+     to taste (1.5 = browser 150%). Browsers without `zoom` ignore it → 100%. */
+  --ui-scale:1.25;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -28,6 +32,7 @@ body{
   background:var(--void); color:var(--ink);
   font-family:"JetBrains Mono",ui-monospace,Menlo,monospace; font-size:13px; line-height:1.5;
   overflow-x:hidden; -webkit-font-smoothing:antialiased;
+  zoom:var(--ui-scale);
 }
 /* tron grid floor + vignette + scanlines */
 body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;

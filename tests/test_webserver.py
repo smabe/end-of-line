@@ -122,6 +122,13 @@ class IndexResourceTest(CluTestCase):
         data = webserver.load_apple_icon()
         self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_frontend_scales_ui_above_browser_default(self):
+        # The dashboard renders larger than browser 100% by default (readability)
+        # via a tweakable --ui-scale zoom, not per-element font bumps.
+        html = webserver.load_index_html()
+        self.assertIn("--ui-scale:1.25", html)
+        self.assertIn("zoom:var(--ui-scale)", html)
+
     def test_frontend_escapes_worker_derived_strings(self):
         html = webserver.load_index_html()
         self.assertIn("function esc(", html)
