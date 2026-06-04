@@ -175,13 +175,26 @@ class ScenarioActionTest(unittest.TestCase):
         self.assertEqual(acts[4], demo_worker.ACT_QUIET)
 
     def test_block_works_then_blocks(self) -> None:
-        self.assertEqual(demo_worker.scenario_action("block", 0), demo_worker.ACT_WRITE)
-        self.assertEqual(demo_worker.scenario_action("block", 1), demo_worker.ACT_WRITE)
-        self.assertEqual(demo_worker.scenario_action("block", 2), demo_worker.ACT_BLOCK)
+        # Works for the whole pre-lifecycle window, then blocks at its end.
+        pre = demo_worker._PRE_LIFECYCLE_STEPS
+        for step in range(pre):
+            self.assertEqual(demo_worker.scenario_action("block", step), demo_worker.ACT_WRITE)
+        self.assertEqual(demo_worker.scenario_action("block", pre), demo_worker.ACT_BLOCK)
 
     def test_dead_works_then_dies(self) -> None:
-        self.assertEqual(demo_worker.scenario_action("dead", 0), demo_worker.ACT_WRITE)
-        self.assertEqual(demo_worker.scenario_action("dead", 2), demo_worker.ACT_DEAD)
+        pre = demo_worker._PRE_LIFECYCLE_STEPS
+        for step in range(pre):
+            self.assertEqual(demo_worker.scenario_action("dead", step), demo_worker.ACT_WRITE)
+        self.assertEqual(demo_worker.scenario_action("dead", pre), demo_worker.ACT_DEAD)
+
+    def test_pre_lifecycle_window_is_a_watchable_thirty_seconds(self) -> None:
+        # The "longer" phase guarantee: block/dead show a real ~30s window of
+        # activity before their lifecycle event, not the ~10s that made the
+        # original demo flash by. Measured by step COUNT × the (unchanged) 5s
+        # cadence — never by lengthening the per-step sleep (that defers Ctrl-C).
+        window = demo_worker._PRE_LIFECYCLE_STEPS * demo_worker.DEFAULT_STEP_SECONDS
+        self.assertGreaterEqual(window, 30.0)
+        self.assertLessEqual(demo_worker.DEFAULT_STEP_SECONDS, 5.0)
 
     def test_unknown_scenario_defaults_to_write(self) -> None:
         self.assertEqual(demo_worker.scenario_action("???", 0), demo_worker.ACT_WRITE)
@@ -247,20 +260,25 @@ class RunWorkerTest(unittest.TestCase):
         self.assertEqual([c[0] for c in self.calls], ["heartbeat"] * 4)
 
     def test_block_calls_block_then_returns_before_max_steps(self) -> None:
-        self._run("block", max_steps=9)
-        self.assertEqual(self._assistant_count(), 2)
-        self.assertEqual([c[0] for c in self.calls], ["heartbeat", "heartbeat", "block"])
+        # Works the full pre-lifecycle window (a heartbeat + write per step),
+        # then calls `clu block` and returns — driven by the constant so the
+        # "longer" raise can't silently desync this assertion.
+        pre = demo_worker._PRE_LIFECYCLE_STEPS
+        self._run("block", max_steps=pre + 3)
+        self.assertEqual(self._assistant_count(), pre)
+        self.assertEqual([c[0] for c in self.calls], ["heartbeat"] * pre + ["block"])
         block = self.calls[-1]
         for token in ("--project", "--plan", "demo-busy", "--phase", "a", "--token", "tok", "--question"):
             self.assertIn(token, block)
-        # Returned at the block step -> never slept a 3rd time.
-        self.assertEqual(len(self.sleeps), 2)
+        # Returned at the block step -> slept once per pre-lifecycle step, no more.
+        self.assertEqual(len(self.sleeps), pre)
 
     def test_dead_exits_without_callback_orphaning_the_claim(self) -> None:
-        self._run("dead", max_steps=9)
-        self.assertEqual(self._assistant_count(), 2)
+        pre = demo_worker._PRE_LIFECYCLE_STEPS
+        self._run("dead", max_steps=pre + 3)
+        self.assertEqual(self._assistant_count(), pre)
         # Only the pre-death heartbeats; no block, no final callback.
-        self.assertEqual([c[0] for c in self.calls], ["heartbeat", "heartbeat"])
+        self.assertEqual([c[0] for c in self.calls], ["heartbeat"] * pre)
 
 
 class CommandTemplateTest(unittest.TestCase):

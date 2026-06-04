@@ -36,10 +36,13 @@ ACT_BLOCK = "block"  # call `clu block` (opens a blocker, releases claim), then 
 ACT_DEAD = "dead"  # exit with no callback — orphan the claim for dead-PID detection
 
 # How many steps idle works before going quiet, and how many block/dead work
-# before their lifecycle event — small so the dashboard shows real activity
-# first, then the scenario's defining behavior.
+# before their lifecycle event. block/dead work a watchable ~30s window
+# (6 × DEFAULT_STEP_SECONDS) so the operator sees real activity before the
+# scenario's defining behavior — the original 2 steps (~10s) flashed by. Raise
+# the step COUNT, never DEFAULT_STEP_SECONDS: a longer per-step sleep would
+# defer Ctrl-C / teardown past each 5s re-check point.
 _IDLE_WRITE_STEPS = 2
-_PRE_LIFECYCLE_STEPS = 2
+_PRE_LIFECYCLE_STEPS = 6
 
 # Live-demo pacing. Heartbeat + write every 5s keeps `busy` looking active
 # (fresh ACT) and stays well under the ~25-min stalled threshold. The step
