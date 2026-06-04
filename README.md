@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/tron-tron-legacy.gif" alt="CLU: 'I created the perfect system.'" width="448">
+  <img src="docs/images/tron-clu.gif" alt="CLU: 'I created the perfect system.'" width="448">
 </p>
 
 # End of Line
