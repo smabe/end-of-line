@@ -117,6 +117,16 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 16px;font-size:12px;margin-bottom:14px}
 .kv .k{color:var(--dim);letter-spacing:.04em}
 .kv .v{color:var(--ink);min-width:0;overflow-wrap:anywhere} .kv .v.cy{color:var(--cy)} .kv .v.warn{color:var(--amber)}
+/* phase-progress segment strips (#86): done=filled · active=glow · pending=hollow.
+   Shape carries state (filled vs hollow), not color alone. */
+.steps,.mini{display:inline-flex;vertical-align:middle}
+.steps{gap:3px;margin-right:8px}
+.steps i{width:15px;height:6px;border-radius:1px;border:1px solid var(--cy-dim);background:transparent}
+.mini{gap:2px;margin:0 5px 0 7px}
+.mini i{width:9px;height:4px;border-radius:1px;border:1px solid var(--cy-dim);background:transparent}
+.steps i.done,.mini i.done{background:var(--cy);border-color:var(--cy)}
+.steps i.act,.mini i.act{background:var(--cy);border-color:var(--cy);box-shadow:0 0 6px var(--cy)}
+.ppnum{color:var(--dim);font-size:10.5px}
 .saybox{border:1px solid var(--edge);border-radius:7px;padding:10px 12px;background:#04141c66;margin-bottom:12px}
 .saybox .lbl{font-size:10px;letter-spacing:.22em;color:var(--cy-dim);text-transform:uppercase;margin-bottom:6px}
 .saybox .txt{color:#cfeef6;font-size:12.5px;white-space:pre-wrap;word-break:break-word}
@@ -313,6 +323,25 @@ function statusInner(){
 // The running-* only makes sense beside a visible command; under
 // --no-transcript the command is hidden, so suppress the star too.
 function runStar(w){ return w.running && w.cmd !== "—" ? `<span class="star">*</span> ` : ""; }
+// Phase-progress (#86) — a done/active/pending segment strip. Empty when the
+// worker has no sessions index (phaseIndex null — non-clu/demo) or past 8 phases
+// (a 12-segment strip is unreadable; the `x/N` count carries it then).
+function phaseSteps(idx, total, cls){
+  if (idx == null || total == null || total > 8) return "";
+  let s = "";
+  for (let i = 0; i < total; i++){
+    s += `<i class="${i < idx - 1 ? "done" : i === idx - 1 ? "act" : ""}"></i>`;
+  }
+  return `<span class="${cls}">${s}</span>`;
+}
+// Lease countdown — mirrors top.human_remaining (`exp` past, `—` unknown).
+function leaseFmt(s){ return s == null ? "—" : s < 0 ? "exp" : age(s); }
+// Compact per-row phase indicator: mini strip + `x/N`, or "" when no phase data.
+function rowPhase(w){
+  if (w.phaseIndex == null || w.phaseTotal == null) return "";
+  return ` ${phaseSteps(w.phaseIndex, w.phaseTotal, "mini")}` +
+    `<span class="ppnum">${w.phaseIndex}/${w.phaseTotal}</span>`;
+}
 // A row's identity-stable parts (project/plan·phase) are built once; the dot,
 // DEAD badge, sub-line, and metrics are slots patched on every poll.
 function buildRow(w){
@@ -322,7 +351,7 @@ function buildRow(w){
   el.innerHTML =
     `<span class="dot"></span>` +
     `<div class="who"><div class="id">${esc(w.proj)}/${esc(w.plan)}` +
-      `<span class="ph">·${esc(w.phase)}</span> <span class="bdg"></span></div>` +
+      `<span class="ph">·${esc(w.phase)}</span> <span class="bdg"></span>${rowPhase(w)}</div>` +
       `<div class="sub"></div></div>` +
     `<div class="metrics"></div>`;
   const refs = {
@@ -360,12 +389,23 @@ function detailHTML(w){
   const star = runStar(w);
   const ac = actCls(w);
   const sayTxt = w.say ? esc(w.say) : `<span style="color:var(--faint)">—</span>`;
+  // Phase position / attempts / lease (#86) — each row only when its datum is
+  // present; a non-clu / demo worker (no sessions index, no claim lease) shows
+  // none of them rather than `null`.
+  const pp =
+    (w.phaseIndex != null && w.phaseTotal != null
+      ? `<span class="k">PHASE</span><span class="v">${phaseSteps(w.phaseIndex, w.phaseTotal, "steps")}${w.phaseIndex}/${w.phaseTotal} · ${esc(w.phase)}</span>` : "") +
+    (w.attempts != null && w.maxAttempts != null
+      ? `<span class="k">attempts</span><span class="v">${w.attempts}/${w.maxAttempts}</span>` : "") +
+    (w.leaseRemaining != null
+      ? `<span class="k">lease</span><span class="v">${leaseFmt(w.leaseRemaining)}</span>` : "");
   return `<div class="dh">${esc(w.proj)} / ${esc(w.plan)} <span class="ph">· ${esc(w.phase)}</span></div>
     <div class="health-chip">${hc}</div>
     <div class="kv">
       <span class="k">RAN</span><span class="v">${age(w.ran)}</span>
       <span class="k">ACT</span><span class="v ${ac === 'a-ok' ? 'cy' : ac === 'a-warn' ? 'warn' : ''}">${age(w.act)}</span>
       <span class="k">HB</span><span class="v">${age(w.hb)}</span>
+      ${pp}
       <span class="k">tokens</span><span class="v">${tnum(w.tokens)}</span>
       <span class="k">wrote</span><span class="v">${esc(w.wrote)}${w.wroteAge != null && w.wrote !== "—" ? ` <span style="color:var(--dim)">(${age(w.wroteAge)})</span>` : ""}</span>
       <span class="k">CMD</span><span class="v cy">${star}${esc(w.cmd)}</span>

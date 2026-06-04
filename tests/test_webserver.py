@@ -122,6 +122,16 @@ class IndexResourceTest(CluTestCase):
         data = webserver.load_apple_icon()
         self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_frontend_renders_phase_progress(self):
+        # #86 — the detail pane + list rows display phase position / attempts /
+        # lease from the toView keys, via a segment-strip helper.
+        html = webserver.load_index_html()
+        self.assertIn("function phaseSteps(", html)
+        self.assertIn("function rowPhase(", html)
+        self.assertIn("w.phaseIndex", html)
+        self.assertIn("w.leaseRemaining", html)
+        self.assertIn(".steps", html)  # the segment-strip CSS
+
     def test_frontend_scales_ui_above_browser_default(self):
         # The dashboard renders larger than browser 100% by default (readability)
         # via a tweakable --ui-scale zoom, not per-element font bumps.
