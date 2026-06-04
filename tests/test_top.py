@@ -405,6 +405,67 @@ class FormatDetailTest(unittest.TestCase):
         self.assertTrue(lines and "PLAN" in lines[0])
 
 
+class PhaseProgressTest(unittest.TestCase):
+    """#86 display layer — phase position / attempts / lease in the curses table
+    and detail pane. The data ships in the row dict (gather_rows); this tests the
+    render only."""
+
+    def _row(self, **over) -> dict:
+        base = {
+            "project": "myrepo", "plan": "clu-top-tui", "phase_id": "layout-engine",
+            "ran_seconds": 600, "heartbeat_age_seconds": 18, "alive": True,
+            "last_command": "pytest", "command_running": False,
+            "last_write": None, "last_write_seconds": None,
+            "last_text": "wiring", "last_activity_seconds": 2, "tokens": None,
+        }
+        base.update(over)
+        return base
+
+    def test_table_phase_column(self) -> None:
+        lines = top.format_rows([self._row(phase_index=3, phase_total=5)], width=160)
+        self.assertIn("PHASE", lines[0])
+        self.assertIn("3/5", lines[1])
+
+    def test_table_phase_dash_when_unknown(self) -> None:
+        # Non-clu / demo workers carry no phase index → "—", never "None".
+        body = "\n".join(top.format_rows([self._row()], width=160)[1:])
+        self.assertNotIn("None", body)
+
+    def test_detail_phase_attempts_lease(self) -> None:
+        text = "\n".join(top.format_detail([self._row(
+            phase_index=3, phase_total=5, attempts=1, max_attempts=3,
+            lease_remaining_seconds=720)], width=120))
+        self.assertIn("PHASE", text)
+        self.assertIn("●●◉○○", text)            # 2 done · active · 2 pending
+        self.assertIn("3/5", text)
+        self.assertIn("layout-engine", text)     # active stage name
+        self.assertIn("ATT", text)
+        self.assertIn("1/3", text)
+        self.assertIn("LEASE", text)
+        self.assertIn("12m", text)
+
+    def test_detail_omits_block_when_absent(self) -> None:
+        text = "\n".join(top.format_detail([self._row()], width=120))
+        self.assertNotIn("PHASE", text)
+        self.assertNotIn("ATT", text)
+        self.assertNotIn("None", text)
+
+    def test_detail_strip_dropped_past_threshold(self) -> None:
+        text = "\n".join(top.format_detail([self._row(phase_index=3, phase_total=12)], width=120))
+        self.assertIn("3/12", text)
+        self.assertNotIn("●", text)
+
+    def test_phase_strip(self) -> None:
+        self.assertEqual(top._phase_strip(3, 5), "●●◉○○")
+        self.assertEqual(top._phase_strip(1, 3), "◉○○")
+        self.assertEqual(top._phase_strip(3, 12), "")   # past threshold
+
+    def test_human_remaining(self) -> None:
+        self.assertEqual(top.human_remaining(None), "—")
+        self.assertEqual(top.human_remaining(-5), "exp")
+        self.assertEqual(top.human_remaining(90), "1m30s")
+
+
 class RenderOnceTest(GitProjectTestCase):
     def test_writes_snapshot_to_stream(self) -> None:
         self._claim("a")
@@ -585,10 +646,11 @@ class MetricRegistryTest(unittest.TestCase):
         self.reg = top_registry
         self.snap = top_registry.Snapshot([_draw_row()])
 
-    def test_eight_columns_registered(self) -> None:
+    def test_default_columns_registered(self) -> None:
+        # `progress` (PHASE) joins the default table for #86 — between pid and cmd.
         self.assertEqual(
             tuple(self.reg.DEFAULT_COLS),
-            ("name", "ran", "act", "hb", "pid", "cmd", "wrote", "saying"),
+            ("name", "ran", "act", "hb", "pid", "progress", "cmd", "wrote", "saying"),
         )
         for key in self.reg.DEFAULT_COLS:
             self.assertIn(key, self.reg.METRICS)

@@ -268,6 +268,17 @@ def human_age(seconds: float | None) -> str:
     return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
 
 
+def human_remaining(seconds: float | None) -> str:
+    """Lease countdown: `12m00s` left, `exp` once past, `—` when unknown. Shared
+    by `format_detail` (detail pane) and `top_registry`'s `lease` metric so the
+    two render the countdown identically."""
+    if seconds is None:
+        return "—"
+    if seconds < 0:
+        return "exp"
+    return human_age(seconds)
+
+
 def assemble_row(claim: dict, activity: dict, now: _dt.datetime | None = None) -> dict:
     """Join one claim's state with its transcript activity into a render row.
 
@@ -356,11 +367,35 @@ def _fit(text: str, width: int) -> str:
 
 # Header labels for the flexible (width-driven) columns.
 _NAME_HDR, _CMD_HDR, _WROTE_HDR, _SAY_HDR = "PROJECT/PLAN·PHASE", "COMMAND", "WROTE", "SAYING"
-# The fixed numeric columns (RAN/ACT/HB/PID) sum to 23; with 7 single-space
-# gaps between the 8 columns, non-flex overhead is 30.
-_FIXED_OVERHEAD = 30
+# Fixed numeric columns RAN/ACT/HB/PID/PHASE sum to 28 (7+6+6+4+5); with 8
+# single-space gaps between the 9 columns, non-flex overhead is 36.
+_FIXED_OVERHEAD = 36
 _FLEX_MIN = {"name": 12, "cmd": 10, "wrote": 6, "saying": 12}
 _FLEX_MAX = {"name": 60, "cmd": 160, "wrote": 32, "saying": 600}
+
+# Phase-progress glyph strip (#86): done / active / pending. Unicode-only, like
+# the health glyphs and the `·` in names — there is no ASCII-fallback switch;
+# they degrade the way the cursor already does on a no-unicode terminal.
+_PHASE_DONE, _PHASE_ACTIVE, _PHASE_PENDING = "●", "◉", "○"
+_PHASE_STRIP_MAX = 8
+
+
+def _phase_strip(idx: int, total: int) -> str:
+    """A done/active/pending glyph strip for phase `idx` of `total`. Empty past
+    `_PHASE_STRIP_MAX` (too wide to read; the numeric `x/N` stands in)."""
+    if total > _PHASE_STRIP_MAX:
+        return ""
+    return "".join(
+        _PHASE_DONE if i < idx - 1 else _PHASE_ACTIVE if i == idx - 1 else _PHASE_PENDING
+        for i in range(total)
+    )
+
+
+def _phase_cell(r: dict) -> str:
+    """The fixed-width PHASE table cell: `x/N`, or `—` when the worker has no
+    sessions index (non-clu / demo). Mirrors `top_registry._render_pair`."""
+    idx, total = r.get("phase_index"), r.get("phase_total")
+    return f"{idx}/{total}" if idx is not None and total is not None else "—"
 
 
 def _row_cells(r: dict) -> tuple[str, str, str, str]:
@@ -405,9 +440,9 @@ def _flex_widths(cells: list[tuple[str, str, str, str]], width: int) -> dict[str
     }
 
 
-def _row_line(name, ran, act, hb, pid, cmd, wrote, saying, cw: dict[str, int]) -> str:
+def _row_line(name, ran, act, hb, pid, phase, cmd, wrote, saying, cw: dict[str, int]) -> str:
     return (
-        f"{name:<{cw['name']}} {ran:>7} {act:>6} {hb:>6} {pid:>4} "
+        f"{name:<{cw['name']}} {ran:>7} {act:>6} {hb:>6} {pid:>4} {phase:>5} "
         f"{cmd:<{cw['cmd']}} {wrote:<{cw['wrote']}} {saying}"
     )
 
@@ -419,7 +454,7 @@ def format_rows(rows: list[dict], *, width: int = 120) -> list[str]:
     cells = [_row_cells(r) for r in rows]
     cw = _flex_widths(cells, width)
     header = _row_line(
-        _fit(_NAME_HDR, cw["name"]), "RAN", "ACT", "HB", "PID",
+        _fit(_NAME_HDR, cw["name"]), "RAN", "ACT", "HB", "PID", "PHASE",
         _fit(_CMD_HDR, cw["cmd"]), _fit(_WROTE_HDR, cw["wrote"]), _SAY_HDR, cw,
     )
     out = [header[:width]]
@@ -428,6 +463,7 @@ def format_rows(rows: list[dict], *, width: int = 120) -> list[str]:
             _fit(name, cw["name"]),
             human_age(r.get("ran_seconds")), human_age(r.get("last_activity_seconds")),
             human_age(r.get("heartbeat_age_seconds")), "ok" if r.get("alive") else "dead",
+            _phase_cell(r),
             _fit(cmd, cw["cmd"]), _fit(wrote, cw["wrote"]), _fit(saying, cw["saying"]), cw,
         )
         out.append(line[:width])
@@ -455,6 +491,26 @@ def format_detail(rows: list[dict], *, width: int = 120) -> list[str]:
             f"HB {human_age(r.get('heartbeat_age_seconds'))} · {'ok' if r.get('alive') else 'dead'}"
         )
         out.append(f"{name}   {meta}"[:width])
+        # Phase position / attempts / lease (#86) — each rendered only when its
+        # datum is present; a non-clu / demo worker (no sessions index, no claim
+        # lease) omits the lines entirely rather than showing `None`.
+        idx, total = r.get("phase_index"), r.get("phase_total")
+        if idx is not None and total is not None:
+            strip = _phase_strip(idx, total)
+            line = f"  PHASE  {strip + ' ' if strip else ''}{idx}/{total}"
+            active = _clean(r.get("phase_id") or "")
+            if active:
+                line += f" · {active}"
+            out.append(line[:width])
+        extras = []
+        att, mx = r.get("attempts"), r.get("max_attempts")
+        if att is not None and mx is not None:
+            extras.append(f"ATT {att}/{mx}")
+        lease = r.get("lease_remaining_seconds")
+        if lease is not None:
+            extras.append(f"LEASE {human_remaining(lease)}")
+        if extras:
+            out.append(("  " + "    ".join(extras))[:width])
         run = "* " if r.get("command_running") else ""
         out.extend(_wrap_field("CMD", run + (r.get("last_command") or "—"), width))
         w = r.get("last_write")

@@ -40,6 +40,7 @@ from end_of_line.top import (
     _clean,
     _fit,
     human_age,
+    human_remaining,
 )
 
 
@@ -133,10 +134,13 @@ def _age_right(value: object, width: int) -> str:
     return f"{human_age(value):>{width}}"  # type: ignore[arg-type]
 
 
-# The 8 columns of today's flat table, in order. Each mirrors a slice of
+# The default flat-table columns, in order. Each mirrors a slice of
 # top._row_cells / top._row_line so the table pane's default render stays
 # byte-identical (the pane delegates to format_rows; these power --cols subsets).
-DEFAULT_COLS: tuple[str, ...] = ("name", "ran", "act", "hb", "pid", "cmd", "wrote", "saying")
+# `progress` (PHASE) sits between pid and cmd, matching format_rows' fixed block.
+DEFAULT_COLS: tuple[str, ...] = (
+    "name", "ran", "act", "hb", "pid", "progress", "cmd", "wrote", "saying",
+)
 
 
 @register_metric(
@@ -320,14 +324,9 @@ def _m_attempts(snapshot: Snapshot, row: dict) -> tuple:
 
 
 def _render_lease(value: object, width: int) -> str:
-    """Lease countdown: `12m00s` left, `exp` once past, `—` when unknown."""
-    if value is None:
-        cell = "—"
-    elif value < 0:
-        cell = "exp"
-    else:
-        cell = human_age(value)
-    return f"{cell:>{width}}"
+    """Lease countdown — delegates to `top.human_remaining` so the metric and
+    `format_detail`'s detail-pane LEASE line render the countdown identically."""
+    return f"{human_remaining(value):>{width}}"  # type: ignore[arg-type]
 
 
 @register_metric(
