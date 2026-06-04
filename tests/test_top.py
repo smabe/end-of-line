@@ -550,6 +550,10 @@ _WIRE_CONTRACT_KEYS = frozenset({
     "project", "plan", "phase_id", "alive", "ran_seconds",
     "last_activity_seconds", "heartbeat_age_seconds", "last_command",
     "command_running", "last_write", "last_write_seconds", "last_text", "tokens",
+    # Phase 4 (new-metrics) — append-only additions (D10). Each is mirrored into
+    # web/index.html's toView so `clu serve` reads the same keys the TUI does.
+    "stuck", "attempts", "max_attempts", "lease_remaining_seconds",
+    "phase_index", "phase_total",
 })
 
 
@@ -1182,6 +1186,211 @@ class HandleKeyTest(unittest.TestCase):
         # so a stray keystroke must never mutate worker state or quit.
         for ch in (ord("d"), ord("x"), ord("r"), ord("!"), ord(" ")):
             self.assertFalse(self._key(ch))
+
+
+# --- Phase 4: new metrics (fused health glyph, tokens, attempts, lease, ------
+#     phase progress) — each registered in top_registry.py alone, with the
+#     health + token math pinned to web/index.html so the two dashboards agree.
+
+
+class AssembleRowNewKeysTest(unittest.TestCase):
+    """assemble_row exposes the claim-derived keys the new metrics read."""
+
+    def _now(self) -> _dt.datetime:
+        return _dt.datetime(2026, 6, 3, 0, 10, 0, tzinfo=_dt.UTC)
+
+    def _activity(self) -> dict:
+        return {"last_command": None, "last_write": None, "last_text": None,
+                "last_activity_ts": None, "command_running": False, "tokens": None}
+
+    def test_attempts_and_lease_remaining_and_stuck(self) -> None:
+        claim = {
+            "phase_id": "p", "started_at": "2026-06-03T00:00:00Z", "pid": os.getpid(),
+            "attempts": 2, "lease_expires": "2026-06-03T00:25:00Z",
+            "stuck_tool_emitted_at": "2026-06-03T00:08:00Z",
+        }
+        row = top.assemble_row(claim, self._activity(), now=self._now())
+        self.assertEqual(row["attempts"], 2)
+        self.assertAlmostEqual(row["lease_remaining_seconds"], 15 * 60, delta=1)
+        self.assertTrue(row["stuck"])
+
+    def test_no_stuck_marker_is_false(self) -> None:
+        claim = {"phase_id": "p", "started_at": "2026-06-03T00:00:00Z", "pid": os.getpid()}
+        row = top.assemble_row(claim, self._activity(), now=self._now())
+        self.assertFalse(row["stuck"])
+        self.assertIsNone(row["attempts"])
+        self.assertIsNone(row["lease_remaining_seconds"])
+
+    def test_expired_lease_is_negative(self) -> None:
+        claim = {"phase_id": "p", "started_at": "2026-06-03T00:00:00Z", "pid": os.getpid(),
+                 "lease_expires": "2026-06-03T00:05:00Z"}  # 5 min before `now`
+        row = top.assemble_row(claim, self._activity(), now=self._now())
+        self.assertLess(row["lease_remaining_seconds"], 0)
+
+
+class GatherRowsNewKeysTest(GitProjectTestCase):
+    """gather_rows enriches the row with the plan-config-derived keys."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._pr = TemporaryDirectory()
+        self.addCleanup(self._pr.cleanup)
+        self.projects_root = Path(self._pr.name)
+
+    def test_max_attempts_and_phase_progress(self) -> None:
+        self._claim("a")
+        rows = top.gather_rows(projects_root=self.projects_root)
+        self.assertEqual(len(rows), 1)
+        # Default config max attempts surfaces for the attempts X/max metric.
+        self.assertEqual(rows[0]["max_attempts"], st.DEFAULT_MAX_ATTEMPTS)
+        # A single-phase test plan has no sessions index → progress unknown.
+        self.assertIn("phase_index", rows[0])
+        self.assertIn("phase_total", rows[0])
+
+
+class WorkerHealthTest(unittest.TestCase):
+    """The fused glyph's classifier (D8) — one signal from PID + ACT + HB +
+    stuck. The act>60 threshold is pinned to web/index.html:238."""
+
+    def setUp(self) -> None:
+        from end_of_line import top_registry
+
+        self.health = top_registry.worker_health
+
+    def test_dead_pid_is_red(self) -> None:
+        self.assertEqual(self.health(alive=False, act=2, hb=2, stuck=False), "dead")
+
+    def test_fresh_worker_is_green(self) -> None:
+        self.assertEqual(self.health(alive=True, act=10, hb=20, stuck=False), "ok")
+
+    def test_act_threshold_parity_with_web(self) -> None:
+        # index.html:238 → `act > 60` is warn; 60 is still ok, 61 tips to warn.
+        self.assertEqual(self.health(alive=True, act=60, hb=2, stuck=False), "ok")
+        self.assertEqual(self.health(alive=True, act=61, hb=2, stuck=False), "warn")
+
+    def test_act_none_is_warn(self) -> None:
+        # Matches the web's `act == null || act > 60` → warn.
+        self.assertEqual(self.health(alive=True, act=None, hb=2, stuck=False), "warn")
+
+    def test_pid_alive_but_act_stale_is_not_green(self) -> None:
+        # The silent-wedge D8 exists to catch: PID ok, transcript gone quiet.
+        self.assertEqual(self.health(alive=True, act=300, hb=5, stuck=False), "warn")
+
+    def test_stuck_command_escalates_even_when_act_fresh(self) -> None:
+        self.assertEqual(self.health(alive=True, act=3, hb=3, stuck=True), "warn")
+
+    def test_dead_heartbeat_loop_is_warn(self) -> None:
+        # hb well past the 25-min ceiling = the heartbeat loop itself died.
+        self.assertEqual(self.health(alive=True, act=3, hb=2000, stuck=False), "warn")
+        # A normal 2-min heartbeat age never false-positives.
+        self.assertEqual(self.health(alive=True, act=3, hb=120, stuck=False), "ok")
+
+
+class TokenTotalParityTest(unittest.TestCase):
+    """The token sum must match web/index.html:218 tokenTotal exactly."""
+
+    def setUp(self) -> None:
+        from end_of_line import top_registry
+
+        self.total = top_registry.token_total
+        self.human = top_registry.token_human
+
+    def test_sums_flat_numeric_values_like_js(self) -> None:
+        usage = {
+            "input_tokens": 1200, "output_tokens": 300,
+            "cache_read_input_tokens": 40000, "cache_creation_input_tokens": 500,
+        }
+        self.assertEqual(self.total(usage), 1200 + 300 + 40000 + 500)
+
+    def test_nested_dicts_are_skipped_like_js(self) -> None:
+        # JS sums only `typeof v === "number"`; a nested cache_creation object
+        # is skipped. Python must skip dict values the same way or the two
+        # dashboards report different token totals.
+        usage = {"input_tokens": 100, "cache_creation": {"ephemeral_5m": 9999}}
+        self.assertEqual(self.total(usage), 100)
+
+    def test_none_and_empty_become_none(self) -> None:
+        self.assertIsNone(self.total(None))
+        self.assertIsNone(self.total({}))
+        self.assertIsNone(self.total("nonsense"))
+
+    def test_scalar_passthrough(self) -> None:
+        self.assertEqual(self.total(42), 42)
+
+    def test_human_compact_format(self) -> None:
+        self.assertEqual(self.human(None), "—")
+        self.assertEqual(self.human(950), "950")
+        self.assertEqual(self.human(45000), "45K")
+        self.assertEqual(self.human(1_250_000), "1.25M")
+
+
+class NewMetricsTest(unittest.TestCase):
+    """Each new metric is a pure (compute, render) pair, registered alone in
+    top_registry.py and reachable through --cols."""
+
+    def setUp(self) -> None:
+        from end_of_line import top_registry
+
+        self.reg = top_registry
+        self.snap = top_registry.Snapshot([_draw_row()])
+
+    def _row(self, **over) -> dict:
+        base = _draw_row(
+            tokens={"input_tokens": 1000, "output_tokens": 250000},
+            attempts=1, max_attempts=3, lease_remaining_seconds=720,
+            phase_index=2, phase_total=5, stuck=False,
+        )
+        base.update(over)
+        return base
+
+    def test_new_metrics_registered_and_cols_selectable(self) -> None:
+        for key in ("health", "tokens", "attempts", "lease", "progress"):
+            self.assertIn(key, self.reg.METRICS)
+            self.assertIn(key, self.reg.metric_keys())
+        # --cols accepts them without an "unknown column" error.
+        self.assertEqual(
+            self.reg.parse_cols("health,tokens,attempts"),
+            ("health", "tokens", "attempts"),
+        )
+
+    def test_health_metric_renders_glyph_by_state(self) -> None:
+        m = self.reg.METRICS["health"]
+        self.assertEqual(m.compute(self.snap, self._row(alive=True, last_activity_seconds=2)), "ok")
+        self.assertEqual(m.compute(self.snap, self._row(alive=False)), "dead")
+        # render maps each state to its own glyph; the three are distinct.
+        glyphs = {m.render(s, 1) for s in ("ok", "warn", "dead")}
+        self.assertEqual(len(glyphs), 3)
+
+    def test_tokens_metric_matches_web_sum(self) -> None:
+        m = self.reg.METRICS["tokens"]
+        v = m.compute(self.snap, self._row())
+        self.assertEqual(v, 1000 + 250000)
+        self.assertEqual(m.render(v, 8).strip(), "251K")
+
+    def test_attempts_metric_x_of_max(self) -> None:
+        m = self.reg.METRICS["attempts"]
+        self.assertEqual(m.render(m.compute(self.snap, self._row(attempts=2, max_attempts=3)), 5).strip(), "2/3")
+        self.assertEqual(m.render(m.compute(self.snap, self._row(attempts=None)), 5).strip(), "—")
+
+    def test_lease_metric_countdown_and_expired(self) -> None:
+        m = self.reg.METRICS["lease"]
+        self.assertEqual(m.render(m.compute(self.snap, self._row(lease_remaining_seconds=720)), 6).strip(), "12m00s")
+        self.assertEqual(m.render(m.compute(self.snap, self._row(lease_remaining_seconds=-5)), 6).strip(), "exp")
+        self.assertEqual(m.render(m.compute(self.snap, self._row(lease_remaining_seconds=None)), 6).strip(), "—")
+
+    def test_progress_metric_x_of_n(self) -> None:
+        m = self.reg.METRICS["progress"]
+        self.assertEqual(m.render(m.compute(self.snap, self._row(phase_index=2, phase_total=5)), 5).strip(), "2/5")
+        self.assertEqual(m.render(m.compute(self.snap, self._row(phase_index=None, phase_total=None)), 5).strip(), "—")
+
+    def test_table_pane_can_render_new_cols_no_engine_edit(self) -> None:
+        # The proof: a pane built from the new metric keys renders through the
+        # existing table pane with no layout/render-loop change.
+        pane = self.reg.PANES["table"]
+        snap = self.reg.Snapshot([self._row()])
+        lines = pane.render(snap, width=60, cols=("name", "health", "tokens", "attempts"))
+        self.assertTrue(all(len(ln) <= 60 for ln in lines))
+        self.assertIn("TOKENS", lines[0])
 
 
 if __name__ == "__main__":

@@ -235,14 +235,24 @@ function actCls(w){
 function toView(r){
   const alive = r.alive !== false;
   const act = r.last_activity_seconds;
-  const health = !alive ? "dead" : (act == null || act > 60) ? "warn" : "ok";
+  const hb = r.heartbeat_age_seconds;
+  // Fused health (clu top D8) — kept in lockstep with top_registry.worker_health
+  // so the two dashboards never disagree. `act > 60` is the pinned threshold
+  // (mirrored below in Python); stuck + a heartbeat loop silent past 25min are
+  // the two corroborating wedge signals folded in.
+  const health = !alive ? "dead"
+    : (r.stuck || act == null || act > 60 || (hb != null && hb > 1500)) ? "warn" : "ok";
   return {
     proj: r.project, plan: r.plan, phase: r.phase_id,
     health, dead: !alive,
-    ran: r.ran_seconds, act, hb: r.heartbeat_age_seconds,
+    ran: r.ran_seconds, act, hb,
     cmd: r.last_command || "—", running: !!r.command_running,
     wrote: r.last_write || "—", wroteAge: r.last_write_seconds,
     say: r.last_text || "", tokens: tokenTotal(r.tokens),
+    // Phase 4 metric keys — surfaced so clu serve reads what the TUI does.
+    stuck: !!r.stuck, attempts: r.attempts, maxAttempts: r.max_attempts,
+    leaseRemaining: r.lease_remaining_seconds,
+    phaseIndex: r.phase_index, phaseTotal: r.phase_total,
   };
 }
 // Identity of a worker — stable across polls even as the list reorders.

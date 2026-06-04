@@ -206,6 +206,149 @@ def _m_saying(snapshot: Snapshot, row: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 4 metrics — fused health glyph + tokens/attempts/lease/progress.
+#
+# Each is added HERE alone (plus the row keys assemble_row/gather_rows surface)
+# and becomes `--cols`-selectable with no layout or render-loop edit — the proof
+# the registry works. The health classifier and token sum are pinned to
+# web/index.html so the curses TUI and `clu serve` never disagree on a worker.
+# --------------------------------------------------------------------------- #
+
+# Pinned to web/index.html:238 (`act > 60` → warn). The fused glyph adds two
+# corroborating wedge signals the flat PID/HB/ACT clocks made you AND by eye
+# (D8): an explicit tool-stuck marker, and a heartbeat loop that has gone silent
+# past the 25-min stalled ceiling (state.STALLED_HEARTBEAT_MIN_CEILING). Both
+# are mirrored into toView so the web classifies health identically.
+_ACT_WARN_SECONDS = 60
+_HB_WARN_SECONDS = 25 * 60
+
+# Glyph-first (color is redundant reinforcement in the curses attr layer): a
+# filled / half / cross circle, same family as the existing `▸` cursor. On a
+# no-unicode terminal these degrade the way the cursor already does.
+_HEALTH_GLYPH = {"ok": "●", "warn": "◐", "dead": "✗"}
+
+
+def worker_health(*, alive: bool, act: float | None, hb: float | None, stuck: bool) -> str:
+    """Fuse PID + ACT + HB + stuck-command into one `"ok" | "warn" | "dead"`
+    state (D8). `dead` (no live PID) dominates; otherwise any wedge signal —
+    a stale/absent ACT (the silent-wedge the web's `act > 60` catches), an
+    explicit stuck-tool marker, or a heartbeat loop silent past the ceiling —
+    tips an otherwise-green worker to `warn`."""
+    if not alive:
+        return "dead"
+    if (
+        stuck
+        or act is None
+        or act > _ACT_WARN_SECONDS
+        or (hb is not None and hb > _HB_WARN_SECONDS)
+    ):
+        return "warn"
+    return "ok"
+
+
+def token_total(usage: object) -> int | float | None:
+    """Sum one `usage` dict's flat numeric values — byte-for-byte the rule in
+    web/index.html:218 `tokenTotal`. A scalar passes through; a nested dict
+    value (e.g. `cache_creation`) is skipped exactly as the JS skips non-number
+    values; an empty/None/non-dict yields None so the cell shows `—`."""
+    if usage is None:
+        return None
+    if isinstance(usage, bool):  # bool is an int subclass in Python; JS treats it as non-number
+        return None
+    if isinstance(usage, (int, float)):
+        return usage
+    if not isinstance(usage, dict):
+        return None
+    total: int | float = 0
+    seen = False
+    for v in usage.values():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            total += v
+            seen = True
+    return total if seen else None
+
+
+def token_human(n: int | float | None) -> str:
+    """Compact token count — mirrors web/index.html:209 `tnum` (`1.25M` / `45K`
+    / raw). Half-up rounding on the K rung matches JS `Math.round`."""
+    if n is None:
+        return "—"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{int(n / 1_000 + 0.5)}K"
+    return str(int(n))
+
+
+@register_metric(
+    key="health", label="H", render=lambda v, w: f"{_HEALTH_GLYPH.get(str(v), '?'):<{w}}",
+    sort_key=lambda v: {"dead": 0, "warn": 1, "ok": 2}.get(str(v), 3),
+    cost="cheap", align="left", fixed_width=1,
+)
+def _m_health(snapshot: Snapshot, row: dict) -> str:
+    return worker_health(
+        alive=bool(row.get("alive")),
+        act=row.get("last_activity_seconds"),
+        hb=row.get("heartbeat_age_seconds"),
+        stuck=bool(row.get("stuck")),
+    )
+
+
+@register_metric(
+    key="tokens", label="TOKENS", render=lambda v, w: f"{token_human(v):>{w}}",
+    sort_key=lambda v: v if v is not None else -1,
+    cost="transcript", align="right", fixed_width=8,
+)
+def _m_tokens(snapshot: Snapshot, row: dict) -> int | float | None:
+    return token_total(row.get("tokens"))
+
+
+def _render_pair(value: object, width: int) -> str:
+    """`X/Y` for an `(x, y)` metric, `—` when either side is unknown."""
+    x, y = value if isinstance(value, tuple) else (None, None)
+    cell = f"{x}/{y}" if x is not None and y is not None else "—"
+    return f"{cell:>{width}}"
+
+
+@register_metric(
+    key="attempts", label="ATT", render=_render_pair,
+    sort_key=lambda v: v[0] if isinstance(v, tuple) and v[0] is not None else -1,
+    cost="cheap", align="right", fixed_width=5,
+)
+def _m_attempts(snapshot: Snapshot, row: dict) -> tuple:
+    return (row.get("attempts"), row.get("max_attempts"))
+
+
+def _render_lease(value: object, width: int) -> str:
+    """Lease countdown: `12m00s` left, `exp` once past, `—` when unknown."""
+    if value is None:
+        cell = "—"
+    elif value < 0:
+        cell = "exp"
+    else:
+        cell = human_age(value)
+    return f"{cell:>{width}}"
+
+
+@register_metric(
+    key="lease", label="LEASE", render=_render_lease,
+    sort_key=lambda v: v if v is not None else float("inf"),
+    cost="cheap", align="right", fixed_width=6,
+)
+def _m_lease(snapshot: Snapshot, row: dict) -> object:
+    return row.get("lease_remaining_seconds")
+
+
+@register_metric(
+    key="progress", label="PHASE", render=_render_pair,
+    sort_key=lambda v: v[0] if isinstance(v, tuple) and v[0] is not None else -1,
+    cost="cheap", align="right", fixed_width=5,
+)
+def _m_progress(snapshot: Snapshot, row: dict) -> tuple:
+    return (row.get("phase_index"), row.get("phase_total"))
+
+
+# --------------------------------------------------------------------------- #
 # Pane — a kind, its metric keys, and a render returning lines
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)

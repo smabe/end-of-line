@@ -952,7 +952,21 @@ edits to the draw loop or the layout engine.
   snapshot would show last tick's workers).
 - `register_metric(...)` / `register_pane(...)` — decorators that populate
   the `METRICS` / `PANES` module dicts. `DEFAULT_COLS` is the 8-column
-  order; `metric_keys()` is the known-key set `--cols` validates against.
+  order; `metric_keys()` is the known-key set `--cols` validates against
+  (the 8 defaults plus the modular extras).
+- The modular metrics (Phase 4, `--cols`-selectable, not in the default
+  table): `health` (fused glyph), `tokens`, `attempts`, `lease`,
+  `progress`. Each is added in this file alone — the proof the registry
+  needs no engine edit.
+- `worker_health(*, alive, act, hb, stuck) -> "ok"|"warn"|"dead"` — the
+  fused-glyph classifier (D8). `dead` dominates; otherwise any of a
+  stale/absent ACT (`> _ACT_WARN_SECONDS = 60`, pinned to the web),
+  an explicit stuck-tool marker, or a heartbeat past
+  `_HB_WARN_SECONDS = 25min` tips an otherwise-green worker to `warn`.
+- `token_total(usage)` / `token_human(n)` — sum the raw usage dict's flat
+  numeric values and format compactly (`1.25M` / `45K`); byte-for-byte the
+  same math as `web/index.html` `tokenTotal` / `tnum`, so the curses and
+  web token columns never disagree.
 - `safe_render(pane, snapshot, *, width, cols) -> list[str]` — the
   per-pane error boundary: a pane whose render raises becomes a single
   inline error band, so one bad pane never crashes the TUI.
@@ -963,10 +977,14 @@ edits to the draw loop or the layout engine.
 **Invariants and gotchas**
 
 - **`gather_rows()`'s row dict is a FROZEN wire contract (D10):** `clu
-  serve` reads the same 13 keys off `/api/workers` and renders them in its
+  serve` reads the same keys off `/api/workers` and renders them in its
   own JS, with zero shared code. Every metric reads FROM the row dict;
-  none reshapes it. `tests/test_top.py:GatherRowsWireContractTest` is the
-  guard — it asserts the 13 keys by exact name.
+  none reshapes it. The contract is **append-only** — Phase 4 added six
+  keys (`stuck`, `attempts`, `max_attempts`, `lease_remaining_seconds`,
+  `phase_index`, `phase_total`), each mirrored into `web/index.html`'s
+  `toView` so both renderers see them; nothing was renamed or dropped.
+  `tests/test_top.py:GatherRowsWireContractTest` is the guard — it asserts
+  the full key set (19 keys) by exact name.
 - Import direction (no module-level cycle): `top_registry` imports pure
   helpers from `top` at module level; `top` imports `top_registry` lazily,
   inside its render functions (mirrors `top_render`).

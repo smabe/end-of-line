@@ -238,6 +238,22 @@ def _age_seconds(ts: str | None, now: _dt.datetime | None = None) -> float | Non
         return None
 
 
+def _remaining_seconds(ts: str | None, now: _dt.datetime | None = None) -> float | None:
+    """Seconds until `ts` (negative once `ts` is in the past). None when the
+    timestamp is missing or unparseable. The mirror of `_age_seconds`, which
+    measures elapsed time; this measures time left (the lease countdown)."""
+    if not ts:
+        return None
+    try:
+        then = st.parse_iso(ts)
+    except ValueError:
+        return None
+    try:
+        return (then - (now or _dt.datetime.now(_dt.UTC))).total_seconds()
+    except TypeError:
+        return None
+
+
 def human_age(seconds: float | None) -> str:
     """Compact age like top's TIME column: `5s`, `1m30s`, `1h01m`, `—`."""
     if seconds is None:
@@ -272,6 +288,12 @@ def assemble_row(claim: dict, activity: dict, now: _dt.datetime | None = None) -
         "last_text": activity.get("last_text"),
         "last_activity_seconds": _age_seconds(activity.get("last_activity_ts"), now),
         "tokens": activity.get("tokens"),
+        # Phase 4 (new-metrics): claim-derived signals for the fused health
+        # glyph + attempts/lease metrics. Append-only (D10) — surfaced to
+        # web/index.html's toView so `clu serve` reads the same keys.
+        "attempts": claim.get("attempts"),
+        "lease_remaining_seconds": _remaining_seconds(claim.get("lease_expires"), now),
+        "stuck": claim.get("stuck_tool_emitted_at") is not None,
     }
 
 
@@ -304,6 +326,17 @@ def gather_rows(
         row = assemble_row(claim, extract_activity(records), now=now)
         row["plan"] = e.plan_slug
         row["project"] = Path(e.project_root).name
+        # Plan-config-derived keys (only gather_rows has `data`): the attempts
+        # ceiling (resolved exactly as supervisor.py:761) and phase X-of-N from
+        # the sessions index. Append-only (D10), mirrored into toView.
+        row["max_attempts"] = data.get("config", {}).get(
+            "max_attempts_per_phase", st.DEFAULT_MAX_ATTEMPTS
+        )
+        phases = data.get("phases", [])
+        ids = [p.get("id") for p in phases]
+        phase_id = claim.get("phase_id")
+        row["phase_total"] = len(phases) or None
+        row["phase_index"] = (ids.index(phase_id) + 1) if phase_id in ids else None
         rows.append(row)
     return rows
 

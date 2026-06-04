@@ -222,8 +222,27 @@ clu top --cols saying,cmd   # show only these metric columns (default: all)
 ```
 
 `--cols` takes a comma-separated subset of the metric keys `name, ran, act, hb,
-pid, cmd, wrote, saying` (an unknown key is a clean usage error). With no
-`--cols`, the table is the full 8 columns as before.
+pid, cmd, wrote, saying` plus the modular extras `health, tokens, attempts,
+lease, progress` (an unknown key is a clean usage error). With no `--cols`, the
+table is the full 8 columns as before.
+
+The extra metrics surface signals the flat table doesn't:
+
+- **health** — a single fused glyph (`●` ok / `◐` warn / `✗` dead) folding PID
+  liveness, ACT staleness (`> 60s`), heartbeat silence, and the stuck-tool
+  marker into one read, so the dangerous *PID-alive-but-wedged* case can't hide
+  behind four separate clocks. The `act > 60` threshold matches `clu serve`'s
+  web view exactly.
+- **tokens** — the last assistant turn's token total (summed from the raw usage
+  dict, same math as the web dashboard); catches a runaway loop spending hard.
+- **attempts** — `X/max` for the current phase; `2/3` means one retry left
+  before the plan halts on max-attempts (invisible in the default table).
+- **lease** — countdown to lease expiry (`12m00s` left, `exp` once past).
+- **progress** — phase `X/N` from the plan's sessions index (`—` for a
+  single-phase plan).
+
+Each of these lives in `end_of_line/top_registry.py` alone — adding one is a
+single-file change, no layout or render-loop edit.
 
 In the live view: **`q`** quits, **`w`** toggles detail mode. Columns size to
 the terminal — the text fields use all available width and truncate only when
