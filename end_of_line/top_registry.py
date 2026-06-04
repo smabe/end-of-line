@@ -176,11 +176,17 @@ def _m_hb(snapshot: Snapshot, row: dict) -> object:
 
 
 @register_metric(
-    key="pid", label="PID", render=lambda v, w: f"{('ok' if v else 'dead'):>{w}}",
+    key="pid", label="PID", render=lambda v, w: f"{str(v):>{w}}",
+    sort_key=lambda v: {"blk": 0, "dead": 1, "ok": 2}.get(str(v), 3),
     cost="cheap", align="right", fixed_width=4,
 )
 def _m_pid(snapshot: Snapshot, row: dict) -> object:
-    return row.get("alive")
+    # The same `blk`/`ok`/`dead` label the compact table uses (top._liveness_cell)
+    # — blocked is checked before the dead path, so a `--cols pid` view and the
+    # default view agree for a blocked row (alive=False but needs-you, not dead).
+    from end_of_line.top import _liveness_cell
+
+    return _liveness_cell(row)
 
 
 @register_metric(
@@ -206,7 +212,10 @@ def _m_wrote(snapshot: Snapshot, row: dict) -> str:
     cost="transcript", align="left", max_width=_FLEX_MAX["saying"],
 )
 def _m_saying(snapshot: Snapshot, row: dict) -> str:
-    return _clean(row.get("last_text") or "—")
+    # A blocked row has no `last_text`; carry the blocker question instead
+    # (mirrors top._row_cells — the actionable thing the operator must answer).
+    text = row.get("blocker_question") if row.get("blocked") else row.get("last_text")
+    return _clean(text or "—")
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +238,10 @@ _HB_WARN_SECONDS = 25 * 60
 # Glyph-first (color is redundant reinforcement in the curses attr layer): a
 # filled / half / cross circle, same family as the existing `▸` cursor. On a
 # no-unicode terminal these degrade the way the cursor already does.
-_HEALTH_GLYPH = {"ok": "●", "warn": "◐", "dead": "✗"}
+# `!` (blocked) is amber "needs-you" — distinct from red `✗` (dead): a blocked
+# plan is waiting on the operator, a dead one's work died. They must read
+# differently at a glance.
+_HEALTH_GLYPH = {"ok": "●", "warn": "◐", "dead": "✗", "blocked": "!"}
 
 
 def worker_health(*, alive: bool, act: float | None, hb: float | None, stuck: bool) -> str:
@@ -286,10 +298,15 @@ def token_human(n: int | float | None) -> str:
 
 @register_metric(
     key="health", label="H", render=lambda v, w: f"{_HEALTH_GLYPH.get(str(v), '?'):<{w}}",
-    sort_key=lambda v: {"dead": 0, "warn": 1, "ok": 2}.get(str(v), 3),
+    sort_key=lambda v: {"blocked": -1, "dead": 0, "warn": 1, "ok": 2}.get(str(v), 3),
     cost="cheap", align="left", fixed_width=1,
 )
 def _m_health(snapshot: Snapshot, row: dict) -> str:
+    # Blocked is checked FIRST — a blocked row has `alive=False`, so the
+    # 4-signal `worker_health` fusion (kept pure) would otherwise call it dead.
+    # A plan waiting on the operator is needs-you (amber), not work-died (red).
+    if row.get("blocked"):
+        return "blocked"
     return worker_health(
         alive=bool(row.get("alive")),
         act=row.get("last_activity_seconds"),
@@ -429,22 +446,24 @@ def _table(snapshot: Snapshot, *, width: int, cols: tuple[str, ...] | None = Non
 
 
 def fleet_summary(rows: list[dict], width: int) -> str:
-    """The one-line fleet header: `N running · N dead · oldest-ACT Xm`.
+    """The one-line fleet header: `N running · N blocked · N dead · oldest-ACT Xm`.
 
-    Mirrors `web/index.html:251` `header()` — counts come straight from the
-    snapshot rows, the same row dicts `clu serve` renders. There is deliberately
-    no "blocked" count: a worker that calls `clu block` releases its claim
-    (`cli.cmd_block` → `release_claim_and_emit`), so a blocked plan has no
-    `current_claim` and never reaches `gather_rows` (`top.gather_rows` skips
-    claimless plans). The web header omits "blocked" for exactly this reason."""
+    Mirrors `web/index.html` `header()` — counts come straight from the snapshot
+    rows, the same row dicts `clu serve` renders. The `blocked` count surfaces
+    plans waiting on the operator: `clu block` releases the claim, but
+    `gather_rows` reads the persisting blocker back into a claimless blocked row
+    (clu-dashboard-blocked). A blocked row has `alive=False`, so it must be
+    pulled out of the dead bucket explicitly — otherwise the most actionable
+    state hides inside the dead count."""
     if not rows:
         return _fit("no active workers", width)
     alive = [r for r in rows if r.get("alive")]
     running = len(alive)
-    dead = len(rows) - running
+    blocked = sum(1 for r in rows if r.get("blocked"))
+    dead = len(rows) - running - blocked
     acts = [r.get("last_activity_seconds") for r in alive if r.get("last_activity_seconds") is not None]
     oldest = human_age(max(acts)) if acts else "—"
-    return _fit(f"{running} running · {dead} dead · oldest-ACT {oldest}", width)
+    return _fit(f"{running} running · {blocked} blocked · {dead} dead · oldest-ACT {oldest}", width)
 
 
 @register_pane(kind="header", metric_keys=())
