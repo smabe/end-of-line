@@ -31,9 +31,23 @@ from end_of_line import demo_worker, notify, registry
 from end_of_line import state as st
 from end_of_line import top
 from end_of_line._xdg_guard import clu_config_dir
-from end_of_line.config import CONFIG_FILENAME
+from end_of_line.config import CONFIG_FILENAME, load_project_config
 
 DEMO_SLUG_PREFIX = "demo-"
+
+# Per-scenario (active 1-based phase position, phase total). The worker parks at
+# `position` — phases 1..position-1 are pre-completed (a contiguous prefix) so
+# the dashboard's phase-progress strip renders done/active/pending instead of a
+# trivial 1/1. busy ●●●◉○ · idle ●◉○○ · block ●●◉ · dead ◉○○. (clu-demo-showcase.)
+_SCENARIO_PHASES = {
+    "busy": (4, 5),
+    "idle": (2, 4),
+    "block": (3, 3),
+    "dead": (1, 3),
+}
+# Phase ids are single ascii letters — valid slugs, and the strip reads them as
+# bare positions. Eight covers every scenario total with headroom.
+_PHASE_ALPHABET = ("a", "b", "c", "d", "e", "f", "g", "h")
 
 
 def demo_root() -> Path:
@@ -52,16 +66,48 @@ def _slug(scenario: str) -> str:
     return f"{DEMO_SLUG_PREFIX}{scenario}"
 
 
-def _master_plan(slug: str) -> str:
-    """A one-phase master with a parseable `## Sessions index` (cmd_init needs
-    only the master; the synthetic worker never reads a sub-plan file)."""
+def _master_plan(slug: str, phase_ids=("a",)) -> str:
+    """A master with one `## Sessions index` row per phase id (cmd_init needs
+    only the master; the synthetic worker never reads a sub-plan file). Multiple
+    rows give the worker a multi-phase plan so the dashboard strip can render a
+    parked mid-list position rather than a trivial 1/1."""
+    rows = "".join(
+        f"| {pid} | `{slug}-{pid}.md` | synthetic demo work | 1h |\n"
+        for pid in phase_ids
+    )
     return (
         f"# Demo plan: {slug}\n\n"
         "## Sessions index\n\n"
         "| Session | Plan file | Scope | Effort |\n"
         "|---|---|---|---|\n"
-        f"| a | `{slug}-a.md` | synthetic demo work | 1h |\n"
+        + rows
     )
+
+
+def _phase_layout(scenario: str) -> tuple[list[str], list[str]]:
+    """`(all phase ids, contiguous prefix to pre-complete)` for a scenario.
+
+    Single source of truth for both the master's Sessions index and the prefill
+    done-ids: the prefix is a slice of the same id list, so the two can't drift
+    (a mismatched id would complete nothing and silently park the worker at
+    phase 1). Unknown scenarios fall back to a one-phase plan at position 1.
+    """
+    position, total = _SCENARIO_PHASES.get(scenario, (1, 1))
+    ids = list(_PHASE_ALPHABET[:total])
+    return ids, ids[: position - 1]
+
+
+def _prefill_completed(state_path: Path, done_ids) -> None:
+    """Append a `phase_completed` event per id so the next tick's
+    `completed_phase_ids` skips them and claims the first uncompleted phase,
+    parking the worker mid-list. Must run AFTER init (which writes the state +
+    parses the phases) and BEFORE the dispatch tick. No-op for an empty prefix
+    (position 1, e.g. `dead`)."""
+    if not done_ids:
+        return
+    with st.mutate(state_path) as data:
+        for pid in done_ids:
+            st.append_event(data, st.EVENT_PHASE_COMPLETED, phase=pid)
 
 
 def _orchestrator_config(scenario: str) -> dict:
@@ -84,7 +130,8 @@ def scaffold(scenarios=demo_worker.SCENARIOS, *, root: Path | None = None) -> li
         proj = root / slug
         (proj / "plans").mkdir(parents=True, exist_ok=True)
         (proj / CONFIG_FILENAME).write_text(json.dumps(_orchestrator_config(scenario), indent=2))
-        (proj / "plans" / f"{slug}.md").write_text(_master_plan(slug))
+        phase_ids, _ = _phase_layout(scenario)
+        (proj / "plans" / f"{slug}.md").write_text(_master_plan(slug, phase_ids))
         # Resolve so the registered root matches dispatch's {project} (both
         # resolve()), keeping the locator's cwd comparison exact.
         plans.append(DemoPlan(scenario=scenario, slug=slug, project_root=proj.resolve()))
@@ -113,6 +160,12 @@ def up(scenarios=demo_worker.SCENARIOS, *, root: Path | None = None) -> list[Dem
         # Discord?" wizard fires for every demo plan AND overwrites the masked
         # notify config we just scaffolded. The demo configures notify itself.
         _cli(["init", "--no-notify-prompt", "--project", str(plan.project_root), "--plan", plan.slug])
+        # Park the worker mid-list: pre-complete the contiguous prefix AFTER init
+        # (the state + phases now exist) and BEFORE the dispatch tick (which then
+        # claims the first uncompleted phase).
+        _, done_ids = _phase_layout(plan.scenario)
+        state_path = load_project_config(plan.project_root).state_path(plan.slug)
+        _prefill_completed(state_path, done_ids)
         _dispatch(plan)
     return plans
 
