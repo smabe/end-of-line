@@ -132,6 +132,21 @@ class IndexResourceTest(CluTestCase):
         self.assertIn("w.leaseRemaining", html)
         self.assertIn(".steps", html)  # the segment-strip CSS
 
+    def test_frontend_renders_blocked_state(self):
+        # clu-dashboard-blocked / phase serve — a plan waiting on the operator
+        # (claimless, `clu block` released the claim) renders an amber blocked
+        # row: a BLK badge + the blocker question + a blocked count in the
+        # header, off the gather_rows wire keys (blocked / blocker_question /
+        # blocked_seconds, append-only D10).
+        html = webserver.load_index_html()
+        self.assertIn("r.blocked", html)           # toView reads the discriminator
+        self.assertIn("blockerQuestion", html)     # view-model carries the question
+        self.assertIn("blockedSeconds", html)      # ... and the blocked-since age
+        self.assertIn(".dot.blocked", html)        # amber dot, distinct from .dot.dead
+        self.assertIn("— blocked ${age(w.blockedSeconds)} —", html)  # blocked-since in metrics
+        self.assertIn("w.blocked", html)           # render + header count gate on the flag
+        self.assertIn("blocked</span>", html)      # header builds an N blocked count
+
     def test_frontend_scales_ui_above_browser_default(self):
         # The dashboard renders larger than browser 100% by default (readability)
         # via a tweakable --ui-scale zoom, not per-element font bumps.

@@ -22,8 +22,9 @@ from tempfile import TemporaryDirectory
 
 from end_of_line import registry, top
 from end_of_line import state as st
+from end_of_line.cli import main as cli_main
 
-from tests import GitProjectTestCase
+from tests import GitProjectTestCase, plan_body
 
 
 def _write_jsonl(path: Path, records: list[dict], *, mtime: float | None = None) -> Path:
@@ -636,6 +637,19 @@ class GatherRowsWireContractTest(GitProjectTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(set(rows[0]), _WIRE_CONTRACT_KEYS)
 
+    def test_blocked_row_carries_same_keys_plus_blocked_discriminator(self) -> None:
+        # A blocked row is the SAME flat schema plus three append-only keys
+        # (D10) — clu serve's toView reads `blocker_question`/`blocked_seconds`
+        # by exact name, so a rename here must scream just like a claim-row one.
+        with st.mutate(self.state_path) as data:
+            st.add_blocker(data, "a", "Pick a base branch?", ["x", "y"])
+        rows = top.gather_rows(projects_root=self.projects_root)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            set(rows[0]),
+            _WIRE_CONTRACT_KEYS | {"blocked", "blocker_question", "blocked_seconds"},
+        )
+
 
 class MetricRegistryTest(unittest.TestCase):
     """Each built-in metric is a pure (compute, render) pair — no curses."""
@@ -668,10 +682,17 @@ class MetricRegistryTest(unittest.TestCase):
         self.assertEqual(m.compute(self.snap, _draw_row(ran_seconds=90)), 90)
         self.assertEqual(m.render(90, 7), "  1m30s")  # right-aligned in 7
 
-    def test_pid_metric_ok_dead(self) -> None:
+    def test_pid_metric_ok_dead_blocked(self) -> None:
         m = self.reg.METRICS["pid"]
-        self.assertEqual(m.render(True, 4), "  ok")
-        self.assertEqual(m.render(False, 4), "dead")
+        # render right-aligns the liveness label.
+        self.assertEqual(m.render("ok", 4), "  ok")
+        self.assertEqual(m.render("dead", 4), "dead")
+        self.assertEqual(m.render("blk", 4), " blk")
+        # compute mirrors the compact table — blocked is checked before dead, so
+        # a `--cols pid` view never mislabels a blocked plan (alive=False) as dead.
+        self.assertEqual(m.compute(self.snap, _draw_row(alive=True)), "ok")
+        self.assertEqual(m.compute(self.snap, _draw_row(alive=False)), "dead")
+        self.assertEqual(m.compute(self.snap, _draw_row(alive=False, blocked=True)), "blk")
 
     def test_cmd_metric_running_star_and_clean(self) -> None:
         m = self.reg.METRICS["cmd"]
@@ -681,6 +702,13 @@ class MetricRegistryTest(unittest.TestCase):
     def test_saying_metric_dash_when_empty(self) -> None:
         m = self.reg.METRICS["saying"]
         self.assertEqual(m.compute(self.snap, _draw_row(last_text=None)), "—")
+
+    def test_saying_metric_shows_blocker_question_when_blocked(self) -> None:
+        # A `--cols saying` view of a blocked plan must surface the question, not
+        # the (absent) last_text — same as the default table.
+        m = self.reg.METRICS["saying"]
+        row = _draw_row(last_text=None, blocked=True, blocker_question="Which base?")
+        self.assertEqual(m.compute(self.snap, row), "Which base?")
 
 
 class TablePaneTest(unittest.TestCase):
@@ -1308,6 +1336,133 @@ class GatherRowsNewKeysTest(GitProjectTestCase):
         # A single-phase test plan has no sessions index → progress unknown.
         self.assertIn("phase_index", rows[0])
         self.assertIn("phase_total", rows[0])
+
+
+class BlockedRowGatherTest(GitProjectTestCase):
+    """A plan with an OPEN blocker but no claim surfaces as a claimless
+    'blocked' row (clu-dashboard-blocked). `clu block` releases the claim, so
+    the blocker persists in `data['blockers']` while `current_claim` is gone —
+    gather_rows reads it back instead of skipping the plan."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._pr = TemporaryDirectory()
+        self.addCleanup(self._pr.cleanup)
+        self.projects_root = Path(self._pr.name)
+
+    def _state_path(self, slug: str) -> Path:
+        return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
+
+    def _block(self, slug: str, phase: str, question: str) -> str:
+        with st.mutate(self._state_path(slug)) as data:
+            return st.add_blocker(data, phase, question, ["yes", "no"])
+
+    def _register_plan(self, slug: str, *sessions: str) -> None:
+        (self.project / "plans" / f"{slug}.md").write_text(plan_body(*sessions))
+        self.assertEqual(cli_main(["init", "--project", str(self.project), "--plan", slug]), 0)
+
+    def test_open_blocker_no_claim_becomes_blocked_row(self) -> None:
+        self._block("test-plan", "a", "Pick a branch name?")
+        rows = top.gather_rows(projects_root=self.projects_root)
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertTrue(r["blocked"])
+        self.assertEqual(r["blocker_question"], "Pick a branch name?")
+        self.assertEqual(r["phase_id"], "a")
+        self.assertFalse(r["alive"])
+        # Still shows WHERE in the plan it's stuck (phase x-of-N like a claim).
+        self.assertEqual(r["phase_index"], 1)
+        self.assertEqual(r["phase_total"], 2)
+        self.assertIsNotNone(r["blocked_seconds"])
+        # One flat schema (D10): claim-only fields present but None.
+        self.assertIsNone(r["last_command"])
+        self.assertIsNone(r["lease_remaining_seconds"])
+
+    def test_answered_blocker_produces_no_row(self) -> None:
+        bid = self._block("test-plan", "a", "q?")
+        with st.mutate(self._state_path("test-plan")) as data:
+            for b in data["blockers"]:
+                if b["id"] == bid:
+                    b["answer"] = "yes"
+        self.assertEqual(top.gather_rows(projects_root=self.projects_root), [])
+
+    def test_blocked_sorts_before_running(self) -> None:
+        # test-plan (registered first in setUp) is running; a later-registered
+        # plan is blocked. Registry order is [running, blocked]; the blocked row
+        # must still float to the top of the fleet (stable blocked-first sort).
+        self._claim("a")
+        self._register_plan("zzz-blocked", "x")
+        self._block("zzz-blocked", "x", "need input")
+        rows = top.gather_rows(projects_root=self.projects_root)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(rows[0]["blocked"])
+        self.assertEqual(rows[0]["plan"], "zzz-blocked")
+        self.assertFalse(rows[1].get("blocked"))
+        self.assertEqual(rows[1]["plan"], "test-plan")
+
+
+class BlockedHealthAndRenderTest(unittest.TestCase):
+    """The 'blocked' health state (amber `!`, sorts to top) + the curses render
+    of a claimless blocked row (`blk` PID cell, blocker question, detail block,
+    fleet count). Blocked is checked BEFORE the dead path everywhere — a blocked
+    plan has `alive=False` and must read as needs-you, never as work-died."""
+
+    def _row(self, **over) -> dict:
+        base = {
+            "project": "myrepo", "plan": "routing", "phase_id": "impl",
+            "ran_seconds": None, "heartbeat_age_seconds": None, "alive": False,
+            "last_command": None, "command_running": False,
+            "last_write": None, "last_write_seconds": None,
+            "last_text": None, "last_activity_seconds": None, "tokens": None,
+            "attempts": None, "max_attempts": 3, "lease_remaining_seconds": None,
+            "stuck": False, "phase_index": 1, "phase_total": 3,
+            "blocked": True, "blocker_question": "Which API base?",
+            "blocked_seconds": 180,
+        }
+        base.update(over)
+        return base
+
+    def test_m_health_returns_blocked_first(self) -> None:
+        from end_of_line import top_registry
+
+        snap = top_registry.Snapshot([self._row()])
+        self.assertEqual(top_registry.METRICS["health"].compute(snap, self._row()), "blocked")
+
+    def test_four_distinct_health_glyphs(self) -> None:
+        from end_of_line import top_registry
+
+        m = top_registry.METRICS["health"]
+        glyphs = {m.render(s, 1) for s in ("ok", "warn", "dead", "blocked")}
+        self.assertEqual(len(glyphs), 4)
+
+    def test_blocked_sorts_above_dead_in_health_metric(self) -> None:
+        from end_of_line import top_registry
+
+        m = top_registry.METRICS["health"]
+        self.assertLess(m.sort_key("blocked"), m.sort_key("dead"))
+
+    def test_format_rows_shows_blk_and_question_not_dead(self) -> None:
+        body = "\n".join(top.format_rows([self._row()], width=200)[1:])
+        self.assertIn("blk", body)
+        self.assertIn("Which API base?", body)
+        self.assertNotIn("dead", body)
+
+    def test_format_detail_shows_blocked_block(self) -> None:
+        out = "\n".join(top.format_detail([self._row()], width=120))
+        self.assertIn("BLOCKED", out)
+        self.assertIn("Which API base?", out)
+        self.assertIn("blk", out)
+        self.assertNotIn("dead", out)
+
+    def test_fleet_summary_counts_blocked_not_dead(self) -> None:
+        from end_of_line.top_registry import fleet_summary
+
+        rows = [self._row(), _draw_row(alive=True, last_activity_seconds=2)]
+        line = fleet_summary(rows, 120)
+        self.assertIn("1 blocked", line)
+        self.assertIn("1 running", line)
+        # The blocked row (alive=False) must NOT inflate the dead count.
+        self.assertIn("0 dead", line)
 
 
 class WorkerHealthTest(unittest.TestCase):

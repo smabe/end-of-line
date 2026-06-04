@@ -308,17 +308,55 @@ def assemble_row(claim: dict, activity: dict, now: _dt.datetime | None = None) -
     }
 
 
+def assemble_blocked_row(blocker: dict, now: _dt.datetime | None = None) -> dict:
+    """The claimless counterpart of `assemble_row`: a plan waiting on the
+    operator. `clu block` releases the claim (so there's no live worker), but
+    the blocker persists in `data["blockers"]` — this reads it back into a row.
+
+    Same flat schema as a claim row (D10) so both renderers and `clu serve`
+    read identical keys; the claim-only fields are `None` (no PID, no lease, no
+    transcript activity). The three append-only keys `blocked`/
+    `blocker_question`/`blocked_seconds` discriminate it. `alive=False`, but the
+    `blocked` flag must be checked BEFORE the dead path in every render surface —
+    a blocked plan is needs-you, not work-died.
+    """
+    return {
+        "phase_id": blocker.get("phase_id"),
+        "ran_seconds": None,
+        "heartbeat_age_seconds": None,
+        "alive": False,
+        "last_command": None,
+        "command_running": False,
+        "last_write": None,
+        "last_write_seconds": None,
+        "last_text": None,
+        "last_activity_seconds": None,
+        "tokens": None,
+        "attempts": None,
+        "lease_remaining_seconds": None,
+        "stuck": False,
+        # Append-only blocked discriminator (D10) — mirrored into toView.
+        "blocked": True,
+        "blocker_question": blocker.get("question"),
+        "blocked_seconds": _age_seconds(blocker.get("asked_at"), now),
+    }
+
+
 def gather_rows(
     *,
     projects_root: Path = PROJECTS_ROOT,
     now: _dt.datetime | None = None,
     project_filter: Path | None = None,
 ) -> list[dict]:
-    """One row per active claim across every registered plan (optionally scoped
-    to `project_filter`). Tolerant at the per-plan level: a plan with no live
-    claim, or whose state / transcript can't be read, contributes nothing
-    rather than raising. A corrupt host registry is not swallowed — it surfaces
-    rather than masquerading as an empty dashboard.
+    """One row per active claim — plus a claimless 'blocked' row for any plan
+    waiting on the operator — across every registered plan (optionally scoped to
+    `project_filter`). Tolerant at the per-plan level: a plan with no live claim
+    AND no open blocker, or whose state / transcript can't be read, contributes
+    nothing rather than raising. A corrupt host registry is not swallowed — it
+    surfaces rather than masquerading as an empty dashboard.
+
+    Blocked rows sort to the top (stable): a plan waiting on the operator is the
+    single most actionable state. Running/dead rows keep registry order.
     """
     rows: list[dict] = []
     for e in registry.entries():
@@ -328,27 +366,42 @@ def gather_rows(
         if not data:
             continue
         claim = data.get("current_claim")
-        if not claim:
-            continue
-        wt = st.get_worktree(data)
-        cwd = Path(wt["path"]) if wt and wt.get("path") else Path(e.project_root)
-        tpath = locate_transcript(cwd, projects_root=projects_root, session_id=claim.get("session_id"))
-        records = tail_records(tpath) if tpath else []
-        row = assemble_row(claim, extract_activity(records), now=now)
+        if claim:
+            wt = st.get_worktree(data)
+            cwd = Path(wt["path"]) if wt and wt.get("path") else Path(e.project_root)
+            tpath = locate_transcript(cwd, projects_root=projects_root, session_id=claim.get("session_id"))
+            records = tail_records(tpath) if tpath else []
+            row = assemble_row(claim, extract_activity(records), now=now)
+        else:
+            # No live claim: `clu block` released it, but an open blocker means
+            # the plan is waiting on the operator. Surface the first (primary)
+            # open blocker as a claimless blocked row. Claim AND open blocker
+            # can't co-occur (block releases the claim first), so the claim
+            # branch always wins above.
+            blockers = st.open_blockers(data)
+            if not blockers:
+                continue
+            row = assemble_blocked_row(blockers[0], now=now)
         row["plan"] = e.plan_slug
         row["project"] = Path(e.project_root).name
         # Plan-config-derived keys (only gather_rows has `data`): the attempts
         # ceiling (resolved exactly as supervisor.py:761) and phase X-of-N from
-        # the sessions index. Append-only (D10), mirrored into toView.
+        # the sessions index. Append-only (D10), mirrored into toView. Computed
+        # the same way for claim and blocked rows — a blocked row still shows
+        # WHERE in the plan it's stuck.
         row["max_attempts"] = data.get("config", {}).get(
             "max_attempts_per_phase", st.DEFAULT_MAX_ATTEMPTS
         )
         phases = data.get("phases", [])
         ids = [p.get("id") for p in phases]
-        phase_id = claim.get("phase_id")
+        phase_id = row.get("phase_id")
         row["phase_total"] = len(phases) or None
         row["phase_index"] = (ids.index(phase_id) + 1) if phase_id in ids else None
         rows.append(row)
+    # Blocked-to-top, stable: blocked rows first, everything else in registry
+    # order. Web sticky-by-identity selection re-resolves by key, so a reorder
+    # is safe.
+    rows.sort(key=lambda r: 0 if r.get("blocked") else 1)
     return rows
 
 
@@ -398,13 +451,25 @@ def _phase_cell(r: dict) -> str:
     return f"{idx}/{total}" if idx is not None and total is not None else "—"
 
 
+def _liveness_cell(r: dict) -> str:
+    """The PID/liveness label — `blk` / `ok` / `dead`. Single source of truth for
+    the blocked-before-dead correctness rule: a blocked row has `alive=False`,
+    so it would read as `dead` unless `blocked` is checked first. Shared by the
+    compact table (`format_rows`) and the detail meta line (`format_detail`)."""
+    if r.get("blocked"):
+        return "blk"
+    return "ok" if r.get("alive") else "dead"
+
+
 def _row_cells(r: dict) -> tuple[str, str, str, str]:
     name = _clean(f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}")
     run = "*" if r.get("command_running") else ""
     cmd = _clean(run + (r.get("last_command") or "—"))
     w = r.get("last_write")
     wrote = _clean(f"{Path(w).name} {human_age(r.get('last_write_seconds'))}" if w else "—")
-    saying = _clean(r.get("last_text") or "—")
+    # A blocked row has no `last_text`; the SAYING column carries the blocker
+    # question instead (the actionable thing the operator must answer).
+    saying = _clean((r.get("blocker_question") if r.get("blocked") else r.get("last_text")) or "—")
     return name, cmd, wrote, saying
 
 
@@ -462,7 +527,7 @@ def format_rows(rows: list[dict], *, width: int = 120) -> list[str]:
         line = _row_line(
             _fit(name, cw["name"]),
             human_age(r.get("ran_seconds")), human_age(r.get("last_activity_seconds")),
-            human_age(r.get("heartbeat_age_seconds")), "ok" if r.get("alive") else "dead",
+            human_age(r.get("heartbeat_age_seconds")), _liveness_cell(r),
             _phase_cell(r),
             _fit(cmd, cw["cmd"]), _fit(wrote, cw["wrote"]), _fit(saying, cw["saying"]), cw,
         )
@@ -488,7 +553,7 @@ def format_detail(rows: list[dict], *, width: int = 120) -> list[str]:
         name = _clean(f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}")
         meta = (
             f"RAN {human_age(r.get('ran_seconds'))} · ACT {human_age(r.get('last_activity_seconds'))} · "
-            f"HB {human_age(r.get('heartbeat_age_seconds'))} · {'ok' if r.get('alive') else 'dead'}"
+            f"HB {human_age(r.get('heartbeat_age_seconds'))} · {_liveness_cell(r)}"
         )
         out.append(f"{name}   {meta}"[:width])
         # Phase position / attempts / lease (#86) — each rendered only when its
@@ -511,6 +576,11 @@ def format_detail(rows: list[dict], *, width: int = 120) -> list[str]:
             extras.append(f"LEASE {human_remaining(lease)}")
         if extras:
             out.append(("  " + "    ".join(extras))[:width])
+        # A blocked row's headline: how long it's been waiting + the question
+        # the operator must answer. Above CMD/SAY (both `—` for a blocked plan).
+        if r.get("blocked"):
+            q = _clean(r.get("blocker_question") or "—")
+            out.append(f"  BLOCKED {human_age(r.get('blocked_seconds'))} · {q}"[:width])
         run = "* " if r.get("command_running") else ""
         out.extend(_wrap_field("CMD", run + (r.get("last_command") or "—"), width))
         w = r.get("last_write")
