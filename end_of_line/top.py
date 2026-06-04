@@ -465,7 +465,7 @@ def render_once(
     return 0
 
 
-_HINT = "q quit · w layout"
+_HINT = "q quit · ↑↓ select · Enter open · Tab detail · w layout · ? help"
 
 
 def _render_region(role: str, snapshot, rect, *, cols: tuple[str, ...] | None, hint: str) -> list[str]:
@@ -483,17 +483,139 @@ def _render_region(role: str, snapshot, rect, *, cols: tuple[str, ...] | None, h
     return safe_render(pane, snapshot, width=rect.w, cols=cols if role == "list" else None)
 
 
-def _draw_panes(surface, snapshot, layout, *, cols: tuple[str, ...] | None = None, hint: str = "") -> None:
+# The list cursor: a fixed-width gutter glyph marking the selected row. Text,
+# not a curses attribute, so the read-only seam (Surface has no attr support) is
+# untouched and the cursor degrades to a printable char on any terminal. Both
+# glyphs are the same width, which is the gutter the table is inset by.
+_CURSOR = "▸ "
+_NO_CURSOR = "  "
+_GUTTER = len(_CURSOR)
+
+
+def _blit(surface, lines, rect, *, x: int = 0) -> None:
+    """The shared inner draw loop: write `lines` top-aligned into `rect` at an
+    optional x offset. `CursesSurface` clips each line per cell as a backstop."""
+    for i, line in enumerate(lines[: rect.h]):
+        surface.addstr(rect.y + i, rect.x + x, line)
+
+
+def _selected_row(rows: list[dict], app) -> dict | None:
+    """The row the cursor is bound to this tick, or None for an empty fleet."""
+    i = app.selected_index
+    return rows[i] if rows and 0 <= i < len(rows) else None
+
+
+def _draw_list(surface, snapshot, rect, cols: tuple[str, ...] | None, app) -> None:
+    """The master list with a selection cursor. The table pane stays byte-pure —
+    it renders into the rect minus the cursor gutter, and the cursor glyph is
+    drawn in that gutter for the selected data row (data rows sit one below the
+    table header). Reuses the same per-pane error boundary as every other pane."""
+    from end_of_line.top_registry import PANES, safe_render
+
+    gutter = _GUTTER if rect.w > _GUTTER + 1 else 0
+    lines = safe_render(PANES["table"], snapshot, width=rect.w - gutter, cols=cols)
+    selected_line = app.selected_index + 1  # +1 for the table's own header row
+    if gutter:
+        marks = [_CURSOR if i == selected_line else _NO_CURSOR for i in range(len(lines))]
+        _blit(surface, marks, rect)
+    _blit(surface, lines, rect, x=gutter)
+
+
+def _draw_detail(surface, snapshot, rect, app) -> None:
+    """The detail pane, tracking the cursor: the selected worker's full block,
+    scrolled by `app.scroll` (clamped here against the rendered line count so a
+    focused pane can't scroll past its end). An empty fleet renders the detail
+    pane's own placeholder."""
+    from end_of_line.top_registry import PANES, Snapshot, safe_render
+
+    sel = _selected_row(snapshot.rows, app)
+    lines = safe_render(PANES["detail"], Snapshot([sel] if sel is not None else []), width=rect.w)
+    app.scroll = min(app.scroll, max(0, len(lines) - rect.h))
+    _blit(surface, lines[app.scroll :], rect)
+
+
+def _draw_panes(
+    surface, snapshot, layout, *, cols: tuple[str, ...] | None = None, hint: str = "", app=None
+) -> None:
     """Render every pane of `layout` into its `Rect` on `surface`.
 
     The seam that makes the curses loop testable: a `BufferSurface` drives this
     across every geometry and forced preset (property test) without a terminal.
     Each pane fits its own rows to its region width; `CursesSurface` clips per
-    cell as a backstop, so an off-by-one `Rect` can never corrupt the grid."""
+    cell as a backstop, so an off-by-one `Rect` can never corrupt the grid.
+
+    With an `app` (the live curses loop) the `list`/`detail` regions become
+    selection-aware: the list grows a cursor gutter and the detail tracks the
+    selected worker. Without one (`--once`, the property test) every region
+    routes through the plain `_render_region`, byte-identical to before."""
     for role, rect in layout.rects.items():
-        lines = _render_region(role, snapshot, rect, cols=cols, hint=hint)
-        for i, line in enumerate(lines[: rect.h]):
-            surface.addstr(rect.y + i, rect.x, line)
+        if rect.w <= 0 or rect.h <= 0:
+            continue
+        if app is not None and role == "list":
+            _draw_list(surface, snapshot, rect, cols, app)
+        elif app is not None and role == "detail":
+            _draw_detail(surface, snapshot, rect, app)
+        else:
+            _blit(surface, _render_region(role, snapshot, rect, cols=cols, hint=hint), rect)
+
+
+# Bare control codes curses delivers as ints (keypad mode names the rest).
+_TAB, _ENTER_LF, _ENTER_CR, _ESC = 9, 10, 13, 27
+
+
+def _handle_key(ch: int, app, rows: list[dict], layout, curses) -> bool:
+    """Translate one keypress into a state change. Returns True iff the user
+    asked to quit. **Read-only by invariant (D7):** every branch is navigation,
+    focus, or layout — there is deliberately no kill/release/signal key.
+
+    When the detail pane is the focus (Tab) or a fullscreen drill is open, the
+    arrow/page keys scroll that pane instead of moving the cursor — mirroring the
+    web's list-vs-drill key split (web/index.html:360-369)."""
+    from end_of_line.top_layout import next_preset
+
+    if ch in (ord("q"), ord("Q")):
+        return True
+    if ch in (ord("w"), ord("W")):
+        app.layout_preset = next_preset(app.layout_preset)
+        return False
+
+    detail_visible = "detail" in layout.rects
+    if not detail_visible and app.focus == "detail":
+        app.focus = "list"  # a stale focus from a wider geometry that lost its pane
+    scrolling = detail_visible and (app.focus == "detail" or app.drill)
+    # A page is the height of whichever pane the arrows act on — the detail when
+    # scrolling it (incl. the fullscreen drill, where there is no list), else the
+    # list. Using the wrong pane's height made PgDn crawl one line in a drill.
+    active_rect = layout.rects.get("detail") if scrolling else layout.rects.get("list")
+    page = max(1, (active_rect.h - 1) if active_rect else 1)
+
+    def _nav(delta: int) -> None:
+        if scrolling:
+            app.scroll_by(delta)
+        else:
+            app.move(delta, rows)
+
+    if ch in (curses.KEY_DOWN, ord("j")):
+        _nav(1)
+    elif ch in (curses.KEY_UP, ord("k")):
+        _nav(-1)
+    elif ch == curses.KEY_NPAGE:
+        _nav(page)
+    elif ch == curses.KEY_PPAGE:
+        _nav(-page)
+    elif ch in (ord("g"), curses.KEY_HOME):
+        app.move_to(0, rows)
+    elif ch in (ord("G"), curses.KEY_END):
+        app.move_to(len(rows) - 1, rows)
+    elif ch == _TAB:
+        if detail_visible:
+            app.toggle_focus()
+    elif ch in (curses.KEY_ENTER, _ENTER_LF, _ENTER_CR):
+        if layout.preset == "master":
+            app.drill_in()
+    elif ch == _ESC:
+        app.drill_out()
+    return False
 
 
 def _run_curses(
@@ -527,23 +649,26 @@ def _run_curses(
         while True:
             rows = gather_rows(projects_root=projects_root, project_filter=project_filter)
             snapshot = Snapshot(rows)
+            # Re-resolve the cursor by worker identity BEFORE drawing, so a
+            # worker that completed above it never silently retargets selection.
+            app.sync_selection(rows)
             # Lay out within the surface's usable area (it reserves the
             # bottom-right cell), not raw getmaxyx, so rects never reach the
             # corner curses raises on.
             surface = CursesSurface(stdscr)
             app.geometry = (surface.width, surface.height)
-            layout = engine.layout(surface.width, surface.height, override=app.layout_preset)
+            layout = engine.layout(
+                surface.width, surface.height, override=app.layout_preset, drill=app.drill
+            )
             stdscr.erase()
-            _draw_panes(surface, snapshot, layout, cols=cols, hint=_HINT)
+            _draw_panes(surface, snapshot, layout, cols=cols, hint=_HINT, app=app)
             # Single window, but use the flicker-free pair so adding derwins
             # later is a drop-in: stage all writes, then one screen update.
             stdscr.noutrefresh()
             curses.doupdate()
             ch = stdscr.getch()
-            if ch in (ord("q"), ord("Q")):
+            if _handle_key(ch, app, rows, layout, curses):
                 return 0
-            if ch in (ord("w"), ord("W")):
-                app.layout_preset = next_preset(app.layout_preset)
             # KEY_RESIZE needs no special case: the next iteration reads the new
             # getmaxyx, recomputes rects, and erase()+redraws. keypad(True) keeps
             # it from being misread as a printable key.

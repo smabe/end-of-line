@@ -909,5 +909,280 @@ class LayoutDrawPropertyTest(unittest.TestCase):
                 self.assertLessEqual(len(text), s.width)
 
 
+# --- Phase 3: sticky-by-identity selection + detail pane (clu-top-tui) -------
+
+
+class SelectionModelTest(unittest.TestCase):
+    """Selection is sticky by `(project, plan, phase_id)` identity, re-resolved
+    every tick — never by raw list index (the #1 QA risk). Mirrors the web's
+    `wkey` + `findIndex` re-resolution (web/index.html:376-385)."""
+
+    def _rows(self, *phases: str) -> list[dict]:
+        return [_draw_row(phase_id=p) for p in phases]
+
+    def test_cursor_follows_worker_when_it_moves_position(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        app.sync_selection(self._rows("a", "b", "c"))
+        app.move(1, self._rows("a", "b", "c"))  # select b (index 1)
+        self.assertEqual(app.selected_index, 1)
+        self.assertEqual(app.selected_key, ("myrepo", "routing", "b"))
+        # b slides to the bottom; the cursor tracks the worker, not the index.
+        app.sync_selection(self._rows("a", "c", "b"))
+        self.assertEqual(app.selected_index, 2)
+        self.assertEqual(app.selected_key, ("myrepo", "routing", "b"))
+
+    def test_dropout_clamps_gracefully_no_crash(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        rows = self._rows("a", "b", "c")
+        app.sync_selection(rows)
+        app.move_to(2, rows)  # select c (index 2)
+        # c drops out; the cursor clamps to the old index within the new length.
+        app.sync_selection(self._rows("a", "b"))
+        self.assertEqual(app.selected_index, 1)
+        self.assertEqual(app.selected_key, ("myrepo", "routing", "b"))
+
+    def test_empty_list_clears_selection_no_crash(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        app.sync_selection(self._rows("a", "b"))
+        app.sync_selection([])
+        self.assertIsNone(app.selected_key)
+        self.assertEqual(app.selected_index, 0)
+
+    def test_move_clamps_no_wrap(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        rows = self._rows("a", "b")
+        app.sync_selection(rows)
+        app.move(-1, rows)  # already at top — clamp, don't wrap to bottom
+        self.assertEqual(app.selected_index, 0)
+        app.move(5, rows)   # past bottom — clamp to last
+        self.assertEqual(app.selected_index, 1)
+
+    def test_move_resets_detail_scroll_when_selection_changes(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        rows = self._rows("a", "b")
+        app.sync_selection(rows)
+        app.scroll = 5
+        app.move(1, rows)  # selection a -> b
+        self.assertEqual(app.scroll, 0)
+
+    def test_scroll_by_clamps_at_zero(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        app.scroll_by(-3)
+        self.assertEqual(app.scroll, 0)
+        app.scroll_by(4)
+        self.assertEqual(app.scroll, 4)
+
+    def test_tab_toggles_focus_and_esc_returns(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        self.assertEqual(app.focus, "list")
+        app.toggle_focus()
+        self.assertEqual(app.focus, "detail")
+        app.toggle_focus()
+        self.assertEqual(app.focus, "list")
+
+    def test_drill_in_and_out(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        app.drill_in()
+        self.assertTrue(app.drill)
+        app.drill_out()  # Esc leaves drill first
+        self.assertFalse(app.drill)
+        app.focus = "detail"
+        app.drill_out()  # Esc then drops detail focus
+        self.assertEqual(app.focus, "list")
+
+
+class DrillLayoutTest(unittest.TestCase):
+    """Fullscreen drill on the narrow (master) preset: Enter replaces the
+    list-only body with a fullscreen detail; Esc returns."""
+
+    def test_drill_makes_detail_fullscreen_on_master(self) -> None:
+        from end_of_line.top_layout import LayoutEngine
+
+        lay = LayoutEngine().layout(40, 24, drill=True)
+        self.assertEqual(lay.preset, "master")
+        self.assertIn("detail", lay.rects)
+        self.assertNotIn("list", lay.rects)
+
+    def test_drill_ignored_when_split_already_shows_detail(self) -> None:
+        from end_of_line.top_layout import LayoutEngine
+
+        lay = LayoutEngine().layout(120, 40, drill=True)
+        self.assertEqual(lay.preset, "split")
+        self.assertIn("list", lay.rects)
+        self.assertIn("detail", lay.rects)
+
+
+class SelectionAwareDetailTest(unittest.TestCase):
+    """The detail pane tracks the cursor: it renders the SELECTED worker's full,
+    untruncated SAYING — and only that worker's, not the fleet's."""
+
+    def _draw(self, rows, app, w, h, *, drill=False):
+        from end_of_line.top_layout import LayoutEngine
+        from end_of_line.top_registry import Snapshot
+        from end_of_line.top_render import BufferSurface
+
+        s = BufferSurface(w, h)
+        layout = LayoutEngine().layout(w, h, drill=drill)
+        top._draw_panes(s, Snapshot(rows), layout, app=app)
+        return s, layout
+
+    def test_detail_shows_selected_worker_full_untruncated_saying(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        say = "HEAD_TOKEN " + "filler " * 60 + "TAIL_TOKEN"
+        rows = [
+            _draw_row(phase_id="a", last_text="alpha-only-text"),
+            _draw_row(phase_id="b", last_text=say),
+        ]
+        app = AppState()
+        app.sync_selection(rows)
+        app.move(1, rows)  # select b
+        s, layout = self._draw(rows, app, 120, 40)
+        det = layout.rects["detail"]
+        detail_text = " ".join(t for (_y, x, t) in s.cells if x >= det.x)
+        # full SAYING reproduced end-to-end (word-wrapped, never ellipsized)…
+        self.assertIn("HEAD_TOKEN", detail_text)
+        self.assertIn("TAIL_TOKEN", detail_text)
+        # …and the non-selected worker's text is absent from the detail region.
+        self.assertNotIn("alpha-only-text", detail_text)
+
+    def test_list_marks_the_selected_row(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        rows = [_draw_row(phase_id="a"), _draw_row(phase_id="b")]
+        app = AppState()
+        app.sync_selection(rows)
+        app.move(1, rows)  # select b
+        s, _layout = self._draw(rows, app, 120, 40)
+        cursor_cells = [c for c in s.cells if "▸" in c[2]]
+        self.assertEqual(len(cursor_cells), 1)  # exactly one row carries the cursor
+
+    def test_drilled_detail_renders_selected_worker(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        rows = [_draw_row(phase_id="a", last_text="DRILL_SAYING")]
+        app = AppState()
+        app.sync_selection(rows)
+        app.drill_in()
+        s, layout = self._draw(rows, app, 40, 24, drill=True)
+        self.assertNotIn("list", layout.rects)
+        txt = " ".join(t for (_y, _x, t) in s.cells)
+        self.assertIn("DRILL_SAYING", txt)
+
+    def test_empty_fleet_detail_is_safe(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        app.sync_selection([])
+        s, _layout = self._draw([], app, 120, 40)  # must not raise
+        self.assertIsInstance(s.cells, list)
+
+
+class HandleKeyTest(unittest.TestCase):
+    """The keypress dispatcher: read-only by invariant (D7), with the
+    list-vs-detail scroll split that mirrors the web."""
+
+    def setUp(self) -> None:
+        import curses
+
+        from end_of_line.top_layout import AppState, LayoutEngine
+
+        self.curses = curses
+        self.app = AppState()
+        self.engine = LayoutEngine()
+        self.rows = [_draw_row(phase_id=p) for p in ("a", "b", "c")]
+        self.app.sync_selection(self.rows)
+
+    def _key(self, ch, *, w=120, h=40, drill=False):
+        layout = self.engine.layout(w, h, drill=drill)
+        return top._handle_key(ch, self.app, self.rows, layout, self.curses)
+
+    def test_q_quits(self) -> None:
+        self.assertTrue(self._key(ord("q")))
+        self.assertFalse(self._key(self.curses.KEY_DOWN))
+
+    def test_arrows_move_selection_in_list_focus(self) -> None:
+        self._key(self.curses.KEY_DOWN)
+        self.assertEqual(self.app.selected_index, 1)
+        self._key(ord("k"))  # up
+        self.assertEqual(self.app.selected_index, 0)
+
+    def test_g_and_G_jump_to_ends(self) -> None:
+        self._key(ord("G"))
+        self.assertEqual(self.app.selected_index, 2)
+        self._key(ord("g"))
+        self.assertEqual(self.app.selected_index, 0)
+
+    def test_detail_focus_scrolls_instead_of_moving(self) -> None:
+        self.app.focus = "detail"  # split has a detail pane
+        self._key(self.curses.KEY_DOWN)
+        self.assertEqual(self.app.selected_index, 0)  # selection unchanged
+        self.assertEqual(self.app.scroll, 1)          # detail scrolled instead
+
+    def test_enter_drills_only_on_master_preset(self) -> None:
+        self._key(self.curses.KEY_ENTER, w=120, h=40)  # split → no drill
+        self.assertFalse(self.app.drill)
+        self._key(self.curses.KEY_ENTER, w=40, h=24)   # master → drills
+        self.assertTrue(self.app.drill)
+
+    def test_esc_leaves_drill(self) -> None:
+        self.app.drill = True
+        self._key(27)  # Esc
+        self.assertFalse(self.app.drill)
+
+    def test_w_cycles_layout_preset(self) -> None:
+        self.assertIsNone(self.app.layout_preset)
+        self._key(ord("w"))
+        self.assertEqual(self.app.layout_preset, "split")
+
+    def test_pagedown_in_drill_scrolls_by_detail_height_not_one(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        rows = [_draw_row(phase_id="a", last_text="word " * 400)]
+        app.sync_selection(rows)
+        app.drill_in()
+        layout = self.engine.layout(40, 24, drill=True)
+        det = layout.rects["detail"]
+        top._handle_key(self.curses.KEY_NPAGE, app, rows, layout, self.curses)
+        # A page is the scrolled pane's height — not the absent list rect's 1.
+        self.assertEqual(app.scroll, det.h - 1)
+        self.assertGreater(app.scroll, 1)
+
+    def test_focus_normalizes_to_list_when_no_detail_pane(self) -> None:
+        from end_of_line.top_layout import AppState
+
+        app = AppState()
+        rows = self.rows
+        app.sync_selection(rows)
+        app.focus = "detail"  # stale focus carried in from a wider geometry
+        layout = self.engine.layout(40, 24)  # master — list only, no detail
+        top._handle_key(self.curses.KEY_DOWN, app, rows, layout, self.curses)
+        self.assertEqual(app.focus, "list")
+        self.assertEqual(app.selected_index, 1)  # arrow moved selection, didn't scroll
+
+    def test_no_destructive_keybind(self) -> None:
+        # Every printable key that isn't bound is a no-op — the UI is read-only,
+        # so a stray keystroke must never mutate worker state or quit.
+        for ch in (ord("d"), ord("x"), ord("r"), ord("!"), ord(" ")):
+            self.assertFalse(self._key(ch))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -122,8 +122,15 @@ def _place(node: "Leaf | Split", rect: Rect, out: dict[str, Rect]) -> None:
         _place(node.second, Rect(rect.x, second_y, rect.w, rect.h - first_h - gap), out)
 
 
-def _body_tree(preset: str) -> "Leaf | Split":
-    """The split-tree for a preset's body (everything between header and hint)."""
+def _body_tree(preset: str, drill: bool = False) -> "Leaf | Split":
+    """The split-tree for a preset's body (everything between header and hint).
+
+    `drill` only bites on the list-only `master` preset (the narrow `<50` cols
+    phone case): Enter swaps the list for a fullscreen detail of the selected
+    worker, Esc swaps back. The split/stacked presets already show a detail pane,
+    so drill is a no-op there."""
+    if drill and preset == "master":
+        return Leaf("detail")
     if preset == "split":
         return Split("h", Leaf("list"), Leaf("detail"), _LIST_WEIGHT)
     if preset == "stacked":
@@ -145,7 +152,9 @@ class LayoutEngine:
     Stateless — `layout(width, height, override=None)` is pure, so the property
     test drives every geometry without a terminal."""
 
-    def layout(self, width: int, height: int, override: str | None = None) -> Layout:
+    def layout(
+        self, width: int, height: int, override: str | None = None, drill: bool = False
+    ) -> Layout:
         if width <= 0 or height <= 0:
             return Layout("fallback", {})
         preset = override if override in PRESETS else choose_preset(width, height)
@@ -164,18 +173,97 @@ class LayoutEngine:
             bottom -= 1
             rects["hint"] = Rect(0, bottom, width, 1)
         body = Rect(0, top, width, max(0, bottom - top))
-        _place(_body_tree(preset), body, rects)
+        _place(_body_tree(preset, drill), body, rects)
         return Layout(preset, rects)
+
+
+def row_key(row: dict) -> tuple[str | None, str | None, str | None]:
+    """A worker's stable identity `(project, plan, phase_id)` — the key the
+    cursor sticks to across ticks. Mirrors the web's `wkey` (web/index.html:249),
+    so the two dashboards re-resolve selection identically."""
+    return (row.get("project"), row.get("plan"), row.get("phase_id"))
+
+
+def _clamp(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
 
 
 @dataclass
 class AppState:
-    """Mutable state the panes share. `selected_key` / `scroll` / `focus` drive
-    the selection model in Phase 3; the engine reads only `layout_preset` (the
-    `w` override) and stamps `geometry` each tick."""
+    """Mutable state the panes share. The engine reads `layout_preset` (the `w`
+    override) and `drill`, and stamps `geometry` each tick; the rest is the
+    selection model.
 
-    selected_key: tuple[str, str, str] | None = None
+    Selection is **sticky by identity** (D5): `selected_key` is the worker the
+    cursor is bound to; `selected_index` is where it currently sits. Every tick
+    `sync_selection` re-resolves the index from the key, so a worker that
+    completes *above* the cursor never silently retargets it to a different
+    worker — the #1 QA risk this whole model exists to kill. `focus` flips
+    list↔detail (Tab) to scroll an overflowing detail; `scroll` is that pane's
+    offset, reset whenever the selection changes so it never shows a stale
+    position for a different worker; `drill` is the narrow-preset fullscreen."""
+
+    selected_key: tuple[str | None, str | None, str | None] | None = None
+    selected_index: int = 0
     geometry: tuple[int, int] = (0, 0)
     layout_preset: str | None = None
     focus: str = "list"
     scroll: int = 0
+    drill: bool = False
+
+    def sync_selection(self, rows: list[dict]) -> None:
+        """Re-resolve the cursor against this tick's rows, by identity not index.
+
+        If the bound worker is still present, follow it wherever it moved. If it
+        dropped out, clamp the old index into the new (shorter) list. If the list
+        emptied, clear the selection. Resetting the scroll on a key change keeps
+        the detail pane from showing the prior worker's scroll offset."""
+        if not rows:
+            self.selected_key = None
+            self.selected_index = 0
+            return
+        keys = [row_key(r) for r in rows]
+        if self.selected_key in keys:
+            self.selected_index = keys.index(self.selected_key)
+        else:
+            self.selected_index = _clamp(self.selected_index, 0, len(rows) - 1)
+        self._restamp(rows)
+
+    def move(self, delta: int, rows: list[dict]) -> None:
+        """Move the cursor by `delta` rows, clamped (no wrap, per D5)."""
+        self.move_to(self.selected_index + delta, rows)
+
+    def move_to(self, index: int, rows: list[dict]) -> None:
+        """Move the cursor to an absolute `index`, clamped to the row range."""
+        if not rows:
+            return
+        self.selected_index = _clamp(index, 0, len(rows) - 1)
+        self._restamp(rows)
+
+    def _restamp(self, rows: list[dict]) -> None:
+        """Bind `selected_key` to the row now under the cursor; reset the detail
+        scroll if that changed which worker is selected."""
+        key = row_key(rows[self.selected_index])
+        if key != self.selected_key:
+            self.scroll = 0
+            self.selected_key = key
+
+    def scroll_by(self, delta: int) -> None:
+        """Scroll the focused detail pane, clamped at the top (the draw step
+        clamps the bottom against the rendered line count)."""
+        self.scroll = max(0, self.scroll + delta)
+
+    def toggle_focus(self) -> None:
+        """Tab: flip focus between the list and the detail pane."""
+        self.focus = "detail" if self.focus == "list" else "list"
+
+    def drill_in(self) -> None:
+        """Enter: open the fullscreen detail (narrow preset)."""
+        self.drill = True
+
+    def drill_out(self) -> None:
+        """Esc: leave the fullscreen drill first; otherwise drop detail focus."""
+        if self.drill:
+            self.drill = False
+        elif self.focus == "detail":
+            self.focus = "list"
