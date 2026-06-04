@@ -93,6 +93,10 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 .dot{width:9px;height:9px;border-radius:50%;justify-self:center}
 .dot.ok{background:var(--teal);box-shadow:0 0 8px var(--teal);animation:beat 2.4s infinite}
 .dot.warn{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+/* blocked = needs-you (amber, pulsing like ok so it reads as live-but-waiting,
+   not red-dead): a plan parked on the operator after `clu block` released the
+   claim. Distinct hue from .dot.dead — must-act vs work-died. (#86 follow-on.) */
+.dot.blocked{background:var(--amber);box-shadow:0 0 8px var(--amber);animation:beat 2.4s infinite}
 .dot.dead{background:var(--red);box-shadow:0 0 8px var(--red);animation:none}
 .who{display:flex;flex-direction:column;min-width:0}
 .who .id{color:#dff6fb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -251,7 +255,7 @@ function tokenTotal(usage){
   }
   return seen ? total : null;
 }
-const DOT = {ok:"ok", warn:"warn", dead:"dead"};
+const DOT = {ok:"ok", warn:"warn", dead:"dead", blocked:"blocked"};
 function actCls(w){
   if (w.dead || w.act == null) return "";
   return w.act <= 15 ? "a-ok" : w.act <= 60 ? "" : "a-warn";
@@ -266,7 +270,11 @@ function toView(r){
   // so the two dashboards never disagree. `act > 60` is the pinned threshold
   // (mirrored below in Python); stuck + a heartbeat loop silent past 25min are
   // the two corroborating wedge signals folded in.
-  const health = !alive ? "dead"
+  // `r.blocked` is checked FIRST: a blocked row is claimless so `alive` is
+  // false — without this it would mis-classify as "dead". Mirrors the curses
+  // _m_health blocked-before-worker_health ordering (clu-dashboard-blocked).
+  const health = r.blocked ? "blocked"
+    : !alive ? "dead"
     : (r.stuck || act == null || act > 60 || (hb != null && hb > 1500)) ? "warn" : "ok";
   return {
     proj: r.project, plan: r.plan, phase: r.phase_id,
@@ -279,6 +287,10 @@ function toView(r){
     stuck: !!r.stuck, attempts: r.attempts, maxAttempts: r.max_attempts,
     leaseRemaining: r.lease_remaining_seconds,
     phaseIndex: r.phase_index, phaseTotal: r.phase_total,
+    // Blocked discriminator (clu-dashboard-blocked, append-only D10) — a plan
+    // waiting on the operator. blockerQuestion is worker/operator free text → esc().
+    blocked: r.blocked === true, blockerQuestion: r.blocker_question,
+    blockedSeconds: r.blocked_seconds,
   };
 }
 // Identity of a worker — stable across polls even as the list reorders.
@@ -313,11 +325,16 @@ function statusInner(){
     const msg = connected ? "no active workers" : "connecting…";
     return `<span class="run">${esc(msg)}</span><span class="age"></span>`;
   }
-  const alive = WORKERS.filter(w => !w.dead);
-  const r = alive.length, d = WORKERS.length - r;
+  // Blocked rows are claimless (dead=true) but are their own category — pull
+  // them out before the running/dead split so they don't inflate the dead count.
+  const blocked = WORKERS.filter(w => w.blocked);
+  const rest = WORKERS.filter(w => !w.blocked);
+  const alive = rest.filter(w => !w.dead);
+  const r = alive.length, d = rest.length - r, b = blocked.length;
   const acts = alive.map(w => w.act).filter(x => x != null);
   const oldest = acts.length ? age(Math.max(...acts)) : "—";
   return `<span class="run">${r} running</span><span class="sep">·</span>` +
+    (b ? `<span class="blk">${b} blocked</span><span class="sep">·</span>` : "") +
     `<span class="dead">${d} dead</span><span class="age">oldest-ACT ${oldest}</span>`;
 }
 // The running-* only makes sense beside a visible command; under
@@ -372,6 +389,15 @@ function buildRow(w){
 function patchRow(refs, w, isSel){
   refs.el.className = "row" + (isSel ? " sel" : "");
   refs.dot.className = "dot " + DOT[w.health];
+  // Blocked is gated BEFORE dead: a blocked row is claimless (dead=true) but
+  // reads as needs-you — amber BLK badge, the blocker question in .sub, a
+  // blocked-since age in the metrics slot (no PID/RAN/ACT — there's no worker).
+  if (w.blocked){
+    setHTML(refs.bdg, `<span class="badge blk">BLK</span>`);
+    setHTML(refs.sub, `<span class="cmd">${esc(w.blockerQuestion || "—")}</span>`);
+    setHTML(refs.met, `<span>— blocked ${age(w.blockedSeconds)} —</span>`);
+    return;
+  }
   setHTML(refs.bdg, w.dead ? `<span class="badge dead">DEAD</span>` : "");
   setHTML(refs.sub, `<span class="cmd">${runStar(w)}${esc(w.cmd)}</span> · ACT ${age(w.act)}`);
   setHTML(refs.met, w.dead
@@ -381,11 +407,19 @@ function patchRow(refs, w, isSel){
       `<span>HB <b>${age(w.hb)}</b></span>`);
 }
 function detailHTML(w){
-  const hc = w.dead
+  const hc = w.blocked
+    ? `<span style="color:var(--amber)">● blocked</span>`
+    : w.dead
     ? `<span style="color:var(--red)">● dead</span>`
     : w.health === "warn"
       ? `<span style="color:var(--amber)">● idle</span>`
       : `<span style="color:var(--teal)">● ok</span>`;
+  // Blocked rows lead with the blocker (the actionable datum) + blocked-since
+  // age; the worker metrics below are all "—" (claimless, no live worker).
+  const bl = w.blocked
+    ? `<span class="k">blocker</span><span class="v warn">${esc(w.blockerQuestion || "—")}</span>` +
+      `<span class="k">blocked</span><span class="v">${age(w.blockedSeconds)}</span>`
+    : "";
   const star = runStar(w);
   const ac = actCls(w);
   const sayTxt = w.say ? esc(w.say) : `<span style="color:var(--faint)">—</span>`;
@@ -402,6 +436,7 @@ function detailHTML(w){
   return `<div class="dh">${esc(w.proj)} / ${esc(w.plan)} <span class="ph">· ${esc(w.phase)}</span></div>
     <div class="health-chip">${hc}</div>
     <div class="kv">
+      ${bl}
       <span class="k">RAN</span><span class="v">${age(w.ran)}</span>
       <span class="k">ACT</span><span class="v ${ac === 'a-ok' ? 'cy' : ac === 'a-warn' ? 'warn' : ''}">${age(w.act)}</span>
       <span class="k">HB</span><span class="v">${age(w.hb)}</span>
