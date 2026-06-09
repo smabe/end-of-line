@@ -42,7 +42,7 @@ that workers dispatched via `claude --print '/clu-phase ...'` can act on.
 
 Detection: `test -f .orchestrator.json && echo OK`. If absent, say:
 > This project doesn't have `.orchestrator.json` — clu isn't managing
-> it. Use `/plan` instead (it produces a generic single-file plan).
+> it. Use `/plan` instead (the generic, non-clu plan skill).
 > If you want to make this a clu project first, run `clu init --project
 > . --plan <slug>` to bootstrap, then re-invoke `/clu-plan`.
 
@@ -105,6 +105,13 @@ inherits whatever the research got wrong. There is no "small plan"
 exception and no opt-out: research grounds the master, and the master
 is the contract the cold-context worker can't push back on.
 
+**Hand off opaque diagnostic cases to `/diagnose` first.** If the
+symptom is genuinely opaque (no obvious hypothesis, multiple plausible
+causes, intermittent reproduction), run `/diagnose` to find the root
+cause BEFORE scoping phases here. /diagnose finds the cause; clu-plan
+scopes the fix. A cold worker can't run a disciplined diagnosis loop
+mid-phase — don't ship it a master built on a guessed root cause.
+
 **Three mandatory research dimensions, each its own agent, dispatched
 in parallel in a single message:**
 
@@ -134,6 +141,36 @@ in parallel in a single message:**
 Each brief also carries: the slug + one-line plan goal, an explicit
 "You are NOT to invoke `/clu-plan` or `/plan`; research only, report
 under 400 words," and a request for file:line / URL+section citations.
+
+**Three framing questions to hold while designing the dispatch.**
+Everything below is scaffolding for these; answer them well and the
+rest mostly takes care of itself:
+
+1. **What's the shape of failure if the research is wrong?** Frame it
+   as a concrete falsifiable scenario (initial state, applied
+   conditions, expected vs. failing behavior). That scenario is the
+   load-test that lands at phase 1.
+2. **What finding would a generalist agent bury?** Whatever it is,
+   that's the brief for one specialist whose ONLY job is to surface it
+   as a primary finding — not a footnote under broader coverage.
+3. **How many genuinely distinct dimensions am I researching?** That's
+   your agent count beyond the three mandatory ones.
+
+**Agent count scales with research surface area — not plan size, not
+phase count.** Soft guidance for the extra slots beyond the three
+mandatory dimensions:
+
+- **0 extra** when the three mandatory dimensions cover everything (a
+  single contained change).
+- **1–2 extra** when the plan spans extra dimensions — e.g. a schema
+  bump wants migration + caller-impact specialists on top of the three;
+  a notify-channel change wants delivery-semantics + config-merge.
+- **3+ extra** when the plan is genuinely cross-cutting AND
+  specialization buys clarity (multi-module refactor, new subsystem).
+  The extra slots are for *role specialization*, not chasing the same
+  question harder.
+- **Stop adding agents** when the marginal one would re-cover another's
+  ground. Consolidation overhead grows with agent count; budget it.
 
 **Beyond the three, add specialist agents when the plan's shape
 demands it** (role specialization — each agent has one sharp job no
@@ -315,6 +352,14 @@ conflicts across worktrees were the canonical failure (clu #50;
 |---|---|---|---|
 | <phase-id> | `<slug>-<phase-id>.md` | <one-line scope> | <Nh> |
 | <next-phase-id> | `<slug>-<next-phase-id>.md` | ... | ... |
+
+## Findings log
+
+_Empty at plan time. As phases run, the worker appends one dated bullet
+per cross-phase finding — a gotcha, a spike result, an API surprise, an
+assumption that turned out wrong — so a later phase doesn't rediscover
+it. Cite file:line. Plan-time decisions stay in Locked design decisions;
+this section is runtime-only: written by workers, read by every phase._
 ```
 
 The Sessions index is load-bearing. `parse_sessions_index()` derives
@@ -349,6 +394,7 @@ See `plans/<slug>.md`. Summary:
 
 ## Read first
 
+- `plans/<slug>.md` `## Findings log` — prior phases' runtime findings (gotchas, spikes, wrong assumptions); empty if you're the first phase.
 - `<file:line>` — <why the worker needs this context>
 - `<file:line>` — <another>
 - `<existing test file>` — <pattern to mirror>
@@ -370,9 +416,18 @@ See `plans/<slug>.md`. Summary:
    - <Concrete check 3 — e.g. grep confirms no regressions>
 
 4. **Commit + attest + complete.**
+   - **Record cross-phase findings (if any).** If this phase surfaced
+     something a later phase would otherwise rediscover — a gotcha, a
+     spike result, an API surprise, an assumption that proved wrong —
+     append one dated bullet to `## Findings log` in `plans/<slug>.md`
+     (create the heading if the master predates this convention).
+     Nothing surfaced? Skip it; don't manufacture noise.
    - Structured commit: `<slug>: phase <phase-id> — <scope> (#issue
      if applicable)`.
-   - Stage explicit paths: `<file1>`, `<file2>`, `<test file>`.
+   - Stage explicit paths: `<file1>`, `<file2>`, `<test file>` (add
+     `plans/<slug>.md` if you logged a finding before committing; a
+     finding surfaced after the commit rides a follow-up commit —
+     re-stamp).
    - **After the commit** (HEAD must be the SHA being attested):
      - `clu verify --plan <slug> --phase <phase-id> --token <T>`
      - `clu attest --simplify --plan <slug> --phase <phase-id> --token <T>`
@@ -632,6 +687,18 @@ after step 1. Don't run `clu init` without explicit operator intent.
   an iron-clad invariant. Across worktrees the asymmetry auto-merges
   silently (project CLAUDE.md: "Non-goals are claims that need proof").
 
+- **Cross-phase findings flow through the master's `## Findings log`.**
+  A worker that discovers a gotcha, spike result, or wrong assumption a
+  later phase would otherwise rediscover appends a dated bullet there
+  before its phase commit; every worker reads it at dispatch (clu-phase
+  step 4). It's the runtime counterpart to plan-time Locked design
+  decisions — same master, different author and time. Deliberately NOT a
+  separate research file (clu workers already read the master every
+  phase, so a section costs no extra read and `/plan` bans split research
+  files) and NOT `state.json` (findings are worker-readable prose, not
+  machine coordination). One worktree per plan + sequential phases means
+  no intra-plan write contention on the master.
+
 - **No research deferrals — verify or block.** Every cited path,
   function name, schema field, config key, version, or external
   behavior in the master or a sub-plan is verified in Step 2 and
@@ -821,6 +888,10 @@ Smallest-first.
 |---|---|---|---|
 | timeout | `auth-cleanup-timeout.md` | Session timeout config + 401-on-expire (#100) | 1h |
 | rotation | `auth-cleanup-rotation.md` | 24h token rotation + 5min grace (closes #100 #101) | 2h |
+
+## Findings log
+
+_(empty at plan time — workers append cross-phase findings as phases run)_
 ```
 
 Why two phases and not one combined commit? Each phase closes an
