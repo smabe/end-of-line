@@ -64,3 +64,27 @@ class SkillDriftHealthTest(GitProjectTestCase):
         # clu-phase is in sync, so it must not appear in the drift list.
         drift_section = out[out.index("differ from the bundle"):]
         self.assertNotIn("clu-phase", drift_section)
+
+    def test_vendored_skill_not_flagged(self):
+        # `plan` is VENDORED — clu bundles it but isn't canonical for it, so an
+        # installed copy that differs from clu's bundle is the expected steady
+        # state, not drift. It must not appear in the drift warning.
+        self._install("plan", b"# the operator's own richer /plan\n")
+        out = self._doctor()
+        self.assertNotIn("differ from the bundle", out)
+
+    def test_vendored_differs_native_in_sync_is_quiet(self):
+        # A differing vendored skill alongside an in-sync native skill produces
+        # no drift section at all — the vendored difference is suppressed and the
+        # native skill matches.
+        self._install("plan", b"# operator's own /plan\n")  # vendored, differs
+        self._install("clu-phase", self._bundled("clu-phase"))  # native, in sync
+        out = self._doctor()
+        self.assertNotIn("differ from the bundle", out)
+
+    def test_vendored_skills_subset_of_bundled(self):
+        # Guards a typo in VENDORED_SKILLS that would silently never match a
+        # bundled skill (and so never suppress anything).
+        from end_of_line.cli import BUNDLED_SKILLS, VENDORED_SKILLS
+
+        self.assertTrue(VENDORED_SKILLS <= set(BUNDLED_SKILLS))

@@ -2230,6 +2230,16 @@ BUNDLED_SKILLS = (
     "plan",
 )
 
+# Skills clu bundles for convenience but is NOT the canonical source of —
+# `plan` / `brainstorm` are general skills the operator may maintain their own
+# (richer) copy of. An installed copy that differs from clu's bundle is the
+# expected steady state, not staleness, so the drift check skips them: warning
+# would be noise and its `install-skill --force` suggestion would clobber the
+# operator's copy with clu's. They stay installable/listable via install-skill;
+# only the unsolicited drift warning is suppressed. Must be a subset of
+# BUNDLED_SKILLS (tests/test_skill_drift.py guards this).
+VENDORED_SKILLS = frozenset({"brainstorm", "plan"})
+
 _CLU_NOTE_START = "<!-- clu:start autonomous-loop-pacing -->"
 _CLU_NOTE_END = "<!-- clu:end autonomous-loop-pacing -->"
 _CLU_NOTE_BODY = (
@@ -2652,6 +2662,8 @@ def _print_skill_drift_health() -> None:
 
     drifted: list[str] = []
     for name in BUNDLED_SKILLS:
+        if name in VENDORED_SKILLS:
+            continue  # clu isn't canonical for these — a local diff isn't drift.
         installed_path = Path.home() / ".claude" / "skills" / name / "SKILL.md"
         if not installed_path.exists():
             continue
