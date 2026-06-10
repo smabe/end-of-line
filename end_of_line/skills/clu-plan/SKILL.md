@@ -185,11 +185,10 @@ mandatory here when triggered:
   duplication (blocks ≥30 lines, ≥3 near-verbatim methods, shared
   chrome) with file:line, and recommend (a) **refactor-first**
   (extract the shared base/helper as its OWN phase, then build the new
-  file on top in a later phase) or (b) copy-and-defer. Default to (a).
-  In clu this maps cleanly: the refactor becomes the first row of the
-  Sessions index; the new file is a later row. Parallel worktrees make
-  silent duplication worse, so refactor-then-extend is the default,
-  not a `/code-review` afterthought.
+  file on top in a later phase) or (b) copy-and-defer. The policy
+  default and override mechanics live under Critical rules: "New file
+  mirrors an existing file? Refactor first by default" — in short,
+  (a) wins and becomes the first row of the Sessions index.
 
 - **Exclusion-safety specialist** — MANDATORY when a Non-goal will
   exclude some members of a peer set (some op types, endpoints,
@@ -199,9 +198,8 @@ mandatory here when triggered:
   groups, walk realistic call sequences for race/ordering/stale-state
   hazards (file:line), and recommend (a) **fold excluded into scope**
   or (b) keep the exclusion with a one-sentence iron-clad invariant.
-  Default to (a). This is the project CLAUDE.md rule "Non-goals are
-  claims that need proof" enforced at research time — and across
-  worktrees the asymmetry auto-merges silently.
+  The policy default lives under Critical rules: "Justify Non-goal
+  exclusions across peer sets" — in short, (a) wins.
 
 - **Algorithmic / inner-loop specialist** — MANDATORY for plans that
   cite a paper, GDC talk, engine docs, or a third-party primitive, or
@@ -219,22 +217,11 @@ web dimensions on a "pure docs/config" basis.
 understanding of the touched area; any forced binary decisions from
 the reuse / exclusion specialists, with the recommended option (baked
 into the draft as the default — see Step 3); and **no unverified
-claims**. There is no `TODO: verify` channel. If research couldn't
-close a question, that's the signal Step 2 isn't done — finish it
-before drafting. The only things research legitimately can't close are
-(a) genuine operator decisions (surfaced at approval, Step 4) and
-(b) empirical/runtime unknowns that truly need a running app or live
-system — these become the master's Diagnosis falsifiable test or the
-algorithmic load-test, never Locked-decisions facts. **(b) has a
-membership test — apply it, don't self-certify into it:** a question
-is empirical ONLY if a Read / grep / doc-fetch *this session* genuinely
-can't close it. If reading the code or docs would settle it, it is NOT
-empirical — verify it now. The tell that this is failing is a sub-plan
-whose acceptance says "verify X" where X is statically checkable (does
-this function branch on that flag? does this type have that field?) —
-that's the Step 2 work you skipped, not a deferral. For anything else
-that can't be verified, STOP before drafting and resolve it with the
-operator — never carry an unverified claim into the master.
+claims** (full rule under Critical rules: "No research deferrals —
+verify or block", including the only two legitimate carve-outs and
+the membership test for what counts as empirical). If research
+couldn't close a question, that's the signal Step 2 isn't done —
+finish it, or STOP and resolve it with the operator before drafting.
 
 ### Step 3: Draft all files in memory
 
@@ -254,17 +241,10 @@ ship.
 - **Every factual claim is backed by Step 2 findings.** Cite file:line
   / URL+section in the master and sub-plans wherever a claim depends on
   a verified source.
-- **Verify or block — no deferral channel.** Every cited path,
-  function name, schema field, config key, version, or external
-  behavior is verified in Step 2 and stated as fact with a file:line /
-  URL+section citation — or the plan isn't drafted. There is no
-  `TODO: verify`, no "I'll confirm during the phase," no placeholder.
-  If you can't verify it, STOP and resolve it with the operator first.
-  This is *stricter* in clu than in `/plan`: a cold-context worker
-  reads the master's Locked-decisions paths as settled and has no
-  operator to ask — an unverified path ships as wrong dispatch. The
-  guess/fact line is enforced by absence: every claim in the master is
-  verified, not "unmarked."
+- **Verify or block — no deferral channel** (full rule under Critical
+  rules: "No research deferrals — verify or block"). Every claim in
+  the master or a sub-plan is verified in Step 2 and cited with
+  file:line / URL+section, or the plan isn't drafted.
 - **Bake forced binary decisions in as the recommended option.** If
   the reuse specialist recommended a refactor-first split, draft the
   Sessions index with that refactor as the first row. If the exclusion
@@ -288,10 +268,11 @@ is a follow-up to a recent incident, name the incident.>
 - **Falsifiable test:** <a one-line experiment runnable in seconds that
   CONFIRMS or DISPROVES the hypothesis before "Files touched" is scoped>
 - **Test result:** <run it during Step 2. Record what you observed. If
-  it disproves the hypothesis, STOP — return to Step 2 research with the
-  negative result as a sharper question; do NOT draft phases yet. The
-  master commits paths workers can't second-guess, so a wrong target
-  here ships as wrong worker dispatch.>
+  it confirms the hypothesis, scope phases normally. If it disproves
+  it, STOP — return to Step 2 research with the negative result as a
+  sharper question; do NOT draft phases yet. The master commits paths
+  workers can't second-guess, so a wrong target here ships as wrong
+  worker dispatch.>
 
 ## Locked design decisions
 
@@ -328,9 +309,13 @@ conflicts across worktrees were the canonical failure (clu #50;
 ## Per-phase done checklist
 
 - TDD: failing tests first.
-- `/code-review` after if diff >1 file or ~30 lines.
+- `/code-review` after if diff >1 file or ~30 lines — plus any review
+  gates the project's own CLAUDE.md mandates for this diff type (UI
+  review passes, screenshot evidence, lint gates). Project gates
+  compose with `/code-review`; they don't replace it.
 - Full suite green: `python3 -m unittest discover -s tests` (or this
-  project's primary check).
+  project's canonical pre-commit gate — a green subset the gate
+  doesn't sanction is not green).
 - Structured commit format (Title / Why / What's new / Under the hood /
   Tests / `Co-Authored-By:` trailer).
 - Stage explicit paths (no `git add -A`).
@@ -495,7 +480,20 @@ When the operator says `ship` (or equivalent):
    — if the plan files are on a different branch, the worker worktree
    won't see them. Commit + push to main BEFORE `clu init`.
 
-3. **Run `clu init` per plan (if the operator wants queueing now):**
+3. **Re-validate before a delayed `clu init`.** If queueing happens
+   later than authoring — the plan files were written in a prior
+   session, or main has advanced since Step 2 verified the plan's
+   claims (other plans merged, manual commits landed) — run the
+   mechanical drift sweep first: `git log --oneline <commit that
+   authored the plan>.. -- <every path in ## Files touched>`. Any
+   commit touching those paths is exactly where drift lives; read
+   those diffs and re-verify the master's affected claims (or re-run
+   Step 2 on the drifted area) before dispatch. A cold worker reads
+   Locked-decisions paths as settled and can't detect that main moved
+   under them. Authoring and queueing in the same session with no
+   intervening merges: skip, nothing can have drifted.
+
+4. **Run `clu init` per plan (if the operator wants queueing now):**
    ```bash
    clu init --project . --plan <slug> --worktree --no-claude-md
    ```
@@ -503,13 +501,13 @@ When the operator says `ship` (or equivalent):
    `--no-claude-md` if the project's CLAUDE.md is already set up to
    avoid the prompt (most operators).
 
-4. **Run `clu queue add` in ONE call** (atomic per the queue-ux-hardening
+5. **Run `clu queue add` in ONE call** (atomic per the queue-ux-hardening
    ship):
    ```bash
    clu queue add --project . <slug-1> <slug-2> <slug-3>
    ```
 
-5. **Confirm to the operator** with the dispatched state. Both
+6. **Confirm to the operator** with the dispatched state. Both
    `clu init` and `clu queue add` print a one-line resolved-model
    summary (worker-model-line #51) — surface it to the operator if
    they're choosing between sonnet/opus for this run:
@@ -519,7 +517,7 @@ When the operator says `ship` (or equivalent):
    clu watch --all --task-list           # fleet stream (alt to list)
    ```
 
-6. **Arm live progress monitoring** via the Monitor tool — only when
+7. **Arm live progress monitoring** via the Monitor tool — only when
    the SessionStart hook hasn't already done it. The hook
    (`end_of_line/hooks/clu_session_start.py`) auto-arms one
    `--task-list` Monitor per active plan on every fresh session in a
@@ -550,7 +548,7 @@ When the operator says `ship` (or equivalent):
    not redundant: `--operator` is host-wide wedge surfacing,
    `--task-list` is per-plan execution progress.
 
-7. **Tear down the Monitor when the plan completes.** The single
+8. **Tear down the Monitor when the plan completes.** The single
    teardown trigger is `TASK_UPDATE task=<slug> status=completed`
    with NO `parent=` field — that's the whole-plan completion event
    (emitted on `EVENT_PLAN_COMPLETED`), not a phase event. When that
@@ -620,6 +618,15 @@ prefix — fall back to free-text interpretation.
 
 If the operator only wants the files authored (not queued yet), stop
 after step 1. Don't run `clu init` without explicit operator intent.
+
+An authored-but-never-init'ed plan is invisible to clu's archive
+machinery — nothing will ever clean it up. If it's later superseded or
+the operator says it's dead, prepend a one-line `> **ABANDONED
+<date>:** <reason>` banner to the master and move the master + every
+sub-plan to `plans/archive/<slug>/` yourself. Dead plan files left in
+`plans/` are a queue accident waiting for a future session. (When in
+doubt whether a lingering plan was ever init'ed, check for
+`plans/.orchestrator/<slug>.state.json`.)
 
 ## Critical rules
 
@@ -713,7 +720,14 @@ after step 1. Don't run `clu init` without explicit operator intent.
   operator decisions (surfaced at approval, Step 4) and (b) empirical/
   runtime unknowns that truly need a running app or live system (the
   master's Diagnosis falsifiable test or the algorithmic load-test),
-  never Locked-decisions facts.
+  never Locked-decisions facts. **(b) has a membership test — apply
+  it, don't self-certify into it:** a question is empirical ONLY if a
+  Read / grep / doc-fetch *this session* genuinely can't close it. If
+  reading the code or docs would settle it, it is NOT empirical —
+  verify it now. The tell that this is failing is a sub-plan whose
+  acceptance says "verify X" where X is statically checkable (does
+  this function branch on that flag? does this type have that
+  field?) — that's the Step 2 work you skipped, not a deferral.
 
 - **Sub-plan failure modes are not a sink for unresolved
   verifications.** Each `## Failure modes to watch` entry must be a
@@ -726,11 +740,11 @@ after step 1. Don't run `clu init` without explicit operator intent.
   uncertain *after* everything statically knowable is verified.
 
 - **Perf/bug plans: run the Diagnosis falsifiable test in Step 2,
-  BEFORE drafting the Sessions index.** Fill the master's Diagnosis
-  section. If the test disproves the hypothesis, return to Step 2
-  research with the negative result; don't phase a fix against the
-  wrong target. Files-read alone doesn't ground a diagnosis;
-  "I disabled X and the symptom didn't change" does.
+  BEFORE drafting the Sessions index.** Protocol per the master
+  template's Diagnosis commentary (confirmed → scope normally;
+  disproved → back to Step 2 with the negative result as the sharper
+  question). Files-read alone doesn't ground a diagnosis; "I disabled
+  X and the symptom didn't change" does.
 
 - **For ALGORITHMIC plans** (signals: cites a paper, uses a constraint
   solver, implements physics/integrator/control loop), the
