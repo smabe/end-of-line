@@ -316,6 +316,19 @@ bypasses permission checks.
 - `dispatch_for_tick(result, cfg, plan_slug, state_file)` — the only
   public entry point for phase dispatch. Returns `True` on spawn,
   `False` on no-op or fast-fail.
+- `build_worker_env(cfg, *, plan_slug=None, phase_id=None, token=None)`
+  — env dict for the worker `Popen`, or `None` to inherit. Merges (not
+  replaces) `os.environ` with the optional `dispatch.path` PATH
+  override. When the claim kwargs are provided (phase dispatch), also
+  injects `CLU_PLAN` / `CLU_PHASE` / `CLU_TOKEN` / `CLU_PROJECT` so
+  Claude Code hooks inside the worker (the activity hook) inherit the
+  claim identity — worker-side `export` can't deliver this because env
+  doesn't persist across Bash tool calls in headless `--print`
+  sessions (#91). Repair workers pass no kwargs: they carry no claim
+  or token, and the activity hook's empty-token short-circuit is the
+  correct behavior for them. Cfg-only call with no PATH override keeps
+  returning `None` — `clu doctor`'s "(source: inherited)" display
+  depends on it.
 - `dispatch_repair_worker(cfg, corrupt_path, backup_path, diagnosis,
   log_path, *, timeout_sec=60)` — synchronous repair-worker spawn for a
   corrupt `queue.json`. Renders `cfg.dispatch.repair_command`, waits for

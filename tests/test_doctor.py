@@ -52,7 +52,45 @@ class BuildWorkerEnvTestCase(unittest.TestCase):
     def test_build_worker_env_without_path_override(self) -> None:
         # Empty string is the missing-field default; helper must treat
         # it as "no override" and return None so the caller leaves env unset.
+        # Regression pin for cmd_doctor's "(source: inherited)" display.
         self.assertIsNone(dispatch.build_worker_env(self._cfg("")))
+
+    def test_build_worker_env_claim_kwargs_inject_clu_vars(self) -> None:
+        env = dispatch.build_worker_env(
+            self._cfg("/foo:/bar"),
+            plan_slug="my-plan",
+            phase_id="impl",
+            token="session-tok",
+        )
+        self.assertIsNotNone(env)
+        assert env is not None
+        self.assertEqual(env["CLU_PLAN"], "my-plan")
+        self.assertEqual(env["CLU_PHASE"], "impl")
+        self.assertEqual(env["CLU_TOKEN"], "session-tok")
+        self.assertEqual(env["CLU_PROJECT"], "/tmp/x")
+        # PATH override composes with injection.
+        self.assertEqual(env["PATH"], "/foo:/bar")
+        # Merge semantic: HOME survives (the bug from #9).
+        if "HOME" in os.environ:
+            self.assertEqual(env["HOME"], os.environ["HOME"])
+
+    def test_build_worker_env_claim_kwargs_without_path_override(self) -> None:
+        # No PATH override used to mean "return None, inherit". With claim
+        # kwargs the dict must still materialize so CLU_* reach the worker.
+        env = dispatch.build_worker_env(
+            self._cfg(""),
+            plan_slug="my-plan",
+            phase_id="impl",
+            token="session-tok",
+        )
+        self.assertIsNotNone(env)
+        assert env is not None
+        self.assertEqual(env["CLU_PLAN"], "my-plan")
+        self.assertEqual(env["CLU_PHASE"], "impl")
+        self.assertEqual(env["CLU_TOKEN"], "session-tok")
+        self.assertEqual(env["CLU_PROJECT"], "/tmp/x")
+        # No override → PATH passes through from os.environ untouched.
+        self.assertEqual(env.get("PATH"), os.environ.get("PATH"))
 
 
 class _DoctorProjectTestCase(unittest.TestCase):

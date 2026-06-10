@@ -15,7 +15,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
-from end_of_line.dispatch import dispatch_for_tick, resolved_model
+from end_of_line.dispatch import dispatch_for_tick, dispatch_repair_worker, resolved_model
 from end_of_line.supervisor import TickResult
 from tests import CluTestCase
 
@@ -158,6 +158,23 @@ class DispatchTestCase(CluTestCase):
         """
         captured = self._capture_env_value("PATH", path="/usr/bin:/bin")
         self.assertEqual(captured, "/usr/bin:/bin")
+
+    def test_dispatch_env_carries_claim_identity(self) -> None:
+        """Worker env gets CLU_PLAN/PHASE/TOKEN/PROJECT injected at Popen (#91).
+
+        Hooks inside the worker (the activity hook) inherit the worker
+        process env — this is what keeps `tool_stuck` coverage alive for
+        headless `--print` workers, where worker-side `export` never
+        persists across Bash tool calls.
+        """
+        captured = self._capture_via_sentinel(
+            payload=(
+                'printf "%s|%s|%s|%s" "$CLU_PLAN" "$CLU_PHASE"'
+                ' "$CLU_TOKEN" "$CLU_PROJECT" > {s}'
+            ),
+            sentinel_name="clu_env.captured",
+        )
+        self.assertEqual(captured, f"t|a|{self.token}|{self.project}")
 
     def test_dispatch_with_path_preserves_home(self) -> None:
         """Custom PATH must MERGE with os.environ, not replace it.
@@ -395,6 +412,37 @@ class ResolvedModelTestCase(unittest.TestCase):
         # shlex.split raises on unterminated quote — treat as absent
         # rather than crash the CLI on init/queue-add.
         self.assertIsNone(resolved_model("claude --print 'oops"))
+
+
+class RepairWorkerEnvTestCase(CluTestCase):
+    """Repair workers carry no claim — no CLU_* identity injection (#91)."""
+
+    def test_repair_worker_env_has_no_claim_identity(self) -> None:
+        from unittest import mock
+
+        sentinel = self.tmp_path / "repair_env.captured"
+        # Doubled braces survive the repair-template .format() as literals,
+        # so the worker shell sees ${CLU_TOKEN-unset}.
+        cmd = 'sh -c \'printf "%s" "${{CLU_TOKEN-unset}}" > ' + str(sentinel) + "'"
+        cfg = ProjectConfig(
+            project_root=self.tmp_path,
+            dispatch=DispatchSpec(kind="shell", command="ignored", repair_command=cmd),
+        )
+        # Deterministic regardless of how THIS test process was launched:
+        # a clu-dispatched worker running the suite has CLU_TOKEN set, and
+        # env=None inheritance would leak it into the child.
+        with mock.patch.dict(os.environ):
+            for key in ("CLU_PLAN", "CLU_PHASE", "CLU_TOKEN", "CLU_PROJECT"):
+                os.environ.pop(key, None)
+            rc = dispatch_repair_worker(
+                cfg,
+                self.tmp_path / "corrupt.json",
+                self.tmp_path / "backup.json",
+                "diag",
+                self.tmp_path / "repair.log",
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(sentinel.read_text(), "unset")
 
 
 if __name__ == "__main__":

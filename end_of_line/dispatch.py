@@ -111,16 +111,42 @@ def resolved_model(cmd_tmpl: str) -> str | None:
     return None
 
 
-def build_worker_env(cfg: ProjectConfig) -> dict[str, str] | None:
+def build_worker_env(
+    cfg: ProjectConfig,
+    *,
+    plan_slug: str | None = None,
+    phase_id: str | None = None,
+    token: str | None = None,
+) -> dict[str, str] | None:
     """Return the env dict to pass to subprocess.Popen, or None to inherit.
 
     Merges (not replaces) os.environ when an override is configured — a bare
     {"PATH": ...} would strip HOME/USER and break `claude --print` in the
     worker (the #9 regression). Empty path == no override == inherit.
+
+    When the claim kwargs are provided (phase dispatch), also injects
+    CLU_PLAN / CLU_PHASE / CLU_TOKEN / CLU_PROJECT so processes inside the
+    worker — specifically Claude Code hooks, which inherit the worker's
+    env — know the claim identity. Worker-side `export` can't do this:
+    env doesn't persist across Bash tool calls in headless `--print`
+    sessions (#91). Repair workers pass no kwargs on purpose: they carry
+    no claim or token, and the activity hook's empty-token short-circuit
+    is the correct behavior for them. Cfg-only calls with no PATH
+    override keep returning None (inherit) — cmd_doctor's
+    "(source: inherited)" display depends on it.
     """
+    inject = plan_slug is not None or phase_id is not None or token is not None
+    if not cfg.dispatch.path and not inject:
+        return None
+    env = {**os.environ}
     if cfg.dispatch.path:
-        return {**os.environ, "PATH": cfg.dispatch.path}
-    return None
+        env["PATH"] = cfg.dispatch.path
+    if inject:
+        env["CLU_PLAN"] = plan_slug or ""
+        env["CLU_PHASE"] = phase_id or ""
+        env["CLU_TOKEN"] = token or ""
+        env["CLU_PROJECT"] = str(cfg.project_root)
+    return env
 
 
 def _match_systemic_signature(log_path: Path, *, rc: int) -> str | None:
@@ -243,7 +269,13 @@ def dispatch_for_tick(
         cwd=cwd,
         start_new_session=True,
     )
-    if (worker_env := build_worker_env(cfg)) is not None:
+    worker_env = build_worker_env(
+        cfg,
+        plan_slug=plan_slug,
+        phase_id=result.phase_id,
+        token=result.token,
+    )
+    if worker_env is not None:
         popen_kwargs["env"] = worker_env
 
     try:

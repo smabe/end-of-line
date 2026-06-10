@@ -115,3 +115,18 @@ Verified ground truth (2026-06-10 session):
 
 _Empty at plan time. Workers append one dated bullet per cross-phase finding
 (gotcha, spike result, API surprise, wrong assumption) with file:line._
+
+- 2026-06-10 (inject, #90 dogfood): under the hardened worker sandbox the
+  full suite has 30 environment failures — `tests/test_webserver.py` (21
+  errors, `socket.bind` → `PermissionError`: Seatbelt blocks listening) and
+  `tests/test_reap_orphan_pgroup.py` / `test_terminalize.py` /
+  `test_zombie_sweep.py` (9 failures, can't signal spawned process groups).
+  Stash-verified identical on the pristine tree — not diff-caused. `clu
+  verify` runs sandbox-exempt (`sandbox.excludedCommands`) and is the
+  authoritative green; don't chase these in-session.
+- 2026-06-10 (inject, #90 dogfood): dontAsk denial shapes seen live —
+  compound Bash with `$(cd ...)`/command substitution denied even when each
+  half is allowlisted; the Read tool denied on canonical-project paths
+  outside the worktree (`plans/.orchestrator/logs/...`) while plain
+  allowlisted Bash (`ls`, `grep`) on the same paths works. Neither blocked
+  the phase; `clu` callbacks, `git`, and `python3` ran clean throughout.
