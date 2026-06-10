@@ -102,8 +102,15 @@ Don't re-litigate without a real reason:
   Pushover.
 - **Quiet hours:** 22:00–08:00 local. Halt bypasses; everything else
   defers.
-- **Worker sandbox:** document-only for v0.1. The operator owns what
-  the worker LLM does.
+- **Worker dispatch is hardened (#90):** scoped permissions
+  (`--permission-mode dontAsk` + one comma-joined `--allowedTools`) as
+  friction, Claude Code's native Seatbelt sandbox as the boundary
+  (`~/.config/clu/worker-settings.json`, emitted by `clu init`), and
+  `clu block` as the escape hatch on denial. `clu` itself runs
+  sandbox-exempt via `sandbox.excludedCommands` so callbacks and
+  notifications keep working. Recipe + allowlist rationale:
+  `docs/operations.md` "Hardened worker dispatch";
+  template: `examples/hardened.orchestrator.json`.
 
 ## Sister project
 

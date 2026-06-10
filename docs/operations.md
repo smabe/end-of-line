@@ -631,13 +631,25 @@ claude --print --model claude-fable-5 --permission-mode dontAsk \
   --max-budget-usd 20.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'
 ```
 
-Two CLI requirements, both empirical (2026-06-10):
+Three deployment requirements, all empirical (2026-06-10):
 
 - **`--allowedTools` MUST be one comma-joined argument.** The flag is
   variadic — split across multiple arguments it eats the following
   prompt argument and the worker never receives `/clu-phase`.
 - **The `--settings` path MUST be absolute.** `~` is not reliably
   expanded inside the `shell=True` dispatch line when quoted.
+- **`dispatch.path` MUST include clu's bin dir** (see
+  `examples/hardened.orchestrator.json`). Cron dispatch inherits the
+  LaunchAgent's minimal PATH; without the override, the worker's `clu`
+  calls exit 127 and the worker falls back to the absolute path —
+  which silently defeats the `excludedCommands: ["clu *"]` sandbox
+  exemption (the pattern prefix-matches the literal command text, so
+  `/Users/<you>/.local/bin/clu …` runs *inside* the sandbox, and any
+  callback that writes outside the working tree — canonical-root state
+  for worktree plans, the `~/.config/clu` inbox — dies with
+  `Operation not permitted`). Caught by the live denial smoke; the
+  blocker landed only because that scratch project's state file sat
+  under the sandbox-writable cwd.
 
 **Version floor: claude ≥ 2.1.170.** Some 2.1.11x builds deny `$VAR`
 expansion inside allowlisted Bash calls (anthropics/claude-code#51001),
@@ -702,6 +714,13 @@ to treat a denial that blocks the phase as a `clu block` trigger, so
 the failure mode is a focused iMessage question, not a silent
 lease-expiry.
 
+Off-allowlist commands are not always refused outright: a command the
+sandbox can contain may execute *inside* it and fail at the boundary
+instead (live smoke: `curl https://example.com` ran and exited 56 on
+the network block rather than being denied). Same net containment —
+the allowlist gates what reaches the host unsandboxed; the sandbox is
+the wall.
+
 ### Guard rails
 
 - `clu doctor` warns when `dispatch.command` or
@@ -710,6 +729,13 @@ lease-expiry.
   clean.
 - `clu init` materializes the settings template (above) and prints the
   hardened-command hint when the file is absent.
+- **Migration ordering:** install the daemon-era `/clu-phase` skill
+  (`clu install-skill`) BEFORE swapping `dispatch.command` to the
+  hardened recipe. The pre-daemon skill arms heartbeats with a
+  background bash compound that scoped permissions deny (#90 spike
+  Test B), so an old-skill worker dispatched under the new command
+  runs heartbeat-less until lease expiry. `clu doctor`'s skill-drift
+  check flags the stale install.
 
 ### Residual gaps (v1, documented not fixed)
 

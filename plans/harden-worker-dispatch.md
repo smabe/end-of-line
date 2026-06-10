@@ -162,6 +162,43 @@ that turned out wrong — so a later phase doesn't rediscover it. Cite file:line
   tick (or kill and check the sidecar `logs/<phase>.<token>.hb.log`) to prove
   the daemon. Both self-exit paths verified live: dead worker PID →
   `exit_worker_dead`, released claim + live PID → `exit_claim_gone`.
+- 2026-06-10 (migrate-dogfood): **`dispatch.path` is REQUIRED in the hardened
+  recipe.** Cron dispatch inherits the LaunchAgent's minimal PATH → bare `clu`
+  exits 127 → workers fall back to the absolute path → which defeats the
+  `excludedCommands: ["clu *"]` prefix match → clu runs INSIDE the sandbox →
+  callbacks that write outside cwd (canonical-root state for worktree plans,
+  the `~/.config/clu` inbox) die with EPERM. Live-proven both directions:
+  smoke v1 (no path) logged `notify: inbox write failed (blocker): [Errno 1]`;
+  smoke v2 (with path) landed the blocker in the inbox. operations.md recipe +
+  `examples/hardened.orchestrator.json` updated.
+- 2026-06-10 (migrate-dogfood): **`$PPID` doesn't survive scoped-permission
+  dispatch** (extends Test B: variable-bearing/compound Bash calls fail prefix
+  matching; workers also can't persist shell state across calls in `--print`).
+  Fix shipped in this phase: `clu heartbeat-daemon --worker-pid` is now
+  optional, defaulting to the claim's dispatcher-stamped PID (`cmd_heartbeat_daemon`,
+  cli.py; SKILL.md step 2 rewritten flag-free). Round-3 smoke validates the
+  flat no-PID arm.
+- 2026-06-10 (migrate-dogfood): off-allowlist flat commands may EXECUTE inside
+  the sandbox and fail at its boundary instead of being permission-denied —
+  `curl https://example.com` ran and exited 56 on the network block. Same net
+  containment, different mechanism than Test A's denial path. Docs note added.
+- 2026-06-10 (migrate-dogfood): transient — one of two simultaneously
+  dispatched sandboxed workers had Bash entirely unavailable (smoke-happy2
+  attempt 1); suspected sandbox-init contention under `failIfUnavailable`.
+  Defense-in-depth held: worker stopped cleanly without callbacks, the
+  dead-PID watchdog re-dispatched in 3s, attempt 2 completed. Unreproduced.
+- 2026-06-10 (migrate-dogfood): step 2b's `CLU_*` env exports are ineffective
+  in headless workers — shell state doesn't persist across Bash calls, so the
+  activity hook short-circuits and `tool_stuck` coverage is absent for ALL
+  `--print` workers (pre-dates this plan). Candidate fix for a follow-up:
+  dispatcher injects `CLU_PLAN/PHASE/TOKEN/PROJECT` into the worker env at
+  Popen time (`build_worker_env` already merges os.environ).
+- 2026-06-10 (migrate-dogfood): a project-level `.claude/skills/clu-phase/`
+  copy CANNOT shadow the user-level skill of the same name (probe, claude
+  2.1.170; the user-level copy won) — the smoke used a renamed project-level
+  copy (`clu-phase-hardened`). Real migrations instead require `clu
+  install-skill` BEFORE the next dispatch under the hardened command
+  (migration-ordering note added to operations.md guard rails).
 - 2026-06-10 (guard-recipe): `worker-settings.template.json` is registered in
   pyproject `[tool.setuptools.package-data]` beside `skills/`, but the live
   install is editable — `importlib.resources` resolves from the source tree,
@@ -171,3 +208,19 @@ that turned out wrong — so a later phase doesn't rediscover it. Cite file:line
   should disappear after the config swap; re-run `clu doctor` to confirm
   both that and that init does NOT re-emit over the operator's existing
   `~/.config/clu/worker-settings.json` (never-overwrite contract).
+- 2026-06-10 (migrate-dogfood, attempt 3): headless dispatch PATH also poisons
+  the TOOLCHAIN, not just `clu` resolution — bare `python3` resolved to Xcode's
+  3.9 (172 import errors: `datetime.UTC` needs 3.11+) and `openssl` to Apple
+  LibreSSL 3.3 (no `-ext` flag; 2 `clu serve` TLS test errors). Both vanish
+  with `/opt/homebrew/bin` first on PATH. The hardened recipe's
+  `dispatch.path` (homebrew first) fixes this for future workers; the swap
+  also makes `test_command`'s bare `python3` resolve correctly under
+  `clu verify`.
+- 2026-06-10 (operator, post-mortem of migrate-dogfood attempt-1 death):
+  do NOT launch the smoke dispatches or test suite as BACKGROUND tasks and
+  end your turn "standing by" — a `--print` worker process EXITS when its
+  final message is emitted; there is no later re-invocation. Attempt 1 died
+  exactly this way (pid 12608, last log line "Standing by", no
+  complete/block called; dead-PID rule released the claim). Run every smoke
+  dispatch and suite run SYNCHRONOUSLY (foreground Bash, generous timeout),
+  and call `clu complete`/`clu block` before your final message.

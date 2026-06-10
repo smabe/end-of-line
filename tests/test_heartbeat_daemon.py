@@ -212,15 +212,17 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def _argv(self, *, phase: str = "a", token: str | None = None,
-              worker_pid: str = "12345") -> list[str]:
-        return [
+              worker_pid: str | None = "12345") -> list[str]:
+        argv = [
             "heartbeat-daemon",
             "--project", str(self.project),
             "--plan", "test-plan",
             "--phase", phase,
             "--token", token or self.token,
-            "--worker-pid", worker_pid,
         ]
+        if worker_pid is not None:
+            argv += ["--worker-pid", worker_pid]
+        return argv
 
     def test_bad_phase_slug_rejected(self) -> None:
         with mock.patch.object(hbd, "run") as run:
@@ -260,6 +262,36 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
         # Arm-time validation doubles as the first heartbeat.
         stamp = st.load(self.state_path)["current_claim"]["last_heartbeat_at"]
         self.assertNotEqual(stamp, "2020-01-01T00:00:00Z")
+
+    def test_omitted_worker_pid_defaults_to_claim_pid(self) -> None:
+        # The dispatcher stamps the worker PID into the claim; under
+        # scoped-permission dispatch `$PPID` doesn't survive the
+        # permission matcher, so the flag must be optional (#90 smoke).
+        with st.mutate(self.state_path) as data:
+            data["current_claim"]["pid"] = 54321
+        with mock.patch.object(hbd, "run", return_value=0) as run:
+            rc = main(self._argv(worker_pid=None))
+        self.assertEqual(rc, 0)
+        self.assertEqual(run.call_args.kwargs["worker_pid"], 54321)
+
+    def test_omitted_worker_pid_without_claim_pid_rejected(self) -> None:
+        with st.mutate(self.state_path) as data:
+            data["current_claim"]["pid"] = None
+        with mock.patch.object(hbd, "run") as run:
+            rc = main(self._argv(worker_pid=None))
+        self.assertEqual(rc, 8)  # ExitCode.INVALID_VALUE
+        run.assert_not_called()
+
+    def test_omitted_worker_pid_with_nonpositive_claim_pid_rejected(self) -> None:
+        # A non-positive claim pid must not reach the daemon: os.kill(-1, 0)
+        # signals every process the user owns, so a corrupt stamp would make
+        # the liveness probe always succeed.
+        with st.mutate(self.state_path) as data:
+            data["current_claim"]["pid"] = -7
+        with mock.patch.object(hbd, "run") as run:
+            rc = main(self._argv(worker_pid=None))
+        self.assertEqual(rc, 8)  # ExitCode.INVALID_VALUE
+        run.assert_not_called()
 
     def test_sidecar_log_path_uses_phase_and_token(self) -> None:
         with mock.patch.object(hbd, "run", return_value=0) as run:

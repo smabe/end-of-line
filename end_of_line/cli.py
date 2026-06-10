@@ -1090,10 +1090,12 @@ def main(argv: list[str] | None = None) -> int:
     p_hb_daemon.add_argument("--phase", required=True)
     p_hb_daemon.add_argument(
         "--worker-pid",
-        required=True,
         type=int,
+        default=None,
         dest="worker_pid",
-        help="Worker PID the daemon tracks; the daemon exits when it dies",
+        help="Worker PID the daemon tracks; the daemon exits when it dies "
+        "(default: the claim's dispatcher-stamped PID — `$PPID` doesn't "
+        "survive scoped-permission dispatch)",
     )
 
     p_notify_hbf = sub.add_parser(
@@ -5882,31 +5884,43 @@ def cmd_heartbeat_daemon(args, cfg: ProjectConfig, state_path: Path) -> int:
     worker PID, and the token against the live claim — the validation ping
     doubles as the first heartbeat, so a forged or stale token dies here
     with CLAIM_MISMATCH instead of silently in a daemon log.
+
+    `--worker-pid` is optional: scoped-permission dispatch denies Bash
+    calls carrying `$PPID` (#90 live smoke), so the default is the claim's
+    PID — stamped by the dispatcher at Popen time, which is exactly the
+    worker process the daemon should track.
     """
     try:
         st.validate_slug(args.phase, kind="phase id")
     except st.InvalidSlug as exc:
         return _die(ExitCode.INVALID_SLUG, str(exc))
-    if args.worker_pid <= 0:
+    if args.worker_pid is not None and args.worker_pid <= 0:
         return _die(
             ExitCode.INVALID_VALUE,
             f"--worker-pid must be a positive PID, got {args.worker_pid}",
         )
     with st.mutate(state_path) as data:
         ts = st.record_heartbeat(data, args.token, args.phase)
+        worker_pid = args.worker_pid or (data.get("current_claim") or {}).get("pid")
+    if not worker_pid or worker_pid <= 0:
+        return _die(
+            ExitCode.INVALID_VALUE,
+            "--worker-pid omitted and the claim records no usable worker "
+            "PID — pass --worker-pid explicitly",
+        )
     log_path = state_path.parent / "logs" / f"{args.phase}.{args.token}.hb.log"
     rc = heartbeat_daemon.run(
         project_root=cfg.project_root,
         plan=args.plan,
         phase=args.phase,
         token=args.token,
-        worker_pid=args.worker_pid,
+        worker_pid=worker_pid,
         state_path=state_path,
         log_path=log_path,
     )
     print(
         f"heartbeat-daemon armed for {args.plan}/{args.phase} "
-        f"(worker pid {args.worker_pid}, every "
+        f"(worker pid {worker_pid}, every "
         f"{heartbeat_daemon.DEFAULT_INTERVAL_SECONDS}s, first beat @ {ts})"
     )
     return rc

@@ -1,0 +1,18 @@
+{
+  "plan_dir": "plans",
+  "dispatch": {
+    "kind": "shell",
+    "command": "claude --print --model claude-fable-5 --permission-mode dontAsk --settings /Users/<you>/.config/clu/worker-settings.json --allowedTools \"Bash(clu *),Bash(git *),Bash(python3 *),Bash(gh *),Bash(command -v *),Edit,Write,TodoWrite,Task,Skill\" --max-budget-usd 20.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'",
+    "path": "/opt/homebrew/bin:/usr/local/bin:/Users/<you>/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  },
+  "notify": {
+    "quiet_hours": [
+      "22:00",
+      "08:00"
+    ]
+  },
+  "test_command": "python3 -m unittest discover -s tests",
+  "quality": {
+    "verify_required": true
+  }
+}
