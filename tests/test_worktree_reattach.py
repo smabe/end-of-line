@@ -18,7 +18,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import isolate_registry, must
 
 PLAN_BODY = """\
 # T
@@ -78,7 +78,7 @@ class WorktreeReattachTestCase(unittest.TestCase):
 
     def test_happy_path_rewrites_state_worktree_path(self) -> None:
         state_path = self._init_plan("alpha")
-        old_path = st.get_worktree(st.load(state_path))["path"]
+        old_path = must(st.get_worktree(st.load(state_path)))["path"]
         # Build a sibling git worktree to reattach to.
         new_path = self.parent / "myrepo-alpha-relocated"
         _git(self.project, "worktree", "add", "-b", "clu/alpha-2", str(new_path))
@@ -90,7 +90,7 @@ class WorktreeReattachTestCase(unittest.TestCase):
             str(new_path),
         )
         self.assertEqual(rc, 0)
-        record = st.get_worktree(st.load(state_path))
+        record = must(st.get_worktree(st.load(state_path)))
         self.assertEqual(record["path"], str(new_path.resolve()))
         # Branch is untouched by reattach.
         self.assertEqual(record["branch"], "clu/alpha")

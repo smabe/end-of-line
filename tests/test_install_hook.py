@@ -24,6 +24,7 @@ from unittest import mock
 
 from end_of_line import monitor
 from end_of_line.cli import ExitCode, main
+from tests import must
 
 
 class InstallHookTestBase(unittest.TestCase):
@@ -69,8 +70,7 @@ class FreshInstallTests(InstallHookTestBase):
     def test_install_writes_marker_v2(self) -> None:
         rc, _, _ = self._run_install()
         self.assertEqual(rc, int(ExitCode.OK))
-        m = monitor.load_marker()
-        self.assertIsNotNone(m)
+        m = must(monitor.load_marker())
         self.assertEqual(m["schema_version"], 2)
         self.assertIn("hook_path", m)
         self.assertIn("settings_json_path", m)

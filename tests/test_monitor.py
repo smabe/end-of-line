@@ -26,7 +26,7 @@ from pathlib import Path
 from unittest import mock
 
 from end_of_line import monitor
-from tests import isolate_monitor_marker
+from tests import isolate_monitor_marker, must
 
 
 class MarkerPathTests(unittest.TestCase):
@@ -116,8 +116,7 @@ class MarkerLifecycleTests(unittest.TestCase):
 
     def test_load_marker_returns_dict_when_present(self) -> None:
         monitor.record_hook_installed("/abs/hook.py", "/home/x/settings.json")
-        loaded = monitor.load_marker()
-        self.assertIsNotNone(loaded)
+        loaded = must(monitor.load_marker())
         self.assertEqual(loaded["hook_path"], "/abs/hook.py")
 
     def test_load_marker_returns_none_when_absent(self) -> None:

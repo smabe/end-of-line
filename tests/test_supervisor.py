@@ -10,7 +10,7 @@ from unittest import mock
 from end_of_line import state as st
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import CluTestCase
+from tests import CluTestCase, must
 
 PLAN_BODY = """\
 # Test plan
@@ -201,9 +201,9 @@ class SupervisorTestCase(CluTestCase):
     def test_halt_first_time_sets_notify_body(self) -> None:
         self._seed_max_attempts()
         result = tick(self.state_path, self.cfg)
-        self.assertIsNotNone(result.notify_body)
-        self.assertIn("a", result.notify_body)  # phase id appears
-        self.assertIn("2", result.notify_body)  # attempt count appears
+        body = must(result.notify_body)
+        self.assertIn("a", body)  # phase id appears
+        self.assertIn("2", body)  # attempt count appears
 
     def test_halt_does_not_renotify_on_subsequent_ticks(self) -> None:
         self._seed_max_attempts()
@@ -329,8 +329,7 @@ class SupervisorTestCase(CluTestCase):
         self.assertEqual(emit.call_args.kwargs["session_id"], original_token)
         # Operator-notification wiring: notify_body must be set so
         # ACTION_NOTIFY_KIND["worker_dead"] fires an iMessage in cmd_tick.
-        self.assertIsNotNone(result.notify_body)
-        self.assertIn("99999", result.notify_body)
+        self.assertIn("99999", must(result.notify_body))
 
     def test_live_pid_no_op_falls_through(self) -> None:
         import os as _os

@@ -15,7 +15,7 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import CluTestCase, isolate_registry
+from tests import CluTestCase, capture_inbox_writer, isolate_registry, must
 
 PLAN_BODY = """\
 # Test plan
@@ -236,7 +236,7 @@ class NotifyDispatchTestCase(CluTestCase):
                 now=_dt.datetime(2026, 5, 11, 12, 0),
                 plan_slug="test-plan",
                 project_root="/some/proj",
-                inbox_writer=lambda **kw: writes.append(kw),
+                inbox_writer=capture_inbox_writer(writes),
             )
         self.assertEqual(len(writes), 1)
         entry = writes[0]
@@ -255,7 +255,7 @@ class NotifyDispatchTestCase(CluTestCase):
                 now=_dt.datetime(2026, 5, 11, 3, 0),  # quiet
                 plan_slug="test-plan",
                 project_root="/x",
-                inbox_writer=lambda **kw: writes.append(kw),
+                inbox_writer=capture_inbox_writer(writes),
             )
         # iMessage suppressed during quiet hours.
         self.assertFalse(ok)
@@ -271,7 +271,7 @@ class NotifyDispatchTestCase(CluTestCase):
                 notify.KIND_BLOCKER,
                 "hello",
                 now=_dt.datetime(2026, 5, 11, 12, 0),
-                inbox_writer=lambda **kw: writes.append(kw),
+                inbox_writer=capture_inbox_writer(writes),
             )
         self.assertEqual(writes, [])
 
@@ -513,7 +513,7 @@ class StalledNotifyTestCase(unittest.TestCase):
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "stalled")
         # Slug-prefixed so multi-plan recipients can disambiguate.
-        self.assertIn("test-plan/a stalled", result.notify_body)
+        self.assertIn("test-plan/a stalled", must(result.notify_body))
 
 
 if __name__ == "__main__":

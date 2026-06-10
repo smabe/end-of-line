@@ -13,7 +13,7 @@ from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import GitProjectTestCase, make_worktree, plan_body, write_config
+from tests import GitProjectTestCase, make_worktree, must, plan_body, write_config
 
 
 class CmdVerifyTestCase(GitProjectTestCase):
@@ -36,8 +36,7 @@ class CmdVerifyTestCase(GitProjectTestCase):
         self._claim("phase-a")
         rc = main(self._argv("verify", "--phase", "phase-a"))
         self.assertEqual(rc, ExitCode.OK)
-        stamp = self._attestation()
-        self.assertIsNotNone(stamp)
+        stamp = must(self._attestation())
         self.assertEqual(stamp["commit_sha"], self.sha)
 
     def test_verify_does_not_stamp_on_failure(self) -> None:
@@ -112,8 +111,7 @@ class CmdVerifyTestCase(GitProjectTestCase):
             )
         )
         self.assertEqual(rc, ExitCode.OK)
-        stamp = self._attestation()
-        self.assertIsNotNone(stamp)
+        stamp = must(self._attestation())
         self.assertEqual(stamp["commit_sha"], self.sha)
 
     # ---- HEAD-before-run -------------------------------------------------------
@@ -138,8 +136,7 @@ class CmdVerifyTestCase(GitProjectTestCase):
             check=True,
         ).stdout.strip()
         self.assertNotEqual(pre_sha, post_sha, "mid-run commit should have advanced HEAD")
-        stamp = self._attestation()
-        self.assertIsNotNone(stamp)
+        stamp = must(self._attestation())
         self.assertEqual(stamp["commit_sha"], pre_sha)
 
     # ---- timeout ---------------------------------------------------------------
@@ -188,8 +185,7 @@ class CmdVerifyTestCase(GitProjectTestCase):
             self._claim("phase-a")
             rc = main(self._argv("verify", "--phase", "phase-a"))
             self.assertEqual(rc, ExitCode.OK)
-            stamp = self._attestation()
-            self.assertIsNotNone(stamp)
+            stamp = must(self._attestation())
             self.assertEqual(
                 stamp["commit_sha"], wt_sha, "stamp must use worktree HEAD, not canonical HEAD"
             )

@@ -11,7 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import GitProjectTestCase, make_worktree, plan_body, write_config
+from tests import GitProjectTestCase, make_worktree, must, plan_body, write_config
 
 
 class CmdAttestTestCase(GitProjectTestCase):
@@ -47,8 +47,7 @@ class CmdAttestTestCase(GitProjectTestCase):
         token = self._claim("phase-a")
         rc = main(self._argv("attest", "--phase", "phase-a", "--token", token, "--simplify"))
         self.assertEqual(rc, ExitCode.OK)
-        stamp = self._simplify_stamp()
-        self.assertIsNotNone(stamp)
+        stamp = must(self._simplify_stamp())
         self.assertEqual(stamp["commit_sha"], self.sha)
 
     def test_attest_simplify_overwrites_prior_stamp(self) -> None:
@@ -57,8 +56,7 @@ class CmdAttestTestCase(GitProjectTestCase):
         second_sha = self._make_commit()
         rc = main(self._argv("attest", "--phase", "phase-a", "--token", token, "--simplify"))
         self.assertEqual(rc, ExitCode.OK)
-        stamp = self._simplify_stamp()
-        self.assertIsNotNone(stamp)
+        stamp = must(self._simplify_stamp())
         self.assertEqual(stamp["commit_sha"], second_sha)
 
     # ---- no-flag guard ---------------------------------------------------------
@@ -143,8 +141,7 @@ class CmdAttestTestCase(GitProjectTestCase):
             token = self._claim("phase-a")
             rc = main(self._argv("attest", "--phase", "phase-a", "--token", token, "--simplify"))
             self.assertEqual(rc, ExitCode.OK)
-            stamp = self._simplify_stamp()
-            self.assertIsNotNone(stamp)
+            stamp = must(self._simplify_stamp())
             self.assertEqual(
                 stamp["commit_sha"], wt_sha, "stamp must use worktree HEAD, not canonical HEAD"
             )

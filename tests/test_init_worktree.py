@@ -18,7 +18,7 @@ from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import isolate_registry, must
 
 PLAN_BODY = """\
 # Test plan
@@ -112,7 +112,7 @@ class InitWorktreeTestCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(expanded.exists())
         data = st.load(self.state_path)
-        self.assertEqual(st.get_worktree(data)["path"], str(expanded))
+        self.assertEqual(must(st.get_worktree(data))["path"], str(expanded))
 
     def test_worktree_custom_branch_and_base_ref(self) -> None:
         # Add a second commit on a feature branch so --base-ref points
@@ -133,7 +133,7 @@ class InitWorktreeTestCase(unittest.TestCase):
             "feature",
         )
         self.assertEqual(rc, 0)
-        record = st.get_worktree(st.load(self.state_path))
+        record = must(st.get_worktree(st.load(self.state_path)))
         self.assertEqual(record["branch"], "myname/foo")
         self.assertEqual(record["base_ref"], feature_sha)
         self.assertIn("feature", stderr)

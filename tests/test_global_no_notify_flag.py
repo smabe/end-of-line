@@ -14,7 +14,7 @@ from unittest import mock
 from end_of_line import notify
 from end_of_line.cli import main
 from end_of_line.config import ChannelSpec, NotifySpec
-from tests import isolate_registry
+from tests import capture_inbox_writer, isolate_registry
 
 
 class GlobalNoNotifyFlagTestCase(unittest.TestCase):
@@ -58,11 +58,6 @@ class GlobalNoNotifyFlagTestCase(unittest.TestCase):
 
     def test_global_no_notify_does_not_affect_inbox_writes(self) -> None:
         inbox_calls: list[dict] = []
-
-        def fake_writer(**kwargs):
-            inbox_calls.append(kwargs)
-            return "evt-1"
-
         spec = NotifySpec(channels=(ChannelSpec(kind="imessage", params={"to": "+1"}),))
         mock_cls = mock.MagicMock()
         mock_cls.from_spec.return_value.send.return_value = None
@@ -75,7 +70,7 @@ class GlobalNoNotifyFlagTestCase(unittest.TestCase):
                 "body",
                 plan_slug="my-plan",
                 project_root="/tmp/proj",
-                inbox_writer=fake_writer,
+                inbox_writer=capture_inbox_writer(inbox_calls),
             )
 
         self.assertFalse(result)

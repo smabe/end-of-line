@@ -25,7 +25,7 @@ from end_of_line.dispatch import (
     dispatch_for_tick,
 )
 from end_of_line.supervisor import TickResult
-from tests import CluTestCase
+from tests import CluTestCase, must
 
 PLAN = """\
 # T
@@ -225,8 +225,7 @@ class LastTerminationReasonTestCase(unittest.TestCase):
                 {"type": "lease_expired", "phase": "schema"},
             ]
         }
-        reason = _last_termination_reason(data, "schema")
-        self.assertIsNotNone(reason)
+        reason = must(_last_termination_reason(data, "schema"))
         self.assertIn("lease expired", reason)
 
     def test_returns_most_recent_when_multiple(self) -> None:
@@ -236,7 +235,7 @@ class LastTerminationReasonTestCase(unittest.TestCase):
                 {"type": "claim_force_released", "phase": "schema"},
             ]
         }
-        reason = _last_termination_reason(data, "schema")
+        reason = must(_last_termination_reason(data, "schema"))
         self.assertIn("force-released", reason)
 
 

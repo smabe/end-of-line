@@ -17,6 +17,7 @@ from end_of_line import monitor, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.hooks import clu_session_start
+from tests import must
 
 # ---- hook script unit tests ------------------------------------------------
 
@@ -137,16 +138,14 @@ class InstallSessionStartFlagTests(SessionStartInstallTestBase):
     def test_install_with_flag_records_marker_field(self) -> None:
         rc, _, _ = self._install("--session-start")
         self.assertEqual(rc, int(ExitCode.OK))
-        m = monitor.load_marker()
-        self.assertIsNotNone(m)
+        m = must(monitor.load_marker())
         self.assertIn("session_start_hook_path", m)
         self.assertIn("clu_session_start.py", m["session_start_hook_path"])
 
     def test_install_no_flag_does_not_set_marker_field(self) -> None:
         rc, _, _ = self._install()
         self.assertEqual(rc, int(ExitCode.OK))
-        m = monitor.load_marker()
-        self.assertIsNotNone(m)
+        m = must(monitor.load_marker())
         self.assertNotIn("session_start_hook_path", m)
 
     def test_install_session_start_after_plain_install_adds_only_session_start(self) -> None:

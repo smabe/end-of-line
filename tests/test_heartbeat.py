@@ -12,7 +12,7 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.supervisor import _detect_stalled, tick
-from tests import CluTestCase
+from tests import CluTestCase, must
 
 PLAN_BODY = """\
 # Test plan
@@ -307,8 +307,7 @@ class NoHeartbeatGuardTestCase(unittest.TestCase):
     def test_real_heartbeat_past_threshold_still_emits(self) -> None:
         """Regression: phase_stalled still emits when worker HAS heartbeated."""
         data = self._make_data(last_heartbeat_at=self._PAST_HEARTBEAT)
-        result = _detect_stalled(data)
-        self.assertIsNotNone(result)
+        result = must(_detect_stalled(data))
         self.assertEqual(result.action, "stalled")
         stalled = [e for e in data["events"] if e["type"] == st.EVENT_PHASE_STALLED]
         self.assertEqual(len(stalled), 1)

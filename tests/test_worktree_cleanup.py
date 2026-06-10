@@ -24,7 +24,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, _remove_worktree_and_branch, main
-from tests import isolate_registry
+from tests import isolate_registry, must
 
 # Plan-file basenames must be `<slug>-<phase>.md` so plan_parser extracts
 # clean phase ids ("a", "b") instead of treating the whole basename as the id.
@@ -329,8 +329,7 @@ class CmdWorktreeGcUpstreamTests(WorktreeCleanupBase):
         rc, _stdout, stderr = self._gc("--confirm")
         self.assertEqual(rc, 0)
         # Worktree is preserved on disk.
-        self.assertIsNotNone(self._wt_record("alpha"))
-        wt_path = Path(self._wt_record("alpha")["path"])
+        wt_path = Path(must(self._wt_record("alpha"))["path"])
         self.assertTrue(wt_path.exists())
         self.assertIn("retained", stderr.lower())
         self.assertIn("ahead", stderr.lower())

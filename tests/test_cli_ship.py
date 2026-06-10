@@ -22,7 +22,7 @@ from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import isolate_registry, must
 
 PLAN_BODY = """\
 # T
@@ -110,7 +110,7 @@ class ShipBase(unittest.TestCase):
         return _git(wt_path, "rev-parse", "HEAD").stdout.strip()
 
     def _branch(self, slug: str) -> str:
-        return st.get_worktree(st.load(self._state_path(slug)))["branch"]
+        return must(st.get_worktree(st.load(self._state_path(slug))))["branch"]
 
     def _ship(self, *args: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -435,8 +435,7 @@ class ShipAsPrPlanTests(ShipBase):
         self.assertIn("pull/42", out)
         # ship_pending stamped with mode=as_pr + URL + timestamp.
         data = st.load(self._state_path("alpha"))
-        pending = data.get("ship_pending")
-        self.assertIsNotNone(pending)
+        pending = data["ship_pending"]
         self.assertEqual(pending["mode"], "as_pr")
         self.assertIn("pull/42", pending["pr_url"])
         self.assertIn("ts", pending)
@@ -639,8 +638,8 @@ class ShipAsPrAllDoneTests(ShipBase):
         self.assertEqual(rc, ExitCode.OK)
         for slug in ("alpha", "beta"):
             data = st.load(self._state_path(slug))
-            pending = data.get("ship_pending")
-            self.assertIsNotNone(pending, f"{slug} should be stamped")
+            self.assertIn("ship_pending", data, f"{slug} should be stamped")
+            pending = data["ship_pending"]
             self.assertEqual(pending["mode"], "as_pr")
             self.assertIn(slug, pending["pr_url"])
 

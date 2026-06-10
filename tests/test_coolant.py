@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from end_of_line import coolant
-from tests import CluTestCase
+from tests import CluTestCase, must
 
 
 def _write_fake_scripts(scripts_dir: Path) -> None:
@@ -82,8 +82,7 @@ class TestMarketplaceGlob(CluTestCase):
             (cache_root / v / "scripts").mkdir(parents=True)
             _write_fake_scripts(cache_root / v / "scripts")
         with mock.patch.object(coolant, "_plugin_cache_root", return_value=self.tmp_path / "cache"):
-            result = coolant._marketplace_glob()
-            self.assertIsNotNone(result)
+            result = must(coolant._marketplace_glob())
             self.assertEqual(result.parent.name, "0.2.0")
 
     def test_returns_none_when_cache_root_missing(self):

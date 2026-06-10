@@ -20,7 +20,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import isolate_registry, must
 
 PLAN_BODY = """\
 # T
@@ -103,8 +103,7 @@ class WorktreeAttachTestCase(unittest.TestCase):
 
         rc, stdout, _ = self._attach("--plan", "alpha", "--path", str(wt_path))
         self.assertEqual(rc, 0)
-        record = st.get_worktree(st.load(state_path))
-        self.assertIsNotNone(record)
+        record = must(st.get_worktree(st.load(state_path)))
         self.assertEqual(record["path"], str(wt_path.resolve()))
         self.assertEqual(record["branch"], "feature/alpha")
         self.assertEqual(record["base_ref"], head_sha)

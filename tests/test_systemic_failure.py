@@ -24,7 +24,7 @@ from end_of_line.dispatch import (
     dispatch_for_tick,
 )
 from end_of_line.supervisor import TickResult
-from tests import CluTestCase, isolate_registry
+from tests import CluTestCase, isolate_registry, must
 
 PLAN = """\
 # T
@@ -194,8 +194,7 @@ class SystemicDispatchTestCase(_SystemicFixture):
         data = self._read()
         self.assertEqual(data["status"], st.STATUS_PAUSED)
         self.assertIsNone(data["current_claim"])
-        evt = _systemic_event(data)
-        self.assertIsNotNone(evt)
+        evt = must(_systemic_event(data))
         self.assertEqual(evt["signature"], "missing_binary")
         self.assertEqual(evt["phase"], "a")
         self.assertEqual(evt["token"], self.token)
@@ -215,8 +214,7 @@ class SystemicDispatchTestCase(_SystemicFixture):
         dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         data = self._read()
         self.assertEqual(data["status"], st.STATUS_PAUSED)
-        evt = _systemic_event(data)
-        self.assertIsNotNone(evt)
+        evt = must(_systemic_event(data))
         self.assertEqual(evt["signature"], "rate_limit")
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
 
@@ -227,8 +225,7 @@ class SystemicDispatchTestCase(_SystemicFixture):
         dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         data = self._read()
         self.assertEqual(data["status"], st.STATUS_PAUSED)
-        evt = _systemic_event(data)
-        self.assertIsNotNone(evt)
+        evt = must(_systemic_event(data))
         self.assertEqual(evt["signature"], "auth_failure")
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
 
@@ -258,7 +255,7 @@ class SystemicDispatchTestCase(_SystemicFixture):
         dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         data = self._read()
         self.assertEqual(data["status"], st.STATUS_PAUSED)
-        evt = _systemic_event(data)
+        evt = must(_systemic_event(data))
         self.assertEqual(evt["signature"], "missing_binary")
 
     def test_no_log_file_falls_through_to_generic(self) -> None:
@@ -342,7 +339,7 @@ class MultiPlanIndependenceTestCase(CluTestCase):
             )
             evt = _systemic_event(data)
             self.assertIsNotNone(evt, f"{slug} should have a systemic event")
-            self.assertEqual(evt["signature"], "rate_limit")
+            self.assertEqual(must(evt)["signature"], "rate_limit")
         # Both plans fired their own iMessage — no cross-plan deduping.
         self.assertEqual(len(self.sent), 2)
 

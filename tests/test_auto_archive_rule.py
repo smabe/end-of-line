@@ -19,7 +19,7 @@ from end_of_line.cross_plan_rules import (
     register_rule,
     run_rules,
 )
-from tests import CluTestCase
+from tests import CluTestCase, must
 from tests import git as _git
 from tests import make_git_project as _make_git_project
 
@@ -156,7 +156,7 @@ class TestAutoArchiveRuleFires(_AutoArchiveRuleBase):
         ):
             result = run_rules(self.project, [p])
 
-        self.assertIsNotNone(result)
+        result = must(result)
         self.assertEqual(result.rule_name, "auto_archive")
         spy.assert_called_once()
         _, call_kwargs = spy.call_args

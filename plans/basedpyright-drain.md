@@ -163,3 +163,16 @@ _Empty at plan time. Workers append one dated bullet per cross-phase finding
   `project_filter=Path("/some/proj")` (signature is `Path | None`; the old
   str literal only worked because the mock forwards verbatim). Post-phase
   count: 69 remain, all in tests-drain-rest's file set.
+- 2026-06-10 (tests-drain-rest): repo reaches basedpyright ZERO (1.39.6
+  local; gate phase re-validates on the 1.39.7 pin). Two deviations from
+  locked approaches, both narrow: (1) `test_top.py:512` — the plan said
+  "build a new Rect instead of assigning," but the flagged assignment IS the
+  assertion (frozen-dataclass raise inside `assertRaises`); used a one-line
+  rationale'd `# pyright: ignore[reportAttributeAccessIssue]` instead.
+  (2) `test_top.py:1441` — `Metric.sort_key` is registry-typed
+  `(object) -> object`, so the ordering assertion needs `cast(int, ...)`
+  (rationale comment in place). Total suppressions added this phase: that
+  one ignore + one cast pair — everything else is `must()` / direct
+  indexing / real types (`ProjectConfig(project_root=...)` replaced the
+  `Cfg` stub in test_logs; `_capture_writer` in test_notify returns the
+  event-id str the inbox_writer protocol declares).

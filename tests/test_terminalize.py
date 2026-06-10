@@ -16,6 +16,7 @@ import time
 import unittest
 
 from end_of_line import state as st
+from tests import must
 
 
 def _spawn_marked_group(marker: str) -> subprocess.Popen:
@@ -112,7 +113,7 @@ class TestReapClaim(unittest.TestCase):
                 "plan_slug": "test-plan",
                 "current_claim": {"phase_id": "a", "pgid": leader.pid, "claimed_by": "tok"},
             }
-            result = st.reap_claim(data)
+            result = must(st.reap_claim(data))
             self.assertIsNotNone(result.signaled, "slug marker must match the surviving heartbeat")
             time.sleep(0.6)
             self.assertFalse(_group_alive(leader.pid), "orphaned heartbeat reaped")
@@ -133,8 +134,7 @@ class TestReapClaim(unittest.TestCase):
             _waiter.start()
             result = st.reap_claim(data)
             _waiter.join(timeout=10)
-            self.assertIsNotNone(result)
-            self.assertIsNotNone(result.signaled)
+            self.assertIsNotNone(must(result).signaled)
             time.sleep(0.6)
             self.assertFalse(_group_alive(leader.pid), "worker group should be reaped")
         finally:
@@ -157,7 +157,7 @@ class TestReapClaim(unittest.TestCase):
             _waiter.start()
             result = st.reap_claim(data)
             _waiter.join(timeout=10)
-            self.assertIsNotNone(result.signaled)
+            self.assertIsNotNone(must(result).signaled)
         finally:
             try:
                 os.killpg(leader.pid, 9)

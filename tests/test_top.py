@@ -19,6 +19,7 @@ import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 
 from end_of_line import registry, top
 from end_of_line import state as st
@@ -509,7 +510,9 @@ class RectTest(unittest.TestCase):
         r = Rect(1, 2, 30, 10)
         self.assertEqual((r.x, r.y, r.w, r.h), (1, 2, 30, 10))
         with self.assertRaises(Exception):
-            r.x = 5  # frozen — assignment must fail
+            # The checker rightly rejects this assignment — provoking that
+            # rejection at runtime is the point of the test.
+            r.x = 5  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_value_semantics(self) -> None:
         # Frozen → hashable + equal-by-value: the layout engine will key dicts
@@ -902,7 +905,7 @@ class NextPresetTest(unittest.TestCase):
     def test_w_cycles_auto_then_each_preset(self) -> None:
         from end_of_line.top_layout import next_preset
 
-        seen = [None]
+        seen: list[str | None] = [None]
         cur = None
         for _ in range(5):
             cur = next_preset(cur)
@@ -1438,7 +1441,9 @@ class BlockedHealthAndRenderTest(unittest.TestCase):
         from end_of_line import top_registry
 
         m = top_registry.METRICS["health"]
-        self.assertLess(m.sort_key("blocked"), m.sort_key("dead"))
+        # Metric.sort_key is registry-typed `(object) -> object`; the health
+        # metric's keys are ints.
+        self.assertLess(cast(int, m.sort_key("blocked")), cast(int, m.sort_key("dead")))
 
     def test_format_rows_shows_blk_and_question_not_dead(self) -> None:
         body = "\n".join(top.format_rows([self._row()], width=200)[1:])

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, _follow_log, _resolve_log_path, main
+from end_of_line.config import ProjectConfig
 from tests import isolate_registry
 
 PLAN_BODY = """\
@@ -151,8 +152,8 @@ class LogsTestCase(unittest.TestCase):
         claim_log = self._write_log("from-claim.log", "x", mtime=1.0)
         self._write_log("newer.log", "y", mtime=9999.0)
         self._stamp_claim(claim_log)
-        cfg_like = type("Cfg", (), {})()
-        resolved = _resolve_log_path(self.state_path, cfg_like)
+        cfg = ProjectConfig(project_root=self.project)
+        resolved = _resolve_log_path(self.state_path, cfg)
         self.assertEqual(resolved, claim_log)
 
     def test_follow_smoke_returns_when_file_idle(self) -> None:

@@ -15,6 +15,7 @@ from end_of_line.notify_base import (
 )
 from end_of_line.notify_imessage import IMessageNotifier
 from end_of_line.notify_imessage_inbound import IMessageInboundPoller
+from tests import must
 
 
 class NotifierProtocolTestCase(unittest.TestCase):
@@ -41,7 +42,7 @@ class RouteReplyBaseTestCase(unittest.TestCase):
             options_count=2,
             last_notified_at="",
         )
-        result = route_reply("plan-slug 1", [ob])
+        result = must(route_reply("plan-slug 1", [ob]))
         self.assertIsInstance(result, Reply)
         self.assertEqual(result.target, ob)
         self.assertEqual(result.answer, "1")

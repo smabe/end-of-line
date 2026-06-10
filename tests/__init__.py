@@ -26,6 +26,17 @@ def must(x: _T | None) -> _T:
     return x
 
 
+def capture_inbox_writer(writes: list[dict]):
+    """inbox_writer stub honoring the declared `(...) -> str` protocol
+    (the real writer returns the event id); appends each call's kwargs."""
+
+    def _writer(**kw) -> str:
+        writes.append(kw)
+        return "evt-test"
+
+    return _writer
+
+
 def utcnow_minus(seconds: int) -> str:
     """ISO8601 stamp N seconds before `datetime.now(UTC)`.
 

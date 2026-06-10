@@ -19,7 +19,7 @@ from pathlib import Path
 from end_of_line import cross_plan_rules, notify, registry
 from end_of_line import state as st
 from end_of_line.cross_plan_rules import ProjectPlan, register_rule, run_rules
-from tests import CluTestCase
+from tests import CluTestCase, must
 from tests import git as _git
 from tests import make_git_project as _make_git_project
 
@@ -162,8 +162,7 @@ class ReadyToShipNotifyTests(_ReadyToShipRuleBase):
     def test_eligible_plan_emits_notification(self) -> None:
         _commit_branch(self.project, "clu/alpha")
         p = _make_done_plan(self.project, "alpha", "clu/alpha")
-        result = run_rules(self.project, [p])
-        self.assertIsNotNone(result)
+        result = must(run_rules(self.project, [p]))
         self.assertEqual(result.rule_name, "ready_to_ship")
         kinds = [k for k, _ in result.notifies]
         self.assertIn(notify.KIND_READY_TO_SHIP, kinds)
@@ -197,7 +196,7 @@ class ReadyToShipNotifyTests(_ReadyToShipRuleBase):
         # `clu ship --plan X --direct --yes`.
         _commit_branch(self.project, "clu/alpha")
         p = _make_done_plan(self.project, "alpha", "clu/alpha")
-        result = run_rules(self.project, [p])
+        result = must(run_rules(self.project, [p]))
         body = result.notifies[0][1]
         self.assertIn("--direct", body)
         self.assertIn("clu ship", body)
@@ -208,7 +207,7 @@ class ReadyToShipNotifyTests(_ReadyToShipRuleBase):
         cfg_path.write_text('{"dispatch":{"ship_mode":"as_pr"}}')
         _commit_branch(self.project, "clu/alpha")
         p = _make_done_plan(self.project, "alpha", "clu/alpha")
-        result = run_rules(self.project, [p])
+        result = must(run_rules(self.project, [p]))
         body = result.notifies[0][1]
         self.assertIn("--as-pr", body)
         self.assertNotIn("--direct", body)
@@ -218,7 +217,7 @@ class ReadyToShipNotifyTests(_ReadyToShipRuleBase):
         _commit_branch(self.project, "clu/beta")
         p1 = _make_done_plan(self.project, "alpha", "clu/alpha")
         p2 = _make_done_plan(self.project, "beta", "clu/beta")
-        result = run_rules(self.project, [p1, p2])
+        result = must(run_rules(self.project, [p1, p2]))
         body = result.notifies[0][1]
         self.assertIn("--all-done", body)
         self.assertIn("alpha", body)
