@@ -599,6 +599,129 @@ The operator CLI (`clu queue add/list/remove`) does **not** trigger
 auto-repair — it refuses loudly on a corrupt queue and prints a paste-
 into-Claude diagnosis. Auto-repair only runs from `tick-all`.
 
+## Hardened worker dispatch
+
+clu workers are headless Claude Code sessions launched by
+`dispatch.command`. The easy template — `--permission-mode
+bypassPermissions` or `--dangerously-skip-permissions` — gives every
+worker unrestricted host access. The hardened recipe replaces that with
+a layered model (GH #90):
+
+- **The OS sandbox is the boundary.** Claude Code's native Seatbelt
+  sandbox confines worker subprocesses to the working tree + temp dirs
+  and the allowed network domains. Permission allowlists alone are
+  friction, not a boundary — field consensus (CVE-2025-66032 family,
+  Flatt Security's bypass write-ups) is that prefix matching can be
+  escaped by a determined payload; the sandbox can't.
+- **The allowlist is friction.** `--permission-mode dontAsk` denies
+  anything not explicitly allowed, which keeps an off-script worker
+  from even reaching the sandbox wall in the common case.
+- **`clu block` is the escape hatch.** A denied tool call returns a
+  denial message to the worker and the session continues (verified
+  empirically, claude 2.1.170, 2026-06-10). A worker that genuinely
+  needs a denied tool raises a blocker instead of wedging — the
+  operator answers by iMessage like any other blocker.
+
+### The recipe
+
+```
+claude --print --model claude-fable-5 --permission-mode dontAsk \
+  --settings /Users/<you>/.config/clu/worker-settings.json \
+  --allowedTools "Bash(clu *),Bash(git *),Bash(python3 *),Bash(gh *),Bash(command -v *),Edit,Write,TodoWrite,Task,Skill" \
+  --max-budget-usd 20.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'
+```
+
+Two CLI requirements, both empirical (2026-06-10):
+
+- **`--allowedTools` MUST be one comma-joined argument.** The flag is
+  variadic — split across multiple arguments it eats the following
+  prompt argument and the worker never receives `/clu-phase`.
+- **The `--settings` path MUST be absolute.** `~` is not reliably
+  expanded inside the `shell=True` dispatch line when quoted.
+
+**Version floor: claude ≥ 2.1.170.** Some 2.1.11x builds deny `$VAR`
+expansion inside allowlisted Bash calls (anthropics/claude-code#51001),
+which breaks the worker contract's env-var plumbing.
+
+### What the worker settings carry
+
+`clu init` writes `~/.config/clu/worker-settings.json` from a bundled
+template when the file is absent (never overwrites — the file is yours
+to tune). Content:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "excludedCommands": ["clu *"],
+    "network": {
+      "allowedDomains": ["github.com", "api.github.com"]
+    }
+  }
+}
+```
+
+Fail-closed by design: if the sandbox can't start, the worker doesn't
+run (`failIfUnavailable`), and nothing may opt out per-command
+(`allowUnsandboxedCommands: false`). `clu` itself runs **outside** the
+sandbox via `excludedCommands` — callbacks write state at the canonical
+project root and `clu block` spawns `osascript`, both outside the
+worktree+tmp cage. clu is the operator's own token-validated CLI;
+exempting it keeps every callback working with zero clu changes and
+means no `filesystem.allowWrite` entries are needed. Worktree workers'
+writes to the canonical shared `.git` are auto-granted by the sandbox
+(code.claude.com/docs/en/sandboxing), so per-plan worktrees need no
+extra entries either.
+
+### The allowlist, entry by entry
+
+| Entry | Why the worker needs it |
+|---|---|
+| `Bash(clu *)` | The worker contract itself: `heartbeat-daemon`, `complete` / `block`, `verify` / `attest`, `prior-blocker`. |
+| `Bash(git *)` | Phase commits in the worktree + SHA capture for `clu complete --commit`. |
+| `Bash(python3 *)` | The test suite (`python3 -m unittest …`) and stdlib one-liners. |
+| `Bash(gh *)` | Best-effort issue references; already optional per the `/clu-phase` skill. |
+| `Bash(command -v *)` | Resolving absolute tool paths under the minimal worker PATH. |
+| `Edit`, `Write` | File edits. Bare (unscoped) — see residual gaps below. |
+| `TodoWrite` | Worker self-tracking across a long phase. |
+| `Task` | Review/search subagents (`/code-review` fan-out). |
+| `Skill` | `/clu-phase` itself, plus `/code-review` and friends. |
+
+A per-project test command beyond `python3` needs its own entry — e.g.
+a project verified by `xcodebuild` adds `Bash(xcodebuild *)` to its
+copy of the dispatch command.
+
+### Denials in practice
+
+Under `dontAsk` in `--print` mode, a denied tool call does NOT wedge
+the session: the worker sees the denial text, keeps its context, and
+later allowed calls still run. The `/clu-phase` contract tells workers
+to treat a denial that blocks the phase as a `clu block` trigger, so
+the failure mode is a focused iMessage question, not a silent
+lease-expiry.
+
+### Guard rails
+
+- `clu doctor` warns when `dispatch.command` or
+  `dispatch.repair_command` carries `bypassPermissions` or
+  `--dangerously-skip-permissions`, and points back here. Quiet when
+  clean.
+- `clu init` materializes the settings template (above) and prints the
+  hardened-command hint when the file is absent.
+
+### Residual gaps (v1, documented not fixed)
+
+- **Bare `Edit` / `Write`.** Path-scoped `Write(...)` rules silently
+  fail under `dontAsk` (anthropics/claude-code#52962), and the sandbox
+  does not govern Claude's file tools — so file edits are allowed
+  everywhere the process can write. The sandbox still confines what
+  worker *subprocesses* can touch.
+- **Per-project tools.** The recipe's Bash allowlist covers the clu
+  contract; anything project-specific (simulators, builders) is the
+  operator's addition, with its own sandbox implications unverified.
+
 ## Per-plan worktrees
 
 By default, every plan in a project runs against the project's main

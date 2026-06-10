@@ -55,7 +55,9 @@ class BuildWorkerEnvTestCase(unittest.TestCase):
         self.assertIsNone(dispatch.build_worker_env(self._cfg("")))
 
 
-class DoctorCommandTestCase(unittest.TestCase):
+class _DoctorProjectTestCase(unittest.TestCase):
+    """Shared fixture for doctor-command tests: tmp project + cfg/run helpers."""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.project = Path(self._tmp.name)
@@ -80,6 +82,8 @@ class DoctorCommandTestCase(unittest.TestCase):
             rc = main(["doctor", "--project", str(target)])
         return rc, out.getvalue(), err.getvalue()
 
+
+class DoctorCommandTestCase(_DoctorProjectTestCase):
     def test_doctor_prints_path_and_resolved_binaries(self) -> None:
         # Use the same PATH the test process has — that way at least one
         # of gh/pipx/clu is likely resolved on the operator's machine,
@@ -339,6 +343,72 @@ class DoctorEffortWarningTestCase(unittest.TestCase):
         self._init_plan("myplan", "")
         _, stdout = self._run_doctor()
         self.assertNotIn("[warn]", stdout)
+
+
+HARDENED_COMMAND = (
+    "claude --print --model claude-fable-5 --permission-mode dontAsk "
+    "--settings /Users/op/.config/clu/worker-settings.json "
+    '--allowedTools "Bash(clu *),Bash(git *),Edit,Write" '
+    "--max-budget-usd 20.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'"
+)
+
+_BYPASS_WARNING = "bypasses Claude permission checks"
+
+
+class DispatchPermissionHealthTestCase(_DoctorProjectTestCase):
+    """`clu doctor` warns when dispatch templates bypass permission checks (#90).
+
+    Quiet-when-clean like every other doctor printer; tolerant of
+    unparseable templates (mirrors `dispatch.resolved_model`).
+    """
+
+    def test_warns_on_permission_mode_bypass(self) -> None:
+        self._write_cfg(command="claude --print --permission-mode bypassPermissions 'x'")
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn(_BYPASS_WARNING, stdout)
+        self.assertIn("dispatch.command", stdout)
+        self.assertIn("Hardened worker dispatch", stdout)
+
+    def test_warns_on_permission_mode_eq_bypass(self) -> None:
+        self._write_cfg(command="claude --print --permission-mode=bypassPermissions 'x'")
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn(_BYPASS_WARNING, stdout)
+        self.assertIn("dispatch.command", stdout)
+
+    def test_warns_on_dangerously_skip_in_repair_command(self) -> None:
+        self._write_cfg(
+            command=HARDENED_COMMAND,
+            repair_command="claude --print --dangerously-skip-permissions 'fix {corrupt_path}'",
+        )
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn(_BYPASS_WARNING, stdout)
+        self.assertIn("dispatch.repair_command", stdout)
+        self.assertNotIn("dispatch.command —", stdout)
+
+    def test_quiet_on_hardened_recipe(self) -> None:
+        self._write_cfg(command=HARDENED_COMMAND)
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(_BYPASS_WARNING, stdout)
+
+    def test_quiet_on_empty_command(self) -> None:
+        # DispatchSpec defaults command to "" and repair_command to None;
+        # neither must trip the tokenizer or the warning.
+        self._write_cfg(command="")
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(_BYPASS_WARNING, stdout)
+
+    def test_tolerates_unparseable_command(self) -> None:
+        # Unbalanced quote → shlex.split raises ValueError. A template clu
+        # can't parse is one the worker can't run either: no crash, no warning.
+        self._write_cfg(command='claude --permission-mode bypassPermissions "unbalanced')
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(_BYPASS_WARNING, stdout)
 
 
 if __name__ == "__main__":

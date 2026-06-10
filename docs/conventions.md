@@ -141,6 +141,14 @@ security boundary between a well-behaved worker and a misbehaving one
 (or a malicious shell on the same machine). Skip it on one command
 and the boundary is gone.
 
+The token boundary governs what a worker may do *to clu state*. What a
+worker may do *to the host* is governed by the dispatch command's
+permission posture — see "Hardened worker dispatch" in
+`docs/operations.md` for the recommended recipe (`dontAsk` + scoped
+`--allowedTools` as friction, the OS sandbox as the boundary, `clu`
+sandbox-exempt so these callbacks keep working). `clu doctor` warns
+when a project's dispatch templates still bypass permission checks.
+
 ## Slug validation
 
 `state.validate_slug` is the path-traversal guard. Both

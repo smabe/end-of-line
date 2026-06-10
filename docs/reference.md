@@ -305,7 +305,11 @@ itself — `dispatch_for_tick` does that after the lock is released.
 Fire-and-forget worker spawn. Renders the project's
 `DispatchSpec.command` template, `Popen`s it, and either stamps the pid
 on the live claim (healthy) or releases the claim with a
-`dispatch_failed` event (fast-fail).
+`dispatch_failed` event (fast-fail). The recommended permission posture
+for the command template (`dontAsk` + scoped `--allowedTools` + OS
+sandbox, never `bypassPermissions`) is documented in operations.md
+"Hardened worker dispatch"; `clu doctor` warns when a template still
+bypasses permission checks.
 
 **Key types and functions**
 
@@ -1469,11 +1473,25 @@ operator (`tick`, `status`, `pause`, `resume`, `retry`, `init`,
   resolves common tools (`claude`, `gh`, `git`, `python3`), and exits
   `OK` / `GENERIC` based on whether the required ones are found. Also
   runs read-only health printers: notify / coolant / effort / stuck-tool
-  / worker-idle, a **zombie-sweep dry-run preview**
+  / worker-idle, a **dispatch-permission guard**
+  (`_print_dispatch_permission_health` — shlex-tokenizes
+  `dispatch.command` and `dispatch.repair_command`, warns when either
+  carries `bypassPermissions` or `--dangerously-skip-permissions`, and
+  points at operations.md "Hardened worker dispatch"; tolerant of
+  unparseable templates, mirroring `dispatch.resolved_model`), a
+  **zombie-sweep dry-run preview**
   (`_print_zombie_health` → `supervisor.sweep_zombie_states(..., dry_run=True)`),
   and a **skill-drift guard** (`_print_skill_drift_health` — SHA-256
   compares each bundled skill against `~/.claude/skills/<name>/SKILL.md`,
   warns on mismatch). No state writes — purely diagnostic.
+- `_ensure_worker_settings()` — `cmd_init` helper: when
+  `~/.config/clu/worker-settings.json` is absent, writes it from the
+  bundled `worker-settings.template.json` (`importlib.resources`,
+  registered as package-data like `skills/`) and prints the path plus a
+  hardened-command hint. NEVER overwrites an existing file — same
+  operator-intent contract as `_ensure_quality_stub`. Template content:
+  Seatbelt sandbox on, fail-closed, `clu *` exempt, network limited to
+  GitHub (operations.md "Hardened worker dispatch").
 - `cmd_watch(args)` — streaming state-event feed. Resolves state
   paths from the registry (single plan, all plans in a project, or
   registry-wide with `--all`), then delegates to

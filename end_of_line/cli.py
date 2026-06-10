@@ -60,6 +60,7 @@ from . import (
 from . import (
     state as st,
 )
+from ._xdg_guard import assert_xdg_safe, clu_config_dir
 from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
 from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
@@ -1265,8 +1266,7 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument(
         "--cert",
         default=None,
-        help="TLS certificate PEM (with --key) instead of an auto self-signed "
-        "cert.",
+        help="TLS certificate PEM (with --key) instead of an auto self-signed cert.",
     )
     p_serve.add_argument(
         "--key",
@@ -1283,8 +1283,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_demo_worker = sub.add_parser(
         "demo-worker",
-        help="(internal) synthetic demo worker — dispatched by `clu demo`, not "
-        "for direct use.",
+        help="(internal) synthetic demo worker — dispatched by `clu demo`, not for direct use.",
     )
     # `plan` is a bare positional so the slug surfaces space-bounded in the
     # worker's cmdline — the #83 reaper kills a worker whose cmdline lacks the
@@ -1293,7 +1292,9 @@ def main(argv: list[str] | None = None) -> int:
     p_demo_worker.add_argument("--phase", required=True)
     p_demo_worker.add_argument("--token", required=True, help="Worker claim token")
     p_demo_worker.add_argument(
-        "--project", type=Path, required=True,
+        "--project",
+        type=Path,
+        required=True,
         help="Project root (callback target + transcript cwd)",
     )
     p_demo_worker.add_argument("--session-id", required=True, dest="session_id")
@@ -1917,6 +1918,35 @@ def _ensure_quality_stub(project_root: Path) -> bool:
     return True
 
 
+def _ensure_worker_settings() -> bool:
+    """Materialize `~/.config/clu/worker-settings.json` when absent (#90).
+
+    The bundled template carries the hardened worker policy: Seatbelt
+    sandbox on and fail-closed, `clu` exempt so callbacks keep working,
+    network limited to GitHub. Lives in XDG (not the project) so worker
+    policy stays out of operator interactive sessions and resolves from
+    any worktree. Mirrors `_ensure_quality_stub`'s contract: an existing
+    file is operator intent — NEVER overwritten, even if it diverges
+    from the template. Returns True iff the file was created.
+    """
+    from importlib.resources import files
+
+    target = clu_config_dir() / "worker-settings.json"
+    if target.exists():
+        return False
+    assert_xdg_safe(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    template = files("end_of_line").joinpath("worker-settings.template.json").read_text()
+    target.write_text(template)
+    print(f"worker sandbox settings: {target} (new)")
+    print(
+        f"  reference it from dispatch.command — claude --print --permission-mode dontAsk "
+        f"--settings {shlex.quote(str(target))} ... "
+        f'(full recipe: "Hardened worker dispatch" in docs/operations.md)'
+    )
+    return True
+
+
 def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     for attr, label in [
         ("lease_ttl_minutes", "--lease-ttl-minutes"),
@@ -1989,6 +2019,7 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     _ensure_quality_stub(cfg.project_root)
     print(f"Initialized {state_path}")
     _print_worker_model(cfg)
+    _ensure_worker_settings()
     _maybe_print_worktree_conflict_hint(
         cfg.project_root,
         args.plan,
@@ -2636,6 +2667,7 @@ def cmd_doctor(args) -> int:
         print(f"  {line}")
     print(f"  (source: {source})")
 
+    _print_dispatch_permission_health(cfg)
     _print_notify_health(cfg)
     _print_coolant_health(cfg)
     _print_effort_health(cfg)
@@ -2647,6 +2679,54 @@ def cmd_doctor(args) -> int:
     if getattr(args, "worktree", False):
         _print_worktree_health(cfg)
     return ExitCode.OK
+
+
+def _bypass_flag_in_template(cmd_tmpl: str) -> str | None:
+    """Return the permission-bypass flag in a dispatch template, or None.
+
+    Tokenizes like `dispatch.resolved_model` — including its
+    return-None-on-ValueError tolerance: a template clu can't parse is
+    one the worker can't run either, so it's not worth warning about.
+    """
+    try:
+        tokens = shlex.split(cmd_tmpl)
+    except ValueError:
+        return None
+    for i, tok in enumerate(tokens):
+        if tok == "--dangerously-skip-permissions":
+            return tok
+        if tok == "--permission-mode" and i + 1 < len(tokens):
+            if tokens[i + 1] == "bypassPermissions":
+                return "--permission-mode bypassPermissions"
+        if tok == "--permission-mode=bypassPermissions":
+            return tok
+    return None
+
+
+def _print_dispatch_permission_health(cfg: ProjectConfig) -> None:
+    """Warn when dispatch templates run workers with permission checks off (#90).
+
+    Quiet when clean — matches the other doctor printers. Checks both
+    `dispatch.command` and `dispatch.repair_command` (the repair worker
+    runs the same headless way and deserves the same scrutiny).
+    """
+    findings = [
+        (label, flag)
+        for label, tmpl in (
+            ("dispatch.command", cfg.dispatch.command),
+            ("dispatch.repair_command", cfg.dispatch.repair_command or ""),
+        )
+        if (flag := _bypass_flag_in_template(tmpl))
+    ]
+    if not findings:
+        return
+    print("Dispatch bypasses Claude permission checks (workers run unrestricted on this host):")
+    for label, flag in findings:
+        print(f"  {label} — carries {flag}")
+    print(
+        '  Harden it: see "Hardened worker dispatch" in docs/operations.md '
+        "(dontAsk + scoped --allowedTools + OS sandbox)."
+    )
 
 
 def _print_demo_sweep_health() -> None:
@@ -3793,9 +3873,7 @@ def cmd_tick_all(args) -> int:
     slugs_by_project: dict[Path, set[str]] = {}
     for row in registry.entries():
         try:
-            slugs_by_project.setdefault(Path(row.project_root).resolve(), set()).add(
-                row.plan_slug
-            )
+            slugs_by_project.setdefault(Path(row.project_root).resolve(), set()).add(row.plan_slug)
         except OSError:
             continue
     for project_root in sorted(slugs_by_project):
@@ -3809,9 +3887,7 @@ def cmd_tick_all(args) -> int:
             # Registry-independent zombie sweep: terminalize + reap any
             # unregistered state file stuck at status=running whose worker is
             # gone — the backstop tick-all's registry walk can't reach (#75).
-            for z in supervisor.sweep_zombie_states(
-                project_cfg, slugs_by_project[project_root]
-            ):
+            for z in supervisor.sweep_zombie_states(project_cfg, slugs_by_project[project_root]):
                 print(
                     f"zombie-sweep {z.plan_slug} @ {project_root}: terminalized"
                     + (" + reaped worker group" if z.reaped else "")
@@ -5862,9 +5938,7 @@ def cmd_notify_heartbeat_failure(args, cfg: ProjectConfig, state_path: Path) -> 
             phase=args.phase,
             log_path=args.log,
         )
-        notify_body = notify.render_heartbeat_loop_failing(
-            args.plan, args.phase, args.log
-        )
+        notify_body = notify.render_heartbeat_loop_failing(args.plan, args.phase, args.log)
     try:
         inbox.write_event(
             type="heartbeat_loop_failing",

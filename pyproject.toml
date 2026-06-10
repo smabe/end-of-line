@@ -18,7 +18,7 @@ where = ["."]
 include = ["end_of_line*"]
 
 [tool.setuptools.package-data]
-end_of_line = ["skills/*/SKILL.md", "hooks/*.py", "web/*.html", "web/*.png"]
+end_of_line = ["skills/*/SKILL.md", "hooks/*.py", "web/*.html", "web/*.png", "worker-settings.template.json"]
 
 [project.optional-dependencies]
 # Dev-only — pipx install ruff && pipx install basedpyright recommended,

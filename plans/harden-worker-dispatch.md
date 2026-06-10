@@ -162,3 +162,12 @@ that turned out wrong — so a later phase doesn't rediscover it. Cite file:line
   tick (or kill and check the sidecar `logs/<phase>.<token>.hb.log`) to prove
   the daemon. Both self-exit paths verified live: dead worker PID →
   `exit_worker_dead`, released claim + live PID → `exit_claim_gone`.
+- 2026-06-10 (guard-recipe): `worker-settings.template.json` is registered in
+  pyproject `[tool.setuptools.package-data]` beside `skills/`, but the live
+  install is editable — `importlib.resources` resolves from the source tree,
+  so wheel inclusion is only exercised by the weekly clean-clone canary. For
+  phase 3's smoke: the doctor warning was live-verified against this repo's
+  canonical bypass config (`_print_dispatch_permission_health`, cli.py) — it
+  should disappear after the config swap; re-run `clu doctor` to confirm
+  both that and that init does NOT re-emit over the operator's existing
+  `~/.config/clu/worker-settings.json` (never-overwrite contract).

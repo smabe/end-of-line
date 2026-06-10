@@ -33,6 +33,12 @@ class CluConfigDirTestCase(unittest.TestCase):
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}):
             self.assertEqual(clu_config_dir(), Path.home() / ".config" / "clu")
 
+    def test_tilde_xdg_config_home_expands(self):
+        # launchd plists and .env loaders pass `~` through unexpanded;
+        # honor the user's intent instead of creating a literal `~` dir.
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "~/custom-xdg"}):
+            self.assertEqual(clu_config_dir(), Path.home() / "custom-xdg" / "clu")
+
 
 class XdgGuardRaisesTestCase(unittest.TestCase):
     """Guard raises RuntimeError on real XDG paths when CLU_TEST_MODE=1."""

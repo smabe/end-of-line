@@ -25,7 +25,8 @@ def clu_config_dir() -> Path:
     matching prior behavior).
     """
     base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
+    # expanduser: launchd plists / .env loaders pass `~` through unexpanded.
+    root = Path(base).expanduser() if base else Path.home() / ".config"
     return root / "clu"
 
 
