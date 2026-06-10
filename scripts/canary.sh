@@ -73,7 +73,7 @@ cd "$WORK/clone"
 "$PYBIN" -m venv "$WORK/venv"                       >>"$RUN_LOG" 2>&1 || fail venv
 "$WORK/venv/bin/pip" install --quiet -e ".[dev]"    >>"$RUN_LOG" 2>&1 || fail install
 "$WORK/venv/bin/ruff" check .                       >>"$RUN_LOG" 2>&1 || fail ruff
-# Advisory only: main carries standing basedpyright drift (tracked in GH issue);
+# Advisory only: main carries standing basedpyright drift (GH #89);
 # promote to a hard `fail` once that lands.
 if ! "$WORK/venv/bin/basedpyright" >>"$RUN_LOG" 2>&1; then
     log "advisory: basedpyright not clean ($(grep -Eo '[0-9]+ errors' "$RUN_LOG" | tail -1 || echo '?'))"
