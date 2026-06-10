@@ -4,6 +4,7 @@ import unittest
 
 from end_of_line import state as st
 from end_of_line.watch import project_event_task
+from tests import must
 
 
 def _evt(type_, **fields):
@@ -26,15 +27,14 @@ class PerEventCoverageTest(unittest.TestCase):
             _evt(st.EVENT_PHASE_COMPLETED, phase="foundation"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("parent=my-plan", out)
+        self.assertIn("parent=my-plan", must(out))
 
     def test_phase_completed_emits_completed(self):
         out = project_event_task(
             _evt(st.EVENT_PHASE_COMPLETED, phase="foundation", commits=["abc"]),
             "my-plan",
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("status=completed", out)
         self.assertIn("task=my-plan/foundation", out)
 
@@ -48,7 +48,7 @@ class PerEventCoverageTest(unittest.TestCase):
             ),
             "my-plan",
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("status=in_progress", out)
         self.assertIn("blk-42", out)
 
@@ -57,7 +57,7 @@ class PerEventCoverageTest(unittest.TestCase):
             _evt(st.EVENT_PHASE_MAX_ATTEMPTS, phase="build", attempts=3),
             "my-plan",
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("status=in_progress", out)
         self.assertIn("HALTED", out)
 
@@ -66,21 +66,19 @@ class PerEventCoverageTest(unittest.TestCase):
             _evt(st.EVENT_SYSTEMIC_FAILURE, signature="OOMKilled", log_path="/tmp/x.log"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("status=in_progress", out)
         self.assertIn("OOMKilled", out)
 
     def test_plan_completed_uses_parent_task_id(self):
-        out = project_event_task(_evt(st.EVENT_PLAN_COMPLETED), "my-plan")
-        self.assertIsNotNone(out)
+        out = must(project_event_task(_evt(st.EVENT_PLAN_COMPLETED), "my-plan"))
         self.assertIn("task=my-plan ", out)  # no /phase
         self.assertNotIn("my-plan/", out)
         self.assertNotIn("parent=", out)  # parent line itself has no parent
         self.assertIn("status=completed", out)
 
     def test_paused_uses_parent_task_id(self):
-        out = project_event_task(_evt(st.EVENT_PAUSED, reason="operator"), "my-plan")
-        self.assertIsNotNone(out)
+        out = must(project_event_task(_evt(st.EVENT_PAUSED, reason="operator"), "my-plan"))
         self.assertIn("task=my-plan ", out)
         self.assertNotIn("my-plan/", out)
         self.assertNotIn("parent=", out)
@@ -88,8 +86,7 @@ class PerEventCoverageTest(unittest.TestCase):
         self.assertIn("paused", out)
 
     def test_resumed_uses_parent_task_id(self):
-        out = project_event_task(_evt(st.EVENT_RESUMED), "my-plan")
-        self.assertIsNotNone(out)
+        out = must(project_event_task(_evt(st.EVENT_RESUMED), "my-plan"))
         self.assertIn("task=my-plan ", out)
         self.assertNotIn("parent=", out)
         self.assertNotIn("my-plan/", out)
@@ -100,7 +97,7 @@ class PerEventCoverageTest(unittest.TestCase):
             _evt(st.EVENT_PHASE_STALLED, phase="build", age_seconds=660.0),
             "my-plan",
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("task=my-plan/build", out)
         self.assertIn("stalled", out)
         self.assertIn("status=in_progress", out)
@@ -177,8 +174,7 @@ class FilteredEventsTest(unittest.TestCase):
             "my-plan",
             verbose=True,
         )
-        self.assertIsNotNone(out)
-        self.assertIn("status=in_progress", out)
+        self.assertIn("status=in_progress", must(out))
 
     def test_unknown_event_returns_none(self):
         out = project_event_task(_evt("garbage_event_xyz"), "my-plan")
@@ -203,9 +199,8 @@ class MsgEscapingTest(unittest.TestCase):
             ),
             "my-plan",
         )
-        self.assertIsNotNone(out)
         # Inner double-quotes must be backslash-escaped
-        self.assertIn('\\"', out)
+        self.assertIn('\\"', must(out))
 
     def test_msg_with_backslash_escaped(self):
         out = project_event_task(
@@ -217,8 +212,7 @@ class MsgEscapingTest(unittest.TestCase):
             ),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("\\\\", out)
+        self.assertIn("\\\\", must(out))
 
 
 class MsgTruncationTest(unittest.TestCase):
@@ -228,7 +222,7 @@ class MsgTruncationTest(unittest.TestCase):
             _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1", question=long_q),
             "my-plan",
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("…", out)
         # Extract msg content between the outer quotes
         msg_content = out.split('msg="', 1)[1].rstrip('"')

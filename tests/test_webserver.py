@@ -13,11 +13,12 @@ import ssl
 import threading
 import unittest
 from http.client import HTTPConnection, HTTPSConnection
+from pathlib import Path
 from unittest import mock
 
 from end_of_line import top, webserver
 from end_of_line.webserver import ServeConfig
-from tests import CluTestCase
+from tests import CluTestCase, must
 
 
 class _ServerCase(CluTestCase):
@@ -107,9 +108,9 @@ class WorkersJsonTest(CluTestCase):
 
     def test_project_filter_is_forwarded(self):
         with mock.patch.object(top, "gather_rows", return_value=[]) as g:
-            webserver.workers_json(project_filter="/some/proj")
+            webserver.workers_json(project_filter=Path("/some/proj"))
         _, kwargs = g.call_args
-        self.assertEqual(kwargs["project_filter"], "/some/proj")
+        self.assertEqual(kwargs["project_filter"], Path("/some/proj"))
 
 
 class IndexResourceTest(CluTestCase):
@@ -188,14 +189,14 @@ class ServerIntegrationTest(_ServerCase):
     def test_root_serves_dashboard(self):
         resp, body = self._get(self.port, "/")
         self.assertEqual(resp.status, 200)
-        self.assertIn("text/html", resp.getheader("Content-Type"))
+        self.assertIn("text/html", must(resp.getheader("Content-Type")))
         self.assertIn(b"END OF LINE", body)
 
     def test_api_workers_json_with_no_store(self):
         self.gather.return_value = [{"plan": "p", "phase_id": "impl"}]
         resp, body = self._get(self.port, "/api/workers")
         self.assertEqual(resp.status, 200)
-        self.assertIn("application/json", resp.getheader("Content-Type"))
+        self.assertIn("application/json", must(resp.getheader("Content-Type")))
         self.assertEqual(resp.getheader("Cache-Control"), "no-store")
         self.assertEqual(json.loads(body), [{"plan": "p", "phase_id": "impl"}])
 
@@ -296,7 +297,7 @@ class AuthTest(_ServerCase):
         resp, _ = self._get(self.port, f"/login?token={self.TOKEN}")
         self.assertEqual(resp.status, 302)
         self.assertEqual(resp.getheader("Location"), "/")
-        cookie = resp.getheader("Set-Cookie")
+        cookie = must(resp.getheader("Set-Cookie"))
         self.assertIn(f"{webserver.COOKIE_NAME}={self.TOKEN}", cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Strict", cookie)

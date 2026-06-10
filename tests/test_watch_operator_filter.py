@@ -20,7 +20,7 @@ from end_of_line import state as st
 from end_of_line import watch
 from end_of_line.cli import ExitCode, main
 from end_of_line.watch import _FORMATTERS, _OPERATOR_VISIBLE, project_event
-from tests import CluTestCase
+from tests import CluTestCase, must
 
 
 def _evt(type_, **fields):
@@ -42,8 +42,7 @@ class OperatorFilterEmitsTest(unittest.TestCase):
             "my-plan",
             operator=True,
         )
-        self.assertIsNotNone(out)
-        self.assertIn("STUCK TOOL", out)
+        self.assertIn("STUCK TOOL", must(out))
 
     def test_phase_blocked_emits(self) -> None:
         out = project_event(
@@ -56,8 +55,7 @@ class OperatorFilterEmitsTest(unittest.TestCase):
             "my-plan",
             operator=True,
         )
-        self.assertIsNotNone(out)
-        self.assertIn("BLOCKED", out)
+        self.assertIn("BLOCKED", must(out))
 
     def test_attestation_refused_emits(self) -> None:
         out = project_event(
@@ -71,8 +69,7 @@ class OperatorFilterEmitsTest(unittest.TestCase):
             "my-plan",
             operator=True,
         )
-        self.assertIsNotNone(out)
-        self.assertIn("ATTESTATION REFUSED", out)
+        self.assertIn("ATTESTATION REFUSED", must(out))
 
     def test_stalled_claim_notified_emits_without_verbose(self) -> None:
         # _VERBOSE_ONLY normally suppresses this — operator mode bypasses.

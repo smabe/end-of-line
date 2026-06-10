@@ -153,3 +153,13 @@ _Empty at plan time. Workers append one dated bullet per cross-phase finding
 - 2026-06-10 (src-drain): count check — live basedpyright 1.39.6 matched the
   planning snapshot exactly (188 total; 157 remain after this phase, all in
   `tests/`). No version skew observed.
+- 2026-06-10 (tests-drain-watch): `must()` landed in `tests/__init__.py`
+  (`def must(x: _T | None) -> _T` — assert-not-None + return); import via
+  `from tests import must`. Idiom that worked best: a test's existing
+  `self.assertIsNotNone(out)` followed by flagged uses becomes `out =
+  must(out)` (same assertion strength, but it narrows for the checker);
+  single flagged uses wrap in place (`assertIn(needle, must(out))`).
+  One non-narrowing fix: `test_webserver.py` forwards
+  `project_filter=Path("/some/proj")` (signature is `Path | None`; the old
+  str literal only worked because the mock forwards verbatim). Post-phase
+  count: 69 remain, all in tests-drain-rest's file set.

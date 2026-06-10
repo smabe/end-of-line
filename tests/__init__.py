@@ -9,11 +9,21 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TypeVar
 from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.cli import main as cli_main
 from end_of_line.config import CONFIG_FILENAME
+
+_T = TypeVar("_T")
+
+
+def must(x: _T | None) -> _T:
+    """Narrow Optional in test assertions; AssertionError here means the
+    fixture/regex produced nothing."""
+    assert x is not None
+    return x
 
 
 def utcnow_minus(seconds: int) -> str:

@@ -4,6 +4,7 @@ import unittest
 
 from end_of_line import state as st
 from end_of_line.watch import project_event
+from tests import must
 
 
 def _evt(type_, **fields):
@@ -23,7 +24,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
 
     def test_phase_started_missing_attempts_defaults_to_1(self):
         out = project_event(_evt(st.EVENT_PHASE_STARTED, phase="p"), "s")
-        self.assertIn("attempt 1", out)
+        self.assertIn("attempt 1", must(out))
 
     def test_phase_completed(self):
         out = project_event(
@@ -44,7 +45,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
             _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-42"),
             "my-plan",
         )
-        self.assertIn("blk-42", out)
+        self.assertIn("blk-42", must(out))
 
     def test_phase_blocked_with_question(self):
         out = project_event(
@@ -56,6 +57,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
             ),
             "my-plan",
         )
+        out = must(out)
         self.assertIn("blk-1", out)
         self.assertIn("Use postgres or sqlite?", out)
 
@@ -65,7 +67,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
             _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1", question=long_q),
             "my-plan",
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("blk-1", out)
         # question field truncated to 100 chars + ellipsis
         self.assertIn("…", out)
@@ -77,13 +79,12 @@ class DefaultVisibleEventsTest(unittest.TestCase):
             _evt(st.EVENT_BLOCKER_ANSWERED, blocker_id="blk-1", answer="postgres"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("blk-1", out)
         self.assertIn("postgres", out)
 
     def test_blocker_consumed(self):
-        out = project_event(_evt(st.EVENT_BLOCKER_CONSUMED, blocker_id="blk-1"), "my-plan")
-        self.assertIsNotNone(out)
+        out = must(project_event(_evt(st.EVENT_BLOCKER_CONSUMED, blocker_id="blk-1"), "my-plan"))
         self.assertIn("blk-1", out)
 
     def test_blocker_sla_exceeded(self):
@@ -91,79 +92,68 @@ class DefaultVisibleEventsTest(unittest.TestCase):
             _evt(st.EVENT_BLOCKER_SLA_EXCEEDED, blocker_id="blk-1", age_hours=25.5),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("blk-1", out)
+        self.assertIn("blk-1", must(out))
 
     def test_phase_max_attempts(self):
         out = project_event(_evt(st.EVENT_PHASE_MAX_ATTEMPTS, phase="build", attempts=3), "my-plan")
-        self.assertIsNotNone(out)
-        self.assertIn("build", out)
+        self.assertIn("build", must(out))
 
     def test_phase_stalled(self):
         out = project_event(
             _evt(st.EVENT_PHASE_STALLED, phase="build", claimed_by="sess-abc", age_seconds=660.0),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("build", out)
+        self.assertIn("build", must(out))
 
     def test_task_spawned(self):
         out = project_event(
             _evt(st.EVENT_TASK_SPAWNED, task="task-1", source="gh", spawned_by_phase="impl"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("task-1", out)
+        self.assertIn("task-1", must(out))
 
     def test_task_completed(self):
         out = project_event(
             _evt(st.EVENT_TASK_COMPLETED, task="task-1", commits=[], forced=False),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("task-1", out)
+        self.assertIn("task-1", must(out))
 
     def test_dispatch_failed(self):
         out = project_event(
             _evt(st.EVENT_DISPATCH_FAILED, phase="impl", token="sess-x", reason="binary not found"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("impl", out)
+        self.assertIn("impl", must(out))
 
     def test_worktree_missing(self):
         out = project_event(
             _evt(st.EVENT_WORKTREE_MISSING, worktree_path="/tmp/wt"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("/tmp/wt", out)
+        self.assertIn("/tmp/wt", must(out))
 
     def test_worktree_conflict_warning(self):
         out = project_event(
             _evt(st.EVENT_WORKTREE_CONFLICT_WARNING, other_slug="other-plan"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("other-plan", out)
+        self.assertIn("other-plan", must(out))
 
     def test_retry_requested(self):
         out = project_event(_evt(st.EVENT_RETRY_REQUESTED, phase="impl"), "my-plan")
-        self.assertIsNotNone(out)
-        self.assertIn("impl", out)
+        self.assertIn("impl", must(out))
 
     # --- plan-scoped events (no /phase segment) ---
 
     def test_plan_completed_no_phase_segment(self):
-        out = project_event(_evt(st.EVENT_PLAN_COMPLETED), "my-plan")
-        self.assertIsNotNone(out)
+        out = must(project_event(_evt(st.EVENT_PLAN_COMPLETED), "my-plan"))
         self.assertTrue(out.startswith("my-plan:"))
         # no slash after the slug
         self.assertNotIn("my-plan/", out)
 
     def test_paused_drops_phase_segment(self):
-        out = project_event(_evt(st.EVENT_PAUSED, reason="operator"), "my-plan")
-        self.assertIsNotNone(out)
+        out = must(project_event(_evt(st.EVENT_PAUSED, reason="operator"), "my-plan"))
         self.assertTrue(out.startswith("my-plan:"))
         self.assertNotIn("my-plan/", out)
 
@@ -172,8 +162,7 @@ class DefaultVisibleEventsTest(unittest.TestCase):
         self.assertIsNotNone(out)
 
     def test_resumed(self):
-        out = project_event(_evt(st.EVENT_RESUMED), "my-plan")
-        self.assertIsNotNone(out)
+        out = must(project_event(_evt(st.EVENT_RESUMED), "my-plan"))
         self.assertTrue(out.startswith("my-plan:"))
         self.assertNotIn("my-plan/", out)
 
@@ -182,24 +171,21 @@ class DefaultVisibleEventsTest(unittest.TestCase):
             _evt(st.EVENT_QUEUE_POPPED, slug="next-plan", added_by="operator", position=1),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("next-plan", out)
+        self.assertIn("next-plan", must(out))
 
     def test_queue_appended(self):
         out = project_event(
             _evt(st.EVENT_QUEUE_APPENDED, slug="follow-up", source_phase="impl", token_fp="abc123"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("follow-up", out)
+        self.assertIn("follow-up", must(out))
 
     def test_queue_rejected(self):
         out = project_event(
             _evt(st.EVENT_QUEUE_REJECTED, slug="follow-up", source_phase="impl", reason="cap"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("follow-up", out)
+        self.assertIn("follow-up", must(out))
 
 
 class VerboseOnlyEventsTest(unittest.TestCase):
@@ -403,8 +389,7 @@ class EdgeCasesTest(unittest.TestCase):
 
     def test_minimal_event_phase_started(self):
         # Only type + ts — no phase, no attempts
-        out = project_event({"type": st.EVENT_PHASE_STARTED, "ts": "2026-01-01T00:00:00Z"}, "p")
-        self.assertIsNotNone(out)
+        out = must(project_event({"type": st.EVENT_PHASE_STARTED, "ts": "2026-01-01T00:00:00Z"}, "p"))
         self.assertIn("attempt 1", out)
 
     def test_minimal_event_phase_completed(self):
@@ -433,16 +418,14 @@ class EdgeCasesTest(unittest.TestCase):
             _evt(st.EVENT_DISPATCH_FAILED, phase="impl", token="t", reason=long_reason),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("…", out)
+        self.assertIn("…", must(out))
 
     def test_systemic_failure(self):
         out = project_event(
             _evt(st.EVENT_SYSTEMIC_FAILURE, signature="OOMKilled", log_path="/tmp/x.log"),
             "my-plan",
         )
-        self.assertIsNotNone(out)
-        self.assertIn("OOMKilled", out)
+        self.assertIn("OOMKilled", must(out))
 
     def test_systemic_failure_minimal(self):
         out = project_event({"type": st.EVENT_SYSTEMIC_FAILURE, "ts": "2026-01-01T00:00:00Z"}, "p")
@@ -473,7 +456,7 @@ class EdgeCasesTest(unittest.TestCase):
             "my-plan",
             verbose=True,
         )
-        self.assertIsNotNone(out)
+        out = must(out)
         self.assertIn("orphan reaped", out)
         self.assertIn("pid=12345", out)
         self.assertIn("signaled=SIGTERM", out)

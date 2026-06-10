@@ -11,7 +11,7 @@ from pathlib import Path
 from end_of_line import fleet, registry
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import isolate_registry
+from tests import isolate_registry, must
 
 
 class SummarizePlanTestCase(unittest.TestCase):
@@ -42,8 +42,7 @@ class SummarizePlanTestCase(unittest.TestCase):
 
     def test_fresh_plan_running_no_phase(self) -> None:
         entry = self._seed("plan-a")
-        summary = fleet.summarize_plan(entry)
-        self.assertIsNotNone(summary)
+        summary = must(fleet.summarize_plan(entry))
         self.assertEqual(summary.plan_slug, "plan-a")
         self.assertEqual(summary.status, st.STATUS_RUNNING)
         self.assertIsNone(summary.current_phase)
@@ -54,7 +53,7 @@ class SummarizePlanTestCase(unittest.TestCase):
             st.claim_phase(data, "phase-1", lease_minutes=30)
 
         entry = self._seed("plan-a", mutate=m)
-        summary = fleet.summarize_plan(entry)
+        summary = must(fleet.summarize_plan(entry))
         self.assertEqual(summary.current_phase, "phase-1")
 
     def test_open_blocker_count(self) -> None:
@@ -64,7 +63,7 @@ class SummarizePlanTestCase(unittest.TestCase):
             data["blockers"][0]["answer"] = "A"
 
         entry = self._seed("plan-a", mutate=m)
-        summary = fleet.summarize_plan(entry)
+        summary = must(fleet.summarize_plan(entry))
         self.assertEqual(summary.open_blocker_count, 1)
 
     def test_halted_status_shown_verbatim(self) -> None:
@@ -72,7 +71,7 @@ class SummarizePlanTestCase(unittest.TestCase):
             data["status"] = st.STATUS_HALTED
 
         entry = self._seed("plan-a", mutate=m)
-        summary = fleet.summarize_plan(entry)
+        summary = must(fleet.summarize_plan(entry))
         self.assertEqual(summary.status, st.STATUS_HALTED)
 
     def test_stalled_claim_overrides_status_label(self) -> None:
@@ -82,7 +81,7 @@ class SummarizePlanTestCase(unittest.TestCase):
             data["current_claim"]["last_heartbeat_at"] = "2020-01-01T00:00:00Z"
 
         entry = self._seed("plan-a", mutate=m)
-        summary = fleet.summarize_plan(entry)
+        summary = must(fleet.summarize_plan(entry))
         self.assertEqual(summary.status, "stalled")
         self.assertEqual(summary.current_phase, "phase-1")
 
@@ -91,9 +90,9 @@ class SummarizePlanTestCase(unittest.TestCase):
             st.append_event(data, st.EVENT_PHASE_STARTED, phase="p")
 
         entry = self._seed("plan-a", mutate=m)
-        summary = fleet.summarize_plan(entry)
-        self.assertIsNotNone(summary.last_event_age_seconds)
-        self.assertLess(summary.last_event_age_seconds, 5)
+        summary = must(fleet.summarize_plan(entry))
+        age = must(summary.last_event_age_seconds)
+        self.assertLess(age, 5)
 
     def test_missing_state_returns_none(self) -> None:
         # Registered but never `clu init`-ed.
