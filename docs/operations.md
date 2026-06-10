@@ -754,6 +754,38 @@ the wall.
   contract; anything project-specific (simulators, builders) is the
   operator's addition, with its own sandbox implications unverified.
 
+## Type-check gate — basedpyright (this repo)
+
+Since #89 drained the repo to zero basedpyright errors, the type check
+is a hard gate at three layers. Each layer pins or floats differently —
+this is what runs where:
+
+- **Clean-clone canary** (`scripts/canary.sh`, weekly LaunchAgent):
+  builds a fresh venv from the `dev` extra, where basedpyright is an
+  **exact pin** (`basedpyright==1.39.7` in `pyproject.toml`). The error
+  set shifts across basedpyright releases, so a float would let an
+  upstream release turn the canary red with no repo change. A non-zero
+  exit fails the run outright (`fail basedpyright`), same as ruff and
+  the suite.
+- **Worker verify gate**: `.orchestrator.json` (local, untracked) sets
+  `quality.verify_command` to
+  `basedpyright && python3 -m unittest discover -s tests`, so every
+  `clu verify` stamp — required before any `clu complete` — proves the
+  tree type-checks AND the suite passes. `clu verify` runs
+  sandbox-exempt (via `sandbox.excludedCommands`), and the chained
+  command runs as its child — outside the worker sandbox — so the
+  gate holds inside hardened workers; `test_command` stays pure-suite
+  for the merge gate. This uses whatever `basedpyright` is on the dispatch
+  PATH — keep it matched to the pin (below).
+- **Local development**: the recommended pipx install floats unless you
+  match it by hand. After any pin bump:
+  `pipx install basedpyright==1.39.7 --force`. Skew between local and
+  pinned versions shows up as "passes locally, canary disagrees" —
+  check `basedpyright --version` first when that happens.
+
+Exit-code contract (pyright CLI): 0 = clean, 1 = type errors; warnings
+alone exit 0. So bare `basedpyright` is a valid hard-gate command.
+
 ## Per-plan worktrees
 
 By default, every plan in a project runs against the project's main

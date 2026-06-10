@@ -3,8 +3,8 @@
 #
 # Pipeline (fail-fast, cheapest deterministic check first):
 #   1. Ruff lint — style + footgun anti-patterns
-#   2. basedpyright — type errors (uses .basedpyright-baseline.json to
-#      freeze pre-existing errors so only NEW violations fail)
+#   2. basedpyright — type errors (repo is at zero since #89; any error
+#      fails the commit)
 #   3. jscpd — duplication across end_of_line/
 #
 # Invoked by ~/projects/abe-skills/hooks/pre-commit via the project-local
@@ -47,20 +47,13 @@ if [[ "${RUFF_SKIP:-0}" != "1" ]]; then
     fi
 fi
 
-# --- basedpyright (with baseline) ---------------------------------------
+# --- basedpyright --------------------------------------------------------
 if [[ "${PYRIGHT_SKIP:-0}" != "1" ]]; then
     if command -v basedpyright >/dev/null 2>&1; then
-        echo "[pyright] Type-checking (against baseline)..."
-        if [[ -f .basedpyright-baseline.json ]]; then
-            BASELINE_ARG=(--baselinefile .basedpyright-baseline.json)
-        else
-            BASELINE_ARG=()
-        fi
-        if ! basedpyright "${BASELINE_ARG[@]}"; then
+        echo "[pyright] Type-checking..."
+        if ! basedpyright; then
             echo
-            echo "[pyright] BLOCKED - new type errors above (baseline-suppressed)."
-            echo "[pyright] After fixing or accepting more, regenerate baseline:"
-            echo "[pyright]   basedpyright --writebaseline .basedpyright-baseline.json"
+            echo "[pyright] BLOCKED - type errors above."
             echo "[pyright] Override: PYRIGHT_SKIP=1 git commit ..."
             exit 1
         fi

@@ -367,6 +367,12 @@ simplify stamp).
 discoverable without reading docs. Flip to `false` when the project
 actually needs it.
 
+This repo's own gate goes the other direction: `quality.verify_command`
+chains basedpyright ahead of the suite, so every phase completion proves
+the tree type-checks — see "Type-check gate — basedpyright" in
+[`operations.md`](operations.md) for what runs where (canary pin,
+verify gate, local pipx).
+
 ## Plan archive layout (`plans/archive/<slug>/`)
 
 Shipped plans live at `plans/archive/<slug>/<filename>.md` — one

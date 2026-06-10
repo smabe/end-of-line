@@ -23,7 +23,10 @@ end_of_line = ["skills/*/SKILL.md", "hooks/*.py", "web/*.html", "web/*.png", "wo
 [project.optional-dependencies]
 # Dev-only — pipx install ruff && pipx install basedpyright recommended,
 # but documenting here so it's discoverable.
-dev = ["ruff>=0.15", "basedpyright>=1.39"]
+# basedpyright is an exact pin — its error set shifts across releases and the
+# canary builds a fresh venv from this extra. Keep the local pipx install
+# matched; rationale in docs/operations.md "Type-check gate".
+dev = ["ruff>=0.15", "basedpyright==1.39.7"]
 
 # --- Ruff (lint + format) ---------------------------------------------------
 [tool.ruff]

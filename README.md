@@ -283,10 +283,10 @@ examples/             # .orchestrator.json template, LaunchAgent plists, fake-wo
 A three-tool pre-commit gate lives at `.githooks/pre-commit-local`:
 
 - **Ruff** — lint (E + W + F + I + UP) on staged files only. Brownfield-friendly: pre-existing violations in unmodified files are tolerated, but touching a violation-laden file surfaces them (boy-scout rule). Format is not gated; run `ruff format` ad-hoc when desired.
-- **basedpyright** — basic-mode type check with `.basedpyright-baseline.json` freezing the current pre-existing error set; only NEW violations fail the commit.
+- **basedpyright** — basic-mode type check; the repo is at zero errors (#89) and any error fails the commit. The clean-clone canary and the worker verify gate enforce the same zero.
 - **jscpd** — duplication scan on `end_of_line/` (min 75 tokens / 10 lines, tests excluded since `CluTestCase` boilerplate is similar by design).
 
-Per-stage opt-out via env: `RUFF_SKIP=1 git commit ...`, `PYRIGHT_SKIP=1`, `JSCPD_SKIP=1`. Install the dev tooling via `pipx install ruff basedpyright` and ensure `npx` is on `$PATH` for jscpd — that keeps the stdlib-only runtime promise intact.
+Per-stage opt-out via env: `RUFF_SKIP=1 git commit ...`, `PYRIGHT_SKIP=1`, `JSCPD_SKIP=1`. Install the dev tooling via `pipx install ruff basedpyright` (match basedpyright to the exact pin in `pyproject.toml`'s dev extra — version skew shows up as "passes locally, canary disagrees") and ensure `npx` is on `$PATH` for jscpd — that keeps the stdlib-only runtime promise intact.
 
 The hook is wired through the project-local extension point of a personal `pre-commit` harness, not via `core.hooksPath`. To run the gate on a fresh clone, drop a one-line `.git/hooks/pre-commit` that execs the project-local script:
 

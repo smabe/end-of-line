@@ -176,3 +176,18 @@ _Empty at plan time. Workers append one dated bullet per cross-phase finding
   indexing / real types (`ProjectConfig(project_root=...)` replaced the
   `Cfg` stub in test_logs; `_capture_writer` in test_notify returns the
   event-id str the inbox_writer protocol declares).
+- 2026-06-10 (gate): scratch-venv validation (`pip install` from PyPI) is
+  not possible inside hardened workers — the sandbox network allowlist is
+  github.com only. Resolved via blocker: operator validated 1.39.7 against
+  the worktree (clean, zero version-skew deltas vs the drain phases' 1.39.6)
+  and added `quality.verify_command` to the local `.orchestrator.json`
+  themselves. Future plans: steps that build fresh venvs or fetch from PyPI
+  must be operator-run or pre-validated at plan time, not assigned to a
+  hardened worker.
+- 2026-06-10 (gate): /code-review surfaced a FOURTH gate layer the plan
+  missed — the local pre-commit hook (`.githooks/pre-commit-local`) ran
+  basedpyright against a tracked `.basedpyright-baseline.json` (161 stale
+  entries / 30 files, all now-fixed), and README described that baseline
+  approach. With the repo at zero, the baseline would only mask new errors
+  matching old entries. Fixed in this commit: baseline deleted, hook runs
+  bare `basedpyright`, README describes the hard gate.
