@@ -121,8 +121,8 @@ debugging session that asks "why didn't this tick advance?" reduces to
    stays — the lease still owns retry. This is just the notification
    trigger. Floor keeps short Effort-scaled leases from triggering too
    eagerly; ceiling keeps long leases from leaving wedged workers
-   undetected (60-min default → 25-min threshold; the bash heartbeat
-   loop runs every 120s independent of the worker's tool-use depth,
+   undetected (60-min default → 25-min threshold; the heartbeat daemon
+   pings every 120s independent of the worker's tool-use depth,
    so staleness past the ceiling is structural, not legitimate).
 4. **Blocker SLA escalation.** If an open blocker is older than
    `blocked_question_sla_hours` (default 24), pause the plan and emit

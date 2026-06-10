@@ -149,3 +149,16 @@ installed claude 2.1.170 (spike transcripts at `/tmp/clu90-spike/*.out`):
 _Empty at plan time. As phases run, the worker appends one dated bullet per
 cross-phase finding — a gotcha, a spike result, an API surprise, an assumption
 that turned out wrong — so a later phase doesn't rediscover it. Cite file:line._
+
+- 2026-06-10 (hb-daemon): live fork smoke confirmed the daemon lands in its
+  own process group (PGID = intermediate child's PID ≠ worker's PGID), so the
+  reaper-immunity assumption holds as designed. The daemon's cmdline carries
+  the plan slug AND token (`clu heartbeat-daemon ... --plan <slug> --token
+  <T>`), but supervisor liveness checks (`state.claim_worker_alive`,
+  `_detect_dead_pid`) only probe claim.pid — no interference. For phase 3's
+  smoke: arm-time validation in `cmd_heartbeat_daemon` (cli.py) stamps the
+  first heartbeat itself, so a fresh stamp right after arming proves the
+  parent path, not the loop — backdate `last_heartbeat_at` and wait one 120s
+  tick (or kill and check the sidecar `logs/<phase>.<token>.hb.log`) to prove
+  the daemon. Both self-exit paths verified live: dead worker PID →
+  `exit_worker_dead`, released claim + live PID → `exit_claim_gone`.

@@ -59,7 +59,7 @@ These two roots play different roles in your work:
 |---|---|
 | `git add` / `git commit` / `git diff` — code changes for the phase | **`$WORKTREE_ROOT`** (= your current `pwd`). The dispatch put you here on the right branch. |
 | Read or modify files for this phase's diff | **`$WORKTREE_ROOT`** (relative paths work — your cwd IS the worktree). |
-| Run `clu complete / block / heartbeat / prior-blocker` — pass `--project ...` | **`$PROJECT_ROOT`** (canonical). clu's state file + registry live here, not in the worktree. |
+| Run `clu complete / block / heartbeat-daemon / prior-blocker` — pass `--project ...` | **`$PROJECT_ROOT`** (canonical). clu's state file + registry live here, not in the worktree. |
 | Read `$STATE` directly (it's an absolute path) | No `cd` needed. |
 
 **The silent-clobber failure mode:** if you `cd $PROJECT_ROOT && git commit`, your commit lands on the canonical project's current branch (usually `main`) instead of `clu/<slug>`. clu has no way to detect or correct this — the commit looks successful, `clu complete` accepts it, but the next phase dispatches off a stale branch tip and the operator has to reconcile branches by hand. **This actually happens** — see issue #36 for the post-mortem. Don't be the worker that recurs it.
@@ -100,30 +100,14 @@ If you see an answered blocker, that means: you asked a question previously, the
    ```
    If they differ, you are in a worktree. Git ops stay in `$WORKTREE_ROOT`; `clu --project` calls take `$PROJECT_ROOT`.
 
-2. **Arm the heartbeat ticker.** Long phases that don't ping `clu heartbeat` look identical to hung workers — `clu status` reports `STALLED` and the supervisor's gap-fill notifications fire. Start a background loop that pings every 2 minutes, tied to the worker's parent PID so it self-terminates if the worker is SIGKILLed/OOMed (issue #72). The EXIT trap is the fast-cleanup path for graceful exits. The loop counts consecutive failures: on the 3rd in a row (~6 min) it calls `clu notify-heartbeat-failure` so the operator learns the loop is broken before lease expiry surfaces it. stderr from each `clu heartbeat` call is tee'd to a sidecar log for post-mortem inspection:
+2. **Arm the heartbeat daemon.** Long phases that don't heartbeat look identical to hung workers — `clu status` reports `STALLED` and the supervisor's gap-fill notifications fire. One flat command arms it:
    ```bash
-   WORKER_PID=$PPID
-   FAILS=0
-   ERRLOG="$(dirname "$STATE")/logs/heartbeat-errors.$PLAN.$PHASE.log"
-   mkdir -p "$(dirname "$ERRLOG")"
-   ( while kill -0 $WORKER_PID 2>/dev/null; do
-       if clu heartbeat --project "$PROJECT_ROOT" --plan "$PLAN" \
-               --phase "$PHASE" --token "$TOKEN" >/dev/null 2>>"$ERRLOG"; then
-           FAILS=0
-       else
-           FAILS=$((FAILS + 1))
-           if [ "$FAILS" -eq 3 ]; then
-               clu notify-heartbeat-failure --project "$PROJECT_ROOT" \
-                   --plan "$PLAN" --phase "$PHASE" --token "$TOKEN" \
-                   --log "$ERRLOG" >/dev/null 2>&1 || true
-           fi
-       fi
-       sleep 120
-     done ) &
-   HEARTBEAT_PID=$!
-   trap "kill $HEARTBEAT_PID 2>/dev/null" EXIT
+   clu heartbeat-daemon --project "$PROJECT_ROOT" --plan "$PLAN" \
+       --phase "$PHASE" --token "$TOKEN" --worker-pid $PPID
    ```
-   The 2-minute interval is well inside the heartbeat threshold (derived from lease TTL: `min(25, max(15, lease_ttl//2))`, so 25 min at the default 60-min lease) and loose enough to not flood state.json writes. **Both terminators are load-bearing**: `kill -0 $WORKER_PID` catches death-by-signal where the EXIT trap doesn't fire (SIGKILL, OOM, crash); the EXIT trap catches graceful exits faster than the next `sleep 120` would notice. Supervisor-side detection (`_detect_dead_pid`) is the third layer that catches the worst case where both fail. The 3-strike self-report adds a fourth layer: if all three of those silently miss a wedge, the operator gets an iMessage when the bash loop itself stops landing heartbeats. A fifth layer, `_emit_worker_idle` (supervisor-side, wedge-watchdogs phase 2), catches the orthogonal "wedged mid-API-stream" case: PID alive, no Bash tool active, CPU ≤1% over ≥10min, no open Anthropic socket. That's the failure mode the existing four didn't catch.
+   The command validates the token against the live claim (stamping the first heartbeat in the same stroke — a forged or stale token dies loudly here), then double-forks into a detached daemon that pings every 2 minutes while the worker PID (`$PPID` — your Claude Code process, same PID source the pre-daemon bash loop tracked) is alive. It shuts itself down: when the worker PID dies (SIGKILL/OOM included, issue #72), or on the first token rejection after the claim is released — your `clu complete`/`clu block` releases the claim, so the daemon is gone within one 120s tick of your exit. No background bash loop, no cleanup step: the old `( while ...; do clu heartbeat; ...; done ) &` compound is denied under scoped-permission dispatch (subshell/loop constructs don't survive permission decomposition — #90 spike Test B), which is why this is a single allowlistable command.
+   The daemon keeps the 3-strike self-report: on the 3rd consecutive failed ping (~6 min) it fires the `clu notify-heartbeat-failure` path once, so the operator learns heartbeats stopped landing before lease expiry surfaces it. Each tick's stderr is appended to the sidecar log `$(dirname "$STATE")/logs/$PHASE.$TOKEN.hb.log` for post-mortem inspection.
+   The 2-minute interval is well inside the heartbeat threshold (derived from lease TTL: `min(25, max(15, lease_ttl//2))`, so 25 min at the default 60-min lease) and loose enough to not flood state.json writes. The watchdog layers and their semantics are unchanged from the bash-loop era: (1) the daemon's worker-PID liveness probe catches death-by-signal; (2) the token-rejection exit catches graceful completion; (3) supervisor-side `_detect_dead_pid` catches the worst case where the daemon itself dies; (4) the 3-strike self-report texts the operator if heartbeats silently stop landing; (5) `_emit_worker_idle` (supervisor-side, wedge-watchdogs phase 2) catches the orthogonal "wedged mid-API-stream" case: PID alive, no Bash tool active, CPU ≤1% over ≥10min, no open Anthropic socket.
 
 2b. **Export the activity-hook environment.** The stuck-tool detector (`clu doctor`, supervisor gap-fill) scopes its process-tree walk to descendants spawned during the current Bash tool call. That window is stamped by a Claude Code PreToolUse/PostToolUse hook that calls `clu activity --start-bash` / `--end-bash`. The hook reads its context from env, so export the four vars here so they propagate to child processes (including Claude Code and its hooks):
    ```bash
@@ -153,7 +137,7 @@ If you see an answered blocker, that means: you asked a question previously, the
    - Need a decision from the user → `clu block` with a focused question + 2-4 options
    - Hit a wall you can't resolve (corrupt state, missing dependency, contradictory requirements) → `clu block` with a question that surfaces the wall
 
-9. **Call the callback and exit.** Output of the callback is logged. Exit code 0 from the callback means clu accepted it. The EXIT trap from step 2 kills the heartbeat ticker automatically.
+9. **Call the callback and exit.** Output of the callback is logged. Exit code 0 from the callback means clu accepted it. The heartbeat daemon from step 2 needs no cleanup — your callback released the claim, so its next ping is rejected and it exits on its own within ~2 minutes.
 
 ## Pre-complete callbacks (mandatory)
 
@@ -241,7 +225,7 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Long phases**: the lease is 60 min by default. If your work takes longer, checkpoint by calling `clu block` with a question like "continue?" + options `["yes", "stop here"]`. The user replies, you resume on the next dispatch with their answer in hand. This is normal — phases are meant to be tick-sized, not session-sized.
 
-- **Skipping the heartbeat ticker**: step 2 arms a background `clu heartbeat` loop for every phase. Don't skip it even for short phases — `clu status` mis-reports `STALLED` the moment the phase exceeds the heartbeat threshold (`min(25, max(15, lease_ttl//2))`, ~25 min by default) without a heartbeat, and the supervisor's gap-fill notification fires. The 2-min ticker is cheap; the `kill -0 $WORKER_PID` loop condition + EXIT trap clean it up automatically (issue #72 — old EXIT-only contract missed SIGKILL/OOM cases).
+- **Skipping the heartbeat daemon**: step 2 arms `clu heartbeat-daemon` for every phase. Don't skip it even for short phases — `clu status` mis-reports `STALLED` the moment the phase exceeds the heartbeat threshold (`min(25, max(15, lease_ttl//2))`, ~25 min by default) without a heartbeat, and the supervisor's gap-fill notification fires. The daemon is cheap and cleans itself up: worker-PID liveness probe (catches SIGKILL/OOM, issue #72) plus token-rejection exit after your callback releases the claim.
 
 - **Forgetting the activity-hook env exports**: step 2b exports `CLU_PLAN` / `CLU_PHASE` / `CLU_TOKEN` / `CLU_PROJECT`. Without those, the Claude Code PreToolUse hook (if installed) reads empty strings and short-circuits → `tool_stuck` detection silently disables. The phase still works; you just lose the early-warning signal for wedged Bash subprocesses. `clu doctor` flags the missing marker.
 

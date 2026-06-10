@@ -44,6 +44,7 @@ from . import (
     dispatch,
     dry_merge,
     fleet,
+    heartbeat_daemon,
     inbox,
     monitor,
     notify,
@@ -1078,6 +1079,22 @@ def main(argv: list[str] | None = None) -> int:
     p_heartbeat.add_argument("--token", required=True, help="Worker claim token")
     p_heartbeat.add_argument("--phase", required=True)
 
+    p_hb_daemon = sub.add_parser(
+        "heartbeat-daemon",
+        help="Self-daemonizing heartbeat loop: detaches, then pings every "
+        "120s while the worker PID is alive (replaces the bash ticker)",
+    )
+    add_common(p_hb_daemon)
+    p_hb_daemon.add_argument("--token", required=True, help="Worker claim token")
+    p_hb_daemon.add_argument("--phase", required=True)
+    p_hb_daemon.add_argument(
+        "--worker-pid",
+        required=True,
+        type=int,
+        dest="worker_pid",
+        help="Worker PID the daemon tracks; the daemon exits when it dies",
+    )
+
     p_notify_hbf = sub.add_parser(
         "notify-heartbeat-failure",
         help="Worker reports 3+ consecutive clu-heartbeat failures (silent non-zero exits)",
@@ -1472,6 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
         "block": cmd_block,
         "task-done": cmd_task_done,
         "heartbeat": cmd_heartbeat,
+        "heartbeat-daemon": cmd_heartbeat_daemon,
         "notify-heartbeat-failure": cmd_notify_heartbeat_failure,
         "activity": cmd_activity,
         "register": cmd_register,
@@ -5781,17 +5799,55 @@ def cmd_heartbeat(args, cfg: ProjectConfig, state_path: Path) -> int:
 
 
 @_translate_claim_mismatch
+def cmd_heartbeat_daemon(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """Arm the detached heartbeat loop for a phase worker.
+
+    Validates everything in the caller's face BEFORE forking: phase slug,
+    worker PID, and the token against the live claim — the validation ping
+    doubles as the first heartbeat, so a forged or stale token dies here
+    with CLAIM_MISMATCH instead of silently in a daemon log.
+    """
+    try:
+        st.validate_slug(args.phase, kind="phase id")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+    if args.worker_pid <= 0:
+        return _die(
+            ExitCode.INVALID_VALUE,
+            f"--worker-pid must be a positive PID, got {args.worker_pid}",
+        )
+    with st.mutate(state_path) as data:
+        ts = st.record_heartbeat(data, args.token, args.phase)
+    log_path = state_path.parent / "logs" / f"{args.phase}.{args.token}.hb.log"
+    rc = heartbeat_daemon.run(
+        project_root=cfg.project_root,
+        plan=args.plan,
+        phase=args.phase,
+        token=args.token,
+        worker_pid=args.worker_pid,
+        state_path=state_path,
+        log_path=log_path,
+    )
+    print(
+        f"heartbeat-daemon armed for {args.plan}/{args.phase} "
+        f"(worker pid {args.worker_pid}, every "
+        f"{heartbeat_daemon.DEFAULT_INTERVAL_SECONDS}s, first beat @ {ts})"
+    )
+    return rc
+
+
+@_translate_claim_mismatch
 def cmd_notify_heartbeat_failure(args, cfg: ProjectConfig, state_path: Path) -> int:
     """Worker reports that its heartbeat loop has failed 3+ consecutive times.
 
-    The bash heartbeat loop in clu-phase/SKILL.md swallows stderr from each
-    `clu heartbeat` call. Any non-zero exit (LockTimeout, ClaimMismatch, etc.)
-    is silent. This command is called after the 3rd consecutive failure so the
-    operator learns the loop is broken before lease expiry surfaces it.
+    The heartbeat daemon (`clu heartbeat-daemon`) sends each tick's stderr to
+    a sidecar log nobody watches live. This command is called after the 3rd
+    consecutive failed ping so the operator learns heartbeats stopped landing
+    before lease expiry surfaces it.
 
     Token-validated and idempotent — heartbeat_loop_failing_notified on the
-    claim prevents duplicate events and inbox entries if the bash `|| true`
-    wrapper ever retries more than once per strike run.
+    claim prevents duplicate events and inbox entries if a strike run ever
+    fires the call more than once.
     """
     notify_body = None
     with st.mutate(state_path) as data:

@@ -354,6 +354,65 @@ on the live claim (healthy) or releases the claim with a
   dispatcher are split.
 - `operations.md` for example `dispatch.command` templates.
 
+### `heartbeat_daemon.py`
+
+The detached heartbeat loop behind `clu heartbeat-daemon` — the worker's
+step-2 replacement for the bash `( while kill -0 ...; do clu heartbeat;
+sleep 120; done ) &` compound, which scoped-permission dispatch denies
+(subshell/loop constructs don't survive permission decomposition; #90
+spike Test B). One flat command double-forks + setsids, then pings the
+live claim every 120s while the worker PID is alive.
+
+**Key types and functions**
+
+- `DEFAULT_INTERVAL_SECONDS = 120`, `STRIKE_LIMIT = 3` — the cadence and
+  the consecutive-failure count that fires the operator self-report.
+- `ACTION_OK / ACTION_STRIKE / ACTION_EXIT_WORKER_DEAD /
+  ACTION_EXIT_CLAIM_GONE` — the per-tick verdicts.
+- `tick_once(state_path, phase, token, worker_pid, *, pid_alive, ping)
+  -> str` — the pure decision core: dead worker PID → exit; ping
+  rejected (`ClaimMismatch` — claim released or superseded) → exit, NOT
+  a strike; any other failure → strike. The ping is in-process
+  (`state.record_heartbeat` under `state.mutate`) — the same code path
+  `cmd_heartbeat` uses, so the daemon holds no subprocess PATH
+  assumptions.
+- `run_loop(...)` — ticks until an exit action. The 3rd consecutive
+  strike fires the `notify-heartbeat-failure` path once (best-effort —
+  a broken transport never kills the loop); success resets the counter.
+  `sleep` / `tick` / `notify_failure` / `max_ticks` are injectable so
+  tests run without wall-clock or forking.
+- `run(..., detach=True)` — `_daemonize` (double-fork + setsid, stdio
+  redirected to the sidecar log `logs/<phase>.<token>.hb.log`), then
+  the loop. The parent returns 0 immediately; the daemon `os._exit`s
+  after the loop so it can't fall back into CLI plumbing. `detach=False`
+  is the test seam — real forking is covered by live smoke, not unit
+  tests.
+
+**Invariants and gotchas**
+
+- The daemon is never the claim PID — claim.pid stays the worker's
+  (supervisor-lifecycle PTY constraint: wrappers must not change
+  claim.pid).
+- setsid puts the daemon in its own process group, so
+  `reap_orphan_pgroup`'s killpg never reaches it — accepted by design.
+  A reaped worker is a dead PID (exit on the next liveness probe) and a
+  released claim is a token rejection (clean exit on the next ping). Do
+  not add the daemon to any reaper.
+- Post-`clu complete` shutdown is the rejection path, not a signal: the
+  callback releases the claim, the next ping raises `ClaimMismatch`,
+  and the daemon exits ≤120s later.
+- `cmd_heartbeat_daemon` validates phase slug, worker PID, and token
+  against the live claim BEFORE forking — the validation ping doubles
+  as the first heartbeat, so a forged token dies with `CLAIM_MISMATCH`
+  in the caller's face instead of silently in a daemon log.
+
+**See also**
+
+- `skills/clu-phase/SKILL.md` step 2 — the worker-side arming command
+  and the five watchdog layers it participates in.
+- `state.py` `record_heartbeat` / `assert_claim_match` for the token
+  discipline the ping inherits.
+
 ### `notify.py`
 
 Notification dispatcher. Owns kind constants, quiet-hours gating, the
@@ -1253,8 +1312,8 @@ argparse dispatch + the `ExitCode` enum + the `_die` helper + the
 `@_translate_claim_mismatch` decorator + every subcommand. Both the
 operator (`tick`, `status`, `pause`, `resume`, `retry`, `init`,
 `register`, `unregister`, `list`, `answer`) and the worker
-(`complete`, `block`, `spawn`, `task-done`, `heartbeat`) talk to clu
-through this.
+(`complete`, `block`, `spawn`, `task-done`, `heartbeat`,
+`heartbeat-daemon`) talk to clu through this.
 
 **Key types and functions**
 

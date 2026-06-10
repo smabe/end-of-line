@@ -170,9 +170,10 @@ EVENT_QUEUE_REJECTED = "queue_rejected"
 # CLAIM_NOTIFIED fires once per (claim, transition) pair.
 EVENT_STUCK_BLOCKER_REPINGED = "stuck_blocker_repinged"
 EVENT_STALLED_CLAIM_NOTIFIED = "stalled_claim_notified"
-# Worker-side heartbeat-loop failure surface: fires when the bash heartbeat
-# loop in clu-phase/SKILL.md detects 3 consecutive non-zero exits (~6min at
-# 120s interval). Idempotent per claim via heartbeat_loop_failing_notified.
+# Worker-side heartbeat-loop failure surface: fires when the worker's
+# heartbeat daemon (`clu heartbeat-daemon`) records 3 consecutive failed
+# pings (~6min at 120s interval). Idempotent per claim via
+# heartbeat_loop_failing_notified.
 EVENT_HEARTBEAT_LOOP_FAILING = "heartbeat_loop_failing"
 # Worktree lifecycle. MISSING fires once per dispatch when state.worktree
 # points at a path that's been deleted or detached (operator removed the
@@ -632,10 +633,10 @@ def stalled_threshold_for_phase(data: dict, phase_id: str) -> int:
     capped at `STALLED_HEARTBEAT_MIN_CEILING`. The floor keeps short
     Effort-scaled leases (#58) from triggering too eagerly; the ceiling
     keeps long leases from leaving wedged workers undetected until full
-    lease expiry. The bash heartbeat loop runs on an independent 120s
-    timer (see clu-phase SKILL.md), so deep tool-use chains do not
-    legitimately skip heartbeats — staleness past the ceiling means
-    something is wrong, regardless of lease length.
+    lease expiry. The heartbeat daemon pings on an independent 120s
+    timer (`clu heartbeat-daemon`; see clu-phase SKILL.md), so deep
+    tool-use chains do not legitimately skip heartbeats — staleness past
+    the ceiling means something is wrong, regardless of lease length.
     """
     explicit = data.get("config", {}).get("stalled_heartbeat_minutes")
     if explicit is not None:
