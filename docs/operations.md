@@ -771,7 +771,9 @@ this is what runs where:
   `quality.verify_command` to
   `basedpyright && python3 -m unittest discover -s tests`, so every
   `clu verify` stamp — required before any `clu complete` — proves the
-  tree type-checks AND the suite passes. `clu verify` runs
+  tree type-checks AND the suite passes. The command runs with
+  `shell=True` (same operator-trust model as `test_command`), so
+  chained gates like this work. `clu verify` runs
   sandbox-exempt (via `sandbox.excludedCommands`), and the chained
   command runs as its child — outside the worker sandbox — so the
   gate holds inside hardened workers; `test_command` stays pure-suite

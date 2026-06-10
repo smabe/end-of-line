@@ -6116,8 +6116,12 @@ def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
     if not head:
         return _die(ExitCode.GENERIC, "could not resolve HEAD SHA")
     try:
+        # shell=True for parity with test_command's merge-gate semantics:
+        # both are operator-owned strings in .orchestrator.json, and chained
+        # gates ("typecheck && tests") are a documented verify_command shape.
         result = subprocess.run(
-            shlex.split(cmd),
+            cmd,
+            shell=True,
             cwd=str(git_root),
             capture_output=True,
             text=True,

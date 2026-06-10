@@ -64,6 +64,26 @@ class CmdVerifyTestCase(GitProjectTestCase):
         self.assertEqual(rc, ExitCode.OK)
         self.assertIsNotNone(self._attestation())
 
+    def test_verify_command_runs_through_shell(self) -> None:
+        # `false || true` exits 0 only under shell semantics; without a
+        # shell, `false` runs with `["||", "true"]` as argv and exits 1.
+        write_config(self.project, quality={"verify_command": "false || true"})
+        self._claim("phase-a")
+        rc = main(self._argv("verify", "--phase", "phase-a"))
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIsNotNone(self._attestation())
+
+    def test_verify_chained_command_fails_when_second_stage_fails(self) -> None:
+        # `true && false` exits 1 only under shell semantics; without a
+        # shell, `true` swallows the rest of the line and exits 0.
+        write_config(self.project, quality={"verify_command": "true && false"})
+        self._claim("phase-a")
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = main(self._argv("verify", "--phase", "phase-a"))
+        self.assertNotEqual(rc, ExitCode.OK)
+        self.assertIsNone(self._attestation())
+
     def test_verify_errors_when_neither_configured(self) -> None:
         write_config(self.project)
         self._claim("phase-a")
