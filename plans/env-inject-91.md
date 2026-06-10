@@ -124,6 +124,19 @@ _Empty at plan time. Workers append one dated bullet per cross-phase finding
   Stash-verified identical on the pristine tree — not diff-caused. `clu
   verify` runs sandbox-exempt (`sandbox.excludedCommands`) and is the
   authoritative green; don't chase these in-session.
+- 2026-06-10 (marker-doctor): /code-review surfaced two fixes applied
+  in-phase: (1) `str.format` on operator templates can raise
+  AttributeError (`{plan_slug.x}`) and TypeError (`{project[0:2]}`) —
+  probe-verified; the quiet-skip tuple now catches both. (2) The
+  sentinel render no longer duplicates the dispatch placeholder set:
+  extracted `dispatch.render_command` (dispatch.py), now the single
+  render home for both `dispatch_for_tick` and the doctor guard.
+- 2026-06-10 (marker-doctor, #90 dogfood): hardened dispatch ran clean
+  end-to-end again — no denials blocked the phase. Live `clu doctor`
+  against the canonical root shows no marker warning (recipe is clean)
+  but DOES flag the operator-side activity hook as not installed for
+  this claim (stuck-tool detection disabled) — operator action, not a
+  plan defect.
 - 2026-06-10 (inject, #90 dogfood): dontAsk denial shapes seen live —
   compound Bash with `$(cd ...)`/command substitution denied even when each
   half is allowlisted; the Read tool denied on canonical-project paths

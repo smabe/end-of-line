@@ -188,6 +188,33 @@ def _template_uses_session_id(cmd_tmpl: str) -> bool:
         return False
 
 
+def render_command(
+    cmd_tmpl: str,
+    *,
+    plan_slug: str,
+    phase_id: str,
+    token: str,
+    project: str,
+    state_file: str,
+    session_id: str,
+) -> str:
+    """Render a dispatch template — the single home of the placeholder set.
+
+    Every value is shlex-quoted for the `shell=True` Popen. `cmd_doctor`'s
+    dispatch-marker guard renders through this same helper, so a placeholder
+    added here is automatically part of what the doctor check exercises —
+    the two renders can't drift apart.
+    """
+    return cmd_tmpl.format(
+        plan_slug=shlex.quote(plan_slug),
+        phase_id=shlex.quote(phase_id),
+        token=shlex.quote(token),
+        project=shlex.quote(project),
+        state_file=shlex.quote(state_file),
+        session_id=shlex.quote(session_id),
+    )
+
+
 def dispatch_for_tick(
     result: TickResult,
     cfg: ProjectConfig,
@@ -217,13 +244,14 @@ def dispatch_for_tick(
     # placeholder, Claude Code picks its own id, so stamping ours would lie —
     # leave it unset and let `clu top` fall back to cwd-matching.
     session_id = str(uuid.uuid4()) if _template_uses_session_id(cmd_tmpl) else None
-    cmd = cmd_tmpl.format(
-        plan_slug=shlex.quote(plan_slug),
-        phase_id=shlex.quote(result.phase_id),
-        token=shlex.quote(result.token or ""),
-        project=shlex.quote(str(cfg.project_root)),
-        state_file=shlex.quote(str(state_file)),
-        session_id=shlex.quote(session_id or ""),
+    cmd = render_command(
+        cmd_tmpl,
+        plan_slug=plan_slug,
+        phase_id=result.phase_id,
+        token=result.token or "",
+        project=str(cfg.project_root),
+        state_file=str(state_file),
+        session_id=session_id or "",
     )
 
     log_dir = state_file.parent / "logs"

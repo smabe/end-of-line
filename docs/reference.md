@@ -1492,6 +1492,12 @@ operator (`tick`, `status`, `pause`, `resume`, `retry`, `init`,
   carries `bypassPermissions` or `--dangerously-skip-permissions`, and
   points at operations.md "Hardened worker dispatch"; tolerant of
   unparseable templates, mirroring `dispatch.resolved_model`), a
+  **dispatch-marker guard** (`_print_dispatch_marker_health` — renders
+  `dispatch.command` with a sentinel slug through the dispatch
+  placeholder set and warns, via the production matcher
+  `state._cmdline_marker_present`, when the slug doesn't survive as a
+  bounded token, which blinds the PID-reuse liveness checks;
+  `repair_command` excluded — repair workers carry no claim; #83), a
   **zombie-sweep dry-run preview**
   (`_print_zombie_health` → `supervisor.sweep_zombie_states(..., dry_run=True)`),
   and a **skill-drift guard** (`_print_skill_drift_health` — SHA-256

@@ -727,6 +727,12 @@ the wall.
   `dispatch.repair_command` carries `bypassPermissions` or
   `--dangerously-skip-permissions`, and points back here. Quiet when
   clean.
+- `{plan_slug}` in `dispatch.command` is load-bearing beyond the worker
+  prompt: the supervisor's PID-reuse liveness checks
+  (`claim_worker_alive`, the orphan reaper) match a claim's plan slug
+  against the live process command line. `clu doctor` warns when the
+  rendered command can't surface the slug as a bounded token — missing
+  entirely, or embedded without delimiters (`x{plan_slug}y`).
 - `clu init` materializes the settings template (above) and prints the
   hardened-command hint when the file is absent.
 - **Migration ordering:** install the daemon-era `/clu-phase` skill

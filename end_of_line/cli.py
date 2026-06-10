@@ -2670,6 +2670,7 @@ def cmd_doctor(args) -> int:
     print(f"  (source: {source})")
 
     _print_dispatch_permission_health(cfg)
+    _print_dispatch_marker_health(cfg)
     _print_notify_health(cfg)
     _print_coolant_health(cfg)
     _print_effort_health(cfg)
@@ -2728,6 +2729,53 @@ def _print_dispatch_permission_health(cfg: ProjectConfig) -> None:
     print(
         '  Harden it: see "Hardened worker dispatch" in docs/operations.md '
         "(dontAsk + scoped --allowedTools + OS sandbox)."
+    )
+
+
+def _print_dispatch_marker_health(cfg: ProjectConfig) -> None:
+    """Warn when dispatch.command can't surface the plan slug as a bounded token (#83).
+
+    Renders the template with a sentinel slug through the production
+    render (`dispatch.render_command` — the placeholder set has one home),
+    then asks the production matcher (`st._cmdline_marker_present`)
+    whether the sentinel survives as a slug-delimited token — one check
+    covers both a missing `{plan_slug}` and an unbounded embedding
+    (`x{plan_slug}y`). Either blinds the PID-reuse liveness guards
+    (`claim_worker_alive` / `reap_orphan_pgroup`), which match a claim's
+    plan slug against the live process cmdline.
+    `dispatch.repair_command` is excluded on purpose: marker checks only
+    run against phase-worker claims, and repair workers carry no claim.
+    Quiet when clean — matches the other doctor printers; a template that
+    won't render (unknown placeholders, stray braces, attribute/index
+    tricks) is a quiet skip, same tolerance class as
+    `dispatch.resolved_model`.
+    """
+    tmpl = cfg.dispatch.command
+    if not tmpl:
+        return
+    sentinel = "probeslug0"
+    try:
+        rendered = dispatch.render_command(
+            tmpl,
+            plan_slug=sentinel,
+            phase_id="probephase",
+            token="probetoken",
+            project=str(cfg.project_root),
+            state_file="probestate",
+            session_id="probesession",
+        )
+    except (KeyError, IndexError, ValueError, AttributeError, TypeError):
+        return
+    if st._cmdline_marker_present(rendered, sentinel):
+        return
+    print(
+        "Dispatch command can't surface the plan slug as a bounded token "
+        "(PID-reuse liveness checks go blind):"
+    )
+    print("  dispatch.command — {plan_slug} is missing or embedded without slug boundaries")
+    print(
+        '  Fix it: see "Hardened worker dispatch" in docs/operations.md '
+        "({plan_slug} anchors claim_worker_alive / reap_orphan_pgroup)."
     )
 
 

@@ -449,5 +449,83 @@ class DispatchPermissionHealthTestCase(_DoctorProjectTestCase):
         self.assertNotIn(_BYPASS_WARNING, stdout)
 
 
+_MARKER_WARNING = "can't surface the plan slug"
+
+
+class DispatchMarkerHealthTestCase(_DoctorProjectTestCase):
+    """`clu doctor` warns when dispatch.command can't surface the plan slug
+    as a bounded token in the rendered worker command line (#83).
+
+    The check renders the template with a sentinel slug and asks the
+    production matcher (`state._cmdline_marker_present`) — so the doctor
+    verdict can't drift from what `claim_worker_alive` actually matches.
+    Quiet-when-clean; unrenderable templates are a quiet skip.
+    """
+
+    def test_quiet_on_hardened_recipe(self) -> None:
+        self._write_cfg(command=HARDENED_COMMAND)
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(_MARKER_WARNING, stdout)
+
+    def test_warns_when_plan_slug_missing(self) -> None:
+        self._write_cfg(command="claude --print '/clu-phase {phase_id} {token} {state_file}'")
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn(_MARKER_WARNING, stdout)
+        self.assertIn("dispatch.command", stdout)
+        self.assertIn("Hardened worker dispatch", stdout)
+
+    def test_warns_when_plan_slug_unbounded(self) -> None:
+        # `x{plan_slug}y` renders the slug fused to slug-alphabet neighbors —
+        # exactly the embedding `_cmdline_marker_present` rejects (#76).
+        self._write_cfg(
+            command="claude --print --tag=x{plan_slug}y '/clu-phase {phase_id} {token} {state_file}'"
+        )
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertIn(_MARKER_WARNING, stdout)
+
+    def test_quiet_on_unknown_placeholder(self) -> None:
+        # {bogus} → KeyError at render time → quiet skip, no crash.
+        # Unparseable ≠ warning (same tolerance class as resolved_model).
+        self._write_cfg(command="claude '/clu-phase {plan_slug} {bogus}'")
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(_MARKER_WARNING, stdout)
+
+    def test_quiet_on_attribute_and_index_placeholders(self) -> None:
+        # {plan_slug.bogus} → AttributeError; {project[0:2]} → TypeError.
+        # Both are one-typo-away operator templates; doctor must survive
+        # them as a quiet skip, not crash mid-printer-chain.
+        for cmd in (
+            "claude '/clu-phase {plan_slug.bogus}'",
+            "claude '/clu-phase {plan_slug} {project[0:2]}'",
+        ):
+            with self.subTest(cmd=cmd):
+                self._write_cfg(command=cmd)
+                rc, stdout, _ = self._run_doctor()
+                self.assertEqual(rc, 0)
+                self.assertNotIn(_MARKER_WARNING, stdout)
+
+    def test_quiet_on_empty_command(self) -> None:
+        self._write_cfg(command="")
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(_MARKER_WARNING, stdout)
+
+    def test_repair_command_excluded(self) -> None:
+        # Marker liveness checks only run against phase-worker claims;
+        # repair workers carry no claim, so a slugless repair_command is
+        # not a finding. Pins the exclusion.
+        self._write_cfg(
+            command=HARDENED_COMMAND,
+            repair_command="claude --print 'fix {corrupt_path}'",
+        )
+        rc, stdout, _ = self._run_doctor()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(_MARKER_WARNING, stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
