@@ -6130,7 +6130,11 @@ def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
     except subprocess.TimeoutExpired:
         return _die(ExitCode.GENERIC, f"verify timed out after 600s: {cmd}")
     if result.returncode != 0:
-        tail = result.stderr.strip().splitlines()[-20:]
+        # Tail both streams: typecheckers (basedpyright) report errors on
+        # stdout, test runners (unittest) on stderr — a chained gate can
+        # fail on either.
+        output = "\n".join(s.strip() for s in (result.stdout, result.stderr) if s.strip())
+        tail = output.splitlines()[-20:]
         return _die(
             ExitCode.GENERIC,
             f"verify failed (rc={result.returncode}):\n" + "\n".join(tail),

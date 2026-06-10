@@ -343,7 +343,7 @@ Controls the quality gates enforced by `clu complete`. Absent block = defaults a
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `verify_command` | string \| null | null | Command run by `clu verify`. Falls back to top-level `test_command` if absent or null. Single-string + `shlex.split`; wrap multi-step verify in a script. |
+| `verify_command` | string \| null | null | Command run by `clu verify`. Falls back to top-level `test_command` if absent or null. Single string, run through the shell (same operator-trust model as `test_command`); chained gates like `typecheck && tests` work directly. |
 | `simplify_threshold` | object \| null | `{files: 1, lines: 30}` | Threshold for the simplify gate. Format: `{files: int, lines: int}` — exceeding EITHER triggers the gate. Set both to 0 to gate every phase. Null restores the default. |
 
 The verify gate always fires (unless `--skip-verify`). The simplify gate fires only when the cumulative phase diff (from branch base to current HEAD) exceeds the threshold.

@@ -84,6 +84,20 @@ class CmdVerifyTestCase(GitProjectTestCase):
         self.assertNotEqual(rc, ExitCode.OK)
         self.assertIsNone(self._attestation())
 
+    def test_verify_failure_tail_includes_stdout(self) -> None:
+        # basedpyright — the documented first stage of a chained
+        # verify_command — reports errors on stdout, not stderr.
+        write_config(
+            self.project,
+            quality={"verify_command": "echo typecheck-boom && false"},
+        )
+        self._claim("phase-a")
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = main(self._argv("verify", "--phase", "phase-a"))
+        self.assertNotEqual(rc, ExitCode.OK)
+        self.assertIn("typecheck-boom", buf.getvalue())
+
     def test_verify_errors_when_neither_configured(self) -> None:
         write_config(self.project)
         self._claim("phase-a")

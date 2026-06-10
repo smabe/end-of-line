@@ -191,3 +191,12 @@ _Empty at plan time. Workers append one dated bullet per cross-phase finding
   approach. With the repo at zero, the baseline would only mask new errors
   matching old entries. Fixed in this commit: baseline deleted, hook runs
   bare `basedpyright`, README describes the hard gate.
+- 2026-06-10 (gate, resume after blocker): the shell=True switch left two
+  stragglers, both fixed in the follow-up commit: docs/contract.md:346 still
+  documented `shlex.split` argv semantics for verify_command, and
+  `cmd_verify`'s failure message tailed stderr only — basedpyright reports
+  errors on stdout, so a chained-gate type failure printed an empty tail.
+  Parked with a one-line scope in a follow-up GH issue (cross-cutting,
+  needs a design pass): doctor health check for verify_command +
+  process-group kill on shell=True timeout (cmd_verify and the merge gate
+  both orphan the shell's children on timeout today).
