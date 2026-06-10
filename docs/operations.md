@@ -687,6 +687,19 @@ writes to the canonical shared `.git` are auto-granted by the sandbox
 (code.claude.com/docs/en/sandboxing), so per-plan worktrees need no
 extra entries either.
 
+**The activity hook rides in this file too.** For `tool_stuck` coverage
+(#91), add the PreToolUse/PostToolUse block from the clu-phase SKILL.md
+to `worker-settings.json` alongside `sandbox` — hooks load from any
+settings source, including `--settings` (probe-verified on claude
+2.1.170). Use the `clu activity --start-bash / --end-bash` command form
+here, not `python3 -m end_of_line.activity_hook`: this file is
+machine-global, and the module form only resolves when the worker's cwd
+carries the package source, while `clu` rides `dispatch.path` in every
+project. The dispatcher injects `CLU_PLAN/PHASE/TOKEN/PROJECT` into the
+worker env at Popen time, so the hook's `[ -n "$CLU_TOKEN" ]` guard
+opens exactly for clu-dispatched sessions and short-circuits everywhere
+else.
+
 ### The allowlist, entry by entry
 
 | Entry | Why the worker needs it |
