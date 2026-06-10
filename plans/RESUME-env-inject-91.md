@@ -14,10 +14,8 @@ Next steps available (pick one or propose your own):
   queueing it as a clu plan makes it the #90 dogfood run for free.
 - #90: stays open by design — close it (with a confirming comment) once the
   first hardened-dispatch plan completes clean. If that plan is #91, do both.
-- [pending] Parked containers issue (layer 3): drafted but NOT filed — the gh
-  keyring token expired mid-session (gh auth status looks fine but API calls
-  401). Run `gh auth refresh -h github.com` first, then file from the draft in
-  the harden-worker-dispatch session transcript / re-draft from #90's AC.
+- #92: containers (layer 3) — filed as parked; unpark trigger documented in
+  the issue. No action unless hardened dispatch shows a real gap.
 - HealthData migration: deliberately NOT tracked here — operator decided it's
   HealthData-side work, after the dogfood confirms.
 
@@ -30,8 +28,9 @@ Read first if continuing from this work:
 - docs/operations.md "Hardened worker dispatch" (the recipe #91's worker will run under)
 
 Open questions or blockers:
-- gh CLI 401 (expired keyring token) — blocks issue filing/closing until
-  `gh auth refresh`.
 - .orchestrator.json.pre-90.bak at repo root is the worker's pre-swap config
   backup — delete once the dogfood run confirms the hardened dispatch.
+- (resolved 2026-06-10) gh 401 was 4 duplicate gh:github.com keychain items
+  returning a dead March token — purged + re-logged-in. If gh 401s again with
+  a green `gh auth status`, check keychain duplicates first.
 ```
