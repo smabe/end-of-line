@@ -27,9 +27,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from end_of_line import demo_worker, notify, registry
+from end_of_line import demo_worker, notify, registry, top
 from end_of_line import state as st
-from end_of_line import top
 from end_of_line._xdg_guard import clu_config_dir
 from end_of_line.config import CONFIG_FILENAME, load_project_config
 
@@ -159,7 +158,9 @@ def up(scenarios=demo_worker.SCENARIOS, *, root: Path | None = None) -> list[Dem
         # TTY), so without this `cmd_init`'s interactive "Wire iMessage? / Wire
         # Discord?" wizard fires for every demo plan AND overwrites the masked
         # notify config we just scaffolded. The demo configures notify itself.
-        _cli(["init", "--no-notify-prompt", "--project", str(plan.project_root), "--plan", plan.slug])
+        _cli(
+            ["init", "--no-notify-prompt", "--project", str(plan.project_root), "--plan", plan.slug]
+        )
         # Park the worker mid-list: pre-complete the contiguous prefix AFTER init
         # (the state + phases now exist) and BEFORE the dispatch tick (which then
         # claims the first uncompleted phase).

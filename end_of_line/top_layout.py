@@ -91,13 +91,13 @@ class Split:
     side-by-side panes don't visually run together."""
 
     orient: str
-    first: "Leaf | Split"
-    second: "Leaf | Split"
+    first: Leaf | Split
+    second: Leaf | Split
     weight: float
     gap: int = 1
 
 
-def _place(node: "Leaf | Split", rect: Rect, out: dict[str, Rect]) -> None:
+def _place(node: Leaf | Split, rect: Rect, out: dict[str, Rect]) -> None:
     """Recursively assign each `Leaf` a `Rect`, writing role → Rect into `out`.
 
     `first` then `second` abut across a `gap`-wide divider channel, so the two
@@ -122,7 +122,7 @@ def _place(node: "Leaf | Split", rect: Rect, out: dict[str, Rect]) -> None:
         _place(node.second, Rect(rect.x, second_y, rect.w, rect.h - first_h - gap), out)
 
 
-def _body_tree(preset: str, drill: bool = False) -> "Leaf | Split":
+def _body_tree(preset: str, drill: bool = False) -> Leaf | Split:
     """The split-tree for a preset's body (everything between header and hint).
 
     `drill` only bites on the list-only `master` preset (the narrow `<50` cols

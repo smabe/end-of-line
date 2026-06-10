@@ -21,7 +21,6 @@ from tempfile import TemporaryDirectory
 
 from end_of_line import demo_worker, registry, top
 from end_of_line import state as st
-
 from tests import GitProjectTestCase, utcnow_minus
 
 

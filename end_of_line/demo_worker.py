@@ -192,7 +192,9 @@ def _cli_runner(argv: list[str]) -> int:
 
 
 def _heartbeat_argv(plan: str, phase_id: str, token: str, project: str) -> list[str]:
-    return ["heartbeat", "--project", project, "--plan", plan, "--phase", phase_id, "--token", token]
+    return [
+        "heartbeat", "--project", project, "--plan", plan, "--phase", phase_id, "--token", token
+    ]
 
 
 def _block_argv(plan: str, phase_id: str, token: str, project: str) -> list[str]:

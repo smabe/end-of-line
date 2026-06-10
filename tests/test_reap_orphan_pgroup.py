@@ -13,7 +13,6 @@ the worker — the heartbeat then reparents to launchd and loops for hours
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import sys
 import threading

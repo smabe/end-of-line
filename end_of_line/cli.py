@@ -1276,7 +1276,8 @@ def main(argv: list[str] | None = None) -> int:
     p_demo_worker.add_argument("--phase", required=True)
     p_demo_worker.add_argument("--token", required=True, help="Worker claim token")
     p_demo_worker.add_argument(
-        "--project", type=Path, required=True, help="Project root (callback target + transcript cwd)"
+        "--project", type=Path, required=True,
+        help="Project root (callback target + transcript cwd)",
     )
     p_demo_worker.add_argument("--session-id", required=True, dest="session_id")
     p_demo_worker.add_argument("--scenario", required=True, choices=list(demo_worker.SCENARIOS))

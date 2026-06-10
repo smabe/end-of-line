@@ -360,7 +360,9 @@ def gather_rows(
     """
     rows: list[dict] = []
     for e in registry.entries():
-        if project_filter is not None and Path(e.project_root).resolve() != Path(project_filter).resolve():
+        if project_filter is not None and (
+            Path(e.project_root).resolve() != Path(project_filter).resolve()
+        ):
             continue
         data = registry.load_entry_state(e)
         if not data:
@@ -369,7 +371,9 @@ def gather_rows(
         if claim:
             wt = st.get_worktree(data)
             cwd = Path(wt["path"]) if wt and wt.get("path") else Path(e.project_root)
-            tpath = locate_transcript(cwd, projects_root=projects_root, session_id=claim.get("session_id"))
+            tpath = locate_transcript(
+                cwd, projects_root=projects_root, session_id=claim.get("session_id")
+            )
             records = tail_records(tpath) if tpath else []
             row = assemble_row(claim, extract_activity(records), now=now)
         else:
@@ -481,7 +485,12 @@ def _flex_widths(cells: list[tuple[str, str, str, str]], width: int) -> dict[str
     is acceptable — absorbs whatever width is left over. Only when name+cmd+
     wrote alone overflow do those three shrink proportionally."""
     budget = max(40, width - _FIXED_OVERHEAD)
-    want = {"name": len(_NAME_HDR), "cmd": len(_CMD_HDR), "wrote": len(_WROTE_HDR), "saying": len(_SAY_HDR)}
+    want = {
+        "name": len(_NAME_HDR),
+        "cmd": len(_CMD_HDR),
+        "wrote": len(_WROTE_HDR),
+        "saying": len(_SAY_HDR),
+    }
     for name, cmd, wrote, saying in cells:
         want["name"] = max(want["name"], len(name))
         want["cmd"] = max(want["cmd"], len(cmd))
@@ -552,7 +561,8 @@ def format_detail(rows: list[dict], *, width: int = 120) -> list[str]:
     for r in rows:
         name = _clean(f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}")
         meta = (
-            f"RAN {human_age(r.get('ran_seconds'))} · ACT {human_age(r.get('last_activity_seconds'))} · "
+            f"RAN {human_age(r.get('ran_seconds'))} · "
+            f"ACT {human_age(r.get('last_activity_seconds'))} · "
             f"HB {human_age(r.get('heartbeat_age_seconds'))} · {_liveness_cell(r)}"
         )
         out.append(f"{name}   {meta}"[:width])
@@ -585,7 +595,8 @@ def format_detail(rows: list[dict], *, width: int = 120) -> list[str]:
         out.extend(_wrap_field("CMD", run + (r.get("last_command") or "—"), width))
         w = r.get("last_write")
         if w:
-            out.append(_clean(f"  WROTE {Path(w).name} {human_age(r.get('last_write_seconds'))}")[:width])
+            wrote = _clean(f"  WROTE {Path(w).name} {human_age(r.get('last_write_seconds'))}")
+            out.append(wrote[:width])
         out.extend(_wrap_field("SAY", r.get("last_text") or "—", width))
         out.append("")
     return out
@@ -627,7 +638,9 @@ def render_once(
 _HINT = "q quit · ↑↓ select · Enter open · Tab detail · w layout · ? help"
 
 
-def _render_region(role: str, snapshot, rect, *, cols: tuple[str, ...] | None, hint: str) -> list[str]:
+def _render_region(
+    role: str, snapshot, rect, *, cols: tuple[str, ...] | None, hint: str
+) -> list[str]:
     """Lines for one pane region, each routed through the registry's per-pane
     error boundary so a single bad pane degrades to an inline band, never a
     crash. The `hint` is the one raw string the layout owns, so clip it to the
@@ -789,7 +802,7 @@ def _run_curses(
 
     # lazy imports — avoid an import cycle (top_render/top_layout/top_registry
     # all import pure helpers from `top` at their module level).
-    from end_of_line.top_layout import AppState, LayoutEngine, next_preset
+    from end_of_line.top_layout import AppState, LayoutEngine
     from end_of_line.top_registry import Snapshot
     from end_of_line.top_render import CursesSurface
 
@@ -852,7 +865,9 @@ def run(
     the named metric columns (default: all)."""
     stream = stream or sys.stdout
     if once or not stream.isatty():
-        return render_once(stream, projects_root=projects_root, project_filter=project_filter, cols=cols)
+        return render_once(
+            stream, projects_root=projects_root, project_filter=project_filter, cols=cols
+        )
     return _run_curses(
         interval=interval, project_filter=project_filter, projects_root=projects_root, cols=cols
     )

@@ -23,7 +23,6 @@ from tempfile import TemporaryDirectory
 from end_of_line import registry, top
 from end_of_line import state as st
 from end_of_line.cli import main as cli_main
-
 from tests import GitProjectTestCase, plan_body
 
 

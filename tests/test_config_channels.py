@@ -10,7 +10,6 @@ from end_of_line.config import (
     ConfigError,
     load_project_config,
 )
-
 from tests import CluTestCase
 
 

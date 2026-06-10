@@ -12,12 +12,10 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import demo, notify, registry
+from end_of_line import demo, notify, registry, top
 from end_of_line import state as st
-from end_of_line import top
 from end_of_line.config import CONFIG_FILENAME, load_project_config
 from end_of_line.plan_parser import parse_sessions_index
-
 from tests import CluTestCase
 
 

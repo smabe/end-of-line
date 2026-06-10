@@ -57,7 +57,7 @@ class Snapshot:
         self._rows = rows
 
     @classmethod
-    def gather(cls, **kwargs) -> "Snapshot":
+    def gather(cls, **kwargs) -> Snapshot:
         from end_of_line.top import gather_rows
 
         return cls(gather_rows(**kwargs))
@@ -377,7 +377,9 @@ class Pane:
 PANES: dict[str, Pane] = {}
 
 
-def register_pane(*, kind: str, metric_keys: tuple[str, ...]) -> Callable[[Callable[..., list[str]]], Pane]:
+def register_pane(
+    *, kind: str, metric_keys: tuple[str, ...]
+) -> Callable[[Callable[..., list[str]]], Pane]:
     """Decorator: register a `render(snapshot, *, width, cols=None) -> lines`
     function as a `Pane`."""
 
@@ -389,7 +391,9 @@ def register_pane(*, kind: str, metric_keys: tuple[str, ...]) -> Callable[[Calla
     return deco
 
 
-def safe_render(pane: Pane, snapshot: Snapshot, *, width: int, cols: tuple[str, ...] | None = None) -> list[str]:
+def safe_render(
+    pane: Pane, snapshot: Snapshot, *, width: int, cols: tuple[str, ...] | None = None
+) -> list[str]:
     """Per-pane error boundary: a pane whose render raises becomes a single
     inline error band, so one bad pane never crashes the TUI and its siblings
     still draw."""
@@ -461,7 +465,9 @@ def fleet_summary(rows: list[dict], width: int) -> str:
     running = len(alive)
     blocked = sum(1 for r in rows if r.get("blocked"))
     dead = len(rows) - running - blocked
-    acts = [r.get("last_activity_seconds") for r in alive if r.get("last_activity_seconds") is not None]
+    acts = [
+        r.get("last_activity_seconds") for r in alive if r.get("last_activity_seconds") is not None
+    ]
     oldest = human_age(max(acts)) if acts else "—"
     return _fit(f"{running} running · {blocked} blocked · {dead} dead · oldest-ACT {oldest}", width)
 

@@ -423,7 +423,9 @@ def make_handler(*, index_html: str, cfg: ServeConfig):
             try:
                 # 1. DNS-rebinding defense — before auth, before routing.
                 if not self._host_allowed():
-                    self._respond(421, b"misdirected request\n", "text/plain; charset=utf-8", head=head)
+                    self._respond(
+                        421, b"misdirected request\n", "text/plain; charset=utf-8", head=head
+                    )
                     return
 
                 path = urlsplit(self.path).path
@@ -466,7 +468,9 @@ def make_handler(*, index_html: str, cfg: ServeConfig):
                 # Corrupt registry / transcript: 500, but keep the thread and
                 # the server alive. Never leak the traceback to the client.
                 try:
-                    self._respond(500, b"internal server error\n", "text/plain; charset=utf-8", head=head)
+                    self._respond(
+                        500, b"internal server error\n", "text/plain; charset=utf-8", head=head
+                    )
                 except Exception:
                     pass
 

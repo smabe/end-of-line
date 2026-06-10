@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import tempfile
@@ -455,33 +456,27 @@ class AppendCpuSampleTestCase(unittest.TestCase):
         return {}
 
     def test_appends_sample(self) -> None:
-        import datetime as _dt
-
         claim = self._claim()
-        now = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        now = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
         st.append_cpu_sample(claim, 0.5, now)
         self.assertEqual(len(claim["cpu_samples"]), 1)
         self.assertEqual(claim["cpu_samples"][0]["cpu"], 0.5)
 
     def test_trims_to_cap(self) -> None:
-        import datetime as _dt
-
         claim = self._claim()
         cap = st.WORKER_IDLE_SAMPLE_CAP
         for i in range(cap + 5):
-            now = _dt.datetime(2026, 1, 1, 12, i, 0, tzinfo=_dt.timezone.utc)
+            now = _dt.datetime(2026, 1, 1, 12, i, 0, tzinfo=_dt.UTC)
             st.append_cpu_sample(claim, float(i), now)
         self.assertEqual(len(claim["cpu_samples"]), cap)
         # Last sample should be the most recent
         self.assertEqual(claim["cpu_samples"][-1]["cpu"], float(cap + 4))
 
     def test_keeps_most_recent_on_trim(self) -> None:
-        import datetime as _dt
-
         claim = self._claim()
         cap = st.WORKER_IDLE_SAMPLE_CAP
         for i in range(cap + 3):
-            now = _dt.datetime(2026, 1, 1, 12, i, 0, tzinfo=_dt.timezone.utc)
+            now = _dt.datetime(2026, 1, 1, 12, i, 0, tzinfo=_dt.UTC)
             st.append_cpu_sample(claim, float(i), now)
         # Oldest samples (0, 1, 2) should be gone
         cpus = [s["cpu"] for s in claim["cpu_samples"]]
@@ -492,37 +487,31 @@ class AppendCpuSampleTestCase(unittest.TestCase):
 
 class WorkerIdleWindowSatisfiedTestCase(unittest.TestCase):
     def _samples(self, count: int, span_minutes: float, cpu: float = 0.5) -> list[dict]:
-        import datetime as _dt
-
-        base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
         if count == 1:
             return [{"ts": base.isoformat(), "cpu": cpu}]
         step = (span_minutes * 60) / (count - 1)
         return [
             {
-                "ts": (_dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+                "ts": (_dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
                        + _dt.timedelta(seconds=i * step)).isoformat(),
                 "cpu": cpu,
             }
             for i in range(count)
         ]
 
-    def _now(self, span_minutes: float = 12.0) -> "_dt.datetime":
-        import datetime as _dt
-
-        return _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc) + _dt.timedelta(
+    def _now(self, span_minutes: float = 12.0) -> _dt.datetime:
+        return _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC) + _dt.timedelta(
             minutes=span_minutes
         )
 
     def test_satisfied_with_sufficient_samples_and_span(self) -> None:
-        import datetime as _dt
 
         claim = {"cpu_samples": self._samples(6, 12.0)}
         now = self._now(12.0)
         self.assertTrue(st.worker_idle_window_satisfied(claim, now))
 
     def test_not_satisfied_too_few_samples(self) -> None:
-        import datetime as _dt
 
         claim = {"cpu_samples": self._samples(3, 12.0)}
         now = self._now(12.0)
@@ -544,9 +533,7 @@ class WorkerIdleWindowSatisfiedTestCase(unittest.TestCase):
 
     def test_not_satisfied_empty_samples(self) -> None:
         claim: dict = {}
-        import datetime as _dt
-
-        now = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+        now = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
         self.assertFalse(st.worker_idle_window_satisfied(claim, now))
 
     def test_boundary_exactly_at_threshold(self) -> None:
