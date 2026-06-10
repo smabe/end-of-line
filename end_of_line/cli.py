@@ -2972,15 +2972,16 @@ def _print_notify_health(cfg: ProjectConfig) -> None:
     for ch in imessage_channels:
         to = ch.params.get("to", "<no handle>")
         override = ch.params.get("self_chat_id")
-        try:
-            resolved = _resolve_self_chat_id(
-                conn,
-                operator_handle=to,
-                override=override,
-            )
-        except SelfChatLookupError as exc:
-            print(f"  iMessage[to={to}]: {exc}")
-            continue
+        if override is not None:
+            resolved = override
+        else:
+            # needs_chatdb opened chat.db for every channel without an override
+            assert conn is not None
+            try:
+                resolved = _resolve_self_chat_id(conn, operator_handle=to)
+            except SelfChatLookupError as exc:
+                print(f"  iMessage[to={to}]: {exc}")
+                continue
         source = "override" if override else "auto-resolved"
         print(f"  iMessage[to={to}]: self_chat={resolved} ({source})")
 
@@ -4531,10 +4532,15 @@ def cmd_answer(args) -> int:
         return _die(ExitCode.GENERIC, "ambiguous reply — pass --plan to disambiguate")
     if result.variant != "FOUND":
         return _die(ExitCode.UNKNOWN_TASK, result.variant.lower())
-    with st.mutate(result.state_path) as data:
-        resolved = st.resolve_blocker_answer(data, result.blocker_id, str(result.answer_index))
-        st.answer_blocker(data, result.blocker_id, resolved)
-    print(f"Answered {result.blocker_id}: {resolved}")
+    state_path, blocker_id = result.state_path, result.blocker_id
+    answer_index = result.answer_index
+    assert (
+        state_path is not None and blocker_id is not None and answer_index is not None
+    )  # FOUND sets all (state_locator)
+    with st.mutate(state_path) as data:
+        resolved = st.resolve_blocker_answer(data, blocker_id, str(answer_index))
+        st.answer_blocker(data, blocker_id, resolved)
+    print(f"Answered {blocker_id}: {resolved}")
     return ExitCode.OK
 
 
@@ -4957,7 +4963,9 @@ def cmd_validate(args) -> int:
         ]
         branches: list[str] = []
         for p in eligible:
-            branch = st.get_worktree(p.state)["branch"]
+            worktree = st.get_worktree(p.state)
+            assert worktree is not None  # eligible filter requires a worktree
+            branch = worktree["branch"]
             r = subprocess.run(
                 ["git", "-C", str(project_root), "rev-parse", "--verify", branch],
                 capture_output=True,

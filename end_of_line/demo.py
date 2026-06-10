@@ -92,7 +92,7 @@ def _phase_layout(scenario: str) -> tuple[list[str], list[str]]:
     phase 1). Unknown scenarios fall back to a one-phase plan at position 1.
     """
     position, total = _SCENARIO_PHASES.get(scenario, (1, 1))
-    ids = list(_PHASE_ALPHABET[:total])
+    ids: list[str] = list(_PHASE_ALPHABET[:total])
     return ids, ids[: position - 1]
 
 

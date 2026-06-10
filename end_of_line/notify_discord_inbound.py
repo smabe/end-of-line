@@ -84,6 +84,7 @@ class DiscordInboundPoller:
             self._dm_channel_id = cached
             return cached
         resp = self._request("POST", "/users/@me/channels", {"recipient_id": self.user_id})
+        assert isinstance(resp, dict)  # _request returns a list only for GET double-429 fallback
         channel_id = str(resp["id"])
         self._save_dm_cache(channel_id)
         self._dm_channel_id = channel_id
@@ -135,15 +136,23 @@ class DiscordInboundPoller:
         result = state_locator.find_blocker_for_reply(self._registry_loader(), msg["content"])
         if result.variant != "FOUND":
             return None
-        plan_slug = result.state_path.name.removesuffix(".state.json")
+        state_path, blocker_id = result.state_path, result.blocker_id
+        answer_index, project_root = result.answer_index, result.project_root
+        assert (
+            state_path is not None
+            and blocker_id is not None
+            and answer_index is not None
+            and project_root is not None
+        )  # FOUND sets all (state_locator)
+        plan_slug = state_path.name.removesuffix(".state.json")
         ob = OpenBlocker(
-            project_root=result.project_root,
+            project_root=project_root,
             plan_slug=plan_slug,
-            blocker_id=result.blocker_id,
+            blocker_id=blocker_id,
             options_count=1,
             last_notified_at="",
         )
-        return Reply(target=ob, answer=str(result.answer_index))
+        return Reply(target=ob, answer=str(answer_index))
 
     def _find_blocker_by_discord_message_id(self, discord_message_id: str) -> OpenBlocker | None:
         for entry in self._registry_loader():

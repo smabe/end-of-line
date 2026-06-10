@@ -366,7 +366,9 @@ def dry_merge_gate_rule(
         # branch has disappeared (lag between worktree record and reality).
         live_pairs: list[tuple[ProjectPlan, str, str]] = []
         for p in group:
-            branch = st.get_worktree(p.state)["branch"]
+            worktree = st.get_worktree(p.state)
+            assert worktree is not None  # eligible grouping skipped worktree-less plans
+            branch = worktree["branch"]
             try:
                 sha = _git_rev_parse(project_root, branch)
                 live_pairs.append((p, branch, sha))

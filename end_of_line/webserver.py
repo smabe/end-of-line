@@ -476,8 +476,12 @@ def make_handler(*, index_html: str, cfg: ServeConfig):
 
         def _handle_login(self, *, head: bool) -> None:
             token = (parse_qs(urlsplit(self.path).query).get("token") or [""])[0]
-            if hmac.compare_digest(token, cfg.token):
-                attrs = f"{COOKIE_NAME}={cfg.token}; HttpOnly; SameSite=Strict; Path=/"
+            # A tokenless config (loopback, auth off) must never mint a session
+            # cookie: deny, don't assert. The route gate already skips /login
+            # when cfg.token is None — this is defense-in-depth if that drifts.
+            expected = cfg.token
+            if expected is not None and hmac.compare_digest(token, expected):
+                attrs = f"{COOKIE_NAME}={expected}; HttpOnly; SameSite=Strict; Path=/"
                 if cfg.tls is not None:
                     attrs += "; Secure"
                 self.send_response(302)
@@ -574,6 +578,7 @@ def serve(cfg: ServeConfig) -> int:
 
     scheme = "https" if cfg.tls is not None else "http"
     bound_host, bound_port = httpd.server_address[:2]
+    assert isinstance(bound_host, str)  # AF_INET/AF_INET6 report the host as str
     _print_banner(cfg, scheme, bound_host, bound_port)
     try:
         httpd.serve_forever()

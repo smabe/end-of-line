@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from end_of_line.top import (
     _FLEX_MAX,
@@ -316,7 +317,9 @@ def _m_health(snapshot: Snapshot, row: dict) -> str:
 
 
 @register_metric(
-    key="tokens", label="TOKENS", render=lambda v, w: f"{token_human(v):>{w}}",
+    key="tokens", label="TOKENS",
+    # cast: registry render callbacks take `object`; this one renders _m_tokens' int|float|None
+    render=lambda v, w: f"{token_human(cast('int | float | None', v)):>{w}}",
     sort_key=lambda v: v if v is not None else -1,
     cost="transcript", align="right", fixed_width=8,
 )
@@ -466,7 +469,7 @@ def fleet_summary(rows: list[dict], width: int) -> str:
     blocked = sum(1 for r in rows if r.get("blocked"))
     dead = len(rows) - running - blocked
     acts = [
-        r.get("last_activity_seconds") for r in alive if r.get("last_activity_seconds") is not None
+        act for r in alive if (act := r.get("last_activity_seconds")) is not None
     ]
     oldest = human_age(max(acts)) if acts else "—"
     return _fit(f"{running} running · {blocked} blocked · {dead} dead · oldest-ACT {oldest}", width)

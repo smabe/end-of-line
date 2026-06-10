@@ -275,15 +275,17 @@ def dispatch_for_tick(
         # verb distinguishes the stat-time miss ("missing") from the
         # Popen-time race ("vanished") in stderr forensics; everything
         # else funnels through one path so the two cases can't drift.
+        worktree = result.worktree
+        assert worktree is not None  # both call sites gate on result.worktree
         _pause_for_missing_worktree(
             state_file,
             result,
             cfg,
             plan_slug=plan_slug,
-            worktree_path=result.worktree["path"],
+            worktree_path=worktree["path"],
         )
         print(
-            f"dispatch: worktree {verb} at {result.worktree['path']}, paused",
+            f"dispatch: worktree {verb} at {worktree['path']}, paused",
             file=sys.stderr,
         )
         return False

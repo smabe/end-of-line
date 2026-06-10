@@ -133,3 +133,23 @@ test slices, then the gate promotion last so it can only land on a clean tree.
 
 _Empty at plan time. Workers append one dated bullet per cross-phase finding
 (gotcha, spike result, API surprise, wrong assumption) with file:line._
+
+- 2026-06-10 (src-drain): `watch.bootstrap_task_list` declares `sink: TextIO`
+  but its only caller (`stream_loop`, watch.py:481) holds `TextIO | None`
+  (None = stdout). Picked the call-site default (`sink or sys.stdout`) per the
+  no-signature-change rule; candidate refactor: widen the param to
+  `TextIO | None = None` when signatures are back on the table.
+- 2026-06-10 (src-drain): the `LocatorResult` FOUND invariant (state_path /
+  blocker_id / answer_index / project_root all set — state_locator.py:64-68)
+  is now *asserted* in `notify_imessage_inbound.py` and
+  `notify_discord_inbound.py`. Test stubs that fake a FOUND result must
+  populate all four fields or the poller raises. No existing test tripped it
+  (suite green), but P2/P3 editing those test files should keep it in mind.
+  Candidate refactor (parked — `state_locator.py` is outside P1's Files
+  touched set): the unpack-and-assert block now repeats at 3 call sites
+  (imessage poll_once, discord _route_message, cli.cmd_answer); a narrowed
+  accessor on `LocatorResult` (e.g. `found_fields()`) would own the invariant
+  in one place.
+- 2026-06-10 (src-drain): count check — live basedpyright 1.39.6 matched the
+  planning snapshot exactly (188 total; 157 remain after this phase, all in
+  `tests/`). No version skew observed.

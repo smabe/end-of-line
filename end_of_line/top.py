@@ -189,7 +189,8 @@ def extract_activity(records: list[dict]) -> dict:
         if ts:
             last_activity_ts = ts
         rtype = rec.get("type")
-        message = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+        raw_message = rec.get("message")
+        message = raw_message if isinstance(raw_message, dict) else {}
         if rtype == "assistant":
             usage = message.get("usage")
             if isinstance(usage, dict):
@@ -200,7 +201,8 @@ def extract_activity(records: list[dict]) -> dict:
                     last_text = block["text"]
                 elif btype == "tool_use":
                     name = block.get("name")
-                    inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    raw_input = block.get("input")
+                    inp = raw_input if isinstance(raw_input, dict) else {}
                     if name == "Bash":
                         last_command = inp.get("command")
                         last_bash_id = block.get("id")

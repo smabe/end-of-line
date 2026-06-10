@@ -285,18 +285,26 @@ def poll_once(
         if result.variant != "FOUND":
             log.info("imessage inbound: dropping %r — %s", body, result.variant)
             continue
+        state_path, blocker_id = result.state_path, result.blocker_id
+        answer_index, project_root = result.answer_index, result.project_root
+        assert (
+            state_path is not None
+            and blocker_id is not None
+            and answer_index is not None
+            and project_root is not None
+        )  # FOUND sets all (state_locator)
         try:
-            shell_answer_fn(result.state_path, result.blocker_id, result.answer_index)
+            shell_answer_fn(state_path, blocker_id, answer_index)
         except Exception as exc:
             # answer write failed — don't auto-tick on stale state; cursor
             # still advances so a wedged reply can't re-fire forever.
             print(f"notify_inbound: dispatch failed: {exc}", file=sys.stderr)
             continue
-        if result.project_root and not _auto_tick_enabled(result.project_root):
+        if not _auto_tick_enabled(project_root):
             continue
-        plan_slug = result.state_path.name.removesuffix(".state.json") if result.state_path else ""
+        plan_slug = state_path.name.removesuffix(".state.json")
         try:
-            tick_spawner(result.project_root, plan_slug)
+            tick_spawner(project_root, plan_slug)
         except Exception as exc:
             # Auto-tick is a latency optimization, not a correctness boundary;
             # cron will pick up the answered blocker on the next firing.

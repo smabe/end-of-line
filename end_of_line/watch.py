@@ -473,10 +473,13 @@ def stream_loop(
         if cfg_loader is None:
             from .cli import load_project_config  # lazy — cli imports watch, avoid cycle
 
-            def cfg_loader(sp: Path) -> Any:
+            def _default_cfg_loader(sp: Path) -> Any:
                 return load_project_config(_state_path_to_project(sp))
 
-        bootstrap_task_list(list(cursors.keys()), cfg_loader, sink)
+            cfg_loader = _default_cfg_loader
+
+        bootstrap_sink = sink if sink is not None else sys.stdout
+        bootstrap_task_list(list(cursors.keys()), cfg_loader, bootstrap_sink)
 
     # Operator mode wants ONLY wedge events; suppress the per-plan snapshot
     # baseline so the dashboard signal stays clean.
@@ -530,6 +533,8 @@ def project_event(
     operator: bool = False,
 ) -> str | None:
     t = event.get("type")
+    if not isinstance(t, str):
+        return None  # malformed event — every emitter stamps a string "type"
     if operator:
         if t not in _OPERATOR_VISIBLE:
             return None
