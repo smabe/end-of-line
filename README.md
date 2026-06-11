@@ -18,6 +18,7 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 - **Append-only event log.** Phase claims, completions, lease expirations, blockers — all derivable from `events[]`. State corruption is recoverable by replaying.
 - **`/plan` convention.** Phase declarations come from the master plan's `## Sessions index` markdown table. The parser is 80 lines.
 - **System cron is the heartbeat.** No long-running orchestrator process. Each tick is ~50ms of Python; the supervisor itself burns zero LLM tokens. Workers are the only thing that costs API money.
+- **Workers are sandboxed, not trusted.** Dispatch runs every worker least-privilege: a scoped tool allowlist (`--permission-mode dontAsk`) as friction, the OS sandbox (Seatbelt on macOS) as the boundary — worktree-confined writes, allowlisted network. A denied worker asks a question (`clu block`) instead of wedging; worker logs stream through a PTY shim so even a dead worker leaves a legible trail.
 - **Pluggable notification backends.** iMessage (macOS, via `osascript` + `chat.db` poll) and Discord (any OS, REST) ship out of the box; the protocol is open for more. Quiet hours (default 22:00–08:00) gate non-halt notifications. In-session-only mode (`channels: []`) skips outbound entirely — the inbox hook covers that case.
 - **Three observation surfaces.** iMessage for halts and blockers (loud, your phone), the inbox hook for AFK pickup (quiet, Claude's next message), `clu watch` for live in-session streaming (Claude's `Monitor` tool, at-desk). Same event stream, three audiences.
 
@@ -27,12 +28,12 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 git clone https://github.com/smabe/end-of-line.git
 cd end-of-line
 pipx install -e .          # puts `clu` on $PATH via its own venv
-clu install-skill          # copies the 6 bundled skills (/clu-phase + /plan + /clu-plan + /clu-reply + /brainstorm + /clu-monitor) into ~/.claude/skills/
+clu install-skill          # copies the 7 bundled skills (/clu-phase + /plan + /clu-plan + /clu-reply + /brainstorm + /clu-monitor + /audit-skill) into ~/.claude/skills/
 ```
 
 On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path that works without `--break-system-packages`.
 
-`clu install-skill` writes six bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
+`clu install-skill` writes seven bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
 
 After installing the skills, run `/clu-monitor` once in Claude Code to install a `UserPromptSubmit` hook that surfaces clu's events into Claude's context on your next message — type "ok" after walking back and Claude already knows what halted, completed, or stuck. Idempotent — re-running prints the current install status. State file: `~/.config/clu/monitor.json`.
 
@@ -44,7 +45,7 @@ Where `clu watch` streams *events*, `clu top` is a `top`-like view of *processes
   <img src="docs/images/clu-top.png" alt="clu top — terminal dashboard of active workers" width="760">
 </p>
 
-`clu serve` puts that same `clu top` data on a web page, with split / strip / phone layouts you cycle with `w` and a detail pane that tracks the cursor live. Localhost by default; `--lan` reaches it from your phone and flips on the full security layer at once (auto-generated token, Host-header allowlist for DNS-rebinding defense, auto self-signed HTTPS). Read-only, like everything else here. See `docs/operations.md` § "Serving the dashboard on the web — `clu serve`".
+`clu serve` puts that same `clu top` data on a web page, with split / strip / phone layouts you cycle with `w` and a detail pane that tracks the cursor live. The detail view carries a scrolling per-worker activity feed — every assistant line, command, and command output, tailed incrementally from the worker's transcript with sticky scroll — so fast-moving workers are readable, not just glanceable. Localhost by default; `--lan` reaches it from your phone and flips on the full security layer at once (auto-generated token, Host-header allowlist for DNS-rebinding defense, auto self-signed HTTPS). Read-only, like everything else here. See `docs/operations.md` § "Serving the dashboard on the web — `clu serve`".
 
 <p align="center">
   <img src="docs/images/clu-serve.png" alt="clu serve — read-only web dashboard of autonomous workers" width="760">
@@ -106,8 +107,10 @@ Drop a `.orchestrator.json` at your project root. `clu init` prompts for notify 
   "plan_dir": "plans",
   "dispatch": {
     "kind": "shell",
-    "command": "claude --print --permission-mode bypassPermissions --max-budget-usd 3.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'"
+    "command": "claude --print --permission-mode dontAsk --settings /Users/<you>/.config/clu/worker-settings.json --allowedTools \"Bash(clu *),Bash(git *),Bash(python3 *),Bash(gh *),Bash(command -v *),Edit,Write,TodoWrite,Task,Skill\" --max-budget-usd 5.00 '/clu-phase {plan_slug} {phase_id} {token} {state_file}'"
   },
+  "test_command": "python3 -m unittest discover -s tests",
+  "quality": { "verify_required": true },
   "notify": {
     "channels": [
       {"kind": "imessage", "to": "you@example.com"}
@@ -116,6 +119,17 @@ Drop a `.orchestrator.json` at your project root. `clu init` prompts for notify 
   }
 }
 ```
+
+That dispatch line is the least-privilege recipe: `dontAsk` auto-denies any
+tool outside the `--allowedTools` list, and the `--settings` file — emitted
+into `~/.config/clu/worker-settings.json` by `clu init` — wraps every worker
+shell command in the OS sandbox (Seatbelt on macOS): writes confined to the
+worktree, network to an allowlist, `clu` itself exempt so callbacks and
+notifications keep working. A worker that gets denied raises a `clu block`
+question instead of wedging, and `clu doctor` warns if a config still
+carries `bypassPermissions`. Full recipe with per-entry rationale:
+`docs/operations.md` § "Hardened worker dispatch"; copy-paste template:
+[`examples/hardened.orchestrator.json`](examples/hardened.orchestrator.json).
 
 Three notification modes — pick one or combine:
 
@@ -279,6 +293,11 @@ examples/             # .orchestrator.json template, LaunchAgent plists, fake-wo
 ```
 
 ## Contributing
+
+Run the suite with `python3 -m unittest discover -s tests` (the canonical
+gate, ~2min) or `python3 scripts/partest.py` for iteration (~25s — the same
+modules sharded across processes, with a count-parity guard against
+discover so a green run can't quietly cover less).
 
 A three-tool pre-commit gate lives at `.githooks/pre-commit-local`:
 
