@@ -35,6 +35,18 @@ crashes immediately, the supervisor logs `dispatch_failed` and releases
 the claim on the next tick. If the worker hangs, the 60-minute lease
 expires and the next tick frees the claim.
 
+Phase workers are not `Popen`d directly — they run as a child of a small
+PTY shim (`_pty_spawn_shim.py`) that the dispatcher launches in their place.
+`claude --print` block-buffers stdout when it isn't a tty, so a worker that
+wedges mid-stream would otherwise leave a 0-byte log exactly when the
+post-mortem needs it; the shim allocates a pty so output streams into the
+log line-by-line. The shim is the process the supervisor tracks — it becomes
+`claim.pid`, the worker is its descendant — so the watchdog stack (stuck-tool
+tree walk, idle-CPU sum, killpg reapers, cmdline marker) operates on the shim
+pid; the idle watchdog was made tree-aware (phase `idle-treewalk`) precisely
+so the shim's own near-zero CPU doesn't false-fire `WORKER_IDLE`. Repair
+workers (synchronous, short-lived, not wedge-prone) skip the shim.
+
 ## In-session signaling (inbox + UserPromptSubmit hook)
 
 Beyond iMessage to the operator, clu has a second notification channel

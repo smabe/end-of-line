@@ -124,3 +124,30 @@ with file:line. The v1 empirical record lives in
   resolved. Signature note: `_emit_worker_idle` gained a `tree_ps_output`
   keyword-only test seam (the `walk_worker_tree` snapshot) alongside the
   existing `ps_output` seam (now the multi-line `%cpu=` output, summed).
+- 2026-06-11 (pty-shim): **Invoked by absolute file path, NOT `-m`.** The
+  master's locked invocation was `[sys.executable, "-m",
+  "end_of_line._pty_spawn_shim", "--", cmd]`, but the worker runs with cwd at
+  the worktree, where `end_of_line` isn't importable unless clu is pip-installed
+  into `sys.executable` (it isn't in dev/test — verified: `import end_of_line`
+  fails from any non-repo cwd). Shipped as `[sys.executable, _PTY_SHIM_PATH,
+  "--", cmd]` (dispatch.py:`_PTY_SHIM_PATH`). The shim is stdlib-only and
+  standalone, so a path invocation is cwd-independent and equivalent — the
+  slug-bearing cmd still rides in argv for the cmdline marker. Any future plan
+  that reasons about the worker cmdline should expect the path form.
+- 2026-06-11 (pty-shim): **`os.openpty()` is denied (EPERM) inside the
+  Claude Code session Seatbelt sandbox.** So `python3 -m unittest` run from a
+  worker's Bash hits the shim's fallback (execvp, no pty), and the two pty
+  integration tests (`test_pty_spawn_shim.ShimProcessTestCase`'s CRLF-fold +
+  incremental-delivery) `skipUnless` a working pty. `clu verify` runs
+  sandbox-exempt, so the pty path IS exercised there. A real-pty *live smoke*
+  driven by branch code can't run from a sandboxed worker session (every
+  `python3` path is sandboxed; the only sandbox-exempt entry, installed `clu`,
+  tracks main and lacks the shim) — production proof is the first post-ship
+  dispatch.
+- 2026-06-11 (pty-shim): **Drain hang-guard.** The drain stops on master EOF
+  (the happy path), but EOF needs every slave fd closed; a detached descendant
+  that inherited the slave would otherwise block the drain forever and stall
+  the claim (the shim IS claim.pid). The heartbeat daemon `dup2`s its stdio off
+  the slave (heartbeat_daemon.py:169-175) so it doesn't, but the drain no longer
+  depends on that: once `proc.poll()` shows the worker exited and the master is
+  quiet for `_POST_EXIT_QUIET_SEC`, it stops (_pty_spawn_shim.py:`_drain`).

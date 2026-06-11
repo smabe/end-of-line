@@ -91,6 +91,15 @@ _MISSING_BINARY_RE = re.compile(r"command not found", re.IGNORECASE)
 _MODEL_FLAG = "--model"
 _MODEL_FLAG_EQ = "--model="
 
+# Absolute path to the PTY shim that phase workers are wrapped in. Invoked by
+# FILE PATH, not `-m end_of_line._pty_spawn_shim`: the worker runs with cwd at
+# the worktree (for its git ops), where the package isn't importable unless clu
+# happens to be pip-installed into `sys.executable`. The shim is stdlib-only
+# and self-contained, so running it as a standalone script is cwd-independent
+# and equivalent — the slug-bearing cmd string still rides in argv for the
+# cmdline marker. See end_of_line/_pty_spawn_shim.py.
+_PTY_SHIM_PATH = str(Path(__file__).resolve().parent / "_pty_spawn_shim.py")
+
 
 def resolved_model(cmd_tmpl: str) -> str | None:
     """Return the `--model X` value from the dispatch template, or None.
@@ -294,8 +303,19 @@ def dispatch_for_tick(
         return _pause_for_missing("missing")
 
     cwd = result.worktree["path"] if result.worktree else str(cfg.project_root)
+    # Route phase workers through the PTY shim: `claude --print` block-buffers
+    # stdout (~4-8KB) when it isn't a tty, so a wedged worker leaves a 0-byte
+    # log exactly when the post-mortem needs it. The shim allocates a pty so
+    # Node line-buffers into the log in real time. It takes the rendered
+    # command STRING as one argv element and runs it through `sh -c` itself —
+    # so dropping shell=True here preserves command/quoting semantics, and the
+    # plan-slug cmdline marker still rides in the shim's argv. The shim becomes
+    # claim.pid (the worker is its child); phase idle-treewalk made the idle
+    # watchdog tree-aware so this doesn't false-fire WORKER_IDLE. Repair
+    # workers stay on the direct shell path below — short-lived, not
+    # wedge-prone. See end_of_line/_pty_spawn_shim.py.
+    shim_argv = [sys.executable, _PTY_SHIM_PATH, "--", cmd]
     popen_kwargs: dict = dict(
-        shell=True,
         cwd=cwd,
         start_new_session=True,
     )
@@ -311,7 +331,7 @@ def dispatch_for_tick(
     try:
         with open(log_path, "ab") as log_fh:
             proc = subprocess.Popen(
-                cmd,
+                shim_argv,
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
                 **popen_kwargs,

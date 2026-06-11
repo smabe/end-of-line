@@ -323,6 +323,15 @@ sandbox, never `bypassPermissions`) is documented in operations.md
 "Hardened worker dispatch"; `clu doctor` warns when a template still
 bypasses permission checks.
 
+Phase workers are wrapped in the PTY shim (`_pty_spawn_shim.py`): the
+outer `Popen` is `[sys.executable, <shim_path>, "--", <rendered cmd>]`
+(list argv, no `shell=True`) instead of the bare command string. The shim
+allocates a pty so `claude --print` line-buffers into the log in real time
+instead of block-buffering until exit — a wedged worker otherwise leaves a
+0-byte log. The shim becomes `claim.pid` (the worker is its child); phase
+`idle-treewalk` made the idle watchdog tree-aware so this doesn't false-fire
+`WORKER_IDLE`. Repair workers stay on the direct `shell=True` path.
+
 **Key types and functions**
 
 - `dispatch_for_tick(result, cfg, plan_slug, state_file)` — the only
@@ -382,6 +391,57 @@ bypasses permission checks.
 - `architecture.md` § "Process model" for why the supervisor and
   dispatcher are split.
 - `operations.md` for example `dispatch.command` templates.
+- `_pty_spawn_shim.py` for the PTY wrapper phase workers run under.
+
+### `_pty_spawn_shim.py`
+
+The long-lived PTY intermediary every phase worker runs under. `claude
+--print` block-buffers stdout (~4–8 KB) when it isn't a tty, so a worker
+that wedges mid-stream leaves a 0-byte log exactly when the post-mortem
+needs it (the 2026-05-26 incident). The shim allocates a pty, runs the
+worker as its child with the pty slave as the child's stdout/stderr, drains
+the master continuously, and writes normalized bytes to fd 1 (the log) — so
+output streams line-by-line. It must be a separate long-lived process: an
+in-supervisor drain dies with the cron tick (the v1 parking reason; see
+`plans/archive/line-buffer-worker-output/`).
+
+Invoked by `dispatch.py` as `[sys.executable, <abs shim path>, "--", <cmd>]`
+— by **file path**, not `-m`, because the worker's cwd is the worktree where
+the package isn't importable; the shim is stdlib-only and self-contained, so
+a path invocation is cwd-independent. It runs the cmd STRING through `sh -c`
+itself, so the slug-bearing cmdline marker still rides in argv.
+
+**Key types and functions**
+
+- `strip_ansi(data: bytes) -> bytes` — pure: removes CSI / OSC / Fe-Fp-Fs
+  escape sequences (one compiled regex, matched on the ESC byte so literal
+  "ESC" text is untouched) and folds `\r\n` → `\n`. Unit-tested against a
+  spike-derived byte sample.
+- `main(argv=None)` — parse `-- <cmd>`, `os.openpty()`, run, propagate rc.
+
+**Invariants and gotchas**
+
+- **Dual EOF handling**: reading the master after the child exits returns
+  `b""` on macOS but raises `OSError` (EIO) on Linux — both are EOF (mirrors
+  CPython's `pty._copy`). The drain blocks in `select`, never sleep-polls, so
+  macOS can't discard the tail at child exit.
+- **Slave hygiene**: TIOCSWINSZ 80x24 (fresh ptys are 0x0); ONLCR cleared on
+  the slave termios so `\n` isn't translated to `\r\n`; the parent closes its
+  slave copy after spawn or the master never EOFs.
+- **Signal propagation**: a child killed by signal N is mirrored by restoring
+  `SIG_DFL` and re-raising N on self (`os.kill(getpid(), N)`), so the outer
+  `Popen.returncode` reads the POSIX `-N` the fast-fail branch expects — never
+  `sys.exit(-N)`, which truncates to `& 0xFF`. The drain finishes (EOF) before
+  the re-raise so no tail bytes are lost.
+- **Fallback**: if `os.openpty()` raises (PTY exhaustion), the shim writes one
+  stderr warning and `os.execvp`s the command directly — degraded to today's
+  block-buffered logging, preserving this pid (= claim pid) and the rc, never
+  a dead dispatch. Scoped to the openpty call so a started child is never
+  double-run.
+
+**See also**
+
+- `dispatch.py` for the wrap site and the repair-worker exemption.
 
 ### `heartbeat_daemon.py`
 

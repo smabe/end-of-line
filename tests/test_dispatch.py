@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -382,6 +383,76 @@ class DispatchTestCase(CluTestCase):
                 )
         self.assertFalse(ok)
         emit.assert_not_called()
+
+    def test_phase_dispatch_wraps_command_through_pty_shim(self) -> None:
+        """Phase workers spawn as `python <shim_path> -- <cmd>`.
+
+        The outer Popen drops `shell=True` (list argv) and passes the rendered
+        operator command STRING as one final element — the shim runs it through
+        `sh -c` itself, so template/quoting semantics are preserved and the
+        plan-slug cmdline marker still appears in the shim's argv. The shim is
+        invoked by absolute file path (not `-m`) so it works from the worker's
+        worktree cwd, where the package isn't importable.
+        """
+        from unittest import mock
+
+        from end_of_line.dispatch import _PTY_SHIM_PATH
+
+        cfg = self._cfg("claude --print '/clu-phase {plan_slug}'")
+        fake = mock.MagicMock()
+        fake.pid = 4321
+        # Survive the fast-fail window -> treated as the healthy running case.
+        fake.wait.side_effect = subprocess.TimeoutExpired(cmd="shim", timeout=0.5)
+        # Patching subprocess.Popen is module-global; coolant.emit_start shells
+        # out via subprocess.run, so stub it to keep this focused on the argv.
+        with mock.patch(
+            "end_of_line.dispatch.subprocess.Popen", return_value=fake
+        ) as popen, mock.patch("end_of_line.dispatch.coolant.emit_start"):
+            ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertTrue(ok)
+        args, kwargs = popen.call_args
+        argv = args[0]
+        self.assertIsInstance(argv, list)
+        self.assertEqual(argv[0], sys.executable)
+        self.assertEqual(argv[1], _PTY_SHIM_PATH)
+        self.assertTrue(argv[1].endswith("_pty_spawn_shim.py"))
+        self.assertEqual(argv[2], "--")
+        # The rendered command (slug shlex-quoted by render_command) is a
+        # SINGLE argv element, not split.
+        self.assertEqual(argv[3], "claude --print '/clu-phase t'")
+        self.assertEqual(len(argv), 4)
+        self.assertNotEqual(kwargs.get("shell"), True)
+
+    def test_repair_dispatch_not_wrapped_through_shim(self) -> None:
+        """Repair workers stay on the direct `shell=True` Popen path.
+
+        Regression pin: repair is synchronous + short-lived, carries no
+        claim/pid, and is not wedge-prone — it must NOT route through the shim.
+        """
+        from unittest import mock
+
+        cmd = "repair-cmd {corrupt_path}"
+        cfg = ProjectConfig(
+            project_root=self.project,
+            dispatch=DispatchSpec(kind="shell", command="ignored", repair_command=cmd),
+        )
+        fake = mock.MagicMock()
+        fake.wait.return_value = 0
+        with mock.patch(
+            "end_of_line.dispatch.subprocess.Popen", return_value=fake
+        ) as popen:
+            dispatch_repair_worker(
+                cfg,
+                self.project / "corrupt.json",
+                self.project / "backup.json",
+                "diag",
+                self.project / "repair.log",
+            )
+        args, kwargs = popen.call_args
+        self.assertEqual(kwargs.get("shell"), True)
+        self.assertIsInstance(args[0], str)
+        self.assertIn("repair-cmd", args[0])
+        self.assertNotIn("_pty_spawn_shim", args[0])
 
 
 class ResolvedModelTestCase(unittest.TestCase):
