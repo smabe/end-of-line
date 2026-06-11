@@ -76,7 +76,8 @@ cd "$WORK/clone"
 "$WORK/venv/bin/basedpyright"                       >>"$RUN_LOG" 2>&1 || fail basedpyright
 "$WORK/venv/bin/python" -m unittest discover -s tests >>"$RUN_LOG" 2>&1 || fail tests
 
-TESTS_RUN="$(grep -Eo 'Ran [0-9]+ tests' "$RUN_LOG" | tail -1 || echo 'tests')"
+# Same unittest summary line scripts/partest.py parses (_RAN_RE) — keep in sync.
+TESTS_RUN="$(grep -Eo 'Ran [0-9]+ tests?' "$RUN_LOG" | tail -1 || echo 'tests')"
 log "PASS: main @ ${HEAD_HASH:0:12} — $TESTS_RUN"
 printf '%s' "$HEAD_HASH" >"$STATE_DIR/last_pass"
 printf '%s\tpass\n' "$HEAD_HASH" >"$STATE_DIR/last_result"

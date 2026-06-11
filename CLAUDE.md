@@ -13,7 +13,10 @@ Python 3.11+, stdlib only, zero runtime deps. `unittest`, not pytest.
 `pipx install -e .` puts `clu` on `$PATH`.
 
 ```bash
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests   # THE gate: pre-commit green, clu verify, canary
+python3 scripts/partest.py              # iteration loops ONLY (~20-30s, module-sharded,
+                                        # parity-checked) — never the pre-commit green;
+                                        # clu verify also runs basedpyright, partest doesn't
 python3 -m end_of_line.cli --help
 ```
 
