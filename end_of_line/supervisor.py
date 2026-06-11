@@ -458,14 +458,19 @@ def _emit_worker_idle(
     side_notifies: list[tuple[str, str]],
     *,
     ps_output: str | None = None,
+    tree_ps_output: str | None = None,
     lsof_output: str | None = None,
 ) -> None:
     """Fire EVENT_WORKER_IDLE once per claim when the worker is PID-alive but
     doing nothing: no active Bash tool, CPU ≤1% over ≥10 min, no open
     Anthropic API socket.
 
-    Detection only — no auto-kill. `ps_output` and `lsof_output` are test
-    seams; production callers leave both None to shell out.
+    CPU is sampled across the whole worker process tree, not claim.pid alone —
+    a wedged worker can idle at ~0% while a child (test run, build) burns CPU,
+    and sampling the root only would miss it and false-fire. Detection only —
+    no auto-kill. `ps_output` (the `ps -p <pids> -o %cpu=` output),
+    `tree_ps_output` (the `walk_worker_tree` snapshot), and `lsof_output` are
+    test seams; production callers leave all None to shell out.
     """
     claim = data.get("current_claim")
     if not claim:
@@ -476,14 +481,22 @@ def _emit_worker_idle(
     if claim.get("active_tool_started_at"):
         return
 
-    # Sample this tick's CPU via ps.
+    # Sample this tick's CPU across the worker's whole process tree. The tree
+    # walk supplies the pid set (root + descendants); ONE `ps -p <pids> -o
+    # %cpu=` reads instantaneous %cpu for the set, which we sum. The root pid
+    # is always in the set, so the pid list is never empty. (Descendant pids
+    # that die between the walk and the ps just drop out of ps's output — we
+    # sum whatever survives. Descendant.cpu_seconds from the tree is cumulative
+    # CPU time, a different quantity — deliberately not used here.)
     now = st._now_utc()
+    descendants = walk_worker_tree(pid, ps_output=tree_ps_output)
+    tree_pids = [pid] + [d.pid for d in descendants]
     if ps_output is not None:
         raw_cpu = ps_output
     else:
         try:
             result = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "%cpu="],
+                ["ps", "-p", ",".join(str(p) for p in tree_pids), "-o", "%cpu="],
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -491,10 +504,16 @@ def _emit_worker_idle(
             raw_cpu = result.stdout
         except (subprocess.TimeoutExpired, OSError):
             raw_cpu = ""
-    try:
-        cpu_pct = float(raw_cpu.strip())
-    except ValueError:
-        cpu_pct = None
+    cpu_pct: float | None = None
+    for line in raw_cpu.splitlines():
+        token = line.strip()
+        if not token:
+            continue
+        try:
+            value = float(token)
+        except ValueError:
+            continue
+        cpu_pct = (cpu_pct or 0.0) + value
 
     if cpu_pct is not None:
         st.append_cpu_sample(claim, cpu_pct, now)

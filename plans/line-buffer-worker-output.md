@@ -114,3 +114,13 @@ empirical results stand and were re-validated this session:
 _Empty at plan time. Workers append one dated bullet per cross-phase finding
 with file:line. The v1 empirical record lives in
 `plans/archive/line-buffer-worker-output/v1-2026-05-26-diagnosis.md`._
+
+- 2026-06-10 (idle-treewalk): `_emit_worker_idle` (supervisor.py:455) now sums
+  `%cpu` across `[claim.pid] + walk_worker_tree(claim.pid)` via one
+  `ps -p <pids> -o %cpu=`, not claim.pid alone. **For pty-shim:** when
+  claim.pid is the shim, the real `claude --print` is a descendant, so the
+  idle check reads `shim ~0% + worker's real %cpu` = correct — the shim does
+  NOT false-fire WORKER_IDLE. The cross-plan blocker from the master is
+  resolved. Signature note: `_emit_worker_idle` gained a `tree_ps_output`
+  keyword-only test seam (the `walk_worker_tree` snapshot) alongside the
+  existing `ps_output` seam (now the multi-line `%cpu=` output, summed).

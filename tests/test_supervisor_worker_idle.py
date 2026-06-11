@@ -57,6 +57,23 @@ _NO_ANTHROPIC_LSOF = "nothing here"
 _ANTHROPIC_LSOF = "42000  claude  TCP ->api.anthropic.com:443 (ESTABLISHED)"
 
 
+def _tree_snapshot(root_pid: int, child_pid: int | None = None) -> str:
+    """A `ps -eo pid,ppid,etime,time,command` snapshot for the idle tree walk.
+
+    Root line plus an optional single child whose ppid is root_pid. Mirrors the
+    injection shape the stuck-tool tests use for `walk_worker_tree`.
+    """
+    lines = [
+        "  PID  PPID    ELAPSED        TIME COMMAND",
+        f"{root_pid}     1   13:00        0:30.00 claude --print /clu-phase plan-y my-phase",
+    ]
+    if child_pid is not None:
+        lines.append(
+            f"{child_pid} {root_pid}   12:00        0:05.00 python3 -m unittest discover"
+        )
+    return "\n".join(lines) + "\n"
+
+
 class EmitWorkerIdleTestCase(CluTestCase):
     def _cfg(self) -> ProjectConfig:
         return ProjectConfig(project_root=self.tmp_path)
@@ -166,6 +183,75 @@ class EmitWorkerIdleTestCase(CluTestCase):
         _emit_worker_idle(data, cfg, [], lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(events, [])
+
+    def test_busy_descendant_suppresses_idle(self) -> None:
+        # Root pid reads ~idle but a child (test run) is burning CPU. Summing the
+        # tree trips the >1% gate and suppresses the idle event; sampling
+        # claim.pid alone (the pre-fix behavior) would have false-fired.
+        data = _data_with_idle_claim()
+        cfg = self._cfg()
+        side_notifies: list = []
+        _emit_worker_idle(
+            data,
+            cfg,
+            side_notifies,
+            tree_ps_output=_tree_snapshot(42000, 42001),
+            ps_output="0.1\n30.0\n",
+            lsof_output=_NO_ANTHROPIC_LSOF,
+        )
+        events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
+        self.assertEqual(events, [])
+        self.assertEqual(side_notifies, [])
+
+    def test_idle_tree_emits(self) -> None:
+        # Root and child both idle → tree sum stays ≤1% → window proceeds.
+        data = _data_with_idle_claim()
+        cfg = self._cfg()
+        side_notifies: list = []
+        _emit_worker_idle(
+            data,
+            cfg,
+            side_notifies,
+            tree_ps_output=_tree_snapshot(42000, 42001),
+            ps_output="0.2\n0.3\n",
+            lsof_output=_NO_ANTHROPIC_LSOF,
+        )
+        events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
+        self.assertEqual(len(events), 1)
+
+    def test_descendant_disappears_between_walk_and_ps(self) -> None:
+        # walk_worker_tree found a child, but it exited before `ps -p` ran, so
+        # ps returns only the root's line. No crash; sample from what survived.
+        data = _data_with_idle_claim()
+        cfg = self._cfg()
+        side_notifies: list = []
+        _emit_worker_idle(
+            data,
+            cfg,
+            side_notifies,
+            tree_ps_output=_tree_snapshot(42000, 42001),
+            ps_output="0.2\n",
+            lsof_output=_NO_ANTHROPIC_LSOF,
+        )
+        events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
+        self.assertEqual(len(events), 1)
+
+    def test_no_descendants_matches_single_pid(self) -> None:
+        # Today's common case: worker has no children. Behavior is identical to
+        # the single-pid sampling it replaces.
+        data = _data_with_idle_claim()
+        cfg = self._cfg()
+        side_notifies: list = []
+        _emit_worker_idle(
+            data,
+            cfg,
+            side_notifies,
+            tree_ps_output=_tree_snapshot(42000),
+            ps_output="0.3\n",
+            lsof_output=_NO_ANTHROPIC_LSOF,
+        )
+        events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
+        self.assertEqual(len(events), 1)
 
     def test_emits_when_lsof_output_none_no_anthropic(self) -> None:
         # lsof_output=None means "no seam injected"; function will try real lsof.

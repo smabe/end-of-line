@@ -275,6 +275,18 @@ itself — `dispatch_for_tick` does that after the lock is released.
   `RUNNING`. Stamps `stalled_notified=True` on the (about-to-be-
   released) claim. Sits ahead of `release_if_expired` so the
   notification fires before the claim is cleared.
+- `_emit_worker_idle(data, config, side_notifies)` — wedge gap-fill:
+  fires `EVENT_WORKER_IDLE` once per claim when the worker is PID-alive
+  but doing nothing (no active Bash tool, CPU ≤1% over ≥10 min, no open
+  Anthropic API socket). CPU is sampled across the **whole worker
+  process tree** — `walk_worker_tree(claim.pid)` for the pid set, then
+  ONE `ps -p <pids> -o %cpu=` summed — not `claim.pid` alone, so a
+  worker idling at ~0% while a child (test run, build) burns CPU does
+  not false-fire. Instantaneous %cpu stays the metric
+  (`append_cpu_sample` / `worker_idle_window_satisfied` unchanged);
+  `Descendant.cpu_seconds` is cumulative time and deliberately unused.
+  `ps_output` (the `%cpu=` output), `tree_ps_output` (the walk
+  snapshot), and `lsof_output` are test seams.
 - `_local_now()` — indirection so tests can pin wall-clock time for
   quiet-hours assertions.
 
