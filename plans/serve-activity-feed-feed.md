@@ -98,7 +98,7 @@ constraints, short-poll only.
 - **Path traversal via params**: plan/phase go through `validate_slug`;
   proj is matched against registry entries, never joined into a path.
 - **Transcript lines can be megabytes** (embedded file contents) — the
-  256KB read cap + 400-char event truncation are load-bearing; don't lift
+  256KB read cap + 2000-char event truncation are load-bearing; don't lift
   them for "completeness."
 - **Sticky scroll jank**: append-then-scroll causes flicker if the check
   happens after DOM mutation — measure scroll position BEFORE appending.

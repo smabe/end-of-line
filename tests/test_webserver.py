@@ -14,11 +14,13 @@ import threading
 import unittest
 from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
-from end_of_line import top, webserver
+from end_of_line import registry, top, webserver
 from end_of_line.webserver import ServeConfig
-from tests import CluTestCase, must
+from tests import CluTestCase, GitProjectTestCase, must
+from tests.test_top import _asst, _tool_result, _write_jsonl
 
 
 class _ServerCase(CluTestCase):
@@ -147,6 +149,21 @@ class IndexResourceTest(CluTestCase):
         self.assertIn("— blocked ${age(w.blockedSeconds)} —", html)  # blocked-since in metrics
         self.assertIn("w.blocked", html)           # render + header count gate on the flag
         self.assertIn("blocked</span>", html)      # header builds an N blocked count
+
+    def test_frontend_has_activity_feed(self):
+        # serve-activity-feed — the detail pane carries a capped, sticky-scroll
+        # scrollback of the selected worker's transcript events, polled from the
+        # /api/feed cursor endpoint. Substring guards in the blocked-row style.
+        html = webserver.load_index_html()
+        self.assertIn("/api/feed", html)             # polls the cursor endpoint
+        self.assertIn('id="feedlog"', html)          # feed container in the shell
+        self.assertIn("function feedStuck(", html)   # sticky-scroll bottom check
+        self.assertIn("FEED_CAP = 1000", html)       # capped scrollback + DOM prune
+        self.assertIn("${esc(e.text)}", html)        # feed strings escaped
+        # pollFeed re-checks the log element after its awaits: buildShell can
+        # null feedLogRef mid-fetch (view switch), and appending to a dead ref
+        # would throw — the stale response must be dropped instead.
+        self.assertIn("if (!feedLogRef) return", html)
 
     def test_frontend_scales_ui_above_browser_default(self):
         # The dashboard renders larger than browser 100% by default (readability)
@@ -524,6 +541,357 @@ class CmdServeWiringTest(CluTestCase):
         with mock.patch.object(ws, "serve", side_effect=OSError("address in use")):
             rc = cli.main(["serve"])
         self.assertNotEqual(rc, 0)
+
+
+# --------------------------------------------------------------------------- #
+# serve-activity-feed — /api/feed cursor window reader
+# --------------------------------------------------------------------------- #
+class FeedWindowTest(CluTestCase):
+    def _file(self, content: bytes) -> Path:
+        path = self.tmp_path / "t.jsonl"
+        path.write_bytes(content)
+        return path
+
+    def _line(self, i: int) -> bytes:
+        return json.dumps({"type": "assistant", "n": i}).encode() + b"\n"
+
+    def test_first_poll_backfills_and_advances_to_eof(self):
+        f = self._file(self._line(1) + self._line(2))
+        records, cursor, reset = webserver.read_feed_window(f, -1)
+        self.assertEqual([r["n"] for r in records], [1, 2])
+        self.assertEqual(cursor, f.stat().st_size)
+        self.assertFalse(reset)
+
+    def test_incremental_poll_returns_only_new_records(self):
+        f = self._file(self._line(1))
+        _, cursor, _ = webserver.read_feed_window(f, -1)
+        with open(f, "ab") as fh:
+            fh.write(self._line(2) + self._line(3))
+        records, cursor2, reset = webserver.read_feed_window(f, cursor)
+        self.assertEqual([r["n"] for r in records], [2, 3])
+        self.assertEqual(cursor2, f.stat().st_size)
+        self.assertFalse(reset)
+
+    def test_partial_final_line_is_carried_not_consumed(self):
+        # Writer mid-append: consume only to the last \n; the partial tail is
+        # re-read (whole) on the next poll once the writer finishes the line.
+        partial = b'{"type": "assistant", "n": 2'
+        f = self._file(self._line(1) + partial)
+        records, cursor, _ = webserver.read_feed_window(f, -1)
+        self.assertEqual([r["n"] for r in records], [1])
+        self.assertEqual(cursor, len(self._line(1)))
+        with open(f, "ab") as fh:
+            fh.write(b', "x": 1}\n')
+        records2, cursor2, _ = webserver.read_feed_window(f, cursor)
+        self.assertEqual([r["n"] for r in records2], [2])
+        self.assertEqual(cursor2, f.stat().st_size)
+
+    def test_idle_poll_at_eof_returns_nothing(self):
+        f = self._file(self._line(1))
+        size = f.stat().st_size
+        records, cursor, reset = webserver.read_feed_window(f, size)
+        self.assertEqual(records, [])
+        self.assertEqual(cursor, size)
+        self.assertFalse(reset)
+
+    def test_shrunken_file_resets_and_backfills(self):
+        # st_size < cursor → rotation/truncation (new attempt reusing the
+        # filename): reset + fresh backfill.
+        f = self._file(self._line(1))
+        records, cursor, reset = webserver.read_feed_window(f, f.stat().st_size + 999)
+        self.assertEqual([r["n"] for r in records], [1])
+        self.assertTrue(reset)
+        self.assertEqual(cursor, f.stat().st_size)
+
+    def test_backfill_into_large_file_starts_at_a_record_boundary(self):
+        # First poll against a transcript larger than the backfill window must
+        # drop the partial first line in the window — every record parses whole.
+        lines = [json.dumps({"type": "assistant", "pad": "x" * 1024, "n": i}) for i in range(100)]
+        f = self._file(("\n".join(lines) + "\n").encode())
+        self.assertGreater(f.stat().st_size, webserver.FEED_BACKFILL_BYTES)
+        records, cursor, reset = webserver.read_feed_window(f, -1)
+        self.assertFalse(reset)
+        self.assertTrue(records)
+        self.assertTrue(all("n" in r for r in records))
+        self.assertLess(len(records), 100)  # window-bounded, not the whole file
+        self.assertEqual(cursor, f.stat().st_size)
+
+    def test_unparseable_line_skipped_but_consumed(self):
+        f = self._file(self._line(1) + b"not json\n" + self._line(2))
+        records, cursor, _ = webserver.read_feed_window(f, -1)
+        self.assertEqual([r["n"] for r in records], [1, 2])
+        self.assertEqual(cursor, f.stat().st_size)
+
+
+# --------------------------------------------------------------------------- #
+# serve-activity-feed — transcript record → feed events
+# --------------------------------------------------------------------------- #
+class RecordEventsTest(CluTestCase):
+    def test_assistant_text_becomes_say(self):
+        events = webserver.record_events(_asst(text="checking tests"))
+        self.assertEqual(
+            events,
+            [{"ts": "2026-06-03T00:00:00Z", "kind": "say", "text": "checking tests"}],
+        )
+
+    def test_bash_tool_use_becomes_tool(self):
+        events = webserver.record_events(_asst(tool="Bash", tool_input={"command": "pytest -q"}))
+        self.assertEqual(events, [{"ts": "2026-06-03T00:00:00Z", "kind": "tool", "text": "pytest -q"}])
+
+    def test_write_tool_use_becomes_write(self):
+        events = webserver.record_events(_asst(tool="Write", tool_input={"file_path": "/r/x.py"}))
+        self.assertEqual(events[0]["kind"], "write")
+        self.assertEqual(events[0]["text"], "/r/x.py")
+
+    def test_tool_result_becomes_result(self):
+        events = webserver.record_events(_tool_result("tu1"))  # string content "ok"
+        self.assertEqual(events, [{"ts": "2026-06-03T00:00:01Z", "kind": "result", "text": "ok"}])
+
+    def test_tool_result_block_list_content_flattened(self):
+        rec = _tool_result("tu1")
+        rec["message"]["content"][0]["content"] = [
+            {"type": "text", "text": "12 passed"},
+            {"type": "text", "text": "0 failed"},
+        ]
+        events = webserver.record_events(rec)
+        self.assertEqual(events[0]["text"], "12 passed 0 failed")
+
+    def test_multiple_blocks_keep_order(self):
+        rec = _asst(text="say first", tool="Bash", tool_input={"command": "ls"})
+        self.assertEqual([e["kind"] for e in webserver.record_events(rec)], ["say", "tool"])
+
+    def test_event_text_truncated_at_cap(self):
+        text = webserver.record_events(_asst(text="y" * 5000))[0]["text"]
+        self.assertEqual(len(text), webserver.FEED_TEXT_CAP)
+        self.assertTrue(text.endswith("…"))
+
+    def test_empty_or_garbage_records_yield_nothing(self):
+        self.assertEqual(webserver.record_events({"type": "other"}), [])
+        self.assertEqual(webserver.record_events("not a dict"), [])
+        self.assertEqual(webserver.record_events(_asst(text="   ")), [])
+
+
+# --------------------------------------------------------------------------- #
+# serve-activity-feed — worker → transcript resolution (registry path)
+# --------------------------------------------------------------------------- #
+class ResolveFeedTranscriptTest(GitProjectTestCase):
+    """registry entry → live claim → worktree cwd → locate_transcript — the
+    same resolution path gather_rows uses, keyed by (proj name, plan, phase)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._pr = TemporaryDirectory()
+        self.addCleanup(self._pr.cleanup)
+        self.projects_root = Path(self._pr.name)
+        self.reg_root = registry.entries()[0].project_root
+        self.proj = Path(self.reg_root).name
+
+    def _transcript(self, name: str = "sess") -> Path:
+        d = self.projects_root / top.encode_project_dir(self.reg_root)
+        return _write_jsonl(d / f"{name}.jsonl", [_asst(cwd=self.reg_root)], mtime=1000)
+
+    def test_resolves_live_claim_to_transcript_and_tid(self):
+        self._claim("a")
+        path = self._transcript()
+        resolved = webserver.resolve_feed_transcript(
+            "test-plan", self.proj, "a", projects_root=self.projects_root
+        )
+        self.assertEqual(resolved, (path, "sess"))
+
+    def test_unknown_plan_or_project_is_none(self):
+        self._claim("a")
+        self._transcript()
+        self.assertIsNone(
+            webserver.resolve_feed_transcript("nope", self.proj, "a", projects_root=self.projects_root)
+        )
+        self.assertIsNone(
+            webserver.resolve_feed_transcript("test-plan", "other-proj", "a", projects_root=self.projects_root)
+        )
+
+    def test_phase_mismatch_is_none(self):
+        # The claim moved on (new phase = new session): the client's selection
+        # is stale, so the feed 404s rather than serving another phase's tail.
+        self._claim("a")
+        self._transcript()
+        self.assertIsNone(
+            webserver.resolve_feed_transcript("test-plan", self.proj, "b", projects_root=self.projects_root)
+        )
+
+    def test_no_claim_is_none(self):
+        self._transcript()
+        self.assertIsNone(
+            webserver.resolve_feed_transcript("test-plan", self.proj, "a", projects_root=self.projects_root)
+        )
+
+    def test_no_transcript_is_none(self):
+        self._claim("a")
+        self.assertIsNone(
+            webserver.resolve_feed_transcript("test-plan", self.proj, "a", projects_root=self.projects_root)
+        )
+
+    def test_project_filter_mismatch_is_none(self):
+        self._claim("a")
+        self._transcript()
+        self.assertIsNone(
+            webserver.resolve_feed_transcript(
+                "test-plan", self.proj, "a",
+                project_filter=self.tmp_path / "elsewhere",
+                projects_root=self.projects_root,
+            )
+        )
+
+    def _servable_sibling(self) -> tuple[str, Path]:
+        """Register a second project with the same basename + plan slug under a
+        different parent, claim phase 'a' on it, and give it a transcript.
+        Returns (registry-recorded root, transcript path)."""
+        from end_of_line import state as st
+        from end_of_line.cli import main as cli_main
+        from tests import DEFAULT_PLAN_BODY
+
+        sibling = self.tmp_path / "elsewhere" / self.proj
+        (sibling / "plans").mkdir(parents=True)
+        (sibling / "plans" / "test-plan.md").write_text(DEFAULT_PLAN_BODY)
+        self.assertEqual(cli_main(["init", "--project", str(sibling), "--plan", "test-plan"]), 0)
+        root = must(
+            next((e.project_root for e in registry.entries() if e.project_root != self.reg_root), None)
+        )
+        with st.mutate(sibling / "plans" / ".orchestrator" / "test-plan.state.json") as data:
+            st.claim_phase(data, "a", lease_minutes=30)
+        d = self.projects_root / top.encode_project_dir(root)
+        return root, _write_jsonl(d / "sibling.jsonl", [_asst(cwd=root)], mtime=1000)
+
+    def test_project_filter_scans_past_foreign_entries(self):
+        # A --project-scoped server treats other registrations as nonexistent:
+        # a same-named, fully servable project registered earlier (basename
+        # collision) must not shadow the in-filter one — the scan continues
+        # past filtered-out entries instead of 404ing on the first name match.
+        self._claim("a")
+        self._transcript()
+        root, path = self._servable_sibling()
+        resolved = webserver.resolve_feed_transcript(
+            "test-plan", self.proj, "a",
+            project_filter=Path(root),
+            projects_root=self.projects_root,
+        )
+        self.assertEqual(resolved, (path, "sibling"))
+
+    def test_scan_continues_past_entries_that_cannot_serve(self):
+        # Per-entry resilience, like gather_rows: an earlier same-named entry
+        # whose claim is on another phase is a skip, not a dead end — the row
+        # the client clicked is whichever entry CAN serve that (proj, plan,
+        # phase) identity, since rows with identical identity are
+        # indistinguishable client-side anyway.
+        self._claim("b")
+        root, path = self._servable_sibling()
+        resolved = webserver.resolve_feed_transcript(
+            "test-plan", self.proj, "a", projects_root=self.projects_root
+        )
+        self.assertEqual(resolved, (path, "sibling"))
+
+
+# --------------------------------------------------------------------------- #
+# serve-activity-feed — /api/feed endpoint over a live server
+# --------------------------------------------------------------------------- #
+class FeedEndpointTest(_ServerCase):
+    """Gate inheritance, param validation, and the cursor round-trip. The
+    registry resolution is mocked (covered above); the transcript is real."""
+
+    def setUp(self):
+        super().setUp()
+        self.port = self._boot(ServeConfig(host="127.0.0.1", port=0))
+        self.transcript = self.tmp_path / "sess-1.jsonl"
+        _write_jsonl(self.transcript, [
+            _asst(text="starting work"),
+            _asst(tool="Bash", tool_input={"command": "pytest -q"}),
+        ])
+        patcher = mock.patch.object(
+            webserver, "resolve_feed_transcript", return_value=(self.transcript, "sess-1")
+        )
+        self.resolve = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _feed(self, query: str):
+        """GET /api/feed?<query> → (resp, parsed body). Only 200 bodies are
+        JSON; error-status tests assert on the code alone, so those get {}."""
+        resp, body = self._get(self.port, f"/api/feed?{query}")
+        data: dict = json.loads(body) if resp.status == 200 else {}
+        return resp, data
+
+    def test_backfill_on_first_poll(self):
+        resp, data = self._feed("plan=p&proj=x&phase=a&cursor=-1")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("application/json", must(resp.getheader("Content-Type")))
+        self.assertEqual(resp.getheader("Cache-Control"), "no-store")
+        self.assertEqual(
+            [(e["kind"], e["text"]) for e in data["events"]],
+            [("say", "starting work"), ("tool", "pytest -q")],
+        )
+        self.assertEqual(data["cursor"], self.transcript.stat().st_size)
+        self.assertEqual(data["tid"], "sess-1")
+        self.assertFalse(data["reset"])
+
+    def test_incremental_poll_returns_only_new_events(self):
+        _, first = self._feed("plan=p&proj=x&phase=a&cursor=-1")
+        with open(self.transcript, "a") as fh:
+            fh.write(json.dumps(_asst(text="now testing")) + "\n")
+        _, data = self._feed(f"plan=p&proj=x&phase=a&cursor={first['cursor']}&tid=sess-1")
+        self.assertEqual([e["text"] for e in data["events"]], ["now testing"])
+        self.assertFalse(data["reset"])
+
+    def test_tid_mismatch_resets_and_backfills(self):
+        # New attempt = new session id: the client's scrollback is stale, so the
+        # server ignores its cursor and backfills fresh with reset:true.
+        _, first = self._feed("plan=p&proj=x&phase=a&cursor=-1")
+        _, data = self._feed(f"plan=p&proj=x&phase=a&cursor={first['cursor']}&tid=old-attempt")
+        self.assertTrue(data["reset"])
+        self.assertEqual(len(data["events"]), 2)
+        self.assertEqual(data["tid"], "sess-1")
+
+    def test_shrunken_transcript_resets(self):
+        _, data = self._feed("plan=p&proj=x&phase=a&cursor=999999&tid=sess-1")
+        self.assertTrue(data["reset"])
+        self.assertEqual(len(data["events"]), 2)
+
+    def test_bad_plan_slug_400(self):
+        resp, _ = self._feed("plan=..%2Fetc&proj=x&phase=a&cursor=-1")
+        self.assertEqual(resp.status, 400)
+
+    def test_bad_phase_slug_400(self):
+        resp, _ = self._feed("plan=p&proj=x&phase=..%2Fetc&cursor=-1")
+        self.assertEqual(resp.status, 400)
+
+    def test_bad_cursor_400(self):
+        resp, _ = self._feed("plan=p&proj=x&phase=a&cursor=abc")
+        self.assertEqual(resp.status, 400)
+
+    def test_unknown_plan_404(self):
+        self.resolve.return_value = None
+        resp, _ = self._feed("plan=p&proj=x&phase=a&cursor=-1")
+        self.assertEqual(resp.status, 404)
+
+    def test_vanished_transcript_404(self):
+        self.transcript.unlink()
+        resp, _ = self._feed("plan=p&proj=x&phase=a&cursor=-1")
+        self.assertEqual(resp.status, 404)
+
+    def test_no_transcript_config_404(self):
+        # Privacy: --no-transcript means the feed route is simply not there —
+        # the endpoint is 100% transcript-content data.
+        port = self._boot(ServeConfig(host="127.0.0.1", port=0, include_transcript=False))
+        resp, _ = self._get(port, "/api/feed?plan=p&proj=x&phase=a&cursor=-1")
+        self.assertEqual(resp.status, 404)
+
+    def test_unauthenticated_feed_401(self):
+        # Gate-inheritance pin: /api/feed sits AFTER the auth gate, so a
+        # tokened server never serves transcript content unauthenticated.
+        port = self._boot(ServeConfig(host="127.0.0.1", port=0, token="sekret"))
+        resp, _ = self._get(port, "/api/feed?plan=p&proj=x&phase=a&cursor=-1")
+        self.assertEqual(resp.status, 401)
+
+    def test_event_text_truncated_at_cap(self):
+        _write_jsonl(self.transcript, [_asst(text="y" * 5000)])
+        _, data = self._feed("plan=p&proj=x&phase=a&cursor=-1")
+        self.assertEqual(len(data["events"][0]["text"]), webserver.FEED_TEXT_CAP)
 
 
 if __name__ == "__main__":
