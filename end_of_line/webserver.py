@@ -47,7 +47,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from . import top
+from . import registry, top
+from . import state as st
 from ._xdg_guard import clu_config_dir
 
 # Worker-derived transcript content dropped by `--no-transcript`. These are the
@@ -362,6 +363,200 @@ def workers_json(*, project_filter: Path | None = None, include_transcript: bool
 
 
 # --------------------------------------------------------------------------- #
+# /api/feed — incremental transcript tail for the detail-pane activity feed
+# --------------------------------------------------------------------------- #
+# Backfill window for a first poll (matches `top.tail_records`' bound); per-poll
+# read cap (transcript lines can embed whole files — one poll must stay
+# bounded); per-event text cap (same reason, applied after decode).
+FEED_BACKFILL_BYTES = 64 * 1024
+FEED_READ_CAP = 256 * 1024
+FEED_TEXT_CAP = 2000
+
+
+def read_feed_window(path: Path, cursor: int) -> tuple[list[dict], int, bool]:
+    """Parse complete JSONL records from `path` starting at byte `cursor`.
+
+    Returns `(records, new_cursor, reset)`. `cursor=-1` (a client's first poll)
+    backfills from the last `FEED_BACKFILL_BYTES`, starting at a record
+    boundary; a cursor past EOF means the file shrank under the client
+    (rotation / a new attempt reusing the name) — same backfill, `reset=True`.
+    At most `FEED_READ_CAP` bytes are read per call and consumed only to the
+    last `\\n`: a partial final line (writer mid-append) stays unconsumed and
+    is re-read whole next poll. Unparseable lines are skipped but consumed.
+    Raises `OSError` when the file is unreadable (caller maps to 404).
+    """
+    with open(path, "rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        reset = cursor > size
+        backfill = cursor < 0 or reset
+        if backfill:
+            cursor = max(0, size - FEED_BACKFILL_BYTES)
+        f.seek(cursor)
+        buf = f.read(FEED_READ_CAP)
+    skip = 0
+    if backfill and cursor > 0:
+        # A mid-file start lands mid-line; drop up to the first newline.
+        nl = buf.find(b"\n")
+        if nl < 0:
+            return [], cursor, reset
+        skip = nl + 1
+    end = buf.rfind(b"\n")
+    if end < skip:
+        # No complete line beyond the (possibly skipped) partial one. Consume
+        # just the skip so the next poll starts at the record boundary.
+        return [], cursor + skip, reset
+    records: list[dict] = []
+    for raw in buf[skip : end + 1].split(b"\n"):
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            records.append(json.loads(s))
+        except json.JSONDecodeError:
+            continue
+    return records, cursor + end + 1, reset
+
+
+def _truncate(text: str) -> str:
+    return text if len(text) <= FEED_TEXT_CAP else text[: FEED_TEXT_CAP - 1] + "…"
+
+
+def _result_text(block: dict) -> str:
+    """Flatten a tool_result's `content` (string OR text-block list) to one
+    string — the same string-or-array tolerance as `top._content_blocks`."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            b["text"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+        )
+    return ""
+
+
+def record_events(rec) -> list[dict]:
+    """One transcript record → feed events `{ts, kind, text}`, in block order.
+
+    Decodes the same record shapes `top.extract_activity` understands —
+    assistant text → `say`, Bash tool_use → `tool`, write-tool tool_use →
+    `write`, tool_result → `result` — but where that reduces to the LAST of
+    each kind for a dashboard row, the feed keeps every occurrence. The
+    cross-record state extract_activity also tracks (usage totals, the
+    running-command id pairing) has no feed analogue, so this decoder stays
+    local rather than contorting a shared helper. Empty-text blocks drop.
+    """
+    if not isinstance(rec, dict):
+        return []
+    ts = rec.get("timestamp")
+    raw_message = rec.get("message")
+    message = raw_message if isinstance(raw_message, dict) else {}
+    rtype = rec.get("type")
+    events: list[dict] = []
+
+    def _emit(kind: str, text) -> None:
+        if isinstance(text, str) and text.strip():
+            events.append({"ts": ts, "kind": kind, "text": _truncate(text)})
+
+    if rtype == "assistant":
+        for block in top._content_blocks(message):
+            btype = block.get("type")
+            if btype == "text":
+                _emit("say", block.get("text"))
+            elif btype == "tool_use":
+                raw_input = block.get("input")
+                inp = raw_input if isinstance(raw_input, dict) else {}
+                name = block.get("name")
+                if name == "Bash":
+                    _emit("tool", inp.get("command"))
+                elif name in top._WRITE_TOOLS:
+                    _emit("write", inp.get("file_path"))
+    elif rtype == "user":
+        for block in top._content_blocks(message):
+            if block.get("type") == "tool_result":
+                _emit("result", _result_text(block))
+    return events
+
+
+def resolve_feed_transcript(
+    plan: str,
+    proj: str,
+    phase: str,
+    *,
+    project_filter: Path | None = None,
+    projects_root: Path = top.PROJECTS_ROOT,
+) -> tuple[Path, str] | None:
+    """Transcript path + identity (file stem = session id, the feed `tid`) for
+    the live claim of (`proj`, `plan`), or None when there's no such plan, no
+    live claim, the claim's phase isn't `phase` (the client's selection is
+    stale), or no transcript exists yet.
+
+    Mirrors `gather_rows`' registry → claim → worktree-cwd → `locate_transcript`
+    path. `proj` is matched against registry entry basenames, never joined into
+    a path. The scan is per-entry resilient like `gather_rows`: entries the
+    `project_filter` excludes, and entries that cannot serve the request
+    (unreadable state, claim on another phase, no transcript yet), are skipped
+    rather than dead-ending the scan — the first entry that can serve decides.
+    """
+    filt = Path(project_filter).resolve() if project_filter is not None else None
+    for e in registry.entries():
+        if e.plan_slug != plan or Path(e.project_root).name != proj:
+            continue
+        if filt is not None and Path(e.project_root).resolve() != filt:
+            continue
+        data = registry.load_entry_state(e)
+        if not data:
+            continue
+        claim = data.get("current_claim")
+        if not claim or claim.get("phase_id") != phase:
+            continue
+        wt = st.get_worktree(data)
+        cwd = Path(wt["path"]) if wt and wt.get("path") else Path(e.project_root)
+        tpath = top.locate_transcript(
+            cwd, projects_root=projects_root, session_id=claim.get("session_id")
+        )
+        if tpath:
+            return (tpath, tpath.stem)
+    return None
+
+
+def feed_json(
+    query: dict[str, list[str]], *, project_filter: Path | None = None
+) -> tuple[int, bytes]:
+    """Resolve one `/api/feed` poll to `(status, body)`. A 200 body is JSON
+    `{events, cursor, tid, reset}`; error bodies are plain text. `reset:true`
+    tells the client its scrollback is stale (new session id, or the file
+    shrank under its cursor) and these events are a fresh backfill."""
+    plan = (query.get("plan") or [""])[0]
+    proj = (query.get("proj") or [""])[0]
+    phase = (query.get("phase") or [""])[0]
+    tid = (query.get("tid") or [""])[0]
+    try:
+        st.validate_slug(plan, kind="plan slug")
+        st.validate_slug(phase, kind="phase id")
+        cursor = int((query.get("cursor") or ["-1"])[0])
+    except (st.InvalidSlug, ValueError):
+        return 400, b"bad request\n"
+    resolved = resolve_feed_transcript(plan, proj, phase, project_filter=project_filter)
+    if resolved is None:
+        return 404, b"not found\n"
+    tpath, current_tid = resolved
+    reset = bool(tid) and tid != current_tid
+    if reset:
+        cursor = -1  # new attempt / new session: ignore the stale cursor
+    try:
+        records, cursor, shrank = read_feed_window(tpath, cursor)
+    except OSError:
+        return 404, b"not found\n"
+    events = [ev for rec in records for ev in record_events(rec)]
+    body = json.dumps(
+        {"events": events, "cursor": cursor, "tid": current_tid, "reset": reset or shrank}
+    ).encode("utf-8")
+    return 200, body
+
+
+# --------------------------------------------------------------------------- #
 # Handler
 # --------------------------------------------------------------------------- #
 def make_handler(*, index_html: str, cfg: ServeConfig):
@@ -428,7 +623,8 @@ def make_handler(*, index_html: str, cfg: ServeConfig):
                     )
                     return
 
-                path = urlsplit(self.path).path
+                url = urlsplit(self.path)
+                path = url.path
 
                 # 2. Static, non-sensitive icon — served before the auth gate so
                 #    a browser favicon / iOS home-screen fetch (which need not
@@ -461,6 +657,21 @@ def make_handler(*, index_html: str, cfg: ServeConfig):
                     self._respond(
                         200, body, "application/json; charset=utf-8",
                         head=head, extra={"Cache-Control": "no-store"},
+                    )
+                elif path == "/api/feed" and cfg.include_transcript:
+                    # The feed is 100% transcript-content data, so --no-transcript
+                    # leaves the route unregistered (falls through to 404).
+                    status, body = feed_json(
+                        parse_qs(url.query),
+                        project_filter=cfg.project_filter,
+                    )
+                    ctype = (
+                        "application/json; charset=utf-8"
+                        if status == 200
+                        else "text/plain; charset=utf-8"
+                    )
+                    self._respond(
+                        status, body, ctype, head=head, extra={"Cache-Control": "no-store"}
                     )
                 else:
                     self._respond(404, b"not found\n", "text/plain; charset=utf-8", head=head)

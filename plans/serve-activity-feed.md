@@ -48,8 +48,9 @@ Verified ground truth (2026-06-11 session, three research passes):
   in `_WRITE_TOOLS` → `write`; `tool_result` → `result`. Extract a shared
   per-record helper from `extract_activity` ONLY if it factors cleanly (two
   real call sites); otherwise keep the feed's decoder local — do not contort
-  `extract_activity`. **Server-side truncation ~400 chars/event** (transcript
-  lines can embed whole files).
+  `extract_activity`. **Server-side truncation 2000 chars/event** (transcript
+  lines can embed whole files; operator-bumped from the planned ~400 — see
+  Findings log).
 - **Privacy**: `include_transcript=False` → `/api/feed` 404 (route not
   registered); documented beside the flag's existing semantics.
 - **UI** (vanilla, inline, themed): feed pane in the detail view; polls ONLY
@@ -100,3 +101,34 @@ Verified ground truth (2026-06-11 session, three research passes):
 
 _Empty at plan time. Workers append one dated bullet per cross-phase finding
 with file:line._
+
+- 2026-06-10 (feed): **Decoder stayed local** — `record_events` lives in
+  `webserver.py` (not extracted into `top.py`). It reuses
+  `top._content_blocks` / `top._WRITE_TOOLS` (precedent: `top_render`
+  imports `top._clean`), but `extract_activity`'s cross-record state
+  (usage totals, running-command id pairing, last-of-each-kind reduction)
+  has no feed analogue, so a shared per-record helper would have served
+  one real call site and contorted the other. `top.py` untouched.
+- 2026-06-10 (feed): **Worker-sandbox `socket.bind` is EPERM**, so every
+  `_ServerCase` test (now 45 incl. 12 new `FeedEndpointTest`) plus the
+  9 reaper-family tests error in-sandbox — `clu verify` is the
+  authoritative judge, as the plan predicted. Live smoke was done by
+  driving `webserver.feed_json` directly against this worker's own
+  session (real registry → claim → transcript): 200, 17 events, clean
+  incremental poll.
+- 2026-06-10 (feed): **Operator browser check post-ship**: the feed pane
+  renders in split detail + phone drill (not strip); verify sticky-scroll
+  (pause-follow on scroll-up, resume at bottom) and that the pane survives
+  the 1.5s detail re-render — the feedbox sits OUTSIDE `#dtl` precisely so
+  `detailHTML`'s wholesale `setHTML` can't nuke its DOM/scroll.
+- 2026-06-11 (operator, mid-phase scope note): result-event truncation cap is
+  **2000 chars**, not ~400 — operator decision after seeing live tool_result
+  extracts. If your implementation already used ~400, change the constant
+  (and any test pinning it) before committing; the 1000-entry client cap
+  stays (2KB x 1000 = ~2MB worst case, acceptable).
+- 2026-06-11 (feed, re-dispatch): cap bumped to 2000 + review fixes applied —
+  `resolve_feed_transcript` is now per-entry resilient (filter/state/phase/
+  transcript dead ends `continue` the registry scan instead of 404ing; same
+  resilience as `gather_rows`, pinned by two sibling-project tests), `pollFeed`
+  re-checks `feedLogRef` after its awaits (view switch mid-fetch nulls it), and
+  the handler reuses one `urlsplit` per request.

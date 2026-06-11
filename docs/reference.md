@@ -1163,8 +1163,33 @@ security layer (token auth, Host-header allowlist, auto self-signed HTTPS).
 - `make_handler(*, index_html, cfg)` — builds the
   `BaseHTTPRequestHandler`. `_dispatch` enforces, in order: Host-allowlist
   (`421`) → `/login` cookie mint → auth gate (`401`) → exact-match routes
-  (`/`, `/api/workers`, else `404`). Request logging is silenced; a
-  `gather_rows` exception yields `500` without killing the thread.
+  (`/`, `/api/workers`, `/api/feed`, else `404`). Request logging is
+  silenced; a `gather_rows` exception yields `500` without killing the
+  thread.
+- `feed_json(query, *, project_filter) -> (status, bytes)` — the
+  `/api/feed` endpoint: an incremental transcript tail for the detail
+  pane's activity feed.
+  `GET /api/feed?plan=<slug>&proj=<name>&phase=<id>&cursor=<n>&tid=<id>`
+  → `{events: [{ts, kind, text}], cursor, tid, reset}`. `kind` is
+  `say` (assistant text) / `tool` (Bash command) / `write` (write-tool
+  file path) / `result` (tool_result text); event text is truncated
+  server-side at `FEED_TEXT_CAP` (2000 chars). `cursor` is a byte offset
+  into the transcript: `-1` backfills the last `FEED_BACKFILL_BYTES`
+  (64 KB); each poll reads at most `FEED_READ_CAP` (256 KB) and consumes
+  only to the last complete line. `tid` (the transcript file stem =
+  session id) binds the cursor to a transcript identity: a `tid` mismatch
+  (new attempt) or a file shrunk under the cursor (rotation) answers
+  `reset:true` with a fresh backfill. Bad slug/cursor → `400`; unknown
+  plan, no live claim, claim on a different phase, or no transcript →
+  `404`. `plan`/`phase` go through `state.validate_slug`; `proj` is
+  matched against registry entry basenames, never path-joined.
+- `read_feed_window(path, cursor)` / `record_events(rec)` /
+  `resolve_feed_transcript(plan, proj, phase, *, project_filter,
+  projects_root)` — the pieces behind `feed_json`: the bounded cursor
+  reader, the per-record event decoder (same record shapes as
+  `top.extract_activity`, but keeping every occurrence rather than the
+  last of each kind), and the registry → claim → worktree-cwd →
+  `locate_transcript` resolution `gather_rows` uses.
 - `build_server(cfg) -> _Server` — `ThreadingHTTPServer` (reuse-address,
   daemon threads); wraps the listening socket in TLS when `cfg.tls` is set
   (a wrap failure → `ConfigError`). `_Server.handle_error` is silenced so a
@@ -1188,8 +1213,14 @@ security layer (token auth, Host-header allowlist, auto self-signed HTTPS).
   auth. An absent `Host` is tolerated only on the unauthenticated loopback
   default; any exposed bind rejects it.
 - Every worker-derived string in `web/index.html` is inserted via an
-  `esc()` helper, never raw `innerHTML` — `/api/workers` carries
-  semi-untrusted LLM/tool text (commands, SAYING, file paths).
+  `esc()` helper, never raw `innerHTML` — `/api/workers` and `/api/feed`
+  carry semi-untrusted LLM/tool text (commands, SAYING, file paths,
+  feed events).
+- **`--no-transcript` disables `/api/feed` entirely** (the route is not
+  registered → `404`): the feed is 100% transcript-content data, the
+  exact class the flag strips from `/api/workers` rows. The feed also
+  sits after the auth gate, so a tokened bind never serves transcript
+  content unauthenticated.
 - The page is read once at startup via `importlib.resources` (`web/*.html`
   package-data) and served from in-memory bytes by exact-match route —
   never a directory handler (no path traversal).
