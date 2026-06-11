@@ -36,14 +36,12 @@ Read first if continuing from this work:
 - docs/operations.md "Hardened worker dispatch" (allowlist + worker-settings
   + activity-hook block — updated this session)
 
-Open questions or blockers:
-- line-buffer-worker-output: RESOLVED — re-authored as a clu plan and
-  SHIPPED 2026-06-11 (PTY shim + idle-treewalk). One pending check: the
-  first plan dispatched after that ship is the shim's production proof —
-  tail its worker log mid-run and confirm lines stream live (ANSI-free,
-  LF-only); note the result in
-  memory/project_line_buffer_worker_output.md.
-- Dispatch model is currently claude-opus-4-8 --effort xhigh (set for the
-  line-buffer plan); ask the operator whether to keep it or return to
-  claude-fable-5 before queueing the next plan.
+Open questions or blockers: none.
+- (resolved) Shim production proof CONFIRMED via serve-activity-feed
+  dispatches (ESC=0/CR=0 logs; budget-killed worker left a legible log).
+- (resolved) Dispatch model back on claude-fable-5.
+- Also landed since this brief: serve-activity-feed shipped (feed pane in
+  clu serve — restart done, dashboard live on new code), scripts/partest.py
+  (iteration runner, ~27s; gate stays serial discover), clu-phase SKILL.md
+  bare-call + focused-tests rules.
 ```
