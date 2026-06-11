@@ -37,8 +37,13 @@ Read first if continuing from this work:
   + activity-hook block — updated this session)
 
 Open questions or blockers:
-- plans/line-buffer-worker-output.md is a parked, never-init'ed plan from
-  2026-05-26 (wedge-watchdogs sister) with no tracking GH issue — operator
-  was asked at session end whether to file+archive or leave parked; check
-  the answer before touching it.
+- line-buffer-worker-output: RESOLVED — re-authored as a clu plan and
+  SHIPPED 2026-06-11 (PTY shim + idle-treewalk). One pending check: the
+  first plan dispatched after that ship is the shim's production proof —
+  tail its worker log mid-run and confirm lines stream live (ANSI-free,
+  LF-only); note the result in
+  memory/project_line_buffer_worker_output.md.
+- Dispatch model is currently claude-opus-4-8 --effort xhigh (set for the
+  line-buffer plan); ask the operator whether to keep it or return to
+  claude-fable-5 before queueing the next plan.
 ```
