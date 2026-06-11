@@ -79,15 +79,13 @@ If `WORKTREE_ROOT != PROJECT_ROOT`, treat it as a flashing-red sign: **every `gi
 
 ## Resume-after-answer
 
-If a prior blocker on this phase has been answered, clu has re-dispatched you to continue. Ask clu:
+If a prior blocker on this phase has been answered, clu has re-dispatched you to continue. Ask clu — as a BARE call, reading the printed output from the tool result:
 
 ```bash
-if answer=$(clu prior-blocker --project "$PROJECT_ROOT" --plan "$PLAN" --phase "$PHASE"); then
-    echo "resuming with prior answer: $answer"
-fi
+clu prior-blocker --project "$PROJECT_ROOT" --plan "$PLAN" --phase "$PHASE"
 ```
 
-`clu prior-blocker` exits 0 and prints the answer text on stdout when an answered blocker exists for the phase; exits non-zero (no output on stdout) when there isn't one.
+`clu prior-blocker` exits 0 and prints the answer text on stdout when an answered blocker exists for the phase; exits non-zero (no output on stdout) when there isn't one. Do NOT wrap it in command substitution (`answer=$(clu …)`) — under hardened dispatch (`dontAsk` + allowlist), `$( )` wrapping defeats the `Bash(clu *)` prefix match and the call is DENIED even though the bare call is allowed. You don't need the shell variable: the output lands in your tool result; read it from there.
 
 If you see an answered blocker, that means: you asked a question previously, the user replied, and now you're resuming with their choice in hand. Use the answer to inform the rest of the work, then complete (or block again on the next thing).
 
@@ -208,6 +206,18 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 - **The completion summary is load-bearing.** When you call `clu complete`, your final message to the operator is the only signal they have about what shipped. Mention what actually committed (SHA), the verification result from the mandate above (count + delta), and anything you tried that didn't work and the operator should know about (e.g. "couldn't run `gh issue close` because the binary wasn't on PATH; operator should close manually"). Silence on a failure mode reads as "everything went fine," which is worse than admitting a small thing didn't.
 
 ## Common pitfalls
+
+- **Command shapes that get DENIED under hardened dispatch** (`dontAsk` +
+  allowlist; the standard since #90): the allowlist prefix-matches each
+  decomposed subcommand, so these fail even when every piece is allowed —
+  (a) command substitution around a callback (`answer=$(clu …)`,
+  `SHA=$(git rev-parse HEAD)` — run the bare command and read its output
+  from the tool result instead); (b) subshell/loop/trap constructs;
+  (c) expanding custom shell variables you set in an earlier Bash call
+  (env doesn't persist across calls anyway — use literal values from your
+  arguments). A denial returns to you cleanly: take the bare-call detour,
+  don't burn turns retrying the same shape, and `clu block` only if no
+  allowed shape can do the job.
 
 - **Passing the wrong token**: tokens are validated against the live claim. If you pass anything other than the `$TOKEN` arg, `clu` rejects with `CLAIM_MISMATCH` (exit 4) and your phase is stuck. Always use `--token "$TOKEN"`.
 
