@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import coolant, inbox, notify, state_blocker
+from . import coolant, inbox, notify, quota, state_blocker
 from . import state as st
 from .config import ORCHESTRATOR_DIR, ProjectConfig
 from .plan_parser import parse_sessions_index
@@ -32,6 +32,14 @@ from .plan_parser import parse_sessions_index
 def _local_now() -> _dt.datetime:
     """Wall-clock local time. Indirection exists so tests can pin the hour."""
     return _dt.datetime.now()
+
+
+def _death_detail(phase_id: str, quota_match: quota.QuotaMatch | None) -> str:
+    """TickResult detail for the two worker-death paths (lease-expiry, dead-PID)."""
+    detail = f"phase={phase_id}"
+    if quota_match is not None:
+        detail += f" quota={quota_match.signature}"
+    return detail
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +627,20 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             phase_id = claim["phase_id"]
             claimed_by = claim.get("claimed_by")
             if st.release_if_expired(data):
+                # Quota classification (#94) reads the snapshotted claim's
+                # log_path — the on-disk log outlives the released claim.
+                # A quota death's phase_started is forgiven via
+                # EVENT_QUOTA_DEATH, so the straggler that lease-expired on
+                # a quota kill burns no attempt.
+                quota_match = quota.classify_log_tail(claim.get("log_path"))
+                if quota_match is not None:
+                    quota.record_quota_death(
+                        data,
+                        quota_match,
+                        phase_id=phase_id,
+                        token=claimed_by,
+                        orchestrator_dir=state_path.parent,
+                    )
                 if claimed_by and phase_id and config.coolant.enabled:
                     coolant.emit_stop(
                         session_id=claimed_by,
@@ -645,7 +667,9 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         signaled=reap.signaled,
                         cmdline_mismatch=reap.cmdline_mismatch,
                     )
-                return _attach(TickResult("lease_expired", f"phase={phase_id}"))
+                return _attach(
+                    TickResult("lease_expired", _death_detail(phase_id, quota_match))
+                )
 
             # issue #72: heartbeat-keeper subprocess survives worker death
             # (EXIT trap doesn't fire on SIGKILL/OOM/crash) and keeps the
@@ -663,6 +687,21 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 claim,
                 cmdline_match=cmdline_match,
             ):
+                # Quota classification (#94) must read the log BEFORE
+                # release — release_claim_and_emit clears the claim that
+                # carries log_path. A quota match suppresses the misleading
+                # worker-dead notify body (KIND_QUOTA_* notifications land
+                # in phase notify-docs) and forgives the attempt via
+                # EVENT_QUOTA_DEATH.
+                quota_match = quota.classify_log_tail(claim.get("log_path"))
+                if quota_match is not None:
+                    quota.record_quota_death(
+                        data,
+                        quota_match,
+                        phase_id=phase_id,
+                        token=claimed_by,
+                        orchestrator_dir=state_path.parent,
+                    )
                 # Order matters: durable state first (event + release +
                 # coolant), best-effort reap last. If the reap raises (e.g.
                 # ps timeout), the claim is already released and the event is
@@ -687,10 +726,12 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 return _attach(
                     TickResult(
                         "worker_dead",
-                        f"phase={phase_id}",
+                        _death_detail(phase_id, quota_match),
                         phase_id=phase_id,
                         token=claimed_by,
-                        notify_body=notify.render_worker_dead(
+                        notify_body=None
+                        if quota_match is not None
+                        else notify.render_worker_dead(
                             data["plan_slug"],
                             phase_id,
                             pid,

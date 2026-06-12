@@ -10,10 +10,14 @@ returning None on weekly/date forms is contract, not a gap.
 from __future__ import annotations
 
 import datetime as dt
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from end_of_line import quota
+from end_of_line import state as st
 from tests import must
 
 NY = ZoneInfo("America/New_York")
@@ -181,6 +185,90 @@ class ParseResetTests(unittest.TestCase):
         now = dt.datetime(2026, 6, 11, 23, 0, tzinfo=NY)
         result = must(quota.parse_reset(SESSION_LINE, now))
         self.assertEqual(result.utcoffset(), dt.timedelta(0))
+
+
+class ReadLogTailTests(unittest.TestCase):
+    """One shared tail helper for every death-classification site — the
+    systemic matcher reads through it too (50-line discipline)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.log = Path(self._tmp.name) / "worker.log"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_missing_file_returns_empty(self) -> None:
+        self.assertEqual(quota.read_log_tail(self.log), "")
+
+    def test_returns_only_the_tail(self) -> None:
+        self.log.write_text("head\n" * 100 + "tail-marker\n")
+        tail = quota.read_log_tail(self.log)
+        self.assertIn("tail-marker", tail)
+        self.assertEqual(len(tail.splitlines()), 50)
+
+
+class QuotaPauseFileTests(unittest.TestCase):
+    """`record_quota_pause` owns the quota.json schema — single writer,
+    under locked_json, always clearing the canary slot."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.orch_dir = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _read(self) -> dict:
+        return json.loads((self.orch_dir / quota.QUOTA_FILE_NAME).read_text())
+
+    def test_parseable_reset_writes_auto_resume_pause(self) -> None:
+        now = dt.datetime(2026, 6, 11, 23, 0, tzinfo=NY)
+        match = must(quota.classify_quota(SESSION_LINE))
+        paused_until = must(quota.record_quota_pause(self.orch_dir, match, now))
+        # reset = 2026-06-12T05:50Z (1:50am EDT), +120s buffer.
+        self.assertEqual(paused_until, dt.datetime(2026, 6, 12, 5, 52, tzinfo=dt.UTC))
+        data = self._read()
+        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(data["signature"], "session_limit")
+        self.assertEqual(data["line"], SESSION_LINE)
+        self.assertEqual(st.parse_iso(data["paused_until"]), paused_until)
+        self.assertIsNone(data["canary_plan"])
+        self.assertIsNone(data["canary_deadline"])
+        self.assertEqual(st.parse_iso(data["created_at"]), now.astimezone(dt.UTC))
+
+    def test_unparseable_reset_writes_stuck_pause(self) -> None:
+        # Weekly form doesn't parse (locked decision) → stuck pause:
+        # paused_until null, no auto-resume, operator clears it.
+        match = must(quota.classify_quota("You've hit your weekly limit · resets Mon 12:00am"))
+        now = dt.datetime(2026, 6, 12, 3, 0, tzinfo=dt.UTC)
+        self.assertIsNone(quota.record_quota_pause(self.orch_dir, match, now))
+        data = self._read()
+        self.assertIsNone(data["paused_until"])
+        self.assertEqual(data["signature"], "weekly_limit")
+
+    def test_re_pause_clears_canary_fields(self) -> None:
+        # A re-pause during a canary window is exactly the canary-failed
+        # case — the fresh write must clear the canary slot.
+        (self.orch_dir / quota.QUOTA_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "paused_until": "2026-06-12T05:52:00Z",
+                    "signature": "session_limit",
+                    "line": SESSION_LINE,
+                    "canary_plan": "some-plan",
+                    "canary_deadline": "2026-06-12T05:55:00Z",
+                    "created_at": "2026-06-12T03:00:00Z",
+                }
+            )
+        )
+        match = must(quota.classify_quota(CREDITS_LINE))
+        quota.record_quota_pause(self.orch_dir, match, dt.datetime(2026, 6, 12, 9, 0, tzinfo=NY))
+        data = self._read()
+        self.assertIsNone(data["canary_plan"])
+        self.assertIsNone(data["canary_deadline"])
+        self.assertEqual(data["signature"], "usage_credits")
 
 
 class ConstantsTests(unittest.TestCase):

@@ -11,6 +11,7 @@ from end_of_line import state as st
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
 from tests import CluTestCase, must
+from tests.test_quota import SESSION_LINE as QUOTA_LINE
 
 PLAN_BODY = """\
 # Test plan
@@ -440,6 +441,119 @@ class SupervisorTestCase(CluTestCase):
             result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "worker_dead")
         self.assertIsNone(self._read()["current_claim"])
+
+    # --- quota-death classification (#94 phase classify) ---
+
+    def _claim_with_log(
+        self,
+        log_body: str,
+        lease_expires: str = "2099-01-01T00:00:00Z",
+    ) -> str:
+        """Claim phase 'a', stamp pid + log_path, seed the worker log."""
+        tick(self.state_path, self.cfg)
+        log_dir = self.state_path.parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        with st.locked(self.state_path):
+            data = st.load(self.state_path)
+            token = data["current_claim"]["claimed_by"]
+            log_path = log_dir / f"a.{token}.log"
+            data["current_claim"]["pid"] = 99999
+            data["current_claim"]["log_path"] = str(log_path)
+            data["current_claim"]["lease_expires"] = lease_expires
+            st.save_atomic(self.state_path, data)
+        log_path.write_text(log_body)
+        return token
+
+    def _tick_worker_dead(self):
+        reap = st.ReapResult(signaled=None, escalated_kill=False, cmdline_mismatch=False)
+        with (
+            mock.patch("end_of_line.state.claim_worker_alive", return_value=False),
+            mock.patch("end_of_line.state.reap_orphan_pgroup", return_value=reap),
+        ):
+            return tick(self.state_path, self.cfg)
+
+    def _event(self, data: dict, event_type: str) -> dict:
+        return next(e for e in data["events"] if e["type"] == event_type)
+
+    def test_dead_pid_quota_log_classifies_and_forgives(self) -> None:
+        token = self._claim_with_log(QUOTA_LINE + "\n")
+        result = self._tick_worker_dead()
+        self.assertEqual(result.action, "worker_dead")
+        data = self._read()
+        death = self._event(data, st.EVENT_QUOTA_DEATH)
+        self.assertEqual(death["phase"], "a")
+        self.assertEqual(death["token"], token)
+        self.assertEqual(death["signature"], "session_limit")
+        self.assertIn("session limit", death["line"])
+        paused = self._event(data, st.EVENT_QUOTA_PAUSED)
+        self.assertIsNotNone(paused["paused_until"])
+        # Forgiveness: the dispatch that died on quota burns no attempt.
+        self.assertEqual(st.attempts_for_phase(data, "a"), 0)
+        # The misleading worker-dead body is suppressed; KIND_QUOTA_*
+        # notifications land in phase notify-docs.
+        self.assertIsNone(result.notify_body)
+        qdata = json.loads((self.state_path.parent / "quota.json").read_text())
+        self.assertEqual(qdata["signature"], "session_limit")
+        self.assertIsNotNone(qdata["paused_until"])
+
+    def test_dead_pid_quota_stuck_reset_writes_null_pause(self) -> None:
+        self._claim_with_log("You've hit your weekly limit · resets Mon 12:00am\n")
+        self._tick_worker_dead()
+        qdata = json.loads((self.state_path.parent / "quota.json").read_text())
+        self.assertIsNone(qdata["paused_until"])
+        paused = self._event(self._read(), st.EVENT_QUOTA_PAUSED)
+        self.assertIsNone(paused["paused_until"])
+
+    def test_dead_pid_non_quota_log_burns_attempt_and_notifies(self) -> None:
+        # Regression: a non-quota death behaves exactly as today.
+        self._claim_with_log("Traceback ...\nValueError: bad\n")
+        result = self._tick_worker_dead()
+        self.assertEqual(result.action, "worker_dead")
+        data = self._read()
+        types = [e["type"] for e in data["events"]]
+        self.assertNotIn(st.EVENT_QUOTA_DEATH, types)
+        self.assertEqual(st.attempts_for_phase(data, "a"), 1)
+        self.assertIn("99999", must(result.notify_body))
+        self.assertFalse((self.state_path.parent / "quota.json").exists())
+
+    def test_lease_expired_quota_log_classifies_and_forgives(self) -> None:
+        token = self._claim_with_log(QUOTA_LINE + "\n", lease_expires="2020-01-01T00:00:00Z")
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
+            mock_reap.return_value = st.ReapResult(
+                signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False
+            )
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "lease_expired")
+        data = self._read()
+        death = self._event(data, st.EVENT_QUOTA_DEATH)
+        self.assertEqual(death["token"], token)
+        self.assertEqual(st.attempts_for_phase(data, "a"), 0)
+        self.assertTrue((self.state_path.parent / "quota.json").exists())
+
+    def test_lease_expired_non_quota_log_unchanged(self) -> None:
+        self._claim_with_log("benign\n", lease_expires="2020-01-01T00:00:00Z")
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
+            mock_reap.return_value = st.ReapResult(
+                signaled=None, escalated_kill=False, cmdline_mismatch=False
+            )
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "lease_expired")
+        data = self._read()
+        types = [e["type"] for e in data["events"]]
+        self.assertNotIn(st.EVENT_QUOTA_DEATH, types)
+        self.assertEqual(st.attempts_for_phase(data, "a"), 1)
+
+    def test_three_quota_deaths_burn_zero_attempts(self) -> None:
+        # Acceptance (#94): 3 consecutive quota deaths never reach the
+        # max-attempts halt — the 4th tick still dispatches phase a.
+        for _ in range(3):
+            self._claim_with_log(QUOTA_LINE + "\n")
+            self._tick_worker_dead()
+        data = self._read()
+        self.assertEqual(st.attempts_for_phase(data, "a"), 0)
+        result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "dispatch")
+        self.assertEqual(result.phase_id, "a")
 
     def test_lease_expired_emits_coolant_stop(self) -> None:
         """The lease-expiry branch decrements coolant's counter — the

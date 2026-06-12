@@ -10,16 +10,23 @@ the stuck-pause bucket — no auto-resume, loud notify — so the parser
 deliberately returns None for anything it can't read confidently
 (weekly `resets Mon 12:00am`, date forms, future wordings).
 
-Pure functions, stdlib-only. The signature table mirrors the systemic
-table in dispatch.py: hard-coded, grows via PR only, first match wins.
+Stdlib-only. The signature table mirrors the systemic table in
+dispatch.py: hard-coded, grows via PR only, first match wins. Besides
+the pure matcher/parser, this module owns the quota.json pause file
+(`record_quota_pause`) and the shared death recorder all three
+worker-death sites call (`record_quota_death`).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import re
+from collections import deque
+from pathlib import Path
 from typing import NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from . import state as st
 
 # Pause-file plumbing shared with later phases (P2 writes the pause,
 # P3 gates dispatch on it). Defined here so the schema constants have
@@ -27,6 +34,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 PAUSE_BUFFER_SEC = 120  # paused_until = reset + buffer; absorbs clock skew
 CANARY_WINDOW_SEC = 180  # canary plan must survive this long post-resume
 QUOTA_FILE_NAME = "quota.json"  # lives in plans/.orchestrator/
+QUOTA_SCHEMA_VERSION = 1
+
+# Worker-log tail discipline shared with the systemic matcher: a 50k-line
+# stack trace shouldn't slow the supervisor, and the relevant signal is
+# always at the end (the death was just observed).
+LOG_TAIL_LINES = 50
 
 # Hard-coded signature list. Grows via PR only; no config field. Order
 # matters — first match wins. The apostrophe class covers ASCII ',
@@ -120,3 +133,99 @@ def parse_reset(line: str, now: dt.datetime) -> dt.datetime | None:
     if candidate <= now:
         candidate += dt.timedelta(days=1)
     return candidate.astimezone(dt.UTC)
+
+
+def read_log_tail(log_path: Path, lines: int = LOG_TAIL_LINES) -> str:
+    """Last `lines` lines of a worker log; "" when missing or unreadable.
+
+    Streams via a bounded deque so a multi-MB worker log never sits in
+    memory whole.
+    """
+    try:
+        with open(log_path, errors="replace") as fh:
+            return "".join(deque(fh, maxlen=lines))
+    except OSError:
+        return ""
+
+
+def classify_log_tail(log_path: str | Path | None) -> QuotaMatch | None:
+    """`classify_quota` over a log file's tail; None-safe on a missing path.
+
+    Callers pass `claim["log_path"]`, which is absent in the
+    Popen→stamp-pid race window — that's the None case.
+    """
+    if not log_path:
+        return None
+    return classify_quota(read_log_tail(Path(log_path)))
+
+
+def _iso_or_none(ts: dt.datetime | None) -> str | None:
+    return None if ts is None else ts.astimezone(dt.UTC).strftime(st._ISO_FMT)
+
+
+def record_quota_pause(
+    orchestrator_dir: Path,
+    match: QuotaMatch,
+    now: dt.datetime,
+) -> dt.datetime | None:
+    """Write the project-level pause file; return paused_until (None = stuck).
+
+    `paused_until` = parsed reset + PAUSE_BUFFER_SEC. An unparseable reset
+    writes a stuck pause (`paused_until: null`): no auto-resume, only the
+    operator clears it (delete quota.json). Writing always resets the
+    canary fields — a re-pause during a canary window is exactly the
+    canary-failed case.
+    """
+    reset = parse_reset(match.line, now)
+    paused_until = None if reset is None else reset + dt.timedelta(seconds=PAUSE_BUFFER_SEC)
+    with st.locked_json(
+        orchestrator_dir / QUOTA_FILE_NAME,
+        expected_version=QUOTA_SCHEMA_VERSION,
+        empty=lambda: {"schema_version": QUOTA_SCHEMA_VERSION},
+    ) as data:
+        data.clear()
+        data.update(
+            {
+                "schema_version": QUOTA_SCHEMA_VERSION,
+                "paused_until": _iso_or_none(paused_until),
+                "signature": match.signature,
+                "line": match.line,
+                "canary_plan": None,
+                "canary_deadline": None,
+                "created_at": _iso_or_none(now),
+            }
+        )
+    return paused_until
+
+
+def record_quota_death(
+    data: dict,
+    match: QuotaMatch,
+    *,
+    phase_id: str,
+    token: str | None,
+    orchestrator_dir: Path,
+) -> dt.datetime | None:
+    """Record a classified quota death: pause file + the two plan events.
+
+    Shared by all three death sites (supervisor dead-PID, supervisor
+    lease-expiry, dispatch fast-fail). The `phase`/`token` kwargs on
+    EVENT_QUOTA_DEATH are the forgiveness contract —
+    `state.attempts_for_phase` subtracts the matching phase_started.
+    """
+    paused_until = record_quota_pause(orchestrator_dir, match, st._now_utc())
+    st.append_event(
+        data,
+        st.EVENT_QUOTA_DEATH,
+        phase=phase_id,
+        token=token,
+        signature=match.signature,
+        line=match.line,
+    )
+    st.append_event(
+        data,
+        st.EVENT_QUOTA_PAUSED,
+        paused_until=_iso_or_none(paused_until),
+        signature=match.signature,
+    )
+    return paused_until
