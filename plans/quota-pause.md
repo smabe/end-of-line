@@ -79,3 +79,5 @@ Ordering: pure matcher first (P1), then classification + attempt forgiveness + p
 ## Findings log
 
 _Empty at plan time. As phases run, the worker appends one dated bullet per cross-phase finding — a gotcha, a spike result, an API surprise, an assumption that turned out wrong — so a later phase doesn't rediscover it. Cite file:line._
+
+- 2026-06-12 (matcher): `python3 -m unittest discover -s tests` run inside the hardened worker sandbox fails with 42 known env failures — all of `test_webserver` (socket binds blocked) plus the process-group reaping tests in `test_terminalize` / `test_zombie_sweep` / `test_reap_orphan_pgroup` (killpg restricted). None quota-related. Don't burn time investigating; `clu verify` runs sandbox-exempt and is the authoritative green.
