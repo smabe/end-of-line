@@ -1,14 +1,12 @@
-# Resume — verify-gate-93 (briefed 2026-06-10, after the #90/#91/#83/#89 session)
+# Resume — verify-gate-93 (briefed 2026-06-12, after quota-pause)
 
 ```
-Session of 2026-06-10 shipped three plans end-to-end: harden-worker-dispatch
-(#90 closed — workers run Fable 5 under dontAsk + allowlist + Seatbelt),
-env-inject-91 (#91 + #83 closed — dispatcher-side CLU_* env, tool_stuck
-coverage live, doctor plan-slug marker guard), and basedpyright-drain (#89
-closed — repo at basedpyright zero, ==1.39.7 pinned, canary hard-fails,
-quality.verify_command runs type check + suite for every phase). All plans
-auto-archived; memory records written; next Monday 09:15 canary run is the
-first hard-gated one.
+quota-pause shipped 2026-06-12 — merge d160f96 on main, #94 closed. Quota
+worker deaths are now classified from the log tail, burn no attempt, pause
+the project until the parsed reset, and canary-auto-resume (new
+end_of_line/quota.py + dispatch gate at tick priority 8). Cleanup done:
+plans auto-archived to plans/archive/quota-pause/ (5880206), memory record
+written (project_quota_pause.md), follow-up filed as #95.
 
 Next steps available (pick one or propose your own):
 - #93: verify gate hardening — RECOMMENDED. Two scoped pieces: clu doctor
@@ -16,32 +14,29 @@ Next steps available (pick one or propose your own):
   completion on the host, discovered only at first worker verify), and
   process-group kill on shell=True timeout in cmd_verify + the merge gate
   (both orphan the shell's children today). Mirrors the doctor printer
-  family shipped this session.
+  family from the 06-10 session.
+- #95: sandbox-aware test skips — the 42 known env failures inside hardened
+  workers (test_webserver socket binds + killpg reap tests) should report
+  as skips. Pairs well with #93 as a same-batch second plan: disjoint files
+  (tests/ only vs cli/doctor), safe to run concurrently.
 - #74: attestation-refused inbox gets diff context + verify history.
 - #73: dry-merge-gate auto-enqueues the merge-resolve plan on dirty result.
-- #71: clu-ship followups epic (browse before picking).
+- #71: clu-ship followups epic (browse before picking — may be stale).
 - #92 stays parked (containers; unpark trigger documented in the issue).
 
-Recommended next pickup: /clu-plan #93 — small, fresh-context, and its
-doctor half reuses the _print_dispatch_*_health pattern from this session.
+Recommended next pickup: /clu-plan #93, optionally batched with #95.
 
 Read first if continuing from this work:
+- gh issue view 93 (and 95 if batching)
+- ~/.claude/projects/-Users-smabe-projects-end-of-line/memory/project_quota_pause.md
+  (quota machinery gotchas if touching supervisor/dispatch: quota.json
+  absent == not paused; gate_decision must not reuse locked_json)
 - ~/.claude/projects/-Users-smabe-projects-end-of-line/memory/project_basedpyright_drain.md
-  (lessons: workers can't pip-install; grep for existing baselines at plan
-  time; verify worker filed-issue claims)
-- ~/.claude/projects/-Users-smabe-projects-end-of-line/memory/project_env_inject_91.md
-  (sandbox denial shapes + in-sandbox suite caveat: ~30 environment
-  failures expected, clu verify is authoritative)
-- gh issue view 93
-- docs/operations.md "Hardened worker dispatch" (allowlist + worker-settings
-  + activity-hook block — updated this session)
+  (workers can't pip-install; verify worker filed-issue claims)
+- docs/operations.md "Recovering from a quota pause" + "Hardened worker
+  dispatch"
 
-Open questions or blockers: none.
-- (resolved) Shim production proof CONFIRMED via serve-activity-feed
-  dispatches (ESC=0/CR=0 logs; budget-killed worker left a legible log).
-- (resolved) Dispatch model back on claude-fable-5.
-- Also landed since this brief: serve-activity-feed shipped (feed pane in
-  clu serve — restart done, dashboard live on new code), scripts/partest.py
-  (iteration runner, ~27s; gate stays serial discover), clu-phase SKILL.md
-  bare-call + focused-tests rules.
+Notes: worker model pinned to claude-opus-4-8 in .orchestrator.json
+(operator choice 2026-06-12, "stay on opus for now" — ask before reverting
+to fable-5). Open questions or blockers: none.
 ```
