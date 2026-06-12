@@ -557,11 +557,23 @@ When the operator says `ship` (or equivalent):
    (because of `persistent: True`) and pollutes future sessions
    with leftover monitors. Don't tear down on `status=in_progress
    msg="paused"` — paused plans can be resumed, and you'd lose the
-   live feed for the rest of the run. Defensive: if `clu watch`
-   processes are already running at session start that you didn't
-   start yourself, those are leftovers from a prior session — you
-   can't `TaskStop` them (task_ids don't persist across sessions),
-   so kill the underlying PIDs.
+   live feed for the rest of the run. Defensive: `clu watch`
+   processes already running at session start are NOT all leftovers
+   — concurrent sessions arm their own watches, and killing theirs
+   severs a live feed they won't know to re-arm (observed
+   2026-06-12: a second session's startup killed a healthy per-plan
+   watch mid-plan). Decide by process-tree ownership before
+   touching anything:
+   - Ancestor `claude` process alive and YOURS (walk up from your
+     shell's `$PPID` — your Bash calls are children of your own
+     `claude` pid) → your own post-`/clear` zombie. You can't
+     `TaskStop` it (task_ids don't survive `/clear`), so kill the
+     PID.
+   - Ancestor `claude` process alive but NOT yours → a concurrent
+     session owns it. Leave it running.
+   - Orphaned (PPID 1 / parent chain dead) → crash leftover; kill
+     the PID. Normal session end reaps its own monitors, so
+     orphans only come from harness crashes.
 
 ### Reacting to task-list protocol notifications
 
