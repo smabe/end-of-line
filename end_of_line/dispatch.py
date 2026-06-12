@@ -19,7 +19,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import coolant, notify
+from . import coolant, notify, quota
 from . import state as st
 from .config import ProjectConfig
 from .supervisor import TickResult
@@ -69,14 +69,11 @@ _REPAIR_SCHEMA_HINT = json.dumps(
 # Exceptions that are recoverable in dispatch fallback paths.
 _DISPATCH_FALLBACK_ERRORS = (OSError, json.JSONDecodeError, st.SchemaVersionMismatch)
 
-# Inspect only the tail of the worker log — a 50k-line stack trace
-# shouldn't slow the supervisor, and the relevant signal is always at
-# the end (rc was just observed).
-_SYSTEMIC_TAIL_LINES = 50
-
 # Hard-coded signature list. Grows via PR only; no config field. Order
 # matters — first match wins, so put the most specific (rc-gated) one
-# first.
+# first. The log tail is read through quota.read_log_tail (the shared
+# 50-line discipline). Quota signatures live in quota.py and are checked
+# BEFORE this table on fast-fail.
 _RATE_LIMIT_RE = re.compile(
     r"(rate[\s_-]?limit|RateLimitError)",
     re.IGNORECASE,
@@ -167,12 +164,7 @@ def _match_systemic_signature(log_path: Path, *, rc: int) -> str | None:
     errors surface as rc=1 from the SDK and rc=2 from a wrapped shell, both
     legitimate.
     """
-    try:
-        with open(log_path, errors="replace") as fh:
-            lines = fh.readlines()
-    except (FileNotFoundError, OSError):
-        return None
-    tail = "".join(lines[-_SYSTEMIC_TAIL_LINES:])
+    tail = quota.read_log_tail(log_path)
     if rc == 127 and _MISSING_BINARY_RE.search(tail):
         return "missing_binary"
     if _RATE_LIMIT_RE.search(tail):
@@ -363,6 +355,15 @@ def dispatch_for_tick(
     except subprocess.TimeoutExpired:
         rc = None  # still running — the healthy case
     if rc is not None and rc != 0:
+        # Quota check BEFORE the systemic table (#94) — the regexes don't
+        # overlap today, but order is the contract if a future message
+        # contains both wordings.
+        if _record_quota_fast_fail(state_file, result, log_path, cfg, plan_slug):
+            print(
+                f"dispatch: quota-death rc={rc}, log={log_path}",
+                file=sys.stderr,
+            )
+            return False
         signature = _match_systemic_signature(log_path, rc=rc)
         if signature is not None:
             _pause_for_systemic_failure(
@@ -710,6 +711,59 @@ def _pause_for_systemic_failure(
         ),
         log_label="systemic_failure",
     )
+
+
+def _record_quota_fast_fail(
+    state_file: Path,
+    result: TickResult,
+    log_path: Path,
+    cfg: ProjectConfig,
+    plan_slug: str,
+) -> bool:
+    """Quota classification on a fast-failed worker; True iff the path was taken.
+
+    On match: quota events + pause file via quota.record_quota_death, then
+    release the just-made claim WITHOUT a dispatch_failed event — the quota
+    events are the record, and the attempt is forgiven via EVENT_QUOTA_DEATH.
+    Unlike `_pause_and_halt`, plan status never flips: the quota pause is a
+    project-level dispatch gate (phase `gate`), not a plan-level halt. The
+    operator-facing KIND_QUOTA_PAUSED/STUCK ping fires after the state write,
+    mirroring `_pause_and_halt`'s post-mutate notify (phase notify-docs).
+    """
+    match = quota.classify_log_tail(log_path)
+    if match is None:
+        return False
+    paused_until = None
+    try:
+        with st.mutate(state_file) as data:
+            paused_until = quota.record_quota_death(
+                data,
+                match,
+                phase_id=result.phase_id or "",
+                token=result.token,
+                orchestrator_dir=state_file.parent,
+            )
+            try:
+                st.release_claim(
+                    data,
+                    expected_token=result.token,
+                    expected_phase=result.phase_id,
+                )
+            except st.ClaimMismatch:
+                # Concurrent operator action already swapped the claim;
+                # don't clobber it. The events are still recorded.
+                pass
+    except _DISPATCH_FALLBACK_ERRORS as exc:
+        print(f"dispatch: failed to record quota death: {exc}", file=sys.stderr)
+        return False
+    kind, body = notify.quota_pause_notification(
+        plan_slug,
+        match.line,
+        paused_until,
+        str(state_file.parent / quota.QUOTA_FILE_NAME),
+    )
+    notify.notify(cfg.notify, kind, body)
+    return True
 
 
 def _release_with_failure(state_file: Path, result: TickResult, *, reason: str) -> None:

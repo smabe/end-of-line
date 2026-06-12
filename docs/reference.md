@@ -393,6 +393,80 @@ instead of block-buffering until exit — a wedged worker otherwise leaves a
 - `operations.md` for example `dispatch.command` templates.
 - `_pty_spawn_shim.py` for the PTY wrapper phase workers run under.
 
+### `quota.py`
+
+Quota-death classification, reset-time parsing, and the project quota
+pause file (#94). Stdlib-only. A worker killed by the operator's Claude
+subscription limit prints a recognizable line and exits; this module
+turns that line into attempt forgiveness + a project-level dispatch
+pause. The signature table mirrors the systemic table in `dispatch.py`:
+hard-coded, grows via PR only, first match wins. Bucketing is by
+**parseability** — a quota match whose reset time parses schedules an
+auto-resume pause; one that doesn't routes to the stuck bucket (no
+auto-resume, loud notify), so the parser returns `None` for anything it
+can't read confidently (weekly `resets Mon 12:00am`, date forms).
+
+**Key types and functions**
+
+- `QuotaMatch(signature, line)` — a classified death: the table key
+  (`session_limit` | `weekly_limit` | `model_limit` | `usage_credits` |
+  `extra_usage`) and the verbatim matched line.
+- `classify_quota(tail)` / `classify_log_tail(log_path)` — first
+  signature matching a line of the worker-log tail, or `None`.
+  `classify_log_tail` is the None-safe file wrapper the three death
+  sites call with `claim["log_path"]`.
+- `parse_reset(line, now)` — the `resets <time> [(tz)]` fragment → aware
+  UTC datetime (next occurrence; candidate ≤ now rolls to tomorrow), or
+  `None`. `now` must be aware. `ZoneInfo` from the parens, system local
+  when absent. First `zoneinfo` use in the codebase.
+- `read_log_tail(log_path, lines=50)` — deque-bounded tail read; `""`
+  on `OSError`. Shared with the systemic matcher (`dispatch.py` reads
+  through it).
+- `record_quota_pause(orchestrator_dir, match, now)` — writes
+  `quota.json` (`paused_until = reset + 120s`, or `null` for stuck) and
+  returns `paused_until`. Always resets the canary fields. Takes the
+  **orchestrator dir** (state-file parent), not the project root —
+  `plan_dir` is configurable and every death site already holds the
+  state path.
+- `record_quota_death(data, match, *, phase_id, token, orchestrator_dir)`
+  — the shared recorder all three death sites call: writes the pause file
+  plus `quota_death` (forgiveness marker) + `quota_paused` events into the
+  open state-mutation `data`. Returns `paused_until`.
+- `gate_decision(orchestrator_dir, plan_slug, now)` → `GateDecision(dispatch, detail, resumed)`
+  — the dispatch gate's four-state machine (see architecture.md "Quota
+  pause gate"). `dispatch=False` → supervisor returns idle; `resumed=True`
+  → supervisor also appends `quota_resumed`.
+- `PAUSE_BUFFER_SEC` (120), `CANARY_WINDOW_SEC` (180),
+  `QUOTA_FILE_NAME` (`"quota.json"`), `QUOTA_SCHEMA_VERSION` (1),
+  `LOG_TAIL_LINES` (50) — module constants; no config knobs (no second
+  caller exists).
+
+**Invariants and gotchas**
+
+- **File absent == not paused** is the one invariant the hot path
+  (`Path.exists()` before any lock) and the operator escape hatch
+  (`rm quota.json`) both rely on. Resume *unlinks*; it never writes a
+  cleared sentinel.
+- `gate_decision` does NOT reuse `record_quota_pause`'s `locked_json` —
+  `locked_json` unconditionally re-saves on exit, which would resurrect
+  the file on the unlink-resume path. The gate uses raw `state.locked`
+  + `state.load` + conditional `save_atomic`/`unlink`. Their save
+  semantics genuinely differ; don't merge them.
+- `quota_paused` events carry **no `phase` key** — consumers iterating
+  `data["events"]` must not assume one.
+- A corrupt or field-malformed `quota.json` degrades to dispatch (a
+  malformed file must never freeze the fleet); a benign
+  `FileNotFoundError` from a concurrent resume race is caught
+  separately and stays silent.
+
+**See also**
+
+- `contract.md` § "Quota-death event semantics" + "Quota pause file
+  schema" for the event kwargs and `quota.json` shape.
+- `architecture.md` § "Quota pause gate" for the state machine.
+- `operations.md` § "Recovering from a quota pause" for the operator
+  runbook.
+
 ### `_pty_spawn_shim.py`
 
 The long-lived PTY intermediary every phase worker runs under. `claude
@@ -516,22 +590,25 @@ channels to fan out to.
 
 - `KIND_BLOCKER`, `KIND_STALLED`, `KIND_COMPLETED`, `KIND_HALTED`,
   `KIND_QUEUE_SKIPPED`, `KIND_QUEUE_REPAIRED`, `KIND_QUEUE_REPAIR_FAILED`,
-  `KIND_QUEUE_CORRUPT`, `KIND_STUCK_BLOCKER`, `KIND_STALLED_CLAIM` —
+  `KIND_QUEUE_CORRUPT`, `KIND_STUCK_BLOCKER`, `KIND_STALLED_CLAIM`,
+  `KIND_QUOTA_PAUSED`, `KIND_QUOTA_RESUMED`, `KIND_QUOTA_STUCK` —
   the notification kinds. See `contract.md` § "Notification kinds" for
-  the trigger + quiet-hours matrix. The last two are the "gap-fill"
-  kinds added with the inbox in #20.
+  the trigger + quiet-hours matrix. `KIND_STUCK_BLOCKER` /
+  `KIND_STALLED_CLAIM` are the "gap-fill" kinds added with the inbox in
+  #20; the three `KIND_QUOTA_*` are the project quota pause (#94).
 - `QUIET_HOURS_BYPASS_KINDS` — frozenset of kinds that ignore quiet
   hours. Currently `{KIND_HALTED, KIND_QUEUE_REPAIR_FAILED,
-  KIND_QUEUE_CORRUPT}` — the unrecoverable-without-operator set.
+  KIND_QUEUE_CORRUPT, KIND_QUOTA_STUCK}` — the
+  unrecoverable-without-operator set.
 - `_NOTIFIER_REGISTRY` — `kind_name → Notifier-class` map. Backends
   register here by appearing in the module-level dict; new transports
   add one line. `set_global_suppress(True)` short-circuits the entire
   dispatch path (the `--no-notify` global CLI flag).
-- `notify(spec, kind, body, *, now=None, sender=None, plan_slug=None, project_root=None, inbox_writer=None)` —
+- `notify(spec, kind, body, *, now=None, plan_slug=None, project_root=None, inbox_writer=None)` —
   gate + fan out + optionally drop an inbox event. Returns `True` if
   any enabled channel sent. The inbox write happens independently of
   the quiet-hours gate, and only when `plan_slug` + `project_root` are
-  both supplied. `sender` and `inbox_writer` are injectable for tests.
+  both supplied. `inbox_writer` is injectable for tests.
 - `in_quiet_window(spec, now)` — public quiet-hours predicate, used by
   the supervisor's SLA-deferral branch as well as `notify()` itself.
 - `is_quiet_hours(now, start, end)` — wrap-aware time-window check;
@@ -550,8 +627,17 @@ channels to fan out to.
   `render_stuck_blocker(plan_slug, blocker_id, phase, question, options, age_min)`,
   `render_stalled_claim(plan_slug, phase, age_min)`,
   `render_worktree_missing(plan_slug, worktree_path)`,
-  `render_worktree_conflict(...)` —
+  `render_worktree_conflict(...)`,
+  `render_quota_paused(plan_slug, line, paused_until)`,
+  `render_quota_stuck(plan_slug, line, quota_file)`,
+  `render_quota_resumed(plan_slug)` —
   kind-specific bodies. Render-only; no I/O.
+- `quota_pause_notification(plan_slug, line, paused_until, quota_file)`
+  — `(kind, body)` selector shared by the three death sites: a parseable
+  reset (`paused_until` set) routes to `KIND_QUOTA_PAUSED`, an
+  unparseable one (`None`) to `KIND_QUOTA_STUCK`. Single source of truth
+  for the paused-vs-stuck branch so the supervisor and dispatch sites
+  can't drift.
 
 **Invariants and gotchas**
 

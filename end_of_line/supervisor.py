@@ -9,9 +9,11 @@ Action priority (first match wins):
   5. Answered-question resume (mark consumed)
   6. Plan halted/paused → idle
   7. Active claim → idle
-  8. Dispatch next pending phase
-  9. All phases complete → mark plan done
-  10. Idle
+  8. Project quota pause gate → idle while paused; one canary dispatches
+     past the reset, fleet resumes when it survives (#94)
+  9. Dispatch next pending phase
+  10. All phases complete → mark plan done
+  11. Idle
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import coolant, inbox, notify, state_blocker
+from . import coolant, inbox, notify, quota, state_blocker
 from . import state as st
 from .config import ORCHESTRATOR_DIR, ProjectConfig
 from .plan_parser import parse_sessions_index
@@ -32,6 +34,14 @@ from .plan_parser import parse_sessions_index
 def _local_now() -> _dt.datetime:
     """Wall-clock local time. Indirection exists so tests can pin the hour."""
     return _dt.datetime.now()
+
+
+def _death_detail(phase_id: str, quota_match: quota.QuotaMatch | None) -> str:
+    """TickResult detail for the two worker-death paths (lease-expiry, dead-PID)."""
+    detail = f"phase={phase_id}"
+    if quota_match is not None:
+        detail += f" quota={quota_match.signature}"
+    return detail
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +629,28 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
             phase_id = claim["phase_id"]
             claimed_by = claim.get("claimed_by")
             if st.release_if_expired(data):
+                # Quota classification (#94) reads the snapshotted claim's
+                # log_path — the on-disk log outlives the released claim.
+                # A quota death's phase_started is forgiven via
+                # EVENT_QUOTA_DEATH, so the straggler that lease-expired on
+                # a quota kill burns no attempt.
+                quota_match = quota.classify_log_tail(claim.get("log_path"))
+                if quota_match is not None:
+                    paused_until = quota.record_quota_death(
+                        data,
+                        quota_match,
+                        phase_id=phase_id,
+                        token=claimed_by,
+                        orchestrator_dir=state_path.parent,
+                    )
+                    side_notifies.append(
+                        notify.quota_pause_notification(
+                            data["plan_slug"],
+                            quota_match.line,
+                            paused_until,
+                            str(state_path.parent / quota.QUOTA_FILE_NAME),
+                        )
+                    )
                 if claimed_by and phase_id and config.coolant.enabled:
                     coolant.emit_stop(
                         session_id=claimed_by,
@@ -645,7 +677,9 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         signaled=reap.signaled,
                         cmdline_mismatch=reap.cmdline_mismatch,
                     )
-                return _attach(TickResult("lease_expired", f"phase={phase_id}"))
+                return _attach(
+                    TickResult("lease_expired", _death_detail(phase_id, quota_match))
+                )
 
             # issue #72: heartbeat-keeper subprocess survives worker death
             # (EXIT trap doesn't fire on SIGKILL/OOM/crash) and keeps the
@@ -663,6 +697,29 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 claim,
                 cmdline_match=cmdline_match,
             ):
+                # Quota classification (#94) must read the log BEFORE
+                # release — release_claim_and_emit clears the claim that
+                # carries log_path. A quota match suppresses the misleading
+                # worker-dead notify body (the operator-facing KIND_QUOTA_*
+                # ping rides side_notifies instead) and forgives the attempt
+                # via EVENT_QUOTA_DEATH.
+                quota_match = quota.classify_log_tail(claim.get("log_path"))
+                if quota_match is not None:
+                    paused_until = quota.record_quota_death(
+                        data,
+                        quota_match,
+                        phase_id=phase_id,
+                        token=claimed_by,
+                        orchestrator_dir=state_path.parent,
+                    )
+                    side_notifies.append(
+                        notify.quota_pause_notification(
+                            data["plan_slug"],
+                            quota_match.line,
+                            paused_until,
+                            str(state_path.parent / quota.QUOTA_FILE_NAME),
+                        )
+                    )
                 # Order matters: durable state first (event + release +
                 # coolant), best-effort reap last. If the reap raises (e.g.
                 # ps timeout), the claim is already released and the event is
@@ -687,10 +744,12 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 return _attach(
                     TickResult(
                         "worker_dead",
-                        f"phase={phase_id}",
+                        _death_detail(phase_id, quota_match),
                         phase_id=phase_id,
                         token=claimed_by,
-                        notify_body=notify.render_worker_dead(
+                        notify_body=None
+                        if quota_match is not None
+                        else notify.render_worker_dead(
                             data["plan_slug"],
                             phase_id,
                             pid,
@@ -802,6 +861,26 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                             phase.id,
                             prior_attempts,
                         ),
+                    )
+                )
+            # Project quota pause gate (#94): a classified quota death
+            # pauses the whole project until the parsed reset. Only a plan
+            # with a dispatchable phase consults the gate, so the canary
+            # slot is stamped for a plan that will actually dispatch.
+            # Watchdog priorities 1–5 above keep running against in-flight
+            # claims while paused. The resume-and-dispatch tick is ONE
+            # action (dispatch) whose gate side effect is the file clear.
+            gate = quota.gate_decision(
+                state_path.parent, data["plan_slug"], st._now_utc()
+            )
+            if not gate.dispatch:
+                return _attach(TickResult("idle", gate.detail))
+            if gate.resumed:
+                st.append_event(data, st.EVENT_QUOTA_RESUMED)
+                side_notifies.append(
+                    (
+                        notify.KIND_QUOTA_RESUMED,
+                        notify.render_quota_resumed(data["plan_slug"]),
                     )
                 )
             ttl = st.lease_ttl_for_phase(data, phase.id)

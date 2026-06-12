@@ -25,6 +25,7 @@ from end_of_line.dispatch import (
 )
 from end_of_line.supervisor import TickResult
 from tests import CluTestCase, isolate_registry, must
+from tests.test_quota import SESSION_LINE as QUOTA_LINE
 
 PLAN = """\
 # T
@@ -271,6 +272,52 @@ class SystemicDispatchTestCase(_SystemicFixture):
         data = self._read()
         self.assertIsNone(_systemic_event(data))
         self.assertEqual(data["status"], st.STATUS_RUNNING)
+
+
+class QuotaFastFailTestCase(_SystemicFixture):
+    """Fast-fail quota check runs BEFORE the systemic table (#94).
+
+    A quota death is a project-level pause, not a plan-level one: the plan
+    stays RUNNING, the attempt is forgiven via EVENT_QUOTA_DEATH, and the
+    pause lives in quota.json (gated in phase `gate`).
+    """
+
+    def test_quota_line_takes_quota_path(self) -> None:
+        self._seed_log(QUOTA_LINE + "\n")
+        cfg = self._cfg("false")  # rc=1 inside the fast-fail window
+        ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        self.assertFalse(ok)
+        data = self._read()
+        self.assertIsNone(_systemic_event(data))
+        self.assertEqual(data["status"], st.STATUS_RUNNING)
+        self.assertIsNone(data["current_claim"])
+        death = next(e for e in data["events"] if e["type"] == st.EVENT_QUOTA_DEATH)
+        self.assertEqual(death["phase"], "a")
+        self.assertEqual(death["token"], self.token)
+        self.assertEqual(death["signature"], "session_limit")
+        types = [e["type"] for e in data["events"]]
+        # Release WITHOUT dispatch_failed — the quota events are the record.
+        self.assertNotIn(st.EVENT_DISPATCH_FAILED, types)
+        self.assertEqual(st.attempts_for_phase(data, "a"), 0)
+        qdata = json.loads((self.state_path.parent / "quota.json").read_text())
+        self.assertEqual(qdata["signature"], "session_limit")
+        self.assertIsNotNone(qdata["paused_until"])
+        # Parseable reset → one KIND_QUOTA_PAUSED iMessage carrying the
+        # signature line so re-pause pings stay distinguishable.
+        self.assertEqual(len(self.sent), 1)
+        _to, body = self.sent[0]
+        self.assertIn(QUOTA_LINE, body)
+
+    def test_rate_limit_still_takes_systemic_path(self) -> None:
+        # Ordering guard: quota-first must not swallow the systemic table.
+        self._seed_log("anthropic.RateLimitError: throttled\n")
+        cfg = self._cfg("false")
+        dispatch_for_tick(self._result(), cfg, "t", self.state_path)
+        data = self._read()
+        self.assertEqual(must(_systemic_event(data))["signature"], "rate_limit")
+        self.assertEqual(data["status"], st.STATUS_PAUSED)
+        types = [e["type"] for e in data["events"]]
+        self.assertNotIn(st.EVENT_QUOTA_DEATH, types)
 
 
 class MultiPlanIndependenceTestCase(CluTestCase):

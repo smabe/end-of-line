@@ -5,12 +5,15 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
+from end_of_line import notify
 from end_of_line import state as st
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
 from tests import CluTestCase, must
+from tests.test_quota import SESSION_LINE as QUOTA_LINE
 
 PLAN_BODY = """\
 # Test plan
@@ -441,6 +444,133 @@ class SupervisorTestCase(CluTestCase):
         self.assertEqual(result.action, "worker_dead")
         self.assertIsNone(self._read()["current_claim"])
 
+    # --- quota-death classification (#94 phase classify) ---
+
+    def _claim_with_log(
+        self,
+        log_body: str,
+        lease_expires: str = "2099-01-01T00:00:00Z",
+    ) -> str:
+        """Claim phase 'a', stamp pid + log_path, seed the worker log."""
+        tick(self.state_path, self.cfg)
+        log_dir = self.state_path.parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        with st.locked(self.state_path):
+            data = st.load(self.state_path)
+            token = data["current_claim"]["claimed_by"]
+            log_path = log_dir / f"a.{token}.log"
+            data["current_claim"]["pid"] = 99999
+            data["current_claim"]["log_path"] = str(log_path)
+            data["current_claim"]["lease_expires"] = lease_expires
+            st.save_atomic(self.state_path, data)
+        log_path.write_text(log_body)
+        return token
+
+    def _tick_worker_dead(self):
+        reap = st.ReapResult(signaled=None, escalated_kill=False, cmdline_mismatch=False)
+        with (
+            mock.patch("end_of_line.state.claim_worker_alive", return_value=False),
+            mock.patch("end_of_line.state.reap_orphan_pgroup", return_value=reap),
+        ):
+            return tick(self.state_path, self.cfg)
+
+    def _event(self, data: dict, event_type: str) -> dict:
+        return next(e for e in data["events"] if e["type"] == event_type)
+
+    def test_dead_pid_quota_log_classifies_and_forgives(self) -> None:
+        token = self._claim_with_log(QUOTA_LINE + "\n")
+        result = self._tick_worker_dead()
+        self.assertEqual(result.action, "worker_dead")
+        data = self._read()
+        death = self._event(data, st.EVENT_QUOTA_DEATH)
+        self.assertEqual(death["phase"], "a")
+        self.assertEqual(death["token"], token)
+        self.assertEqual(death["signature"], "session_limit")
+        self.assertIn("session limit", death["line"])
+        paused = self._event(data, st.EVENT_QUOTA_PAUSED)
+        self.assertIsNotNone(paused["paused_until"])
+        # Forgiveness: the dispatch that died on quota burns no attempt.
+        self.assertEqual(st.attempts_for_phase(data, "a"), 0)
+        # The misleading worker-dead body is suppressed; the operator-facing
+        # signal rides side_notifies as KIND_QUOTA_PAUSED (phase notify-docs).
+        self.assertIsNone(result.notify_body)
+        kinds = [k for k, _ in result.side_notifies]
+        self.assertIn(notify.KIND_QUOTA_PAUSED, kinds)
+        qdata = json.loads((self.state_path.parent / "quota.json").read_text())
+        self.assertEqual(qdata["signature"], "session_limit")
+        self.assertIsNotNone(qdata["paused_until"])
+
+    def test_dead_pid_quota_stuck_reset_writes_null_pause(self) -> None:
+        self._claim_with_log("You've hit your weekly limit · resets Mon 12:00am\n")
+        result = self._tick_worker_dead()
+        qdata = json.loads((self.state_path.parent / "quota.json").read_text())
+        self.assertIsNone(qdata["paused_until"])
+        paused = self._event(self._read(), st.EVENT_QUOTA_PAUSED)
+        self.assertIsNone(paused["paused_until"])
+        # Unparseable reset → STUCK kind (loud, bypasses quiet hours).
+        kinds = [k for k, _ in result.side_notifies]
+        self.assertIn(notify.KIND_QUOTA_STUCK, kinds)
+
+    def test_dead_pid_non_quota_log_burns_attempt_and_notifies(self) -> None:
+        # Regression: a non-quota death behaves exactly as today.
+        self._claim_with_log("Traceback ...\nValueError: bad\n")
+        result = self._tick_worker_dead()
+        self.assertEqual(result.action, "worker_dead")
+        data = self._read()
+        types = [e["type"] for e in data["events"]]
+        self.assertNotIn(st.EVENT_QUOTA_DEATH, types)
+        self.assertEqual(st.attempts_for_phase(data, "a"), 1)
+        self.assertIn("99999", must(result.notify_body))
+        self.assertFalse((self.state_path.parent / "quota.json").exists())
+
+    def test_lease_expired_quota_log_classifies_and_forgives(self) -> None:
+        token = self._claim_with_log(QUOTA_LINE + "\n", lease_expires="2020-01-01T00:00:00Z")
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
+            mock_reap.return_value = st.ReapResult(
+                signaled="SIGTERM", escalated_kill=False, cmdline_mismatch=False
+            )
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "lease_expired")
+        data = self._read()
+        death = self._event(data, st.EVENT_QUOTA_DEATH)
+        self.assertEqual(death["token"], token)
+        self.assertEqual(st.attempts_for_phase(data, "a"), 0)
+        self.assertTrue((self.state_path.parent / "quota.json").exists())
+        # The straggler-path death also surfaces the pause to the operator.
+        kinds = [k for k, _ in result.side_notifies]
+        self.assertIn(notify.KIND_QUOTA_PAUSED, kinds)
+
+    def test_lease_expired_non_quota_log_unchanged(self) -> None:
+        self._claim_with_log("benign\n", lease_expires="2020-01-01T00:00:00Z")
+        with mock.patch("end_of_line.state.reap_orphan_pgroup") as mock_reap:
+            mock_reap.return_value = st.ReapResult(
+                signaled=None, escalated_kill=False, cmdline_mismatch=False
+            )
+            result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "lease_expired")
+        data = self._read()
+        types = [e["type"] for e in data["events"]]
+        self.assertNotIn(st.EVENT_QUOTA_DEATH, types)
+        self.assertEqual(st.attempts_for_phase(data, "a"), 1)
+
+    def test_three_quota_deaths_burn_zero_attempts(self) -> None:
+        # Acceptance (#94): 3 consecutive quota deaths never reach the
+        # max-attempts halt — the 4th tick still dispatches phase a. Each
+        # death writes a project pause (phase gate), which blocks redispatch
+        # until the reset; clearing quota.json between deaths models the
+        # reset elapsing + the canary redispatching only to die on quota
+        # again. Forgiveness holds across all three.
+        quota_file = self.state_path.parent / "quota.json"
+        for _ in range(3):
+            self._claim_with_log(QUOTA_LINE + "\n")
+            self._tick_worker_dead()
+            quota_file.unlink(missing_ok=True)
+        data = self._read()
+        self.assertEqual(st.attempts_for_phase(data, "a"), 0)
+        result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "dispatch")
+        self.assertEqual(result.phase_id, "a")
+
     def test_lease_expired_emits_coolant_stop(self) -> None:
         """The lease-expiry branch decrements coolant's counter — the
         worker's CPU footprint dropped when the process died (or hung)
@@ -473,6 +603,128 @@ class SupervisorTestCase(CluTestCase):
         self.assertEqual(kwargs["session_id"], original_token)
         self.assertEqual(kwargs["agent_id"], "clu-test-plan-a")
         self.assertEqual(kwargs["agent_type"], "clu-worker")
+
+
+def _one_phase_plan(slug: str) -> str:
+    # Phase id = plan_file stem minus the master-stem prefix → "go".
+    return f"""\
+# {slug}
+
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| Go | `{slug}-go.md` | thing | 1h |
+"""
+
+
+class QuotaGateSupervisorTests(CluTestCase):
+    """The dispatch gate + canary auto-resume, end-to-end through tick().
+
+    Two single-phase plans share one orchestrator dir (and thus one
+    quota.json). The gate must idle every plan while paused, let exactly
+    ONE dispatch as the canary past reset, and resume the fleet (clearing
+    the file + emitting EVENT_QUOTA_RESUMED) once the canary survives.
+    """
+
+    NOW = _dt.datetime(2026, 6, 12, 6, 0, tzinfo=_dt.UTC)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.tmp_path
+        (self.project / "plans").mkdir()
+        self.orch = self.project / "plans" / ".orchestrator"
+        self.orch.mkdir(parents=True)
+        self.cfg = ProjectConfig(
+            project_root=self.project,
+            plan_dir="plans",
+            dispatch=DispatchSpec(kind="shell", command="echo {phase_id}"),
+        )
+        self.paths: dict[str, Path] = {}
+        for slug in ("plan-a", "plan-b"):
+            (self.project / "plans" / f"{slug}.md").write_text(_one_phase_plan(slug))
+            sp = self.orch / f"{slug}.state.json"
+            with st.locked(sp):
+                st.save_atomic(sp, st.empty_state(slug, "plans"))
+            self.paths[slug] = sp
+        self.quota_path = self.orch / "quota.json"
+
+    def _write_pause(self, **over: object) -> None:
+        base = {
+            "schema_version": 1,
+            "paused_until": "2026-06-12T05:52:00Z",
+            "signature": "session_limit",
+            "line": QUOTA_LINE,
+            "canary_plan": None,
+            "canary_deadline": None,
+            "created_at": "2026-06-12T03:00:00Z",
+        }
+        base.update(over)
+        self.quota_path.write_text(json.dumps(base))
+
+    def _read(self, slug: str) -> dict:
+        return json.loads(self.paths[slug].read_text())
+
+    def _read_quota(self) -> dict:
+        return json.loads(self.quota_path.read_text())
+
+    def test_active_pause_idles_every_plan(self) -> None:
+        self._write_pause(paused_until="2026-06-12T07:00:00Z")  # future reset
+        with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
+            a = tick(self.paths["plan-a"], self.cfg)
+            b = tick(self.paths["plan-b"], self.cfg)
+        self.assertEqual(a.action, "idle")
+        self.assertEqual(b.action, "idle")
+        self.assertIn("quota_paused", a.detail)
+        self.assertIsNone(self._read("plan-a")["current_claim"])
+        self.assertIsNone(self._read("plan-b")["current_claim"])
+
+    def test_past_reset_dispatches_exactly_one_canary(self) -> None:
+        self._write_pause(paused_until="2026-06-12T05:52:00Z")  # past reset
+        with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
+            a = tick(self.paths["plan-a"], self.cfg)  # first → canary
+            b = tick(self.paths["plan-b"], self.cfg)  # gated by canary window
+        self.assertEqual(a.action, "dispatch")
+        self.assertEqual(b.action, "idle")
+        # quota.json now names plan-a the canary with a +180s deadline.
+        q = self._read_quota()
+        self.assertEqual(q["canary_plan"], "plan-a")
+        self.assertEqual(
+            st.parse_iso(q["canary_deadline"]),
+            self.NOW + _dt.timedelta(seconds=180),
+        )
+        # Exactly one plan holds a fresh claim during the canary window.
+        claims = [
+            self._read(s)["current_claim"] is not None for s in ("plan-a", "plan-b")
+        ]
+        self.assertEqual(claims.count(True), 1)
+        self.assertIsNotNone(self._read("plan-a")["current_claim"])
+
+    def test_past_deadline_resumes_and_clears_file(self) -> None:
+        self._write_pause(
+            paused_until="2026-06-12T05:52:00Z",
+            canary_plan="plan-a",
+            canary_deadline="2026-06-12T05:55:00Z",  # already elapsed by NOW
+        )
+        with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
+            b = tick(self.paths["plan-b"], self.cfg)
+        self.assertEqual(b.action, "dispatch")
+        self.assertFalse(self.quota_path.exists())  # cleared on resume
+        events = [e["type"] for e in self._read("plan-b")["events"]]
+        self.assertIn(st.EVENT_QUOTA_RESUMED, events)
+        # Resume pings the operator (defers in quiet hours; inbox/watch
+        # surface the event regardless).
+        kinds = [k for k, _ in b.side_notifies]
+        self.assertIn(notify.KIND_QUOTA_RESUMED, kinds)
+
+    def test_stuck_pause_idles(self) -> None:
+        self._write_pause(paused_until=None)  # unparseable reset → stuck
+        with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
+            a = tick(self.paths["plan-a"], self.cfg)
+        self.assertEqual(a.action, "idle")
+        self.assertIn("quota_stuck", a.detail)
+        self.assertIsNone(self._read("plan-a")["current_claim"])
+        self.assertTrue(self.quota_path.exists())  # only the operator clears it
 
 
 if __name__ == "__main__":

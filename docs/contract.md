@@ -139,7 +139,10 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     {"ts": "ISO8601", "type": "verify_stamped",         "phase": "...", "commit_sha": "..."},
     {"ts": "ISO8601", "type": "simplify_stamped",       "phase": "...", "commit_sha": "..."},
     {"ts": "ISO8601", "type": "operator_skip_verify",   "phase": "..."},
-    {"ts": "ISO8601", "type": "operator_skip_simplify", "phase": "..."}
+    {"ts": "ISO8601", "type": "operator_skip_simplify", "phase": "..."},
+    {"ts": "ISO8601", "type": "quota_death",   "phase": "...", "token": "...", "signature": "session_limit", "line": "You've hit your session limit · resets 1:50am (America/New_York)"},
+    {"ts": "ISO8601", "type": "quota_paused",  "paused_until": "ISO8601 | null", "signature": "session_limit"},
+    {"ts": "ISO8601", "type": "quota_resumed"}
   ]
 }
 ```
@@ -183,6 +186,16 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 - `queue_rejected` — emitted in the **source plan's** `events` array when a worker-enqueue attempt is refused. Fields: `slug`, `source_plan`, `source_phase`, `reason` — either `"cap"` (per-phase add cap reached) or `"missing_plan_file"` (the target `<plan_dir>/<slug>.md` does not exist).
 
 Both events ride in the **source plan's** state file so the worker's audit trail is co-located with the rest of its phase actions.
+
+### Quota-death event semantics (#94)
+
+A worker killed by the operator's Claude subscription limit prints a recognizable line (`You've hit your session limit · resets 1:50am (America/New_York)`) and exits — indistinguishable, on PID/exit-code alone, from a real crash. `end_of_line.quota` classifies the worker-log tail at all three death sites (supervisor dead-PID probe, supervisor lease-expiry, dispatch fast-fail) and records three events:
+
+- `quota_death` — the classification. Fields: `phase`, `token` (the dead claim's `claimed_by`), `signature` (the matched table key, e.g. `session_limit` | `weekly_limit` | `model_limit` | `usage_credits` | `extra_usage`), `line` (the verbatim matched log line). **This event is a forgiveness marker:** `attempts_for_phase()` subtracts the matching `phase_started` for any phase named by a `quota_death` (or `systemic_failure`), so a quota kill never advances the 3-attempt halt counter. The plan status is **not** touched — quota pause is project-level, not a plan halt.
+- `quota_paused` — the project entered the quota pause. Fields: `paused_until` (ISO-8601 UTC of `reset + 120s`, or **`null`** for the stuck bucket — a quota match whose reset time didn't parse), `signature`. **Carries no `phase` key** — consumers iterating `events` must not assume one.
+- `quota_resumed` — the supervisor's dispatch gate cleared the pause after the canary survived its window. No fields. Rides the resuming plan's event log.
+
+`quota_death` + `quota_paused` are written together by `quota.record_quota_death` inside the death site's open state-mutation window; `quota_resumed` is appended by the gate during the resume tick (see architecture.md "Quota pause gate"). The pause itself lives in `quota.json` (schema below), not in any plan's state.
 
 ### Stall-detector guard
 
@@ -240,6 +253,29 @@ Two sibling files share the queue's directory:
 - `queue.json.lock` — the flock under `state.locked` (managed automatically).
 - `queue.json.corrupt-<UTCstamp>` — bytes-for-bytes backup written before any auto-repair attempt. Kept on disk after the attempt; the operator can diff old vs new to see what the worker rewrote.
 - `queue.json.repair-attempts` — per-diagnosis-hash throttle counter. `{"attempts": N, "last_at": "...", "diagnosis_hash": "..."}`. Reset on a successful repair; resets to 0 on a hash mismatch.
+
+## Quota pause file schema (#94)
+
+Project-level quota pause at `<project_root>/<plan_dir>/.orchestrator/quota.json`. One per project (shared by every plan in the orchestrator dir). Written by `quota.record_quota_pause` (via `state.locked_json`), read by the supervisor dispatch gate (`quota.gate_decision`):
+
+```jsonc
+{
+  "schema_version": 1,
+  // reset + 120s buffer (ISO-8601 UTC), or null for the STUCK bucket
+  // (a quota match whose reset time didn't parse — no auto-resume).
+  "paused_until": "2026-06-12T05:52:00Z | null",
+  "signature": "session_limit",
+  "line": "You've hit your session limit · resets 1:50am (America/New_York)",
+  // Canary-resume bookkeeping. Stamped by the FIRST plan to tick past
+  // paused_until; that plan dispatches as the survival probe while the
+  // rest of the fleet idles until canary_deadline. Both null at rest.
+  "canary_plan": "plan-slug | null",
+  "canary_deadline": "2026-06-12T05:55:00Z | null",
+  "created_at": "2026-06-12T03:00:00Z"
+}
+```
+
+**The single invariant: file absent == not paused.** The gate's hot path is one `Path.exists()` with no lock when nothing is paused. A resume *unlinks* the file (never writes a "cleared" sentinel), and the operator escape hatch for a stuck pause is the same `rm quota.json`. A corrupt or field-malformed file degrades to "dispatch" (a malformed file must never freeze the fleet), with a stderr note. See operations.md "Recovering from a quota pause" for the operator runbook and architecture.md "Quota pause gate" for the gate state machine.
 
 ## Auto-repair contract
 
@@ -403,8 +439,11 @@ The outbound router (`notify.py`) classifies every send by kind. Quiet hours (de
 | `KIND_GATE_CLEAN` | Dry-merge gate ran; all batch branches textually/suite-clean | Gated |
 | `KIND_GATE_DIRTY` | Dry-merge gate ran; textual conflict or suite failure found | **Bypass** |
 | `KIND_PLAN_AUTO_ARCHIVED` | `auto_archive_rule` detected a merged branch and completed cleanup | Gated |
+| `KIND_QUOTA_PAUSED` | Quota death with a parseable reset; project pauses until reset, then auto-resumes | Gated |
+| `KIND_QUOTA_RESUMED` | Dispatch gate cleared the quota pause after the canary survived | Gated |
+| `KIND_QUOTA_STUCK` | Quota death whose reset didn't parse; no auto-resume horizon | **Bypass** |
 
-Bypass set: `{KIND_HALTED, KIND_QUEUE_REPAIR_FAILED, KIND_QUEUE_CORRUPT}`. These are unrecoverable-without-operator states; deferring them past quiet hours would let the chain sit silently broken until morning.
+Bypass set: `{KIND_HALTED, KIND_QUEUE_REPAIR_FAILED, KIND_QUEUE_CORRUPT, KIND_QUOTA_STUCK}`. These are unrecoverable-without-operator states; deferring them past quiet hours would let the chain sit silently broken until morning. `KIND_QUOTA_PAUSED`/`KIND_QUOTA_RESUMED` stay gated because the pause self-heals via auto-resume — there's nothing for the operator to do overnight, and `clu watch` + the inbox surface the events regardless.
 
 Inbox-vs-iMessage asymmetry: every `notify()` call with `plan_slug` + `project_root` in scope writes an inbox event regardless of quiet-hours gating. Quiet hours suppress only the iMessage send — the inbox is for the next Claude turn, not for waking the operator, so it can't be deferred. The two new "gap-fill" kinds (`KIND_STUCK_BLOCKER`, `KIND_STALLED_CLAIM`) ride on the same wire alongside whatever primary action the supervisor's tick already produces, via `TickResult.side_notifies`.
 

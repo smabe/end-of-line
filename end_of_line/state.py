@@ -150,6 +150,15 @@ EVENT_PLAN_COMPLETED = "plan_completed"
 EVENT_PLAN_ABANDONED = "plan_abandoned"
 EVENT_DISPATCH_FAILED = "dispatch_failed"
 EVENT_SYSTEMIC_FAILURE = "systemic_failure"
+# Quota-death family (#94). QUOTA_DEATH marks a worker killed by the
+# operator's subscription quota (kwargs: phase, token, signature, line);
+# its phase_started is forgiven in attempts_for_phase, same as systemic
+# failures. QUOTA_PAUSED / QUOTA_RESUMED bracket the project-level
+# dispatch pause on the triggering plan's event log — the pause itself
+# lives in plans/.orchestrator/quota.json, never in plan status.
+EVENT_QUOTA_DEATH = "quota_death"
+EVENT_QUOTA_PAUSED = "quota_paused"
+EVENT_QUOTA_RESUMED = "quota_resumed"
 EVENT_PHASE_STALLED = "phase_stalled"
 EVENT_PAUSED = "paused"
 EVENT_RESUMED = "resumed"
@@ -1197,8 +1206,9 @@ def attempts_for_phase(data: dict, phase_id: str) -> int:
     operator-driven aborts don't burn the phase's attempt budget.
 
     Systemic failures (PATH bug, rate limit, auth) emit EVENT_SYSTEMIC_FAILURE
-    naming the token that hit them. The corresponding phase_started is
-    subtracted: the phase isn't at fault, so its attempt budget isn't burned.
+    and quota deaths (#94) emit EVENT_QUOTA_DEATH, each naming the token that
+    hit them. The corresponding phase_started is subtracted: the phase isn't
+    at fault, so its attempt budget isn't burned.
     """
     floor = -1
     for i, evt in enumerate(data["events"]):
@@ -1207,10 +1217,10 @@ def attempts_for_phase(data: dict, phase_id: str) -> int:
             and evt.get("phase") == phase_id
         ):
             floor = i
-    systemic_tokens = {
+    forgiven_tokens = {
         evt.get("token")
         for evt in data["events"][floor + 1 :]
-        if evt.get("type") == EVENT_SYSTEMIC_FAILURE
+        if evt.get("type") in (EVENT_SYSTEMIC_FAILURE, EVENT_QUOTA_DEATH)
         and evt.get("phase") == phase_id
         and evt.get("token")
     }
@@ -1219,7 +1229,7 @@ def attempts_for_phase(data: dict, phase_id: str) -> int:
         for evt in data["events"][floor + 1 :]
         if evt.get("type") == EVENT_PHASE_STARTED
         and evt.get("phase") == phase_id
-        and evt.get("claimed_by") not in systemic_tokens
+        and evt.get("claimed_by") not in forgiven_tokens
     )
 
 

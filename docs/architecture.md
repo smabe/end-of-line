@@ -104,7 +104,7 @@ escalations, not emergencies) but write to the inbox unconditionally.
 
 ## One tick = one action
 
-`supervisor.tick` walks a nine-priority chain. First match wins; the
+`supervisor.tick` walks a ten-priority chain. First match wins; the
 tick writes one event and returns. This ordering is load-bearing — every
 debugging session that asks "why didn't this tick advance?" reduces to
 "which rule fired first?".
@@ -151,15 +151,25 @@ debugging session that asks "why didn't this tick advance?" reduces to
 7. **Active claim idle.** A live, non-stalled claim means a worker is
    running; the supervisor returns idle and waits for the worker's
    callback.
-8. **Dispatch.** Walk phases from the master plan's `## Sessions index`
+8. **Project quota pause gate (#94).** Consulted only when this plan has
+   a dispatchable phase (so the canary slot is stamped for a plan that
+   will actually dispatch), immediately before the claim. If
+   `quota.json` is present and the pause is active, return idle
+   (`quota_paused` / `quota_stuck` / `quota_canary` in the detail). Past
+   the reset, the first plan to tick stamps itself canary and dispatches
+   as the survival probe; once the canary outlives its window, the gate
+   unlinks the file, emits `quota_resumed`, and the fleet dispatches
+   normally. Watchdog rules 1–5 keep running against in-flight claims
+   while paused — only *dispatch* is gated. See "Quota pause gate" below.
+9. **Dispatch.** Walk phases from the master plan's `## Sessions index`
    in order. Skip completed phases (a `phase_completed` event exists)
    and phases with an open blocker. The first remaining phase claims —
    unless it's already at `max_attempts_per_phase`, in which case the
    plan halts. The returned `TickResult` carries the new token, which
    `cmd_tick` then hands to `dispatch.dispatch_for_tick`.
-9. **All-done.** All phases completed and no pending spawned tasks →
-   write `plan_completed`, set status to `done`, return `plan_done`.
-   Otherwise idle.
+10. **All-done.** All phases completed and no pending spawned tasks →
+    write `plan_completed`, set status to `done`, return `plan_done`.
+    Otherwise idle.
 
 The dispatch step is the only one that can spawn a worker. The
 supervisor never edits source code, runs tests, or calls Claude itself.
@@ -185,7 +195,7 @@ releases the just-made claim without burning a phase attempt, flips
 the plan to `PAUSED`, and fires a halt-bypass iMessage naming the
 missing path.
 
-The eight-rule chain above runs **inside one plan's tick**. The
+The ten-rule chain above runs **inside one plan's tick**. The
 host-scoped cron entry (`cmd_tick_all`) adds two post-loop passes,
 fired once per distinct project after every registered plan has
 ticked: per-project queue advancement and the worktree conflict scan
@@ -194,6 +204,48 @@ operate cross-state (queue.json or paired state.jsons), so they live
 outside `supervisor.tick`. The "one tick = one action" invariant
 still holds within each plan; the post-loop passes are each at-most-
 one effect per project per cron interval.
+
+## Quota pause gate
+
+When a worker is killed by the operator's Claude subscription limit (a
+session/weekly/model limit or exhausted usage credits), the death is
+classified at all three death sites — supervisor dead-PID, supervisor
+lease-expiry, dispatch fast-fail — by `quota.classify_log_tail` reading
+the worker-log tail before the claim is released. A classified death
+(a) forgives the phase attempt (`quota_death` is a subtraction marker
+for `attempts_for_phase`, exactly like `systemic_failure`), (b) writes
+the project pause file `quota.json` with `paused_until = reset + 120s`,
+and (c) fires a `KIND_QUOTA_PAUSED` iMessage carrying the local resume
+time. The plan status never flips — quota pause is project-level, gated
+at dispatch, not a plan halt.
+
+The pause is a four-state machine resolved inside one `quota.json` lock
+window (`quota.gate_decision`):
+
+```
+                 quota.json absent ──────────────► DISPATCH (hot path: one exists())
+                 │
+   present ──► now < paused_until ───────────────► IDLE  (quota_paused)
+                 │
+                 ├─ paused_until == null ─────────► IDLE  (quota_stuck — operator clears)
+                 │
+                 ├─ now ≥ paused_until, no canary ─► STAMP self as canary (+180s), DISPATCH
+                 │
+                 ├─ canary stamped, now < deadline ► IDLE if another plan; DISPATCH if it's me
+                 │
+                 └─ now ≥ canary_deadline ─────────► UNLINK file, emit quota_resumed, DISPATCH
+```
+
+The **canary** is the first plan to tick past the reset: it dispatches a
+single probe while the rest of the fleet idles. If that worker also dies
+on quota, the P2 death machinery overwrites `quota.json` with a fresh
+`paused_until` and clears the canary slot — so a still-throttled account
+re-pauses automatically, no special-casing. If the canary survives its
+180s window, the next gate tick unlinks the file (keeping "file absent ==
+not paused" the one invariant) and the fleet resumes. A `STUCK` pause
+(unparseable reset → `paused_until: null`) idles indefinitely; only the
+operator removes the file. A corrupt or field-malformed `quota.json`
+degrades to DISPATCH — a bad file must never freeze the fleet.
 
 ## Queue advancement
 
