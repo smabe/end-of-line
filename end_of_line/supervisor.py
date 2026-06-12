@@ -9,9 +9,11 @@ Action priority (first match wins):
   5. Answered-question resume (mark consumed)
   6. Plan halted/paused → idle
   7. Active claim → idle
-  8. Dispatch next pending phase
-  9. All phases complete → mark plan done
-  10. Idle
+  8. Project quota pause gate → idle while paused; one canary dispatches
+     past the reset, fleet resumes when it survives (#94)
+  9. Dispatch next pending phase
+  10. All phases complete → mark plan done
+  11. Idle
 """
 
 from __future__ import annotations
@@ -845,6 +847,20 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         ),
                     )
                 )
+            # Project quota pause gate (#94): a classified quota death
+            # pauses the whole project until the parsed reset. Only a plan
+            # with a dispatchable phase consults the gate, so the canary
+            # slot is stamped for a plan that will actually dispatch.
+            # Watchdog priorities 1–5 above keep running against in-flight
+            # claims while paused. The resume-and-dispatch tick is ONE
+            # action (dispatch) whose gate side effect is the file clear.
+            gate = quota.gate_decision(
+                state_path.parent, data["plan_slug"], st._now_utc()
+            )
+            if not gate.dispatch:
+                return _attach(TickResult("idle", gate.detail))
+            if gate.resumed:
+                st.append_event(data, st.EVENT_QUOTA_RESUMED)
             ttl = st.lease_ttl_for_phase(data, phase.id)
             token = st.claim_phase(data, phase.id, ttl)
             return _attach(

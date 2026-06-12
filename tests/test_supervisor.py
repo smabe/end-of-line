@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from end_of_line import state as st
@@ -545,10 +546,16 @@ class SupervisorTestCase(CluTestCase):
 
     def test_three_quota_deaths_burn_zero_attempts(self) -> None:
         # Acceptance (#94): 3 consecutive quota deaths never reach the
-        # max-attempts halt — the 4th tick still dispatches phase a.
+        # max-attempts halt — the 4th tick still dispatches phase a. Each
+        # death writes a project pause (phase gate), which blocks redispatch
+        # until the reset; clearing quota.json between deaths models the
+        # reset elapsing + the canary redispatching only to die on quota
+        # again. Forgiveness holds across all three.
+        quota_file = self.state_path.parent / "quota.json"
         for _ in range(3):
             self._claim_with_log(QUOTA_LINE + "\n")
             self._tick_worker_dead()
+            quota_file.unlink(missing_ok=True)
         data = self._read()
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
         result = tick(self.state_path, self.cfg)
@@ -587,6 +594,124 @@ class SupervisorTestCase(CluTestCase):
         self.assertEqual(kwargs["session_id"], original_token)
         self.assertEqual(kwargs["agent_id"], "clu-test-plan-a")
         self.assertEqual(kwargs["agent_type"], "clu-worker")
+
+
+def _one_phase_plan(slug: str) -> str:
+    # Phase id = plan_file stem minus the master-stem prefix → "go".
+    return f"""\
+# {slug}
+
+## Sessions index
+
+| Session | Plan file | Scope | Effort |
+|---|---|---|---|
+| Go | `{slug}-go.md` | thing | 1h |
+"""
+
+
+class QuotaGateSupervisorTests(CluTestCase):
+    """The dispatch gate + canary auto-resume, end-to-end through tick().
+
+    Two single-phase plans share one orchestrator dir (and thus one
+    quota.json). The gate must idle every plan while paused, let exactly
+    ONE dispatch as the canary past reset, and resume the fleet (clearing
+    the file + emitting EVENT_QUOTA_RESUMED) once the canary survives.
+    """
+
+    NOW = _dt.datetime(2026, 6, 12, 6, 0, tzinfo=_dt.UTC)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.tmp_path
+        (self.project / "plans").mkdir()
+        self.orch = self.project / "plans" / ".orchestrator"
+        self.orch.mkdir(parents=True)
+        self.cfg = ProjectConfig(
+            project_root=self.project,
+            plan_dir="plans",
+            dispatch=DispatchSpec(kind="shell", command="echo {phase_id}"),
+        )
+        self.paths: dict[str, Path] = {}
+        for slug in ("plan-a", "plan-b"):
+            (self.project / "plans" / f"{slug}.md").write_text(_one_phase_plan(slug))
+            sp = self.orch / f"{slug}.state.json"
+            with st.locked(sp):
+                st.save_atomic(sp, st.empty_state(slug, "plans"))
+            self.paths[slug] = sp
+        self.quota_path = self.orch / "quota.json"
+
+    def _write_pause(self, **over: object) -> None:
+        base = {
+            "schema_version": 1,
+            "paused_until": "2026-06-12T05:52:00Z",
+            "signature": "session_limit",
+            "line": QUOTA_LINE,
+            "canary_plan": None,
+            "canary_deadline": None,
+            "created_at": "2026-06-12T03:00:00Z",
+        }
+        base.update(over)
+        self.quota_path.write_text(json.dumps(base))
+
+    def _read(self, slug: str) -> dict:
+        return json.loads(self.paths[slug].read_text())
+
+    def _read_quota(self) -> dict:
+        return json.loads(self.quota_path.read_text())
+
+    def test_active_pause_idles_every_plan(self) -> None:
+        self._write_pause(paused_until="2026-06-12T07:00:00Z")  # future reset
+        with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
+            a = tick(self.paths["plan-a"], self.cfg)
+            b = tick(self.paths["plan-b"], self.cfg)
+        self.assertEqual(a.action, "idle")
+        self.assertEqual(b.action, "idle")
+        self.assertIn("quota_paused", a.detail)
+        self.assertIsNone(self._read("plan-a")["current_claim"])
+        self.assertIsNone(self._read("plan-b")["current_claim"])
+
+    def test_past_reset_dispatches_exactly_one_canary(self) -> None:
+        self._write_pause(paused_until="2026-06-12T05:52:00Z")  # past reset
+        with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
+            a = tick(self.paths["plan-a"], self.cfg)  # first → canary
+            b = tick(self.paths["plan-b"], self.cfg)  # gated by canary window
+        self.assertEqual(a.action, "dispatch")
+        self.assertEqual(b.action, "idle")
+        # quota.json now names plan-a the canary with a +180s deadline.
+        q = self._read_quota()
+        self.assertEqual(q["canary_plan"], "plan-a")
+        self.assertEqual(
+            st.parse_iso(q["canary_deadline"]),
+            self.NOW + _dt.timedelta(seconds=180),
+        )
+        # Exactly one plan holds a fresh claim during the canary window.
+        claims = [
+            self._read(s)["current_claim"] is not None for s in ("plan-a", "plan-b")
+        ]
+        self.assertEqual(claims.count(True), 1)
+        self.assertIsNotNone(self._read("plan-a")["current_claim"])
+
+    def test_past_deadline_resumes_and_clears_file(self) -> None:
+        self._write_pause(
+            paused_until="2026-06-12T05:52:00Z",
+            canary_plan="plan-a",
+            canary_deadline="2026-06-12T05:55:00Z",  # already elapsed by NOW
+        )
+        with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
+            b = tick(self.paths["plan-b"], self.cfg)
+        self.assertEqual(b.action, "dispatch")
+        self.assertFalse(self.quota_path.exists())  # cleared on resume
+        events = [e["type"] for e in self._read("plan-b")["events"]]
+        self.assertIn(st.EVENT_QUOTA_RESUMED, events)
+
+    def test_stuck_pause_idles(self) -> None:
+        self._write_pause(paused_until=None)  # unparseable reset → stuck
+        with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
+            a = tick(self.paths["plan-a"], self.cfg)
+        self.assertEqual(a.action, "idle")
+        self.assertIn("quota_stuck", a.detail)
+        self.assertIsNone(self._read("plan-a")["current_claim"])
+        self.assertTrue(self.quota_path.exists())  # only the operator clears it
 
 
 if __name__ == "__main__":

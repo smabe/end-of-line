@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import sys
 from collections import deque
 from pathlib import Path
 from typing import NamedTuple
@@ -196,6 +197,103 @@ def record_quota_pause(
             }
         )
     return paused_until
+
+
+class GateDecision(NamedTuple):
+    """Outcome of consulting the project quota pause before a dispatch.
+
+    `dispatch=False` → the supervisor returns `TickResult("idle", detail)`
+    without claiming. `dispatch=True` → proceed to `claim_phase`;
+    `resumed=True` additionally means the canary survived its window and
+    the supervisor must append `EVENT_QUOTA_RESUMED` in its open state
+    mutation window.
+    """
+
+    dispatch: bool
+    detail: str = ""
+    resumed: bool = False
+
+
+_DISPATCH = GateDecision(dispatch=True)
+
+
+def gate_decision(
+    orchestrator_dir: Path,
+    plan_slug: str,
+    now: dt.datetime,
+) -> GateDecision:
+    """Decide whether `plan_slug` may dispatch given the project quota pause.
+
+    File-absent is the hot path: one `Path.exists()` and no lock when
+    nothing is paused (the overwhelmingly common tick). When the pause
+    file is present, a single `locked` window reads it and resolves one
+    of four outcomes (see plans/quota-pause.md "Phase 3"):
+
+    1. `paused_until` set, `now` < it → idle.
+    2. `now` >= `paused_until`, no canary stamped → this plan stamps
+       itself the canary (deadline `now` + CANARY_WINDOW_SEC) and
+       dispatches as the survival probe.
+    3. A canary is stamped and `now` < its deadline → idle if it's
+       another plan; dispatch if it's this plan (a non-quota fast-fail
+       re-reaching the gate must retry, not idle against itself).
+    4. `now` >= the canary deadline → the canary survived (no re-pause
+       overwrote the file), so clear the pause (unlink, keeping
+       "file absent == not paused" the single invariant) and resume.
+
+    A stuck pause (`paused_until: null`) always idles — only operator file
+    removal clears it. A corrupt/unreadable file is treated as absent (a
+    malformed file must not freeze the fleet) with a stderr note.
+    """
+    quota_path = orchestrator_dir / QUOTA_FILE_NAME
+    if not quota_path.exists():
+        return _DISPATCH
+    with st.locked(quota_path):
+        # Read + decode the file's fields inside one guard: field-level
+        # corruption (a hand-edited timestamp, an unpaired canary_deadline)
+        # must degrade to "dispatch", same as JSON/schema corruption — the
+        # contract is that no malformed file ever freezes the fleet. The
+        # decision branches below stay outside the guard so a genuine logic
+        # error isn't silently swallowed as "unreadable".
+        try:
+            data = st.load(quota_path, expected_version=QUOTA_SCHEMA_VERSION)
+            paused_until_s = data.get("paused_until")
+            paused_until = (
+                None if paused_until_s is None else st.parse_iso(paused_until_s)
+            )
+            canary_deadline_s = data.get("canary_deadline")
+            canary_deadline = (
+                None if canary_deadline_s is None else st.parse_iso(canary_deadline_s)
+            )
+        except FileNotFoundError:
+            # Benign race: a concurrent resume tick unlinked the file in the
+            # window between exists() and the lock. "file absent == not
+            # paused" — dispatch, and stay silent (not a corruption note).
+            return _DISPATCH
+        except (OSError, ValueError, TypeError, AttributeError, st.SchemaVersionMismatch):
+            print(f"clu: ignoring unreadable {quota_path}", file=sys.stderr)
+            return _DISPATCH
+        if paused_until is None:
+            return GateDecision(dispatch=False, detail="quota_stuck")
+        if now < paused_until:
+            return GateDecision(
+                dispatch=False, detail=f"quota_paused until={paused_until_s}"
+            )
+        # now >= paused_until — the resume phase.
+        canary_plan = data.get("canary_plan")
+        if canary_plan is None:
+            deadline = now + dt.timedelta(seconds=CANARY_WINDOW_SEC)
+            data["canary_plan"] = plan_slug
+            data["canary_deadline"] = _iso_or_none(deadline)
+            st.save_atomic(quota_path, data)
+            return _DISPATCH
+        # A canary with no deadline is malformed; resuming clears the bad
+        # state rather than freezing — self-healing past the same invariant.
+        if canary_deadline is None or now >= canary_deadline:
+            quota_path.unlink(missing_ok=True)
+            return GateDecision(dispatch=True, resumed=True)
+        if canary_plan == plan_slug:
+            return _DISPATCH
+        return GateDecision(dispatch=False, detail=f"quota_canary plan={canary_plan}")
 
 
 def record_quota_death(

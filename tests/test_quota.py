@@ -9,11 +9,14 @@ returning None on weekly/date forms is contract, not a gap.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 from end_of_line import quota
@@ -269,6 +272,188 @@ class QuotaPauseFileTests(unittest.TestCase):
         self.assertIsNone(data["canary_plan"])
         self.assertIsNone(data["canary_deadline"])
         self.assertEqual(data["signature"], "usage_credits")
+
+
+class GateDecisionTests(unittest.TestCase):
+    """The dispatch gate state machine (#94, phase gate). Four outcomes
+    decided under one lock: idle while paused, the first plan past reset
+    becomes the canary and dispatches, others idle during its window, and
+    the fleet resumes (file cleared) when the canary survives."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.orch_dir = Path(self._tmp.name)
+        self.quota_path = self.orch_dir / quota.QUOTA_FILE_NAME
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write(self, **over: object) -> None:
+        base = {
+            "schema_version": 1,
+            "paused_until": "2026-06-12T05:52:00Z",
+            "signature": "session_limit",
+            "line": SESSION_LINE,
+            "canary_plan": None,
+            "canary_deadline": None,
+            "created_at": "2026-06-12T03:00:00Z",
+        }
+        base.update(over)
+        self.quota_path.write_text(json.dumps(base))
+
+    def _read(self) -> dict:
+        return json.loads(self.quota_path.read_text())
+
+    def test_no_file_dispatches(self) -> None:
+        # Hot path: no quota.json → dispatch, no lock taken.
+        d = quota.gate_decision(
+            self.orch_dir, "plan-a", dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
+        )
+        self.assertTrue(d.dispatch)
+        self.assertFalse(d.resumed)
+
+    def test_active_pause_idles(self) -> None:
+        self._write(paused_until="2026-06-12T05:52:00Z")
+        now = dt.datetime(2026, 6, 12, 5, 0, tzinfo=dt.UTC)  # before reset
+        d = quota.gate_decision(self.orch_dir, "plan-a", now)
+        self.assertFalse(d.dispatch)
+        self.assertIn("quota_paused", d.detail)
+        self.assertIn("05:52", d.detail)
+        # Idle must not mutate the file.
+        self.assertIsNone(self._read()["canary_plan"])
+
+    def test_stuck_pause_idles_indefinitely(self) -> None:
+        self._write(paused_until=None)
+        now = dt.datetime(2026, 6, 20, 0, 0, tzinfo=dt.UTC)  # days later
+        d = quota.gate_decision(self.orch_dir, "plan-a", now)
+        self.assertFalse(d.dispatch)
+        self.assertEqual(d.detail, "quota_stuck")
+
+    def test_past_reset_no_canary_stamps_and_dispatches(self) -> None:
+        self._write(paused_until="2026-06-12T05:52:00Z")
+        now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)  # past reset
+        d = quota.gate_decision(self.orch_dir, "plan-a", now)
+        self.assertTrue(d.dispatch)
+        self.assertFalse(d.resumed)
+        data = self._read()
+        self.assertEqual(data["canary_plan"], "plan-a")
+        self.assertEqual(
+            st.parse_iso(data["canary_deadline"]),
+            now + dt.timedelta(seconds=quota.CANARY_WINDOW_SEC),
+        )
+
+    def test_second_plan_idles_during_canary_window(self) -> None:
+        self._write(
+            paused_until="2026-06-12T05:52:00Z",
+            canary_plan="plan-a",
+            canary_deadline="2026-06-12T06:03:00Z",
+        )
+        now = dt.datetime(2026, 6, 12, 6, 1, tzinfo=dt.UTC)  # within window
+        d = quota.gate_decision(self.orch_dir, "plan-b", now)
+        self.assertFalse(d.dispatch)
+        self.assertIn("canary", d.detail)
+
+    def test_canary_plan_redispatches_in_window(self) -> None:
+        # The canary itself re-reaching the gate before its deadline (a
+        # non-quota fast-fail) must dispatch again, not idle against itself.
+        self._write(
+            paused_until="2026-06-12T05:52:00Z",
+            canary_plan="plan-a",
+            canary_deadline="2026-06-12T06:03:00Z",
+        )
+        now = dt.datetime(2026, 6, 12, 6, 1, tzinfo=dt.UTC)
+        d = quota.gate_decision(self.orch_dir, "plan-a", now)
+        self.assertTrue(d.dispatch)
+        self.assertFalse(d.resumed)
+
+    def test_past_deadline_clears_file_and_resumes(self) -> None:
+        self._write(
+            paused_until="2026-06-12T05:52:00Z",
+            canary_plan="plan-a",
+            canary_deadline="2026-06-12T06:03:00Z",
+        )
+        now = dt.datetime(2026, 6, 12, 6, 5, tzinfo=dt.UTC)  # past deadline
+        d = quota.gate_decision(self.orch_dir, "plan-b", now)
+        self.assertTrue(d.dispatch)
+        self.assertTrue(d.resumed)
+        self.assertFalse(self.quota_path.exists())  # file == "not paused"
+
+    def test_two_plans_race_only_first_stamps_canary(self) -> None:
+        # Sequential gate calls model two plans ticking the same cron pass:
+        # the locked window makes stamping atomic — the second reader sees
+        # the first plan's stamp and idles.
+        self._write(paused_until="2026-06-12T05:52:00Z")
+        now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
+        first = quota.gate_decision(self.orch_dir, "plan-a", now)
+        second = quota.gate_decision(self.orch_dir, "plan-b", now)
+        self.assertTrue(first.dispatch)
+        self.assertFalse(second.dispatch)
+        self.assertEqual(self._read()["canary_plan"], "plan-a")
+
+    def test_re_pause_gates_against_new_paused_until(self) -> None:
+        # The canary died from quota → phase-classify overwrote the file with
+        # a fresh paused_until and cleared the canary. Other plans now gate
+        # against the NEW horizon — no resume.
+        self._write(
+            paused_until="2026-06-12T07:52:00Z",
+            canary_plan=None,
+            canary_deadline=None,
+        )
+        now = dt.datetime(2026, 6, 12, 6, 5, tzinfo=dt.UTC)  # before new reset
+        d = quota.gate_decision(self.orch_dir, "plan-b", now)
+        self.assertFalse(d.dispatch)
+        self.assertFalse(d.resumed)
+        self.assertIn("quota_paused", d.detail)
+
+    def test_corrupt_file_treated_as_absent(self) -> None:
+        self.quota_path.write_text("{not valid json")
+        now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            d = quota.gate_decision(self.orch_dir, "plan-a", now)
+        self.assertTrue(d.dispatch)
+        self.assertFalse(d.resumed)
+        self.assertIn(quota.QUOTA_FILE_NAME, err.getvalue())
+
+    def test_malformed_paused_until_dispatches_not_freezes(self) -> None:
+        # Valid JSON, garbage timestamp field: the "malformed file must
+        # not freeze the fleet" contract covers field-level corruption too,
+        # not only unparseable JSON. A hand-edited paused_until must not
+        # crash every tick.
+        self._write(paused_until="not-a-timestamp")
+        now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            d = quota.gate_decision(self.orch_dir, "plan-a", now)
+        self.assertTrue(d.dispatch)
+        self.assertIn(quota.QUOTA_FILE_NAME, err.getvalue())
+
+    def test_canary_without_deadline_resumes(self) -> None:
+        # canary_plan set but canary_deadline null (malformed pairing) must
+        # self-heal — clear the file and resume rather than raise.
+        self._write(
+            paused_until="2026-06-12T05:52:00Z",
+            canary_plan="plan-a",
+            canary_deadline=None,
+        )
+        now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
+        d = quota.gate_decision(self.orch_dir, "plan-b", now)
+        self.assertTrue(d.dispatch)
+        self.assertTrue(d.resumed)
+        self.assertFalse(self.quota_path.exists())
+
+    def test_concurrent_resume_unlink_is_silent(self) -> None:
+        # Benign race: another tick process unlinked the file in the window
+        # between exists() and the lock. load → FileNotFoundError must NOT
+        # log "ignoring unreadable" (that wording implies corruption).
+        self._write(paused_until="2026-06-12T05:52:00Z")
+        now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
+        with mock.patch(
+            "end_of_line.state.load", side_effect=FileNotFoundError()
+        ):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                d = quota.gate_decision(self.orch_dir, "plan-a", now)
+        self.assertTrue(d.dispatch)
+        self.assertFalse(d.resumed)
+        self.assertEqual(err.getvalue(), "")
 
 
 class ConstantsTests(unittest.TestCase):
