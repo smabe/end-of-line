@@ -358,7 +358,7 @@ def dispatch_for_tick(
         # Quota check BEFORE the systemic table (#94) — the regexes don't
         # overlap today, but order is the contract if a future message
         # contains both wordings.
-        if _record_quota_fast_fail(state_file, result, log_path):
+        if _record_quota_fast_fail(state_file, result, log_path, cfg, plan_slug):
             print(
                 f"dispatch: quota-death rc={rc}, log={log_path}",
                 file=sys.stderr,
@@ -713,22 +713,30 @@ def _pause_for_systemic_failure(
     )
 
 
-def _record_quota_fast_fail(state_file: Path, result: TickResult, log_path: Path) -> bool:
+def _record_quota_fast_fail(
+    state_file: Path,
+    result: TickResult,
+    log_path: Path,
+    cfg: ProjectConfig,
+    plan_slug: str,
+) -> bool:
     """Quota classification on a fast-failed worker; True iff the path was taken.
 
     On match: quota events + pause file via quota.record_quota_death, then
     release the just-made claim WITHOUT a dispatch_failed event — the quota
     events are the record, and the attempt is forgiven via EVENT_QUOTA_DEATH.
     Unlike `_pause_and_halt`, plan status never flips: the quota pause is a
-    project-level dispatch gate (phase `gate`), not a plan-level halt. No
-    notification here either — KIND_QUOTA_* lands in phase notify-docs.
+    project-level dispatch gate (phase `gate`), not a plan-level halt. The
+    operator-facing KIND_QUOTA_PAUSED/STUCK ping fires after the state write,
+    mirroring `_pause_and_halt`'s post-mutate notify (phase notify-docs).
     """
     match = quota.classify_log_tail(log_path)
     if match is None:
         return False
+    paused_until = None
     try:
         with st.mutate(state_file) as data:
-            quota.record_quota_death(
+            paused_until = quota.record_quota_death(
                 data,
                 match,
                 phase_id=result.phase_id or "",
@@ -748,6 +756,13 @@ def _record_quota_fast_fail(state_file: Path, result: TickResult, log_path: Path
     except _DISPATCH_FALLBACK_ERRORS as exc:
         print(f"dispatch: failed to record quota death: {exc}", file=sys.stderr)
         return False
+    kind, body = notify.quota_pause_notification(
+        plan_slug,
+        match.line,
+        paused_until,
+        str(state_file.parent / quota.QUOTA_FILE_NAME),
+    )
+    notify.notify(cfg.notify, kind, body)
     return True
 
 

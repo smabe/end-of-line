@@ -69,12 +69,21 @@ KIND_PLAN_AUTO_ARCHIVED = "plan_auto_archived"
 # data["ship_pending"] once ship is in flight.
 KIND_READY_TO_SHIP = "ready_to_ship"
 KIND_WORKER_IDLE = "worker_idle"
+# Project quota pause (#94). PAUSED/RESUMED defer in quiet hours — the
+# pause self-heals via canary auto-resume, so there's nothing for the
+# operator to do overnight; the inbox + `clu watch` surface the events
+# regardless. STUCK joins the bypass set: an unparseable reset means no
+# auto-resume horizon, which is halt-equivalent and warrants a loud ping.
+KIND_QUOTA_PAUSED = "quota_paused"
+KIND_QUOTA_RESUMED = "quota_resumed"
+KIND_QUOTA_STUCK = "quota_stuck"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset(
     {
         KIND_HALTED,
         KIND_QUEUE_REPAIR_FAILED,
         KIND_QUEUE_CORRUPT,
+        KIND_QUOTA_STUCK,
     }
 )
 
@@ -285,6 +294,56 @@ def render_ready_to_ship(slugs: list[str], mode: str) -> str:
         )
         cmd = f"clu ship --all-done {mode_flag} --yes"
     return f"{head}\nRun: {cmd}"
+
+
+def render_quota_paused(plan_slug: str, line: str, paused_until: _dt.datetime) -> str:
+    """Body for a quota pause with a parseable reset (auto-resume scheduled).
+
+    `paused_until` is the aware UTC resume moment (reset + ~2min buffer);
+    we show it in the operator's local time. The matched `line` carries the
+    original "resets 1:50am" wording, so a re-pause loop's pings stay
+    distinguishable by their reset time.
+    """
+    local = paused_until.astimezone()
+    when = local.strftime("%I:%M%p").lstrip("0").lower()
+    tz = local.strftime("%Z")
+    return (
+        f"⏸️ Quota pause — {plan_slug}: {line}\n"
+        f"Auto-resumes ~{when} {tz} (reset + ~2min). No action needed."
+    )
+
+
+def render_quota_stuck(plan_slug: str, line: str, quota_file: str) -> str:
+    """Body for a quota pause whose reset didn't parse — no auto-resume.
+
+    The fleet idles indefinitely until the operator clears the file, so the
+    body carries the one-line escape hatch (`rm <quota_file>`)."""
+    return (
+        f"🚫 Quota pause STUCK — {plan_slug}: {line}\n"
+        f"Reset time didn't parse — no auto-resume. "
+        f"Clear it once quota returns: rm {quota_file}"
+    )
+
+
+def render_quota_resumed(plan_slug: str) -> str:
+    return f"▶️ Quota resumed — {plan_slug}: canary survived, dispatching normally."
+
+
+def quota_pause_notification(
+    plan_slug: str,
+    line: str,
+    paused_until: _dt.datetime | None,
+    quota_file: str,
+) -> tuple[str, str]:
+    """`(kind, body)` for a classified quota death — the single source of
+    truth for the paused-vs-stuck routing the three death sites share.
+
+    Parseable reset (`paused_until` set) → KIND_QUOTA_PAUSED. Unparseable
+    reset (`None`) → KIND_QUOTA_STUCK with the escape hatch.
+    """
+    if paused_until is None:
+        return KIND_QUOTA_STUCK, render_quota_stuck(plan_slug, line, quota_file)
+    return KIND_QUOTA_PAUSED, render_quota_paused(plan_slug, line, paused_until)
 
 
 def render_worktree_conflict(

@@ -302,8 +302,11 @@ class QuotaFastFailTestCase(_SystemicFixture):
         qdata = json.loads((self.state_path.parent / "quota.json").read_text())
         self.assertEqual(qdata["signature"], "session_limit")
         self.assertIsNotNone(qdata["paused_until"])
-        # No iMessage — KIND_QUOTA_* notifications land in phase notify-docs.
-        self.assertEqual(self.sent, [])
+        # Parseable reset → one KIND_QUOTA_PAUSED iMessage carrying the
+        # signature line so re-pause pings stay distinguishable.
+        self.assertEqual(len(self.sent), 1)
+        _to, body = self.sent[0]
+        self.assertIn(QUOTA_LINE, body)
 
     def test_rate_limit_still_takes_systemic_path(self) -> None:
         # Ordering guard: quota-first must not swallow the systemic table.

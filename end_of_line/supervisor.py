@@ -636,12 +636,20 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 # a quota kill burns no attempt.
                 quota_match = quota.classify_log_tail(claim.get("log_path"))
                 if quota_match is not None:
-                    quota.record_quota_death(
+                    paused_until = quota.record_quota_death(
                         data,
                         quota_match,
                         phase_id=phase_id,
                         token=claimed_by,
                         orchestrator_dir=state_path.parent,
+                    )
+                    side_notifies.append(
+                        notify.quota_pause_notification(
+                            data["plan_slug"],
+                            quota_match.line,
+                            paused_until,
+                            str(state_path.parent / quota.QUOTA_FILE_NAME),
+                        )
                     )
                 if claimed_by and phase_id and config.coolant.enabled:
                     coolant.emit_stop(
@@ -692,17 +700,25 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 # Quota classification (#94) must read the log BEFORE
                 # release — release_claim_and_emit clears the claim that
                 # carries log_path. A quota match suppresses the misleading
-                # worker-dead notify body (KIND_QUOTA_* notifications land
-                # in phase notify-docs) and forgives the attempt via
-                # EVENT_QUOTA_DEATH.
+                # worker-dead notify body (the operator-facing KIND_QUOTA_*
+                # ping rides side_notifies instead) and forgives the attempt
+                # via EVENT_QUOTA_DEATH.
                 quota_match = quota.classify_log_tail(claim.get("log_path"))
                 if quota_match is not None:
-                    quota.record_quota_death(
+                    paused_until = quota.record_quota_death(
                         data,
                         quota_match,
                         phase_id=phase_id,
                         token=claimed_by,
                         orchestrator_dir=state_path.parent,
+                    )
+                    side_notifies.append(
+                        notify.quota_pause_notification(
+                            data["plan_slug"],
+                            quota_match.line,
+                            paused_until,
+                            str(state_path.parent / quota.QUOTA_FILE_NAME),
+                        )
                     )
                 # Order matters: durable state first (event + release +
                 # coolant), best-effort reap last. If the reap raises (e.g.
@@ -861,6 +877,12 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 return _attach(TickResult("idle", gate.detail))
             if gate.resumed:
                 st.append_event(data, st.EVENT_QUOTA_RESUMED)
+                side_notifies.append(
+                    (
+                        notify.KIND_QUOTA_RESUMED,
+                        notify.render_quota_resumed(data["plan_slug"]),
+                    )
+                )
             ttl = st.lease_ttl_for_phase(data, phase.id)
             token = st.claim_phase(data, phase.id, ttl)
             return _attach(

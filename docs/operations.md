@@ -1328,6 +1328,9 @@ Outbound — fired during supervisor ticks. Kinds:
 | `queue_corrupt` | `queue.json` corrupt and auto-repair disabled OR throttle exhausted | **Bypasses quiet hours** |
 | `stuck_blocker` | Open blocker un-consumed for >30 min; re-pings every 30 min | Gated (inbox always writes) |
 | `stalled_claim` | Live claim's lease expired with plan status still `running`; one-shot per claim | Gated (inbox always writes) |
+| `quota_paused` | Worker killed by a quota limit with a parseable reset; project pauses, then auto-resumes (see "Recovering from a quota pause") | Gated |
+| `quota_resumed` | Canary survived the reset; quota pause cleared | Gated |
+| `quota_stuck` | Quota death whose reset didn't parse; no auto-resume — needs `rm quota.json` | **Bypasses quiet hours** |
 
 Quiet hours default to `["22:00", "08:00"]` local time and wrap
 overnight. Configure per project under `notify.quiet_hours` in
@@ -1969,6 +1972,61 @@ failure independently; there's no cross-plan preemption in v1, so if
 plan A flags `rate_limit`, plan B's next tick will hit the same
 failure and ping you separately. That's accepted noise — the operator
 sees the same fix-once action either way.
+
+### Recovering from a quota pause (#94)
+
+The workers run on your Claude subscription, so they share its session /
+weekly / model limits. When a worker is killed mid-phase by a quota
+limit, it prints a line like `You've hit your session limit · resets
+1:50am (America/New_York)` and exits.
+
+**Before #94**, that death was indistinguishable from a real crash: it
+burned the phase's attempt budget, and after three deaths the plan
+halted on `max_attempts_exhausted` — so an overnight reset left a fleet
+of plans frozen until you woke up and ran a manual `clu retry` sweep,
+one plan at a time. (The motivating incident: 8 plans frozen ~5.5h past
+a 01:50 reset.)
+
+**Now** clu classifies the death from the worker log at all three death
+sites and handles it automatically:
+
+- The phase attempt is **forgiven** (a `quota_death` event, like
+  `systemic_failure`) — three quota deaths in a row never advance the
+  halt counter.
+- The whole **project** pauses (not just the one plan) by writing
+  `<project>/plans/.orchestrator/quota.json` with `paused_until = reset
+  + ~2min`. Every plan's dispatch idles until then; in-flight workers
+  and the watchdogs keep running.
+- You get one `quota_paused` iMessage carrying the local resume time.
+  It's **gated by quiet hours** — there's nothing to do, so it won't
+  wake you; `clu watch` and the inbox show the event regardless.
+- Past the reset, the first plan to tick dispatches as a **canary**
+  while the rest idle. If it survives ~3 min, clu deletes `quota.json`,
+  emits `quota_resumed`, and the fleet resumes on its own. If the
+  account is still throttled, the canary re-dies and re-pauses with the
+  new reset time — no attempts burned, no action from you.
+
+**The stuck case.** If the reset time doesn't parse — a weekly limit
+(`resets Mon 12:00am`), a date form, or future wording the table doesn't
+know — clu can't schedule an auto-resume. It writes a **stuck pause**
+(`paused_until: null`), which idles every plan indefinitely and sends a
+`quota_stuck` iMessage that **bypasses quiet hours** (a fleet frozen
+with no horizon is halt-equivalent). The escape hatch is one command,
+once your quota is actually back:
+
+```bash
+rm <project>/plans/.orchestrator/quota.json   # clears the pause; plans dispatch next tick
+```
+
+That's the same file the auto-resume deletes — "file absent == not
+paused" is the whole contract. Deleting it by hand is always safe; the
+worst case is a still-throttled worker re-dies and re-pauses.
+
+The signature table (what counts as a quota death) and the reset parser
+are hard-coded in `quota.py`; a new wording lands via PR with a test in
+`tests/test_quota.py`. See `architecture.md` § "Quota pause gate" for
+the canary state machine and `contract.md` § "Quota pause file schema"
+for the `quota.json` fields.
 
 ### `queue.json` corrupt
 

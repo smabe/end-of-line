@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from end_of_line import notify
 from end_of_line import state as st
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
@@ -490,20 +491,25 @@ class SupervisorTestCase(CluTestCase):
         self.assertIsNotNone(paused["paused_until"])
         # Forgiveness: the dispatch that died on quota burns no attempt.
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
-        # The misleading worker-dead body is suppressed; KIND_QUOTA_*
-        # notifications land in phase notify-docs.
+        # The misleading worker-dead body is suppressed; the operator-facing
+        # signal rides side_notifies as KIND_QUOTA_PAUSED (phase notify-docs).
         self.assertIsNone(result.notify_body)
+        kinds = [k for k, _ in result.side_notifies]
+        self.assertIn(notify.KIND_QUOTA_PAUSED, kinds)
         qdata = json.loads((self.state_path.parent / "quota.json").read_text())
         self.assertEqual(qdata["signature"], "session_limit")
         self.assertIsNotNone(qdata["paused_until"])
 
     def test_dead_pid_quota_stuck_reset_writes_null_pause(self) -> None:
         self._claim_with_log("You've hit your weekly limit · resets Mon 12:00am\n")
-        self._tick_worker_dead()
+        result = self._tick_worker_dead()
         qdata = json.loads((self.state_path.parent / "quota.json").read_text())
         self.assertIsNone(qdata["paused_until"])
         paused = self._event(self._read(), st.EVENT_QUOTA_PAUSED)
         self.assertIsNone(paused["paused_until"])
+        # Unparseable reset → STUCK kind (loud, bypasses quiet hours).
+        kinds = [k for k, _ in result.side_notifies]
+        self.assertIn(notify.KIND_QUOTA_STUCK, kinds)
 
     def test_dead_pid_non_quota_log_burns_attempt_and_notifies(self) -> None:
         # Regression: a non-quota death behaves exactly as today.
@@ -530,6 +536,9 @@ class SupervisorTestCase(CluTestCase):
         self.assertEqual(death["token"], token)
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
         self.assertTrue((self.state_path.parent / "quota.json").exists())
+        # The straggler-path death also surfaces the pause to the operator.
+        kinds = [k for k, _ in result.side_notifies]
+        self.assertIn(notify.KIND_QUOTA_PAUSED, kinds)
 
     def test_lease_expired_non_quota_log_unchanged(self) -> None:
         self._claim_with_log("benign\n", lease_expires="2020-01-01T00:00:00Z")
@@ -703,6 +712,10 @@ class QuotaGateSupervisorTests(CluTestCase):
         self.assertFalse(self.quota_path.exists())  # cleared on resume
         events = [e["type"] for e in self._read("plan-b")["events"]]
         self.assertIn(st.EVENT_QUOTA_RESUMED, events)
+        # Resume pings the operator (defers in quiet hours; inbox/watch
+        # surface the event regardless).
+        kinds = [k for k, _ in b.side_notifies]
+        self.assertIn(notify.KIND_QUOTA_RESUMED, kinds)
 
     def test_stuck_pause_idles(self) -> None:
         self._write_pause(paused_until=None)  # unparseable reset → stuck
