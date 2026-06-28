@@ -281,19 +281,13 @@ def human_remaining(seconds: float | None) -> str:
     return human_age(seconds)
 
 
-def assemble_row(claim: dict, activity: dict, now: _dt.datetime | None = None) -> dict:
-    """Join one claim's state with its transcript activity into a render row.
-
-    PID liveness uses the cheap kill-probe (no cmdline_match -> no `ps`), so a
-    dead worker is flagged rather than shown as quietly idle.
-    """
-    ran = _age_seconds(claim.get("started_at"), now)
-    hb = st.heartbeat_age_seconds(claim, now)
+def _base_row(activity: dict, now: _dt.datetime | None = None) -> dict:
+    """The D10 activity-key block shared by every row type — worker, blocked,
+    session. The single source of truth for the seven transcript-derived keys,
+    so a new row type can't hand-copy (and drift) the wire contract; callers
+    `.update()` their own discriminator/claim keys on top. An empty `activity`
+    dict collapses to the None/False defaults a claimless row needs."""
     return {
-        "phase_id": claim.get("phase_id"),
-        "ran_seconds": ran,
-        "heartbeat_age_seconds": hb,
-        "alive": st.claim_worker_alive(claim),
         "last_command": activity.get("last_command"),
         "command_running": activity.get("command_running", False),
         "last_write": activity.get("last_write"),
@@ -301,6 +295,25 @@ def assemble_row(claim: dict, activity: dict, now: _dt.datetime | None = None) -
         "last_text": activity.get("last_text"),
         "last_activity_seconds": _age_seconds(activity.get("last_activity_ts"), now),
         "tokens": activity.get("tokens"),
+    }
+
+
+def assemble_row(claim: dict, activity: dict, now: _dt.datetime | None = None) -> dict:
+    """Join one claim's state with its transcript activity into a render row.
+
+    PID liveness uses the cheap kill-probe (no cmdline_match -> no `ps`), so a
+    dead worker is flagged rather than shown as quietly idle.
+    """
+    # Single literal with `_base_row` spliced at the original key position, so
+    # the D10 wire-contract order (claim keys, then the 7 activity keys, then
+    # the new-metrics keys) is byte-for-byte preserved — `_base_row` dedupes the
+    # activity block without reordering the JSON `clu serve` emits.
+    return {
+        "phase_id": claim.get("phase_id"),
+        "ran_seconds": _age_seconds(claim.get("started_at"), now),
+        "heartbeat_age_seconds": st.heartbeat_age_seconds(claim, now),
+        "alive": st.claim_worker_alive(claim),
+        **_base_row(activity, now),
         # Phase 4 (new-metrics): claim-derived signals for the fused health
         # glyph + attempts/lease metrics. Append-only (D10) — surfaced to
         # web/index.html's toView so `clu serve` reads the same keys.
@@ -322,18 +335,15 @@ def assemble_blocked_row(blocker: dict, now: _dt.datetime | None = None) -> dict
     `blocked` flag must be checked BEFORE the dead path in every render surface —
     a blocked plan is needs-you, not work-died.
     """
+    # `_base_row({})` (claimless: no transcript activity -> all defaults)
+    # spliced at the original position keeps the D10 key order exactly as the
+    # prior inline dict had it.
     return {
         "phase_id": blocker.get("phase_id"),
         "ran_seconds": None,
         "heartbeat_age_seconds": None,
         "alive": False,
-        "last_command": None,
-        "command_running": False,
-        "last_write": None,
-        "last_write_seconds": None,
-        "last_text": None,
-        "last_activity_seconds": None,
-        "tokens": None,
+        **_base_row({}, now),
         "attempts": None,
         "lease_remaining_seconds": None,
         "stuck": False,

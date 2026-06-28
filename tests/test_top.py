@@ -27,6 +27,12 @@ from end_of_line.cli import main as cli_main
 from tests import GitProjectTestCase, plan_body
 
 
+def _now() -> _dt.datetime:
+    """The single frozen `now` anchor shared by every time-derived assertion in
+    this module — one source so a tz/clock change touches one place, not three."""
+    return _dt.datetime(2026, 6, 3, 0, 10, 0, tzinfo=_dt.UTC)
+
+
 def _write_jsonl(path: Path, records: list[dict], *, mtime: float | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r) + "\n" for r in records))
@@ -244,9 +250,6 @@ class ExtractActivityTest(unittest.TestCase):
 
 
 class AssembleRowTest(unittest.TestCase):
-    def _now(self) -> _dt.datetime:
-        return _dt.datetime(2026, 6, 3, 0, 10, 0, tzinfo=_dt.UTC)
-
     def test_ran_seconds_and_alive_pid(self) -> None:
         # started 600s before `now`; pid is this live test process.
         claim = {
@@ -257,7 +260,7 @@ class AssembleRowTest(unittest.TestCase):
         }
         activity = {"last_command": "pytest", "last_write": "/r/a.py", "last_text": "ok",
                     "last_activity_ts": "2026-06-03T00:09:55Z", "command_running": False, "tokens": None}
-        row = top.assemble_row(claim, activity, now=self._now())
+        row = top.assemble_row(claim, activity, now=_now())
         self.assertEqual(row["phase_id"], "routing")
         self.assertAlmostEqual(row["ran_seconds"], 600, delta=1)
         self.assertAlmostEqual(row["heartbeat_age_seconds"], 30, delta=1)
@@ -269,15 +272,70 @@ class AssembleRowTest(unittest.TestCase):
         activity = {"last_command": None, "last_write": "/r/a.py",
                     "last_write_ts": "2026-06-03T00:09:00Z", "last_text": None,
                     "last_activity_ts": "2026-06-03T00:09:00Z", "command_running": False, "tokens": None}
-        row = top.assemble_row(claim, activity, now=self._now())
+        row = top.assemble_row(claim, activity, now=_now())
         self.assertAlmostEqual(row["last_write_seconds"], 60, delta=1)
 
     def test_dead_pid_flagged_not_idle(self) -> None:
         claim = {"phase_id": "p", "started_at": "2026-06-03T00:00:00Z", "pid": 999999}
         row = top.assemble_row(claim, {"last_command": None, "last_write": None, "last_text": None,
                                        "last_activity_ts": None, "command_running": False, "tokens": None},
-                               now=self._now())
+                               now=_now())
         self.assertFalse(row["alive"])
+
+
+class BaseRowTest(unittest.TestCase):
+    """`_base_row` is the single source of the D10 activity-key block shared by
+    assemble_row / assemble_blocked_row / (soon) assemble_session_row. These
+    lock its key set + that the empty-activity path reproduces the exact
+    None/False defaults the blocked row used to inline."""
+
+    _ACTIVITY_KEYS = {
+        "last_command", "command_running", "last_write", "last_write_seconds",
+        "last_text", "last_activity_seconds", "tokens",
+    }
+
+    def test_base_row_has_activity_keys_only(self) -> None:
+        activity = {"last_command": "pytest", "command_running": True,
+                    "last_write": "/r/a.py", "last_write_ts": "2026-06-03T00:09:00Z",
+                    "last_text": "ok", "last_activity_ts": "2026-06-03T00:09:55Z",
+                    "tokens": {"input_tokens": 5}}
+        base = top._base_row(activity, now=_now())
+        self.assertEqual(set(base), self._ACTIVITY_KEYS)
+        self.assertEqual(base["last_command"], "pytest")
+        self.assertTrue(base["command_running"])
+        self.assertAlmostEqual(base["last_write_seconds"], 60, delta=1)
+        self.assertAlmostEqual(base["last_activity_seconds"], 5, delta=1)
+        self.assertEqual(base["tokens"], {"input_tokens": 5})
+
+    def test_empty_activity_yields_none_defaults(self) -> None:
+        # The blocked-row contract: an empty activity dict must collapse to the
+        # same None/False defaults the row formerly wrote literally.
+        base = top._base_row({}, now=_now())
+        self.assertIsNone(base["last_command"])
+        self.assertFalse(base["command_running"])
+        self.assertIsNone(base["last_write"])
+        self.assertIsNone(base["last_write_seconds"])
+        self.assertIsNone(base["last_text"])
+        self.assertIsNone(base["last_activity_seconds"])
+        self.assertIsNone(base["tokens"])
+
+    def test_assemble_row_activity_portion_equals_base(self) -> None:
+        activity = {"last_command": "x", "command_running": False, "last_write": None,
+                    "last_text": "hi", "last_activity_ts": None, "tokens": None}
+        claim = {"phase_id": "p", "started_at": "2026-06-03T00:00:00Z", "pid": os.getpid()}
+        row = top.assemble_row(claim, activity, now=_now())
+        for k, v in top._base_row(activity, now=_now()).items():
+            self.assertEqual(row[k], v)
+
+    def test_assemble_blocked_row_activity_portion_is_base_defaults(self) -> None:
+        # The blocked row is the one whose 7 inline activity literals this phase
+        # deleted; lock that it now reproduces _base_row({})'s None/False
+        # defaults exactly, so a future edit that feeds it non-empty activity (or
+        # .update()s over a base key) can't silently ship stale CMD/WROTE cells.
+        blocker = {"phase_id": "p", "question": "Which base?", "asked_at": "2026-06-03T00:07:00Z"}
+        row = top.assemble_blocked_row(blocker, now=_now())
+        for k, v in top._base_row({}, now=_now()).items():
+            self.assertEqual(row[k], v)
 
 
 class GatherRowsTest(GitProjectTestCase):
@@ -1288,9 +1346,6 @@ class HandleKeyTest(unittest.TestCase):
 class AssembleRowNewKeysTest(unittest.TestCase):
     """assemble_row exposes the claim-derived keys the new metrics read."""
 
-    def _now(self) -> _dt.datetime:
-        return _dt.datetime(2026, 6, 3, 0, 10, 0, tzinfo=_dt.UTC)
-
     def _activity(self) -> dict:
         return {"last_command": None, "last_write": None, "last_text": None,
                 "last_activity_ts": None, "command_running": False, "tokens": None}
@@ -1301,14 +1356,14 @@ class AssembleRowNewKeysTest(unittest.TestCase):
             "attempts": 2, "lease_expires": "2026-06-03T00:25:00Z",
             "stuck_tool_emitted_at": "2026-06-03T00:08:00Z",
         }
-        row = top.assemble_row(claim, self._activity(), now=self._now())
+        row = top.assemble_row(claim, self._activity(), now=_now())
         self.assertEqual(row["attempts"], 2)
         self.assertAlmostEqual(row["lease_remaining_seconds"], 15 * 60, delta=1)
         self.assertTrue(row["stuck"])
 
     def test_no_stuck_marker_is_false(self) -> None:
         claim = {"phase_id": "p", "started_at": "2026-06-03T00:00:00Z", "pid": os.getpid()}
-        row = top.assemble_row(claim, self._activity(), now=self._now())
+        row = top.assemble_row(claim, self._activity(), now=_now())
         self.assertFalse(row["stuck"])
         self.assertIsNone(row["attempts"])
         self.assertIsNone(row["lease_remaining_seconds"])
@@ -1316,7 +1371,7 @@ class AssembleRowNewKeysTest(unittest.TestCase):
     def test_expired_lease_is_negative(self) -> None:
         claim = {"phase_id": "p", "started_at": "2026-06-03T00:00:00Z", "pid": os.getpid(),
                  "lease_expires": "2026-06-03T00:05:00Z"}  # 5 min before `now`
-        row = top.assemble_row(claim, self._activity(), now=self._now())
+        row = top.assemble_row(claim, self._activity(), now=_now())
         self.assertLess(row["lease_remaining_seconds"], 0)
 
 
