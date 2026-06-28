@@ -30,8 +30,8 @@
 
 **Approval: APPROVED 2026-06-28**
 
-SHIPPED: `refactor` (`_base_row` extraction; suite 1913 green, basedpyright clean; key order byte-preserved). Commit pending this phase's bookkeeping.
-NEXT phase: `discover`. **Read `plans/session-activity-discover.md` FIRST**, then execute. Its 3 binding decisions: passive non-recursive glob per registered project_root; freshness `SESSION_FRESH_SECONDS = 300`; name precedence customTitle→aiTitle→lastPrompt→`project:sid[:8]`; dedup vs claim session-ids by stem.
+SHIPPED: `refactor` (`2cbb203`). `discover` complete (suite green, basedpyright clean; xhigh /code-review applied — dedup by resolved path, full D10 keys on session rows, `_confirms` reuse), commit pending bookkeeping.
+NEXT phase: `classify`. **Read `plans/session-activity-classify.md` FIRST**, then execute. Its binding decisions: check `session` BEFORE the dead path in EVERY render surface (curses `_liveness_cell`/`_m_health`, web `toView`); NAME reads `session_name`; feed keys sessions by `(proj, sid)` reusing `locate_transcript`; session marker `sess`/`SESS`. NOTE: the classify shard's "Carried from P1 /code-review" block lists two render gaps P1 leaves (live session reads `dead`; name shows `project/None·None`) — those ARE this phase's first fixes.
 Line hints below were measured at `7dbe001`; re-anchor by symbol.
 
 Binding decisions carried inline (so a compaction that drops the shard still shows them):

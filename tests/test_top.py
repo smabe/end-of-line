@@ -381,6 +381,153 @@ class GatherRowsTest(GitProjectTestCase):
         self.assertEqual(rows[0]["phase_id"], "a")
 
 
+class SessionNameTest(unittest.TestCase):
+    """Display-name precedence over a session's tail records:
+    customTitle > aiTitle > lastPrompt > `<project>:<short-id>`."""
+
+    def test_custom_title_wins(self) -> None:
+        recs = [
+            {"type": "ai-title", "aiTitle": "Auto Title"},
+            {"type": "last-prompt", "lastPrompt": "hey there"},
+            {"type": "custom-title", "customTitle": "My Name"},
+        ]
+        self.assertEqual(top._session_name(recs, project="p", session_id="abcdef123"), "My Name")
+
+    def test_ai_title_when_no_custom(self) -> None:
+        recs = [{"type": "ai-title", "aiTitle": "Auto"}, {"type": "last-prompt", "lastPrompt": "x"}]
+        self.assertEqual(top._session_name(recs, project="p", session_id="abcdef123"), "Auto")
+
+    def test_last_prompt_when_no_titles(self) -> None:
+        recs = [{"type": "last-prompt", "lastPrompt": "do the thing"}]
+        self.assertEqual(top._session_name(recs, project="p", session_id="abcdef123"), "do the thing")
+
+    def test_fallback_project_short_id(self) -> None:
+        self.assertEqual(
+            top._session_name([], project="myrepo", session_id="abcdef123456"), "myrepo:abcdef12"
+        )
+
+
+class AssembleSessionRowTest(unittest.TestCase):
+    def test_session_discriminators_plus_base_activity(self) -> None:
+        activity = {"last_command": "ls", "command_running": True, "tokens": {"x": 1},
+                    "last_activity_ts": "2026-06-03T00:09:55Z"}
+        row = top.assemble_session_row("sess-1", "My Session", activity, now=_now())
+        self.assertTrue(row["session"])
+        self.assertEqual(row["session_name"], "My Session")
+        self.assertEqual(row["session_id"], "sess-1")
+        self.assertEqual(row["last_command"], "ls")
+        self.assertTrue(row["command_running"])
+        # Claim-only keys zero-filled (no claim/phase/lease for a passive session).
+        self.assertIsNone(row["phase_id"])
+        self.assertIsNone(row["attempts"])
+        self.assertIsNone(row["lease_remaining_seconds"])
+        # Base activity block reproduced exactly.
+        for k, v in top._base_row(activity, now=_now()).items():
+            self.assertEqual(row[k], v)
+
+
+class SessionRowsTest(GitProjectTestCase):
+    """gather_rows surfaces fresh non-claim Claude sessions in registered
+    projects, deduped against live worker claims."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._pr = TemporaryDirectory()
+        self.addCleanup(self._pr.cleanup)
+        self.projects_root = Path(self._pr.name)
+        self.reg_root = registry.entries()[0].project_root
+        self.fresh = _now().timestamp() - 100
+        self.stale = _now().timestamp() - (top.SESSION_FRESH_SECONDS + 100)
+
+    def _sess(self, stem, *, records=None, mtime=None, cwd=None, sidechain=False) -> Path:
+        cwd = cwd or self.reg_root
+        recs = records if records is not None else [
+            _asst(text="working", tool="Bash", tool_input={"command": "ls"}, tool_id="b1", cwd=cwd),
+        ]
+        if sidechain:
+            for r in recs:
+                r["isSidechain"] = True
+        d = self.projects_root / top.encode_project_dir(self.reg_root)
+        return _write_jsonl(d / f"{stem}.jsonl", recs,
+                            mtime=mtime if mtime is not None else self.fresh)
+
+    def _rows(self) -> list[dict]:
+        return top.gather_rows(projects_root=self.projects_root, now=_now())
+
+    def test_fresh_session_becomes_row(self) -> None:
+        self._sess("live-sess")
+        rows = self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["session"])
+        self.assertEqual(rows[0]["session_id"], "live-sess")
+        self.assertEqual(rows[0]["last_command"], "ls")
+        self.assertEqual(rows[0]["project"], Path(self.reg_root).name)
+
+    def test_stale_session_skipped(self) -> None:
+        self._sess("old-sess", mtime=self.stale)
+        self.assertEqual(self._rows(), [])
+
+    def test_sidechain_skipped(self) -> None:
+        self._sess("sub", sidechain=True)
+        self.assertEqual(self._rows(), [])
+
+    def test_cwd_mismatch_skipped(self) -> None:
+        self._sess("foreign", cwd="/some/other/proj")
+        self.assertEqual(self._rows(), [])
+
+    def test_claimed_session_not_doubled(self) -> None:
+        # Worker claim (session_id "wsess") + its transcript, plus an unrelated
+        # fresh session. Expect 1 worker row + 1 session row — never a dup.
+        self._claim("a")
+        with st.mutate(self.state_path) as data:
+            data["current_claim"]["session_id"] = "wsess"
+        self._sess("wsess")
+        self._sess("other")
+        rows = self._rows()
+        session_ids = sorted(r["session_id"] for r in rows if r.get("session"))
+        self.assertEqual(session_ids, ["other"])
+        self.assertEqual(sum(1 for r in rows if not r.get("session")), 1)
+
+    def test_claimed_session_deduped_without_session_id(self) -> None:
+        # The recommended hardened template omits {session_id}, so a real claim
+        # carries none. Dedup must STILL fire — via the worker's resolved
+        # transcript path, not the absent sid. The worker's transcript is the
+        # newest fresh file in its dir (what locate_transcript resolves to).
+        self._claim("a")  # no session_id stamped, as the hardened template yields
+        self._sess("wsess", mtime=_now().timestamp() - 50)   # newest -> worker's
+        self._sess("other", mtime=_now().timestamp() - 150)  # an unrelated session
+        rows = self._rows()
+        session_ids = sorted(r["session_id"] for r in rows if r.get("session"))
+        self.assertEqual(session_ids, ["other"])  # wsess deduped by path
+        self.assertEqual(sum(1 for r in rows if not r.get("session")), 1)
+
+    def test_empty_transcript_no_row_no_crash(self) -> None:
+        d = self.projects_root / top.encode_project_dir(self.reg_root)
+        _write_jsonl(d / "empty.jsonl", [], mtime=self.fresh)
+        self.assertEqual(self._rows(), [])  # no cwd record -> skipped, not raised
+
+    def test_name_from_custom_title(self) -> None:
+        self._sess("named", records=[
+            {"type": "custom-title", "customTitle": "My Work", "cwd": self.reg_root,
+             "isSidechain": False},
+            _asst(text="hi", cwd=self.reg_root),
+        ])
+        self.assertEqual(self._rows()[0]["session_name"], "My Work")
+
+    def test_sessions_sort_after_workers(self) -> None:
+        # Worker gets its own (session_id-resolved) transcript so the separate
+        # session isn't claimed out; then assert the tier order worker→session.
+        self._claim("a")
+        with st.mutate(self.state_path) as data:
+            data["current_claim"]["session_id"] = "wsess"
+        self._sess("wsess")  # the worker's own transcript
+        self._sess("zsess")  # a separate non-clu session
+        rows = self._rows()
+        self.assertFalse(rows[0].get("session"))  # worker first
+        self.assertTrue(rows[-1].get("session"))   # session last
+        self.assertEqual(rows[-1]["session_id"], "zsess")
+
+
 class FormatRowsTest(unittest.TestCase):
     def _row(self, **over) -> dict:
         base = {
@@ -708,6 +855,22 @@ class GatherRowsWireContractTest(GitProjectTestCase):
         self.assertEqual(
             set(rows[0]),
             _WIRE_CONTRACT_KEYS | {"blocked", "blocker_question", "blocked_seconds"},
+        )
+
+    def test_session_row_carries_same_keys_plus_session_discriminator(self) -> None:
+        # A non-clu session row must carry the FULL D10 key set (so a row[...]
+        # subscript on /api/workers never KeyErrors) plus the three append-only
+        # session discriminators — the guard now covers every row type.
+        reg_root = registry.entries()[0].project_root
+        d = self.projects_root / top.encode_project_dir(reg_root)
+        _write_jsonl(d / "live.jsonl", [_asst(text="hi", cwd=reg_root)],
+                     mtime=_now().timestamp() - 10)
+        rows = top.gather_rows(projects_root=self.projects_root, now=_now())
+        sess = [r for r in rows if r.get("session")]
+        self.assertEqual(len(sess), 1)
+        self.assertEqual(
+            set(sess[0]),
+            _WIRE_CONTRACT_KEYS | {"session", "session_name", "session_id"},
         )
 
 

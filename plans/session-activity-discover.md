@@ -29,6 +29,35 @@ See master `plans/session-activity.md`. Binding here:
 - **Rationale:** multiple plans can share one `project_root`; scanning per-entry would re-glob the same dir N times and risk N duplicate session rows. Dedup the roots first.
 - **Evidence:** `registry.entries()` → `PlanEntry(project_root, plan_slug, registered_at)`; no built-in distinct-root API (registry.py).
 
+### Finding: dedup by resolved transcript PATH, not just session-id  *(from xhigh /code-review)*
+- The first cut deduped only on `claim.session_id`. But the recommended hardened
+  template (`examples/hardened.orchestrator.json`) omits `{session_id}`, so
+  `dispatch.py` leaves it `None` and it's never stamped — dedup was inert, and a
+  no-worktree worker double-listed (worker row + phantom session row). Fix:
+  `gather_rows` collects the worker's RESOLVED `locate_transcript` path into
+  `claimed_paths`; `gather_session_rows` skips any file in `claimed_paths` (sid
+  kept as a belt). Robust regardless of the template. Test
+  `test_claimed_session_deduped_without_session_id` reflects the shipped config.
+- Inherent no-session_id limit: with two fresh transcripts in one dir and no sid,
+  `locate_transcript` picks the newest as "the worker", so which file is labeled
+  worker vs session can be wrong — but never DOUBLE-shown. Full disambiguation
+  needs a session_id; out of scope (master non-goal: contamination).
+
+### Finding: session rows carry the FULL D10 key set  *(from xhigh /code-review)*
+- Session rows initially omitted `max_attempts`/`phase_index`/`phase_total` (set
+  only in `gather_rows` for worker/blocked rows), so `set(session_row) !=`
+  the wire contract and a `row[key]` subscript on `/api/workers` could KeyError
+  → 500. Fix: `assemble_session_row` sets all three to `None`. The wire-contract
+  guard now exercises a session row (`test_session_row_carries_same_keys...`), so
+  a future missed key screams — which is why the claimless zero-fill scaffold was
+  NOT extracted (only 2 occurrences; the guard covers the omission risk).
+- Other applied cleanups: `gather_session_rows` reuses `_confirms` (was inline);
+  `gather_rows` hands it the already-filtered roots (registry scanned once).
+- Deviation from this shard: name derivation reads the TAIL records (reused from
+  the activity read) rather than a separate head scan — titles emitted before the
+  tail window fall back to lastPrompt/`project:sid`. Display nicety, not
+  correctness; avoids a second file read.
+
 ## Failure modes to anticipate
 - **Cross-session contamination (CC #26964):** two live sessions in one dir leak records into each other's files; a tailed record may belong to another session. Mitigation (in-scope per master non-goal): when extracting activity for a session, the row's `session_id` is the file stem — acceptable for v1; note that activity could momentarily reflect a sibling. Full per-record `sessionId` filtering deferred.
 - **Filename ≠ internal sessionId (CC #63904):** a synced `<uuid>.jsonl` whose in-file `sessionId` differs. `_identity` reads cwd (not sessionId) for confirm; the stem is still the feed `tid`. Low impact for local sessions; note it.

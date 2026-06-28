@@ -8,10 +8,13 @@ PID liveness) into a render-agnostic row dict.
 
 Why the locator is careful: `~/.claude/projects/<enc>` encodes the worker's cwd
 lossily (every non-ascii-alnum char -> '-', non-reversible), and one dir holds
-many `<session-id>.jsonl` files (retries) plus separate `isSidechain` subagent
-transcripts. So we forward-encode the known cwd to find the dir, then *confirm*
-each candidate by its in-file `cwd` field and reject sidechains — never trust
-the dir name or newest-mtime alone.
+many `<session-id>.jsonl` files (retries). On current Claude Code (v2.1.174)
+subagent transcripts moved out to a per-session `<sid>/subagents/` subdir, so
+the non-recursive `*.jsonl` glob already excludes them; the `isSidechain`
+rejection in `_confirms` stays as belt-and-suspenders against an older layout.
+So we forward-encode the known cwd to find the dir, then *confirm* each
+candidate by its in-file `cwd` field and reject sidechains — never trust the dir
+name or newest-mtime alone.
 """
 
 from __future__ import annotations
@@ -37,6 +40,12 @@ _WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 # is well within the first lines in practice. Bounded so a huge transcript is
 # never read in full just to identify it.
 _IDENTITY_SCAN_LINES = 200
+
+# A non-clu session is shown only while its transcript is "live": modified
+# within this window. No reliable end-of-session marker exists in the JSONL
+# (CC #27361), so mtime is the only liveness signal; 300s matches the community
+# idle threshold (claude-code-trace SESSION_IDLE_THRESHOLD_SECONDS).
+SESSION_FRESH_SECONDS = 300
 
 
 def encode_project_dir(cwd: Path | str) -> str:
@@ -354,6 +363,113 @@ def assemble_blocked_row(blocker: dict, now: _dt.datetime | None = None) -> dict
     }
 
 
+def _session_name(records: list[dict], *, project: str, session_id: str) -> str:
+    """Best display name from a session's tail records: a user-set `customTitle`
+    beats the auto-generated `aiTitle` beats the latest prompt; falls back to
+    `<project>:<short-id>` when no title record is in the read window. (A title
+    emitted before the tail window falls back to the prompt / short-id — a
+    display nicety, not a correctness concern.) Record shapes are sidecar types
+    keyed by session, empirically present on CC v2.1.174."""
+    custom = ai = last_prompt = None
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rtype = rec.get("type")
+        if rtype == "custom-title" and rec.get("customTitle"):
+            custom = rec["customTitle"]
+        elif rtype == "ai-title" and rec.get("aiTitle"):
+            ai = rec["aiTitle"]
+        elif rtype == "last-prompt" and rec.get("lastPrompt"):
+            last_prompt = rec["lastPrompt"]
+    return custom or ai or last_prompt or f"{project}:{session_id[:8]}"
+
+
+def assemble_session_row(
+    session_id: str, name: str, activity: dict, now: _dt.datetime | None = None
+) -> dict:
+    """A non-clu Claude session row: transcript activity with no claim, phase, or
+    lease. Carries the FULL D10 key set a worker/blocked row has (so both render
+    surfaces and `clu serve` read identical keys and a `row[...]` subscript never
+    KeyErrors) — every claim/plan-derived field zero-filled, the way
+    `assemble_blocked_row` zero-fills — plus the append-only `session`/
+    `session_name`/`session_id` discriminators. `alive` is `None`: the PID
+    liveness probe doesn't apply to a passively-discovered session. The render
+    surfaces must branch on `session` BEFORE the dead path (same rule as
+    `blocked`); that routing lands in the `classify` phase — until then a session
+    row renders with the generic dead/`—` cells."""
+    return {
+        "phase_id": None,
+        "ran_seconds": None,
+        "heartbeat_age_seconds": None,
+        "alive": None,
+        **_base_row(activity, now),
+        "attempts": None,
+        "lease_remaining_seconds": None,
+        "stuck": False,
+        # Plan-config-derived D10 keys gather_rows sets for worker/blocked rows;
+        # a session has no plan, so they're None — but present, so the wire
+        # contract holds for every row type.
+        "max_attempts": None,
+        "phase_total": None,
+        "phase_index": None,
+        # Append-only session discriminator (D10) — mirrored into toView.
+        "session": True,
+        "session_name": name,
+        "session_id": session_id,
+    }
+
+
+def gather_session_rows(
+    roots: set[str],
+    *,
+    projects_root: Path = PROJECTS_ROOT,
+    now: _dt.datetime | None = None,
+    claimed_paths: set[Path] | None = None,
+    claimed_sids: set[str] | None = None,
+) -> list[dict]:
+    """One row per fresh, non-claim Claude session in a registered project's
+    transcript dir. A session qualifies when it's a main-session transcript (not
+    a sidechain) whose in-file cwd is the project root (`_confirms`, the same
+    check the worker locator uses), it was modified within `SESSION_FRESH_SECONDS`,
+    and it isn't already a live worker's transcript. Dedup is by the worker's
+    resolved transcript PATH (`claimed_paths`) first — robust even when the
+    dispatch template omits `{session_id}` so the claim carries none — and by
+    `claimed_sids` as a belt. `roots` is the caller's already-project-filtered set
+    of registered root strings (gather_rows hands them over so the registry is
+    scanned once). Freshest first; per-file tolerant — an odd/unreadable file is
+    skipped, never raised."""
+    claimed_paths = claimed_paths or set()
+    claimed_sids = claimed_sids or set()
+    now_ts = (now or _dt.datetime.now(_dt.UTC)).timestamp()
+    scored: list[tuple[float, dict]] = []
+    for root in roots:
+        d = projects_root / encode_project_dir(root)
+        if not d.is_dir():
+            continue
+        for f in d.glob("*.jsonl"):
+            if f in claimed_paths or f.stem in claimed_sids:
+                continue
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            if now_ts - mtime >= SESSION_FRESH_SECONDS:
+                continue
+            if not _confirms(f, root):  # main-session transcript whose cwd is root
+                continue
+            records = tail_records(f)
+            project = Path(root).name
+            row = assemble_session_row(
+                f.stem, _session_name(records, project=project, session_id=f.stem),
+                extract_activity(records), now=now,
+            )
+            row["plan"] = None
+            row["project"] = project
+            scored.append((mtime, row))
+    scored.sort(key=lambda mr: mr[0], reverse=True)  # freshest first
+    return [r for _m, r in scored]
+
+
 def gather_rows(
     *,
     projects_root: Path = PROJECTS_ROOT,
@@ -367,25 +483,35 @@ def gather_rows(
     nothing rather than raising. A corrupt host registry is not swallowed — it
     surfaces rather than masquerading as an empty dashboard.
 
-    Blocked rows sort to the top (stable): a plan waiting on the operator is the
-    single most actionable state. Running/dead rows keep registry order.
+    Three stable tiers: blocked plans sort to the top (a plan waiting on the
+    operator is the single most actionable state), then running/dead clu workers
+    in registry order, then non-clu Claude sessions (`gather_session_rows`) —
+    fresh transcripts in registered projects that aren't a live worker.
     """
     rows: list[dict] = []
+    roots: set[str] = set()  # the project-filtered roots, handed to the session scan
+    claimed_paths: set[Path] = set()  # a live worker's own transcript -> not a session
+    claimed_sids: set[str] = set()  # belt: dedup by claim session id where present
     for e in registry.entries():
         if project_filter is not None and (
             Path(e.project_root).resolve() != Path(project_filter).resolve()
         ):
             continue
+        roots.add(e.project_root)
         data = registry.load_entry_state(e)
         if not data:
             continue
         claim = data.get("current_claim")
         if claim:
+            if claim.get("session_id"):
+                claimed_sids.add(claim["session_id"])
             wt = st.get_worktree(data)
             cwd = Path(wt["path"]) if wt and wt.get("path") else Path(e.project_root)
             tpath = locate_transcript(
                 cwd, projects_root=projects_root, session_id=claim.get("session_id")
             )
+            if tpath:
+                claimed_paths.add(tpath)  # the worker's own transcript, by path
             records = tail_records(tpath) if tpath else []
             row = assemble_row(claim, extract_activity(records), now=now)
         else:
@@ -414,10 +540,19 @@ def gather_rows(
         row["phase_total"] = len(phases) or None
         row["phase_index"] = (ids.index(phase_id) + 1) if phase_id in ids else None
         rows.append(row)
-    # Blocked-to-top, stable: blocked rows first, everything else in registry
-    # order. Web sticky-by-identity selection re-resolves by key, so a reorder
-    # is safe.
-    rows.sort(key=lambda r: 0 if r.get("blocked") else 1)
+    # Non-clu sessions: fresh transcripts in the same registered projects that
+    # aren't a live worker's own transcript. Appended after the clu rows; the
+    # stable sort below groups them. Reuses the roots already filtered above so
+    # the registry isn't scanned twice.
+    rows += gather_session_rows(
+        roots, projects_root=projects_root, now=now,
+        claimed_paths=claimed_paths, claimed_sids=claimed_sids,
+    )
+    # Stable grouping: blocked plans first (most actionable), then running/dead
+    # clu workers in registry order, then non-clu sessions (freshest first, as
+    # gather_session_rows already ordered them). Web sticky-by-identity selection
+    # re-resolves by key, so a reorder is safe.
+    rows.sort(key=lambda r: 0 if r.get("blocked") else 2 if r.get("session") else 1)
     return rows
 
 

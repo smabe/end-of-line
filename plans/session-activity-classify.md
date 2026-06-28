@@ -28,6 +28,21 @@ See master `plans/session-activity.md`. Binding here:
 - `tests/`: curses — session row renders `sess` liveness + `—` phase + name from `session_name` (extend `test_top_sessions.py` or the render test module). webserver — `feed_json` with `sid` resolves a session transcript and returns events; with a bad/unknown `sid` → 404; claim route still works. web `toView` is JS (no python test) — assert via a comment/manual note, or if the project has an index.html render test harness, extend it (grep `tests/` for index.html coverage).
 
 ## Decisions & findings
+### Carried from P1 `discover` /code-review (xhigh) — these are REQUIRED, not optional
+P1 ships session rows in `gather_rows` that render with the GENERIC cells until
+this phase routes on `session`. Two confirmed findings name the exact gap; both
+are already in this shard's Work, flagged here so they aren't dropped:
+- **alive=None reads as `dead`.** A session row sets `alive=None`. `_liveness_cell`
+  (top.py) and `top_registry._m_health` only special-case `blocked`, so a LIVE
+  session shows red `dead`/health glyph in curses; web `toView` (index.html:278
+  `r.alive !== false`) reads `null` as alive → the two surfaces disagree. Fix:
+  branch on `session` BEFORE the dead path in ALL of `_liveness_cell`,
+  `_m_health`, and web `toView` (mirror the `blocked` ordering).
+- **`session_name` is never read.** The NAME cell is built from
+  `project/plan·phase_id` (`_row_cells`, `top_registry._m_name`); a session has
+  `plan=None`,`phase_id=None`, so it renders `<project>/None·None`. Fix: NAME
+  reads `session_name` for session rows.
+
 ### Decision: feed keys sessions by `(proj, sid)`, reusing `locate_transcript`  *(status: active)*
 - **Rationale:** a session has no claim/worktree, so the worker resolver's `(plan, proj, phase) → claim → worktree-cwd` path doesn't apply. But the session's cwd IS the registered `project_root` (discovery only emits sessions found in that encoded dir), so `locate_transcript(project_root, session_id=sid)` re-resolves the exact file statelessly — same primitive the worker path uses, no new transcript-finding logic.
 - **Alternatives considered:** pass the absolute transcript path from client → server — rejected (lets a client request any file on disk; the registry-scoped resolver is the security boundary, mirroring `resolve_feed_transcript`'s "proj matched against basenames, never joined into a path").
