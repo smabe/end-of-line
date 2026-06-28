@@ -77,6 +77,7 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 .statusbar{display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1px solid var(--edge);
   font-size:11.5px;letter-spacing:.05em;color:var(--cy);text-transform:uppercase}
 .statusbar .run{color:var(--teal)} .statusbar .blk{color:var(--amber)} .statusbar .dead{color:var(--red)}
+.statusbar .sess{color:var(--cy)}
 .statusbar .sep{color:var(--faint)} .statusbar .age{margin-left:auto;color:var(--dim);text-transform:none}
 .foot{padding:8px 16px;border-top:1px solid var(--edge);color:var(--dim);font-size:11px;letter-spacing:.03em}
 .foot b{color:var(--cy)}
@@ -98,6 +99,9 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
    claim. Distinct hue from .dot.dead — must-act vs work-died. (#86 follow-on.) */
 .dot.blocked{background:var(--amber);box-shadow:0 0 8px var(--amber);animation:beat 2.4s infinite}
 .dot.dead{background:var(--red);box-shadow:0 0 8px var(--red);animation:none}
+/* session = a non-clu Claude session (cyan, pulsing = live), not a fleet worker.
+   Distinct hue from teal(ok)/amber(blocked)/red(dead). (session-activity) */
+.dot.session{background:var(--cy);box-shadow:0 0 8px var(--cy);animation:beat 2.4s infinite}
 .who{display:flex;flex-direction:column;min-width:0}
 .who .id{color:#dff6fb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .who .id .ph{color:var(--cy)}
@@ -106,6 +110,7 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 .badge{font-size:9.5px;font-weight:700;letter-spacing:.1em;padding:1px 5px;border-radius:3px}
 .badge.blk{color:var(--amber);border:1px solid var(--amber)}
 .badge.dead{color:var(--red);border:1px solid var(--red)}
+.badge.sess{color:var(--cy);border:1px solid var(--cy)}
 .metrics{display:flex;gap:14px;font-size:11px;color:var(--dim);white-space:nowrap}
 .metrics b{color:var(--ink);font-weight:500}
 .metrics .a-ok{color:var(--teal)} .metrics .a-warn{color:var(--amber)}
@@ -267,7 +272,6 @@ function tokenTotal(usage){
   }
   return seen ? total : null;
 }
-const DOT = {ok:"ok", warn:"warn", dead:"dead", blocked:"blocked"};
 function actCls(w){
   if (w.dead || w.act == null) return "";
   return w.act <= 15 ? "a-ok" : w.act <= 60 ? "" : "a-warn";
@@ -282,14 +286,18 @@ function toView(r){
   // so the two dashboards never disagree. `act > 60` is the pinned threshold
   // (mirrored below in Python); stuck + a heartbeat loop silent past 25min are
   // the two corroborating wedge signals folded in.
-  // `r.blocked` is checked FIRST: a blocked row is claimless so `alive` is
-  // false — without this it would mis-classify as "dead". Mirrors the curses
-  // _m_health blocked-before-worker_health ordering (clu-dashboard-blocked).
-  const health = r.blocked ? "blocked"
+  // `r.session` then `r.blocked` are checked FIRST: a session has alive=null and
+  // a blocked row alive=false, so either would mis-classify as "dead". Mirrors
+  // the curses _m_health session/blocked-before-worker_health ordering.
+  const health = r.session ? "session"
+    : r.blocked ? "blocked"
     : !alive ? "dead"
     : (r.stuck || act == null || act > 60 || (hb != null && hb > 1500)) ? "warn" : "ok";
   return {
     proj: r.project, plan: r.plan, phase: r.phase_id,
+    // Non-clu session discriminator (append-only D10) — a passively-discovered
+    // Claude session, not a fleet worker. name shown instead of plan·phase.
+    session: r.session === true, sessionName: r.session_name, sessionId: r.session_id,
     health, dead: !alive,
     ran: r.ran_seconds, act, hb,
     cmd: r.last_command || "—", running: !!r.command_running,
@@ -305,8 +313,22 @@ function toView(r){
     blockedSeconds: r.blocked_seconds,
   };
 }
-// Identity of a worker — stable across polls even as the list reorders.
-function wkey(w){ return `${w.proj} ${w.plan} ${w.phase}`; }
+// Identity of a row — stable across polls even as the list reorders. A session
+// has no plan/phase (both null), so key it by session id to avoid collisions.
+function wkey(w){ return w.session ? `sess ${w.sessionId}` : `${w.proj} ${w.plan} ${w.phase}`; }
+
+// Identity markup for the list .id slot and the detail header — the single web
+// source mirroring Python top.row_display_name (project-prefixed for BOTH a clu
+// worker and a non-clu session, so the two dashboards never disagree on a name).
+function rowIdHtml(w){
+  return w.session
+    ? `${esc(w.proj)} <span class="ph">· ${esc(w.sessionName || w.sessionId)}</span>`
+    : `${esc(w.proj)}/${esc(w.plan)}<span class="ph">·${esc(w.phase)}</span>`;
+}
+// Plain-text identity for the strip ticker (same precedence, no markup).
+function rowTitle(w){
+  return w.session ? `${w.proj} · ${w.sessionName || w.sessionId}` : `${w.proj}/${w.plan}·${w.phase}`;
+}
 
 // ---- in-place rendering ----------------------------------------------------
 // The DOM is rebuilt only when its *shape* changes (geometry, drill, the empty
@@ -337,17 +359,21 @@ function statusInner(){
     const msg = connected ? "no active workers" : "connecting…";
     return `<span class="run">${esc(msg)}</span><span class="age"></span>`;
   }
-  // Blocked rows are claimless (dead=true) but are their own category — pull
-  // them out before the running/dead split so they don't inflate the dead count.
+  // Blocked rows and non-clu sessions are their own categories — pull BOTH out
+  // before the running/dead split so neither inflates the dead count. Mirrors
+  // top_registry.fleet_summary.
   const blocked = WORKERS.filter(w => w.blocked);
-  const rest = WORKERS.filter(w => !w.blocked);
+  const sessions = WORKERS.filter(w => w.session);
+  const rest = WORKERS.filter(w => !w.blocked && !w.session);
   const alive = rest.filter(w => !w.dead);
-  const r = alive.length, d = rest.length - r, b = blocked.length;
+  const r = alive.length, d = rest.length - r, b = blocked.length, s = sessions.length;
   const acts = alive.map(w => w.act).filter(x => x != null);
   const oldest = acts.length ? age(Math.max(...acts)) : "—";
   return `<span class="run">${r} running</span><span class="sep">·</span>` +
     (b ? `<span class="blk">${b} blocked</span><span class="sep">·</span>` : "") +
-    `<span class="dead">${d} dead</span><span class="age">oldest-ACT ${oldest}</span>`;
+    `<span class="dead">${d} dead</span>` +
+    (s ? `<span class="sep">·</span><span class="sess">${s} session${s === 1 ? "" : "s"}</span>` : "") +
+    `<span class="age">oldest-ACT ${oldest}</span>`;
 }
 // The running-* only makes sense beside a visible command; under
 // --no-transcript the command is hidden, so suppress the star too.
@@ -377,15 +403,18 @@ function buildRow(w){
   const el = document.createElement("div");
   el.className = "row";
   el.dataset.key = wkey(w);
+  // The name sits in its own `.nm` slot, patched every poll — a session's name
+  // can change mid-run (project:shortid fallback → aiTitle/customTitle) without
+  // a structural rebuild, so a build-once name would otherwise go stale.
   el.innerHTML =
     `<span class="dot"></span>` +
-    `<div class="who"><div class="id">${esc(w.proj)}/${esc(w.plan)}` +
-      `<span class="ph">·${esc(w.phase)}</span> <span class="bdg"></span>${rowPhase(w)}</div>` +
+    `<div class="who"><div class="id"><span class="nm"></span> <span class="bdg"></span>${rowPhase(w)}</div>` +
       `<div class="sub"></div></div>` +
     `<div class="metrics"></div>`;
   const refs = {
     el,
     dot: el.querySelector(".dot"),
+    nm: el.querySelector(".nm"),
     bdg: el.querySelector(".bdg"),
     sub: el.querySelector(".sub"),
     met: el.querySelector(".metrics"),
@@ -400,7 +429,8 @@ function buildRow(w){
 }
 function patchRow(refs, w, isSel){
   refs.el.className = "row" + (isSel ? " sel" : "");
-  refs.dot.className = "dot " + DOT[w.health];
+  refs.dot.className = "dot " + w.health;  // health IS the dot class (ok/warn/dead/blocked/session)
+  setHTML(refs.nm, rowIdHtml(w));          // patched: a session's name can change mid-run
   // Blocked is gated BEFORE dead: a blocked row is claimless (dead=true) but
   // reads as needs-you — amber BLK badge, the blocker question in .sub, a
   // blocked-since age in the metrics slot (no PID/RAN/ACT — there's no worker).
@@ -410,7 +440,9 @@ function patchRow(refs, w, isSel){
     setHTML(refs.met, `<span>— blocked ${age(w.blockedSeconds)} —</span>`);
     return;
   }
-  setHTML(refs.bdg, w.dead ? `<span class="badge dead">DEAD</span>` : "");
+  // A session reads as live (SESS badge) — its cmd/ACT render like a worker's.
+  setHTML(refs.bdg, w.session ? `<span class="badge sess">SESS</span>`
+    : w.dead ? `<span class="badge dead">DEAD</span>` : "");
   setHTML(refs.sub, `<span class="cmd">${runStar(w)}${esc(w.cmd)}</span> · ACT ${age(w.act)}`);
   setHTML(refs.met, w.dead
     ? `<span>— pid gone —</span>`
@@ -419,7 +451,9 @@ function patchRow(refs, w, isSel){
       `<span>HB <b>${age(w.hb)}</b></span>`);
 }
 function detailHTML(w){
-  const hc = w.blocked
+  const hc = w.session
+    ? `<span style="color:var(--cy)">● session</span>`
+    : w.blocked
     ? `<span style="color:var(--amber)">● blocked</span>`
     : w.dead
     ? `<span style="color:var(--red)">● dead</span>`
@@ -445,7 +479,7 @@ function detailHTML(w){
       ? `<span class="k">attempts</span><span class="v">${w.attempts}/${w.maxAttempts}</span>` : "") +
     (w.leaseRemaining != null
       ? `<span class="k">lease</span><span class="v">${leaseFmt(w.leaseRemaining)}</span>` : "");
-  return `<div class="dh">${esc(w.proj)} / ${esc(w.plan)} <span class="ph">· ${esc(w.phase)}</span></div>
+  return `<div class="dh">${rowIdHtml(w)}</div>
     <div class="health-chip">${hc}</div>
     <div class="kv">
       ${bl}
@@ -540,7 +574,7 @@ function patch(){
   // Only build the (non-trivial) detail / ticker strings for the container the
   // current geometry actually has — strip has no detail, split/phone no ticker.
   if (detailRef) setHTML(detailRef, detailHTML(w));
-  if (tickerRef) setHTML(tickerRef, `▌ ${esc(w.proj)}/${esc(w.plan)}·${esc(w.phase)} — <b>${esc((w.say || "").slice(0, 90))}</b>`);
+  if (tickerRef) setHTML(tickerRef, `▌ ${esc(rowTitle(w))} — <b>${esc((w.say || "").slice(0, 90))}</b>`);
 }
 // ---- activity feed (/api/feed) ----------------------------------------------
 // A capped scrollback of the selected worker's transcript events, tailed
@@ -592,8 +626,13 @@ async function pollFeed(){
   if (k !== feedKey){ feedKey = k; feedReset(); }
   feedBusy = true;
   try{
-    const q = `plan=${encodeURIComponent(w.plan)}&proj=${encodeURIComponent(w.proj)}` +
-      `&phase=${encodeURIComponent(w.phase)}&cursor=${feedCursor}` +
+    // A session feeds by (proj, sid) — no claim/phase to key on; a worker keeps
+    // the (plan, proj, phase) claim key. Mirrors webserver.feed_json routing.
+    const q = (w.session
+      ? `proj=${encodeURIComponent(w.proj)}&sid=${encodeURIComponent(w.sessionId)}`
+      : `plan=${encodeURIComponent(w.plan)}&proj=${encodeURIComponent(w.proj)}` +
+        `&phase=${encodeURIComponent(w.phase)}`) +
+      `&cursor=${feedCursor}` +
       (feedTid ? `&tid=${encodeURIComponent(feedTid)}` : "");
     const res = await fetch("/api/feed?" + q, {cache: "no-store"});
     if (!res.ok) return;  // 404 etc: nothing to tail right now; retry next tick

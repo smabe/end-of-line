@@ -42,6 +42,8 @@ from end_of_line.top import (
     _fit,
     human_age,
     human_remaining,
+    row_display_name,
+    row_kind,
 )
 
 
@@ -149,7 +151,7 @@ DEFAULT_COLS: tuple[str, ...] = (
     cost="cheap", align="left", max_width=_FLEX_MAX["name"],
 )
 def _m_name(snapshot: Snapshot, row: dict) -> str:
-    return _clean(f"{row.get('project', '?')}/{row.get('plan', '?')}·{row.get('phase_id', '?')}")
+    return _clean(row_display_name(row))
 
 
 @register_metric(
@@ -182,9 +184,10 @@ def _m_hb(snapshot: Snapshot, row: dict) -> object:
     cost="cheap", align="right", fixed_width=4,
 )
 def _m_pid(snapshot: Snapshot, row: dict) -> object:
-    # The same `blk`/`ok`/`dead` label the compact table uses (top._liveness_cell)
-    # — blocked is checked before the dead path, so a `--cols pid` view and the
-    # default view agree for a blocked row (alive=False but needs-you, not dead).
+    # The same `sess`/`blk`/`ok`/`dead` label the compact table uses
+    # (top._liveness_cell) — session + blocked are checked before the dead path
+    # (via row_kind), so a `--cols pid` view and the default view agree for a
+    # session/blocked row (non-live `alive`, but not work-died).
     from end_of_line.top import _liveness_cell
 
     return _liveness_cell(row)
@@ -242,7 +245,10 @@ _HB_WARN_SECONDS = 25 * 60
 # `!` (blocked) is amber "needs-you" — distinct from red `✗` (dead): a blocked
 # plan is waiting on the operator, a dead one's work died. They must read
 # differently at a glance.
-_HEALTH_GLYPH = {"ok": "●", "warn": "◐", "dead": "✗", "blocked": "!"}
+# `◇` (session) is a non-clu Claude session — a passively-discovered transcript,
+# not a clu worker. Hollow diamond reads as "present but outside the fleet",
+# distinct from the filled/cross worker glyphs and the amber `!` blocked.
+_HEALTH_GLYPH = {"ok": "●", "warn": "◐", "dead": "✗", "blocked": "!", "session": "◇"}
 
 
 def worker_health(*, alive: bool, act: float | None, hb: float | None, stuck: bool) -> str:
@@ -299,15 +305,17 @@ def token_human(n: int | float | None) -> str:
 
 @register_metric(
     key="health", label="H", render=lambda v, w: f"{_HEALTH_GLYPH.get(str(v), '?'):<{w}}",
-    sort_key=lambda v: {"blocked": -1, "dead": 0, "warn": 1, "ok": 2}.get(str(v), 3),
+    sort_key=lambda v: {"blocked": -1, "dead": 0, "warn": 1, "ok": 2, "session": 4}.get(str(v), 3),
     cost="cheap", align="left", fixed_width=1,
 )
 def _m_health(snapshot: Snapshot, row: dict) -> str:
-    # Blocked is checked FIRST — a blocked row has `alive=False`, so the
-    # 4-signal `worker_health` fusion (kept pure) would otherwise call it dead.
-    # A plan waiting on the operator is needs-you (amber), not work-died (red).
-    if row.get("blocked"):
-        return "blocked"
+    # `row_kind` (shared with _liveness_cell) checks session + blocked FIRST —
+    # both have a non-live `alive` (None / False), so the 4-signal `worker_health`
+    # fusion (kept pure) would otherwise call them dead. `session`/`blocked` ARE
+    # the health states (both are `_HEALTH_GLYPH` keys); only a real worker fuses.
+    kind = row_kind(row)
+    if kind != "worker":
+        return kind
     return worker_health(
         alive=bool(row.get("alive")),
         act=row.get("last_activity_seconds"),
@@ -453,9 +461,10 @@ def _table(snapshot: Snapshot, *, width: int, cols: tuple[str, ...] | None = Non
 
 
 def fleet_summary(rows: list[dict], width: int) -> str:
-    """The one-line fleet header: `N running · N blocked · N dead · oldest-ACT Xm`.
+    """The one-line fleet header: `N running · N blocked · N dead · N sessions ·
+    oldest-ACT Xm`.
 
-    Mirrors `web/index.html` `header()` — counts come straight from the snapshot
+    Mirrors `web/index.html` `statusInner()` — counts come straight from the snapshot
     rows, the same row dicts `clu serve` renders. The `blocked` count surfaces
     plans waiting on the operator: `clu block` releases the claim, but
     `gather_rows` reads the persisting blocker back into a claimless blocked row
@@ -467,12 +476,20 @@ def fleet_summary(rows: list[dict], width: int) -> str:
     alive = [r for r in rows if r.get("alive")]
     running = len(alive)
     blocked = sum(1 for r in rows if r.get("blocked"))
-    dead = len(rows) - running - blocked
+    sessions = sum(1 for r in rows if r.get("session"))
+    # Sessions and blocked rows both have a non-live `alive`; pull BOTH out of
+    # the dead bucket explicitly (a non-clu session isn't dead work, and a
+    # blocked plan is needs-you) — mirrors web/index.html statusInner().
+    dead = len(rows) - running - blocked - sessions
     acts = [
         act for r in alive if (act := r.get("last_activity_seconds")) is not None
     ]
     oldest = human_age(max(acts)) if acts else "—"
-    return _fit(f"{running} running · {blocked} blocked · {dead} dead · oldest-ACT {oldest}", width)
+    sess_part = f"{sessions} session{'' if sessions == 1 else 's'} · " if sessions else ""
+    return _fit(
+        f"{running} running · {blocked} blocked · {dead} dead · {sess_part}oldest-ACT {oldest}",
+        width,
+    )
 
 
 @register_pane(kind="header", metric_keys=())

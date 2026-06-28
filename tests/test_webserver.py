@@ -11,6 +11,7 @@ import json
 import re
 import ssl
 import threading
+import time
 import unittest
 from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
@@ -789,6 +790,70 @@ class ResolveFeedTranscriptTest(GitProjectTestCase):
         self.assertEqual(resolved, (path, "sibling"))
 
 
+class ResolveSessionTranscriptTest(GitProjectTestCase):
+    """resolve_session_transcript: a non-clu session resolves by (proj, sid),
+    with the same cwd-confirm + sidechain rejection + project scoping as the
+    worker feed — but EXACT (no newest-file fallback) and with no claim."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._pr = TemporaryDirectory()
+        self.addCleanup(self._pr.cleanup)
+        self.projects_root = Path(self._pr.name)
+        self.reg_root = registry.entries()[0].project_root
+        self.proj = Path(self.reg_root).name
+
+    def _transcript(self, name: str, *, cwd: str | None = None, sidechain: bool = False,
+                    mtime: float | None = None) -> Path:
+        rec = _asst(cwd=cwd or self.reg_root)
+        if sidechain:
+            rec["isSidechain"] = True
+        d = self.projects_root / top.encode_project_dir(self.reg_root)
+        return _write_jsonl(d / f"{name}.jsonl", [rec],
+                            mtime=mtime if mtime is not None else time.time())
+
+    def test_resolves_session_to_transcript_and_tid(self) -> None:
+        path = self._transcript("sess-xyz")
+        self.assertEqual(
+            webserver.resolve_session_transcript(
+                self.proj, "sess-xyz", projects_root=self.projects_root
+            ),
+            (path, "sess-xyz"),
+        )
+
+    def test_unknown_project_is_none(self) -> None:
+        self._transcript("sess-xyz")
+        self.assertIsNone(webserver.resolve_session_transcript(
+            "other-proj", "sess-xyz", projects_root=self.projects_root))
+
+    def test_unknown_sid_does_not_fall_back_to_another_session(self) -> None:
+        # A real, fresh session exists in the dir; asking for a DIFFERENT sid must
+        # return None — never that session's tail (the locate_transcript fallback
+        # would have leaked it).
+        self._transcript("sess-xyz")
+        self.assertIsNone(webserver.resolve_session_transcript(
+            self.proj, "nope", projects_root=self.projects_root))
+
+    def test_sidechain_sid_is_none(self) -> None:
+        self._transcript("sub", sidechain=True)
+        self.assertIsNone(webserver.resolve_session_transcript(
+            self.proj, "sub", projects_root=self.projects_root))
+
+    def test_stale_session_is_none(self) -> None:
+        # The feed serves only sessions the dashboard would list — a transcript
+        # idle past SESSION_FRESH_SECONDS resolves to nothing, same definition.
+        self._transcript("old", mtime=time.time() - (top.SESSION_FRESH_SECONDS + 100))
+        self.assertIsNone(webserver.resolve_session_transcript(
+            self.proj, "old", projects_root=self.projects_root))
+
+    def test_project_filter_mismatch_is_none(self) -> None:
+        self._transcript("sess-xyz")
+        self.assertIsNone(webserver.resolve_session_transcript(
+            self.proj, "sess-xyz",
+            project_filter=self.tmp_path / "elsewhere",
+            projects_root=self.projects_root))
+
+
 # --------------------------------------------------------------------------- #
 # serve-activity-feed — /api/feed endpoint over a live server
 # --------------------------------------------------------------------------- #
@@ -809,6 +874,11 @@ class FeedEndpointTest(_ServerCase):
         )
         self.resolve = patcher.start()
         self.addCleanup(patcher.stop)
+        spatcher = mock.patch.object(
+            webserver, "resolve_session_transcript", return_value=(self.transcript, "sess-1")
+        )
+        self.resolve_session = spatcher.start()
+        self.addCleanup(spatcher.stop)
 
     def _feed(self, query: str):
         """GET /api/feed?<query> → (resp, parsed body). Only 200 bodies are
@@ -887,6 +957,28 @@ class FeedEndpointTest(_ServerCase):
         port = self._boot(ServeConfig(host="127.0.0.1", port=0, token="sekret"))
         resp, _ = self._get(port, "/api/feed?plan=p&proj=x&phase=a&cursor=-1")
         self.assertEqual(resp.status, 401)
+
+    def test_session_feed_routes_by_sid(self):
+        # `sid` present routes the session resolver (no plan/phase needed) and
+        # streams that session's transcript tail.
+        resp, data = self._feed("proj=x&sid=sess-1&cursor=-1")
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(self.resolve_session.called)
+        self.assertFalse(self.resolve.called)  # NOT the claim path
+        self.assertEqual(
+            [(e["kind"], e["text"]) for e in data["events"]],
+            [("say", "starting work"), ("tool", "pytest -q")],
+        )
+        self.assertEqual(data["tid"], "sess-1")
+
+    def test_bad_sid_400(self):
+        resp, _ = self._feed("proj=x&sid=..%2Fetc&cursor=-1")
+        self.assertEqual(resp.status, 400)
+
+    def test_unknown_sid_404(self):
+        self.resolve_session.return_value = None
+        resp, _ = self._feed("proj=x&sid=ghost&cursor=-1")
+        self.assertEqual(resp.status, 404)
 
     def test_event_text_truncated_at_cap(self):
         _write_jsonl(self.transcript, [_asst(text="y" * 5000)])

@@ -708,6 +708,86 @@ def _draw_row(**over) -> dict:
     return base
 
 
+def _session_render_row(**over) -> dict:
+    base = top.assemble_session_row(
+        "sess-abc12345", "My Session",
+        {"last_command": "ls -la", "last_text": "looking around",
+         "command_running": False, "last_activity_ts": "2026-06-03T00:09:55Z"},
+        now=_now(),
+    )
+    base["project"] = "myrepo"
+    base["plan"] = None
+    base.update(over)
+    return base
+
+
+class SessionRenderTest(unittest.TestCase):
+    """Curses render routing for a non-clu session row (top.py)."""
+
+    def test_liveness_cell_is_sess(self) -> None:
+        self.assertEqual(top._liveness_cell(_session_render_row()), "sess")
+
+    def test_phase_cell_is_dash(self) -> None:
+        self.assertEqual(top._phase_cell(_session_render_row()), "—")
+
+    def test_display_name_uses_session_name(self) -> None:
+        self.assertEqual(top.row_display_name(_session_render_row()), "myrepo · My Session")
+
+    def test_display_name_worker_unchanged(self) -> None:
+        self.assertEqual(
+            top.row_display_name({"project": "myrepo", "plan": "routing", "phase_id": "impl"}),
+            "myrepo/routing·impl",
+        )
+
+    def test_format_rows_shows_name_and_sess(self) -> None:
+        body = top.format_rows([_session_render_row()], width=200)[1]
+        self.assertIn("My Session", body)
+        self.assertIn("sess", body)
+        self.assertNotIn("dead", body)
+
+    def test_format_detail_shows_name_and_sess(self) -> None:
+        out = "\n".join(top.format_detail([_session_render_row()]))
+        self.assertIn("My Session", out)
+        self.assertIn("sess", out)
+
+
+class SessionRegistryRenderTest(unittest.TestCase):
+    """Registry metric routing for a session row (top_registry)."""
+
+    def setUp(self) -> None:
+        from end_of_line import top_registry
+
+        self.reg = top_registry
+        self.snap = top_registry.Snapshot([_session_render_row()])
+
+    def test_health_metric_returns_session(self) -> None:
+        v = self.reg.METRICS["health"].compute(self.snap, _session_render_row())
+        self.assertEqual(v, "session")
+
+    def test_health_glyph_has_session(self) -> None:
+        self.assertIn("session", self.reg._HEALTH_GLYPH)
+
+    def test_name_metric_uses_session_name(self) -> None:
+        v = self.reg.METRICS["name"].compute(self.snap, _session_render_row())
+        self.assertEqual(v, "myrepo · My Session")
+
+    def test_pid_metric_is_sess(self) -> None:
+        v = self.reg.METRICS["pid"].compute(self.snap, _session_render_row())
+        self.assertEqual(v, "sess")
+
+    def test_fleet_summary_counts_sessions_not_dead(self) -> None:
+        rows = [
+            _session_render_row(),
+            _draw_row(alive=True),
+            _draw_row(alive=False, blocked=True, blocker_question="?"),
+        ]
+        s = self.reg.fleet_summary(rows, 200)
+        self.assertIn("1 running", s)
+        self.assertIn("1 blocked", s)
+        self.assertIn("0 dead", s)     # the session must NOT inflate the dead count
+        self.assertIn("1 session", s)  # surfaced as its own tier
+
+
 class RectTest(unittest.TestCase):
     def test_frozen_geometry(self) -> None:
         from end_of_line.top_render import Rect

@@ -30,8 +30,8 @@
 
 **Approval: APPROVED 2026-06-28**
 
-SHIPPED: `refactor` (`2cbb203`). `discover` complete (suite green, basedpyright clean; xhigh /code-review applied — dedup by resolved path, full D10 keys on session rows, `_confirms` reuse), commit pending bookkeeping.
-NEXT phase: `classify`. **Read `plans/session-activity-classify.md` FIRST**, then execute. Its binding decisions: check `session` BEFORE the dead path in EVERY render surface (curses `_liveness_cell`/`_m_health`, web `toView`); NAME reads `session_name`; feed keys sessions by `(proj, sid)` reusing `locate_transcript`; session marker `sess`/`SESS`. NOTE: the classify shard's "Carried from P1 /code-review" block lists two render gaps P1 leaves (live session reads `dead`; name shows `project/None·None`) — those ARE this phase's first fixes.
+SHIPPED: `refactor` (`2cbb203`), `discover` (`7625dab`). `classify` complete (suite 1948 green, basedpyright + JS-parse clean; xhigh /code-review applied — patched name slot, project-prefixed `rowIdHtml`/`rowTitle`, `row_kind` precedence classifier, session-feed freshness, shared `_project_entries`), commit pending bookkeeping.
+NEXT phase: `agents`. **Read `plans/session-activity-agents.md` FIRST**, then execute. Its binding decisions: spawn-level only (decode parent `Agent`/`Task` tool_use, no child sidechain recursion); new feed kind `agent`; match both `Agent` and `Task` names; prefer `subagent_type`, fall back to `description`. Decoders: `top.extract_activity` (add `last_agent`) + `webserver.record_events` (emit `agent`); web feed-kind styling; docs.
 Line hints below were measured at `7dbe001`; re-anchor by symbol.
 
 Binding decisions carried inline (so a compaction that drops the shard still shows them):

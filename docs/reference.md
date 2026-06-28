@@ -1218,7 +1218,17 @@ edits to the draw loop or the layout engine.
   `phase_index`, `phase_total`), each mirrored into `web/index.html`'s
   `toView` so both renderers see them; nothing was renamed or dropped.
   `tests/test_top.py:GatherRowsWireContractTest` is the guard — it asserts
-  the full key set (19 keys) by exact name.
+  the full key set (19 keys) by exact name, across all three row types.
+- **Three row tiers** share that one key set: a clu worker (claim-derived
+  fields populated), a claimless **blocked** row (the `blocked`/
+  `blocker_question`/`blocked_seconds` discriminators), and a non-clu
+  **session** row (`assemble_session_row` — the `session`/`session_name`/
+  `session_id` discriminators, claim/plan fields `None`). A session is a
+  fresh non-worker Claude transcript in a registered project
+  (`gather_session_rows`); every render surface checks `session` (then
+  `blocked`) BEFORE the dead path, since both carry a non-live `alive`.
+  Health glyph `◇`, PID cell `sess`; the NAME cell shows `session_name`
+  via the shared `top.row_display_name`.
 - Import direction (no module-level cycle): `top_registry` imports pure
   helpers from `top` at module level; `top` imports `top_registry` lazily,
   inside its render functions (mirrors `top_render`).
@@ -1269,13 +1279,22 @@ security layer (token auth, Host-header allowlist, auto self-signed HTTPS).
   plan, no live claim, claim on a different phase, or no transcript →
   `404`. `plan`/`phase` go through `state.validate_slug`; `proj` is
   matched against registry entry basenames, never path-joined.
+  A **non-clu session** row has no claim/phase, so it feeds by session id:
+  `GET /api/feed?proj=<name>&sid=<session-id>&cursor=<n>&tid=<id>`.
+  `sid` present routes the session resolver (validated via
+  `state.validate_slug`); otherwise the claim path above. Same
+  `{events, cursor, tid, reset}` body.
 - `read_feed_window(path, cursor)` / `record_events(rec)` /
   `resolve_feed_transcript(plan, proj, phase, *, project_filter,
-  projects_root)` — the pieces behind `feed_json`: the bounded cursor
-  reader, the per-record event decoder (same record shapes as
-  `top.extract_activity`, but keeping every occurrence rather than the
-  last of each kind), and the registry → claim → worktree-cwd →
-  `locate_transcript` resolution `gather_rows` uses.
+  projects_root)` / `resolve_session_transcript(proj, sid, *,
+  project_filter, projects_root)` — the pieces behind `feed_json`: the
+  bounded cursor reader, the per-record event decoder (same record shapes
+  as `top.extract_activity`, but keeping every occurrence rather than the
+  last of each kind), the registry → claim → worktree-cwd →
+  `locate_transcript` resolution `gather_rows` uses, and the session
+  counterpart that resolves the EXACT `<sid>.jsonl` (no newest-file
+  fallback — an unknown id must resolve to nothing, never another
+  session's tail), `_confirms`-checked the same way.
 - `build_server(cfg) -> _Server` — `ThreadingHTTPServer` (reuse-address,
   daemon threads); wraps the listening socket in TLS when `cfg.tls` is set
   (a wrap failure → `ConfigError`). `_Server.handle_error` is silenced so a

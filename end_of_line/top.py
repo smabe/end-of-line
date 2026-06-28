@@ -602,18 +602,46 @@ def _phase_cell(r: dict) -> str:
     return f"{idx}/{total}" if idx is not None and total is not None else "—"
 
 
-def _liveness_cell(r: dict) -> str:
-    """The PID/liveness label — `blk` / `ok` / `dead`. Single source of truth for
-    the blocked-before-dead correctness rule: a blocked row has `alive=False`,
-    so it would read as `dead` unless `blocked` is checked first. Shared by the
-    compact table (`format_rows`) and the detail meta line (`format_detail`)."""
+def row_display_name(r: dict) -> str:
+    """The identity shown in the NAME column / detail header. A non-clu session
+    has no plan/phase — show its `session_name` under the project; a clu row
+    keeps the `project/plan·phase` form. Single source of truth shared by the
+    compact table (`_row_cells`), the detail header (`format_detail`), and the
+    registry `name` metric (`top_registry._m_name`)."""
+    if r.get("session"):
+        return f"{r.get('project', '?')} · {r.get('session_name', '?')}"
+    return f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}"
+
+
+def row_kind(r: dict) -> str:
+    """The render tier of a row — `session` / `blocked` / `worker`. The single
+    source of the session-before-blocked-before-dead precedence every render
+    surface keys on: both a session (`alive=None`) and a blocked row
+    (`alive=False`) carry a non-live `alive`, so both MUST be classified before
+    the dead path. Consumed by `_liveness_cell` and `top_registry._m_health` so
+    the precedence lives in exactly one place (a missed surface is the bug class
+    that otherwise renders a live row as a red `dead`)."""
+    if r.get("session"):
+        return "session"
     if r.get("blocked"):
+        return "blocked"
+    return "worker"
+
+
+def _liveness_cell(r: dict) -> str:
+    """The PID/liveness label — `sess` / `blk` / `ok` / `dead`, off `row_kind`.
+    Shared by the compact table (`format_rows`), the detail meta line
+    (`format_detail`), and the registry `pid` metric."""
+    kind = row_kind(r)
+    if kind == "session":
+        return "sess"
+    if kind == "blocked":
         return "blk"
     return "ok" if r.get("alive") else "dead"
 
 
 def _row_cells(r: dict) -> tuple[str, str, str, str]:
-    name = _clean(f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}")
+    name = _clean(row_display_name(r))
     run = "*" if r.get("command_running") else ""
     cmd = _clean(run + (r.get("last_command") or "—"))
     w = r.get("last_write")
@@ -706,7 +734,7 @@ def format_detail(rows: list[dict], *, width: int = 120) -> list[str]:
         return ["(no active workers)"]
     out: list[str] = []
     for r in rows:
-        name = _clean(f"{r.get('project', '?')}/{r.get('plan', '?')}·{r.get('phase_id', '?')}")
+        name = _clean(row_display_name(r))
         meta = (
             f"RAN {human_age(r.get('ran_seconds'))} · "
             f"ACT {human_age(r.get('last_activity_seconds'))} · "

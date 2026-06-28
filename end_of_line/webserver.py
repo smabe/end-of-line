@@ -43,6 +43,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -479,6 +480,20 @@ def record_events(rec) -> list[dict]:
     return events
 
 
+def _project_entries(proj: str, *, project_filter: Path | None = None):
+    """Yield registered entries whose project_root basename is `proj` — matched
+    against basenames, NEVER path-joined; that match is the feed's path-safety
+    boundary — honoring `project_filter`. Shared by both feed resolvers so the
+    matching rule (and its security guarantee) lives in exactly one place."""
+    filt = Path(project_filter).resolve() if project_filter is not None else None
+    for e in registry.entries():
+        if Path(e.project_root).name != proj:
+            continue
+        if filt is not None and Path(e.project_root).resolve() != filt:
+            continue
+        yield e
+
+
 def resolve_feed_transcript(
     plan: str,
     proj: str,
@@ -493,17 +508,12 @@ def resolve_feed_transcript(
     stale), or no transcript exists yet.
 
     Mirrors `gather_rows`' registry → claim → worktree-cwd → `locate_transcript`
-    path. `proj` is matched against registry entry basenames, never joined into
-    a path. The scan is per-entry resilient like `gather_rows`: entries the
-    `project_filter` excludes, and entries that cannot serve the request
-    (unreadable state, claim on another phase, no transcript yet), are skipped
-    rather than dead-ending the scan — the first entry that can serve decides.
-    """
-    filt = Path(project_filter).resolve() if project_filter is not None else None
-    for e in registry.entries():
-        if e.plan_slug != plan or Path(e.project_root).name != proj:
-            continue
-        if filt is not None and Path(e.project_root).resolve() != filt:
+    path, over `_project_entries` (the shared basename match). Per-entry resilient
+    like `gather_rows`: entries the `project_filter` excludes, and entries that
+    cannot serve the request (unreadable state, claim on another phase, no
+    transcript yet), are skipped — the first entry that can serve decides."""
+    for e in _project_entries(proj, project_filter=project_filter):
+        if e.plan_slug != plan:
             continue
         data = registry.load_entry_state(e)
         if not data:
@@ -521,24 +531,62 @@ def resolve_feed_transcript(
     return None
 
 
+def resolve_session_transcript(
+    proj: str,
+    sid: str,
+    *,
+    project_filter: Path | None = None,
+    projects_root: Path = top.PROJECTS_ROOT,
+) -> tuple[Path, str] | None:
+    """Transcript path + identity (`tid`) for a non-clu session `sid` in project
+    `proj`, or None. The session counterpart of `resolve_feed_transcript`: there
+    is no claim to go through, so it checks for the EXACT `<sid>.jsonl` in the
+    matching project's transcript dir — and only serves it if it meets the SAME
+    `session` definition the dashboard lists by (`gather_session_rows`): a
+    main-session transcript (cwd-confirmed, sidechain-rejected via `top._confirms`)
+    modified within `SESSION_FRESH_SECONDS`. The freshness gate keeps the set of
+    streamable sids equal to the set of listed sessions — a stale id resolves to
+    nothing. Unlike `locate_transcript`, there is no newest-file fallback: an
+    unknown `sid` never falls through to another session's tail. Per-entry
+    resilient over `_project_entries`; the first that resolves decides."""
+    for e in _project_entries(proj, project_filter=project_filter):
+        cand = projects_root / top.encode_project_dir(e.project_root) / f"{sid}.jsonl"
+        try:
+            fresh = time.time() - cand.stat().st_mtime < top.SESSION_FRESH_SECONDS
+        except OSError:
+            continue  # no such file in this project's dir
+        if fresh and top._confirms(cand, e.project_root):
+            return (cand, cand.stem)
+    return None
+
+
 def feed_json(
     query: dict[str, list[str]], *, project_filter: Path | None = None
 ) -> tuple[int, bytes]:
     """Resolve one `/api/feed` poll to `(status, body)`. A 200 body is JSON
     `{events, cursor, tid, reset}`; error bodies are plain text. `reset:true`
     tells the client its scrollback is stale (new session id, or the file
-    shrank under its cursor) and these events are a fresh backfill."""
-    plan = (query.get("plan") or [""])[0]
+    shrank under its cursor) and these events are a fresh backfill.
+
+    Two row kinds: a clu worker is keyed by `(plan, proj, phase)` via its live
+    claim; a non-clu session carries `sid` (and `proj`) and resolves by session
+    id. `sid` present routes the session path; otherwise the claim path."""
     proj = (query.get("proj") or [""])[0]
-    phase = (query.get("phase") or [""])[0]
+    sid = (query.get("sid") or [""])[0]
     tid = (query.get("tid") or [""])[0]
     try:
-        st.validate_slug(plan, kind="plan slug")
-        st.validate_slug(phase, kind="phase id")
         cursor = int((query.get("cursor") or ["-1"])[0])
+        if sid:
+            st.validate_slug(sid, kind="session id")
+            resolved = resolve_session_transcript(proj, sid, project_filter=project_filter)
+        else:
+            plan = (query.get("plan") or [""])[0]
+            phase = (query.get("phase") or [""])[0]
+            st.validate_slug(plan, kind="plan slug")
+            st.validate_slug(phase, kind="phase id")
+            resolved = resolve_feed_transcript(plan, proj, phase, project_filter=project_filter)
     except (st.InvalidSlug, ValueError):
         return 400, b"bad request\n"
-    resolved = resolve_feed_transcript(plan, proj, phase, project_filter=project_filter)
     if resolved is None:
         return 404, b"not found\n"
     tpath, current_tid = resolved

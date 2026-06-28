@@ -48,6 +48,27 @@ are already in this shard's Work, flagged here so they aren't dropped:
 - **Alternatives considered:** pass the absolute transcript path from client → server — rejected (lets a client request any file on disk; the registry-scoped resolver is the security boundary, mirroring `resolve_feed_transcript`'s "proj matched against basenames, never joined into a path").
 - **Evidence:** `resolve_feed_transcript` registry-scan + `locate_transcript` webserver.py:502–520; path-safety note webserver.py:498–500 (@7dbe001).
 
+### Applied from xhigh /code-review
+- **Web list-row name went stale on title change (real bug).** The name was in a
+  build-once `.id` slot keyed by session id; a mid-run title change (fallback →
+  aiTitle/customTitle) updated the detail/ticker but not the list row. Fix: name
+  lives in a `.nm` slot patched every poll.
+- **Web compact row + ticker dropped the project prefix** (curses showed
+  `project · name`, web showed bare name → divergence). Fix: two shared JS
+  helpers `rowIdHtml` (markup, list + detail header) and `rowTitle` (plain,
+  ticker), both project-prefixed, mirroring Python `row_display_name`.
+- **Precedence centralized.** Extracted `top.row_kind(r) -> session|blocked|worker`
+  — the single source of the session-before-blocked-before-dead order; both
+  `_liveness_cell` and `_m_health` consume it (was hand-coded in each).
+- **Session feed freshness.** `resolve_session_transcript` now applies the same
+  `SESSION_FRESH_SECONDS` gate the lister uses, so the streamable-sid set equals
+  the listed-session set (a stale id resolves to nothing).
+- **Shared resolver preamble.** Extracted `_project_entries(proj, project_filter)`
+  (the basename-match path-safety boundary) used by BOTH resolvers; dropped the
+  `seen` set. Singularized "1 session"; removed the `DOT` identity map (use
+  `w.health` directly); fixed stale comments (`header()`→`statusInner`, `_m_pid`
+  +`sess`).
+
 ## Failure modes to anticipate
 - **`alive`-absent mis-render as `dead`:** the whole reason session is checked first. A missed branch in ANY of the four surfaces (curses `_liveness_cell`, `top_registry._m_health`, web `toView`, web badge) shows a live session as dead. Test each surface.
 - **`sid` validation:** a UUID has hyphens; confirm `validate_slug` passes a real session id (it does per the regex) — but a `tid`-only or empty `sid` must 400, not crash.
