@@ -248,7 +248,6 @@ class ExtractActivityTest(unittest.TestCase):
         self.assertIsNone(a["last_activity_ts"])
         self.assertFalse(a["command_running"])
 
-
 class AssembleRowTest(unittest.TestCase):
     def test_ran_seconds_and_alive_pid(self) -> None:
         # started 600s before `now`; pid is this live test process.

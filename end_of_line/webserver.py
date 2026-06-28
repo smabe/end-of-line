@@ -473,6 +473,10 @@ def record_events(rec) -> list[dict]:
                     _emit("tool", inp.get("command"))
                 elif name in top._WRITE_TOOLS:
                     _emit("write", inp.get("file_path"))
+                elif name in top._AGENT_TOOLS:
+                    # A spawned subagent (a /code-review fan-out, an Explore, …):
+                    # its type or, lacking that, its one-line description.
+                    _emit("agent", inp.get("subagent_type") or inp.get("description"))
     elif rtype == "user":
         for block in top._content_blocks(message):
             if block.get("type") == "tool_result":

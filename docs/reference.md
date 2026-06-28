@@ -1268,7 +1268,9 @@ security layer (token auth, Host-header allowlist, auto self-signed HTTPS).
   `GET /api/feed?plan=<slug>&proj=<name>&phase=<id>&cursor=<n>&tid=<id>`
   → `{events: [{ts, kind, text}], cursor, tid, reset}`. `kind` is
   `say` (assistant text) / `tool` (Bash command) / `write` (write-tool
-  file path) / `result` (tool_result text); event text is truncated
+  file path) / `result` (tool_result text) / `agent` (an Agent/Task
+  spawn — the subagent type, e.g. a `/code-review` fan-out); event text
+  is truncated
   server-side at `FEED_TEXT_CAP` (2000 chars). `cursor` is a byte offset
   into the transcript: `-1` backfills the last `FEED_BACKFILL_BYTES`
   (64 KB); each poll reads at most `FEED_READ_CAP` (256 KB) and consumes

@@ -35,6 +35,11 @@ PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 # Tool names whose tool_use entry means "the worker wrote a file".
 _WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
+# Tool names that spawn a subagent (a /code-review fan-out, an Explore, etc.).
+# Both spellings exist across Claude Code versions — match either. This is the
+# one place to extend if the tool is renamed again.
+_AGENT_TOOLS = frozenset({"Agent", "Task"})
+
 # How many leading lines to scan for a session's identifying `cwd` record.
 # Transcripts open with meta/snapshot records that carry no cwd; the cwd line
 # is well within the first lines in practice. Bounded so a huge transcript is

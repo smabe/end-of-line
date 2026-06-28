@@ -648,6 +648,16 @@ class RecordEventsTest(CluTestCase):
         events = webserver.record_events(_tool_result("tu1"))  # string content "ok"
         self.assertEqual(events, [{"ts": "2026-06-03T00:00:01Z", "kind": "result", "text": "ok"}])
 
+    def test_agent_tool_use_becomes_agent(self):
+        ev = webserver.record_events(_asst(tool="Task", tool_input={
+            "subagent_type": "Explore", "description": "map code"}))
+        self.assertEqual(ev[0]["kind"], "agent")
+        self.assertEqual(ev[0]["text"], "Explore")
+
+    def test_agent_tool_use_description_fallback(self):
+        ev = webserver.record_events(_asst(tool="Agent", tool_input={"description": "review the diff"}))
+        self.assertEqual([(e["kind"], e["text"]) for e in ev], [("agent", "review the diff")])
+
     def test_tool_result_block_list_content_flattened(self):
         rec = _tool_result("tu1")
         rec["message"]["content"][0]["content"] = [

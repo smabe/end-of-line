@@ -28,6 +28,26 @@ See master `plans/session-activity.md`. Binding here:
 - **Alternatives considered:** follow `toolUseResult.agentId` → child file and nest its events — deferred to a follow-up (master non-goal); the correlation chain is recorded in master Background findings so a later phase can pick it up without re-research.
 - **Evidence:** Agent `input` shape + `tool_result.toolUseResult.agentId`/`agentType`/`status` empirically confirmed (CC v2.1.174); decoder sites `extract_activity` top.py:202–211, `record_events` webserver.py:467–478 (@7dbe001).
 
+### Decision: feed-only — no row-level `last_agent`  *(status: active; from xhigh /code-review)*
+- **Rationale:** the first cut also added a row-level `last_agent` D10 key surfaced
+  in the COMMAND cell (`▶ Explore` when no Bash ran). xhigh review found two real
+  defects from that surfacing: (a) it wasn't added to `_TRANSCRIPT_FIELDS`, so
+  `clu serve --no-transcript` leaked the semi-untrusted subagent string; (b)
+  `command_text` gave Bash absolute precedence with no recency, so one early Bash
+  hid the agent for the rest of the session — the indicator rarely fired for the
+  agent-heavy sessions it targeted. A correct recency fix needs yet more
+  wire-contract surface (an "agent-latest" signal + strip-list + running-star
+  edge) for an at-a-glance nicety the operator's ask ("show up in clu-serve")
+  didn't require. KISS: the **feed `agent` kind is the deliverable** — it shows
+  every spawn in clu serve's detail pane, richly and correctly. Dropped the row
+  field entirely; the compact row still conveys agent activity via the assistant
+  narration in SAYING.
+- **Alternatives considered:** keep the row field + fix recency/strip/star —
+  rejected (more surface, more edges, marginal value). Follow-up if an at-a-glance
+  row indicator is later wanted: design a proper "latest tool action" with recency.
+- **Evidence:** review findings [0] (`_TRANSCRIPT_FIELDS` leak) + [2] (no recency),
+  both CONFIRMED, weeghmhkl.
+
 ## Failure modes to anticipate
 - **Tool rename drift:** if a future CC version renames the tool again, the set misses it. Matching both `Agent` and `Task` covers the known names; a miss degrades to "no agent event," not a crash. Note the set as the one place to extend.
 - **`last_agent` clobbering `last_command`:** if folded into the same field, a session that ran Bash THEN spawned an agent could show stale data. Keeping `last_agent` a separate key avoids this; renderers decide precedence. Test both-present ordering.

@@ -151,6 +151,7 @@ header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6
 .felog .fe.tool .fk{color:var(--amber)}
 .felog .fe.write .fk{color:var(--teal)}
 .felog .fe.result .fk{color:var(--dim)}
+.felog .fe.agent .fk{color:var(--cy);font-weight:700}
 /* STRIP view */
 .strip .detail,.strip .divider{display:none}
 .strip .row{grid-template-columns:18px 240px 1fr auto}
@@ -587,7 +588,7 @@ function patch(){
 // leaves the log empty and retries next tick.
 const FEED_CAP = 1000;        // max DOM entries; oldest pruned on append
 const FEED_STICK_PX = 10;     // "at bottom" tolerance for auto-follow
-const FEED_LABEL = {say: "say", tool: "cmd", write: "wrote", result: "res"};
+const FEED_LABEL = {say: "say", tool: "cmd", write: "wrote", result: "res", agent: "agent"};
 let feedLogRef = null;        // the scrolling #feedlog element (null in strip view)
 let feedKey = null, feedCursor = -1, feedTid = null, feedCount = 0;
 let feedTimer = null, feedBusy = false;

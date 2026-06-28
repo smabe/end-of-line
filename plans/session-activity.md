@@ -30,9 +30,11 @@
 
 **Approval: APPROVED 2026-06-28**
 
-SHIPPED: `refactor` (`2cbb203`), `discover` (`7625dab`). `classify` complete (suite 1948 green, basedpyright + JS-parse clean; xhigh /code-review applied — patched name slot, project-prefixed `rowIdHtml`/`rowTitle`, `row_kind` precedence classifier, session-feed freshness, shared `_project_entries`), commit pending bookkeeping.
-NEXT phase: `agents`. **Read `plans/session-activity-agents.md` FIRST**, then execute. Its binding decisions: spawn-level only (decode parent `Agent`/`Task` tool_use, no child sidechain recursion); new feed kind `agent`; match both `Agent` and `Task` names; prefer `subagent_type`, fall back to `description`. Decoders: `top.extract_activity` (add `last_agent`) + `webserver.record_events` (emit `agent`); web feed-kind styling; docs.
-Line hints below were measured at `7dbe001`; re-anchor by symbol.
+SHIPPED: `refactor` (`2cbb203`), `discover` (`7625dab`), `classify` (`f17dd3b`). `agents` complete (suite 1950 green, basedpyright + JS-parse clean; xhigh /code-review → scoped to feed-only, see below), commit pending bookkeeping.
+
+ALL PHASES DONE — ready to `/plan ship session-activity`.
+
+`agents` final scope (changed at review): **feed `agent` kind only** — `webserver.record_events` emits `agent` (subagent_type / description) for `Agent`/`Task` tool_use; web FEED_LABEL + CSS render it. The row-level `last_agent`/COMMAND-cell surfacing was DROPPED — review found a `--no-transcript` leak + a no-recency bug; the feed is the correct, clean delivery of the "show agents in clu-serve" ask. (Full rationale in the agents shard.)
 
 Binding decisions carried inline (so a compaction that drops the shard still shows them):
 - **Passive scan, no hook.** Discover sessions by globbing each registered project's `~/.claude/projects/<encoded-cwd>/*.jsonl` (non-recursive — sidechains now live in a `<sid>/subagents/` subdir, so they're already excluded). No SessionStart/End registration. (Operator chose passive scan over self-register.)
