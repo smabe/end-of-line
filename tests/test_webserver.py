@@ -863,6 +863,18 @@ class ResolveSessionTranscriptTest(GitProjectTestCase):
             project_filter=self.tmp_path / "elsewhere",
             projects_root=self.projects_root))
 
+    def test_session_dir_resolves_unregistered(self) -> None:
+        # A watched-but-unregistered dir: resolvable only when passed via session_dirs.
+        watch = self.tmp_path / "watched"
+        watch.mkdir()
+        d = self.projects_root / top.encode_project_dir(str(watch))
+        _write_jsonl(d / "wsid.jsonl", [_asst(cwd=str(watch))], mtime=time.time())
+        self.assertIsNone(webserver.resolve_session_transcript(
+            watch.name, "wsid", projects_root=self.projects_root))
+        got = webserver.resolve_session_transcript(
+            watch.name, "wsid", projects_root=self.projects_root, session_dirs=(str(watch),))
+        self.assertEqual(must(got)[1], "wsid")
+
 
 # --------------------------------------------------------------------------- #
 # serve-activity-feed — /api/feed endpoint over a live server

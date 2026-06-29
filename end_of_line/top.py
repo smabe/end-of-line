@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import textwrap
+from collections.abc import Sequence
 from pathlib import Path
 
 from end_of_line import registry
@@ -424,6 +425,14 @@ def assemble_session_row(
     }
 
 
+def matches_project_filter(root: str | Path, project_filter: Path | None) -> bool:
+    """True if `root` is in scope for `project_filter` (None = no filter, all
+    roots in scope). The single resolve-compare both discovery surfaces (the
+    curses `gather_rows` and the web feed resolver) use to honor `--project X`,
+    so the `--project` scoping rule lives in one place."""
+    return project_filter is None or Path(root).resolve() == Path(project_filter).resolve()
+
+
 def gather_session_rows(
     roots: set[str],
     *,
@@ -432,17 +441,16 @@ def gather_session_rows(
     claimed_paths: set[Path] | None = None,
     claimed_sids: set[str] | None = None,
 ) -> list[dict]:
-    """One row per fresh, non-claim Claude session in a registered project's
-    transcript dir. A session qualifies when it's a main-session transcript (not
-    a sidechain) whose in-file cwd is the project root (`_confirms`, the same
-    check the worker locator uses), it was modified within `SESSION_FRESH_SECONDS`,
-    and it isn't already a live worker's transcript. Dedup is by the worker's
-    resolved transcript PATH (`claimed_paths`) first — robust even when the
-    dispatch template omits `{session_id}` so the claim carries none — and by
-    `claimed_sids` as a belt. `roots` is the caller's already-project-filtered set
-    of registered root strings (gather_rows hands them over so the registry is
-    scanned once). Freshest first; per-file tolerant — an odd/unreadable file is
-    skipped, never raised."""
+    """One row per fresh, non-claim Claude session in a scanned root's transcript
+    dir. A session qualifies when it's a main-session transcript (not a sidechain)
+    whose in-file cwd is the root (`_confirms`, the same check the worker locator
+    uses), it was modified within `SESSION_FRESH_SECONDS`, and it isn't already a
+    live worker's transcript. Dedup is by the worker's resolved transcript PATH
+    (`claimed_paths`) first — robust even when the dispatch template omits
+    `{session_id}` so the claim carries none — and by `claimed_sids` as a belt.
+    `roots` is the caller's already-project-filtered scan set: registered project
+    roots UNION configured `session_dirs` (gather_rows builds it). Freshest first;
+    per-file tolerant — an odd/unreadable file is skipped, never raised."""
     claimed_paths = claimed_paths or set()
     claimed_sids = claimed_sids or set()
     now_ts = (now or _dt.datetime.now(_dt.UTC)).timestamp()
@@ -480,6 +488,7 @@ def gather_rows(
     projects_root: Path = PROJECTS_ROOT,
     now: _dt.datetime | None = None,
     project_filter: Path | None = None,
+    session_dirs: Sequence[str] = (),
 ) -> list[dict]:
     """One row per active claim — plus a claimless 'blocked' row for any plan
     waiting on the operator — across every registered plan (optionally scoped to
@@ -491,16 +500,15 @@ def gather_rows(
     Three stable tiers: blocked plans sort to the top (a plan waiting on the
     operator is the single most actionable state), then running/dead clu workers
     in registry order, then non-clu Claude sessions (`gather_session_rows`) —
-    fresh transcripts in registered projects that aren't a live worker.
+    fresh transcripts in the registry roots PLUS any configured `session_dirs`,
+    that aren't a live worker.
     """
     rows: list[dict] = []
     roots: set[str] = set()  # the project-filtered roots, handed to the session scan
     claimed_paths: set[Path] = set()  # a live worker's own transcript -> not a session
     claimed_sids: set[str] = set()  # belt: dedup by claim session id where present
     for e in registry.entries():
-        if project_filter is not None and (
-            Path(e.project_root).resolve() != Path(project_filter).resolve()
-        ):
+        if not matches_project_filter(e.project_root, project_filter):
             continue
         roots.add(e.project_root)
         data = registry.load_entry_state(e)
@@ -545,10 +553,17 @@ def gather_rows(
         row["phase_total"] = len(phases) or None
         row["phase_index"] = (ids.index(phase_id) + 1) if phase_id in ids else None
         rows.append(row)
-    # Non-clu sessions: fresh transcripts in the same registered projects that
-    # aren't a live worker's own transcript. Appended after the clu rows; the
-    # stable sort below groups them. Reuses the roots already filtered above so
-    # the registry isn't scanned twice.
+    # Configured session_dirs (machine-wide): cwds whose sessions we surface even
+    # without a registered plan. Union into the scan roots, behind the SAME
+    # project_filter gate the registry roots passed (so `--project X` still means
+    # just X); the set dedups a dir that is also a registered root.
+    for d in session_dirs:
+        if matches_project_filter(d, project_filter):
+            roots.add(d)
+    # Non-clu sessions: fresh transcripts in those roots that aren't a live
+    # worker's own transcript. Appended after the clu rows; the stable sort below
+    # groups them. Reuses the roots already filtered above so the registry isn't
+    # scanned twice.
     rows += gather_session_rows(
         roots, projects_root=projects_root, now=now,
         claimed_paths=claimed_paths, claimed_sids=claimed_sids,
@@ -802,6 +817,7 @@ def render_once(
     now: _dt.datetime | None = None,
     width: int | None = None,
     cols: tuple[str, ...] | None = None,
+    session_dirs: Sequence[str] = (),
 ) -> int:
     """Write a single snapshot to `stream`. Used for `--once` and non-TTY.
 
@@ -809,7 +825,8 @@ def render_once(
     in snapshot mode; falls back to 120 when there's no terminal (piped)."""
     if width is None:
         width = shutil.get_terminal_size((120, 24)).columns
-    rows = gather_rows(projects_root=projects_root, now=now, project_filter=project_filter)
+    rows = gather_rows(projects_root=projects_root, now=now, project_filter=project_filter,
+                       session_dirs=session_dirs)
     for line in _compact_lines(rows, width=width, cols=cols):
         stream.write(line + "\n")
     return 0
@@ -976,6 +993,7 @@ def _run_curses(
     project_filter: Path | None,
     projects_root: Path,
     cols: tuple[str, ...] | None = None,
+    session_dirs: Sequence[str] = (),
 ) -> int:
     import curses
     import locale
@@ -999,7 +1017,8 @@ def _run_curses(
         stdscr.keypad(True)  # deliver arrow keys + KEY_RESIZE as keysyms
         stdscr.timeout(max(100, int(interval * 1000)))  # getch doubles as pace + quit poll
         while True:
-            rows = gather_rows(projects_root=projects_root, project_filter=project_filter)
+            rows = gather_rows(projects_root=projects_root, project_filter=project_filter,
+                               session_dirs=session_dirs)
             snapshot = Snapshot(rows)
             # Re-resolve the cursor by worker identity BEFORE drawing, so a
             # worker that completed above it never silently retargets selection.
@@ -1039,15 +1058,19 @@ def run(
     projects_root: Path = PROJECTS_ROOT,
     stream=None,
     cols: tuple[str, ...] | None = None,
+    session_dirs: Sequence[str] = (),
 ) -> int:
     """Entry point for `clu top`. Curses when attached to a TTY; otherwise (or
     with --once) a single plain snapshot. `cols` narrows the compact table to
-    the named metric columns (default: all)."""
+    the named metric columns (default: all). `session_dirs` are machine-wide
+    cwds whose non-clu sessions are surfaced even without a registered plan."""
     stream = stream or sys.stdout
     if once or not stream.isatty():
         return render_once(
-            stream, projects_root=projects_root, project_filter=project_filter, cols=cols
+            stream, projects_root=projects_root, project_filter=project_filter, cols=cols,
+            session_dirs=session_dirs,
         )
     return _run_curses(
-        interval=interval, project_filter=project_filter, projects_root=projects_root, cols=cols
+        interval=interval, project_filter=project_filter, projects_root=projects_root, cols=cols,
+        session_dirs=session_dirs,
     )

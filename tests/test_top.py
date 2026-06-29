@@ -527,6 +527,55 @@ class SessionRowsTest(GitProjectTestCase):
         self.assertEqual(rows[-1]["session_id"], "zsess")
 
 
+class SessionWatchDirsTest(GitProjectTestCase):
+    """session_dirs: surface sessions in configured cwds with no registered plan
+    (union with registry roots, same project_filter gate + dedup)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._pr = TemporaryDirectory()
+        self.addCleanup(self._pr.cleanup)
+        self.projects_root = Path(self._pr.name)
+        self.reg_root = registry.entries()[0].project_root
+        self.watch = self.tmp_path / "watched-proj"
+        self.watch.mkdir()
+        self.fresh = _now().timestamp() - 50
+
+    def _sess_in(self, root, stem: str) -> Path:
+        d = self.projects_root / top.encode_project_dir(str(root))
+        return _write_jsonl(d / f"{stem}.jsonl", [_asst(text="hi", cwd=str(root))], mtime=self.fresh)
+
+    def _rows(self, **over) -> list[dict]:
+        return top.gather_rows(projects_root=self.projects_root, now=_now(), **over)
+
+    def test_session_dir_surfaces_unregistered_session(self) -> None:
+        self._sess_in(self.watch, "live")
+        rows = self._rows(session_dirs=[str(self.watch)])
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["session"])
+        self.assertEqual(rows[0]["project"], self.watch.name)
+
+    def test_without_session_dirs_unregistered_invisible(self) -> None:
+        self._sess_in(self.watch, "live")
+        self.assertEqual(self._rows(), [])
+
+    def test_project_filter_excludes_nonmatching_session_dir(self) -> None:
+        self._sess_in(self.watch, "live")
+        rows = self._rows(session_dirs=[str(self.watch)], project_filter=self.tmp_path / "other")
+        self.assertEqual(rows, [])
+
+    def test_session_dir_matching_filter_included(self) -> None:
+        self._sess_in(self.watch, "live")
+        rows = self._rows(session_dirs=[str(self.watch)], project_filter=self.watch)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["session"])
+
+    def test_session_dir_also_registered_not_doubled(self) -> None:
+        self._sess_in(Path(self.reg_root), "live")
+        rows = self._rows(session_dirs=[self.reg_root])
+        self.assertEqual(sum(1 for r in rows if r.get("session")), 1)
+
+
 class FormatRowsTest(unittest.TestCase):
     def _row(self, **over) -> dict:
         base = {

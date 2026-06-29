@@ -293,31 +293,76 @@ def _parse_quiet_hours(raw_value: object) -> tuple[str, str] | None:
     return None
 
 
-def _load_global_notify() -> tuple[tuple[ChannelSpec, ...], tuple[str, str] | None]:
-    """Read the global config's notify block → (channels, quiet_hours).
-
-    The global file is optional and machine-wide: a missing / empty / malformed
-    file (or one bad channel) must NOT break every project load, so we fail open
-    to `((), None)`. A missing file is silent (the common case); any other
-    failure — bad JSON, non-object shapes, an invalid channel — is loud on
-    stderr so the operator knows their shared notify config is being ignored,
-    but never fatal. `assert_xdg_safe` (inside `global_config_path`) is
-    deliberately NOT caught: it must fail loud when a test forgets isolation.
-    """
-    path = global_config_path()
+def _read_global_config(path: Path | None = None) -> dict:
+    """Read the machine-wide `~/.config/clu/config.json` → its raw dict, the one
+    fail-open read both global readers share. Optional + machine-wide: a missing
+    file is silent (`{}`, the common case); bad JSON or a non-object top level is
+    loud on stderr (so a typo isn't silently ignored) but never fatal.
+    `assert_xdg_safe` (inside `global_config_path`) is deliberately NOT caught —
+    it must fail loud when a test forgets isolation."""
+    p = path or global_config_path()
     try:
-        text = path.read_text()
+        text = p.read_text()
     except OSError:
-        return (), None
+        return {}
     try:
         raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        print(f"config: ignoring malformed global config ({p}): {exc}", file=sys.stderr)
+        return {}
+    if not isinstance(raw, dict):
+        print(f"config: ignoring non-object global config ({p})", file=sys.stderr)
+        return {}
+    return raw
+
+
+def _load_global_notify() -> tuple[tuple[ChannelSpec, ...], tuple[str, str] | None]:
+    """Read the global config's notify block → (channels, quiet_hours). Fails
+    open to `((), None)`; a bad channel is loud on stderr but never fatal."""
+    raw = _read_global_config()
+    try:
         notify_raw = raw.get("notify", {})
         channels = tuple(_validate_channel(c) for c in notify_raw.get("channels", []))
         quiet_hours = _parse_quiet_hours(notify_raw.get("quiet_hours"))
-    except (json.JSONDecodeError, ConfigError, AttributeError, TypeError) as exc:
-        print(f"config: ignoring malformed global notify config ({path}): {exc}", file=sys.stderr)
+    except (ConfigError, AttributeError, TypeError) as exc:
+        print(f"config: ignoring malformed global notify config: {exc}", file=sys.stderr)
         return (), None
     return channels, quiet_hours
+
+
+def load_session_dirs(path: Path | None = None) -> list[str]:
+    """Machine-wide `session_dirs` from the global config — the project cwds
+    whose Claude sessions `clu top` / `clu serve` should surface even without a
+    registered plan. Each entry is `expanduser`'d + `resolve`'d to an absolute
+    str, to match the resolved cwd Claude records in-transcript (exactly as a
+    registry root is stored resolved). A non-list value, non-str entries, and
+    NON-ABSOLUTE entries (a stray `""` / relative path would otherwise bind to
+    clu's cwd) are skipped; a non-list `session_dirs` is loud on stderr. Result
+    is deduped, order preserved. Fail open to `[]` (shared read via
+    `_read_global_config`; the feature is inert until the operator opts in)."""
+    entries = _read_global_config(path).get("session_dirs", [])
+    if not isinstance(entries, list):
+        if entries:  # present but wrong shape (e.g. a bare string) — don't ignore silently
+            print("config: ignoring global session_dirs (expected a list)", file=sys.stderr)
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for e in entries:
+        if not isinstance(e, str):
+            continue
+        expanded = os.path.expanduser(e)
+        # Reject non-absolute entries BEFORE resolve() — an empty/relative path
+        # resolves against clu's cwd, silently watching the launch directory.
+        if not os.path.isabs(expanded):
+            continue
+        try:
+            resolved = str(Path(expanded).resolve())
+        except (OSError, ValueError):
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(resolved)
+    return out
 
 
 def load_project_config(project_root: Path) -> ProjectConfig:

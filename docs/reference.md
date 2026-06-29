@@ -179,6 +179,15 @@ resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
   `"HH:MM"` strings).
 - `load_project_config(project_root)` — parses
   `<project>/.orchestrator.json` or returns the all-defaults config.
+- `load_session_dirs(path=None)` — reads the machine-wide
+  `~/.config/clu/config.json`'s top-level `session_dirs` list → a deduped
+  list of `expanduser`'d + resolved absolute dir strings. Fail-open to
+  `[]` (missing/malformed/non-list). The cwds whose non-clu Claude
+  sessions `clu top`/`clu serve` surface without a registered plan;
+  `cmd_top`/`cmd_serve` load it and thread it to `top.gather_rows`
+  (unioned into the scan roots) and `webserver.resolve_session_transcript`
+  (extra feed candidate roots). See `docs/operations.md` "Watch extra
+  session directories".
 - `CONFIG_FILENAME` (`.orchestrator.json`), `ORCHESTRATOR_DIR`
   (`.orchestrator`) — the layout constants.
 

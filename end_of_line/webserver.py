@@ -45,6 +45,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -81,6 +82,9 @@ class ServeConfig:
     token: str | None = None  # None → no auth gate (loopback default)
     host_allowlist: frozenset[str] = dataclasses.field(default_factory=frozenset)
     tls: ssl.SSLContext | None = None  # None → plaintext
+    # Machine-wide cwds whose non-clu sessions are surfaced even without a
+    # registered plan (config `session_dirs`); fed to gather_rows + the feed.
+    session_dirs: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         if not self.host_allowlist:
@@ -281,6 +285,7 @@ def build_config(
     cert: str | None = None,
     key: str | None = None,
     http: bool = False,
+    session_dirs: Sequence[str] = (),
 ) -> ServeConfig:
     """Resolve CLI flags into a `ServeConfig`, applying the security policy:
     LAN-IP detection, token provisioning, the non-loopback-needs-a-token
@@ -326,6 +331,7 @@ def build_config(
         include_transcript=include_transcript,
         token=token,
         tls=tls,
+        session_dirs=session_dirs,
     )
 
 
@@ -352,10 +358,13 @@ def load_apple_icon() -> bytes:
     )
 
 
-def workers_json(*, project_filter: Path | None = None, include_transcript: bool = True) -> bytes:
+def workers_json(
+    *, project_filter: Path | None = None, include_transcript: bool = True,
+    session_dirs: Sequence[str] = (),
+) -> bytes:
     """`gather_rows()` shaped for the wire. With `include_transcript=False`,
     drop the transcript-content fields so the feed carries metrics only."""
-    rows = top.gather_rows(project_filter=project_filter)
+    rows = top.gather_rows(project_filter=project_filter, session_dirs=session_dirs)
     if not include_transcript:
         for row in rows:
             for field in _TRANSCRIPT_FIELDS:
@@ -486,16 +495,15 @@ def record_events(rec) -> list[dict]:
 
 def _project_entries(proj: str, *, project_filter: Path | None = None):
     """Yield registered entries whose project_root basename is `proj` — matched
-    against basenames, NEVER path-joined; that match is the feed's path-safety
-    boundary — honoring `project_filter`. Shared by both feed resolvers so the
-    matching rule (and its security guarantee) lives in exactly one place."""
-    filt = Path(project_filter).resolve() if project_filter is not None else None
+    against basenames, NEVER path-joined; that basename match is the feed's
+    path-safety boundary for the REGISTRY candidate roots, single-sourced here.
+    The `--project` resolve-compare is shared with the curses path via
+    `top.matches_project_filter`."""
     for e in registry.entries():
-        if Path(e.project_root).name != proj:
-            continue
-        if filt is not None and Path(e.project_root).resolve() != filt:
-            continue
-        yield e
+        if Path(e.project_root).name == proj and top.matches_project_filter(
+            e.project_root, project_filter
+        ):
+            yield e
 
 
 def resolve_feed_transcript(
@@ -541,6 +549,7 @@ def resolve_session_transcript(
     *,
     project_filter: Path | None = None,
     projects_root: Path = top.PROJECTS_ROOT,
+    session_dirs: Sequence[str] = (),
 ) -> tuple[Path, str] | None:
     """Transcript path + identity (`tid`) for a non-clu session `sid` in project
     `proj`, or None. The session counterpart of `resolve_feed_transcript`: there
@@ -551,21 +560,31 @@ def resolve_session_transcript(
     modified within `SESSION_FRESH_SECONDS`. The freshness gate keeps the set of
     streamable sids equal to the set of listed sessions — a stale id resolves to
     nothing. Unlike `locate_transcript`, there is no newest-file fallback: an
-    unknown `sid` never falls through to another session's tail. Per-entry
-    resilient over `_project_entries`; the first that resolves decides."""
-    for e in _project_entries(proj, project_filter=project_filter):
-        cand = projects_root / top.encode_project_dir(e.project_root) / f"{sid}.jsonl"
+    unknown `sid` never falls through to another session's tail.
+
+    Candidate roots are the registry roots matching `proj` (via `_project_entries`)
+    UNION the configured `session_dirs` matching `proj` (basename + project_filter),
+    so a session in a watched-but-unregistered dir resolves too — mirroring how
+    `gather_rows` unions session_dirs into the scan roots. The first that resolves
+    decides."""
+    roots = [e.project_root for e in _project_entries(proj, project_filter=project_filter)]
+    for d in session_dirs:
+        if Path(d).name == proj and top.matches_project_filter(d, project_filter):
+            roots.append(d)
+    for root in roots:
+        cand = projects_root / top.encode_project_dir(root) / f"{sid}.jsonl"
         try:
             fresh = time.time() - cand.stat().st_mtime < top.SESSION_FRESH_SECONDS
         except OSError:
-            continue  # no such file in this project's dir
-        if fresh and top._confirms(cand, e.project_root):
+            continue  # no such file in this root's dir
+        if fresh and top._confirms(cand, root):
             return (cand, cand.stem)
     return None
 
 
 def feed_json(
-    query: dict[str, list[str]], *, project_filter: Path | None = None
+    query: dict[str, list[str]], *, project_filter: Path | None = None,
+    session_dirs: Sequence[str] = (),
 ) -> tuple[int, bytes]:
     """Resolve one `/api/feed` poll to `(status, body)`. A 200 body is JSON
     `{events, cursor, tid, reset}`; error bodies are plain text. `reset:true`
@@ -582,7 +601,8 @@ def feed_json(
         cursor = int((query.get("cursor") or ["-1"])[0])
         if sid:
             st.validate_slug(sid, kind="session id")
-            resolved = resolve_session_transcript(proj, sid, project_filter=project_filter)
+            resolved = resolve_session_transcript(
+                proj, sid, project_filter=project_filter, session_dirs=session_dirs)
         else:
             plan = (query.get("plan") or [""])[0]
             phase = (query.get("phase") or [""])[0]
@@ -705,6 +725,7 @@ def make_handler(*, index_html: str, cfg: ServeConfig):
                     body = workers_json(
                         project_filter=cfg.project_filter,
                         include_transcript=cfg.include_transcript,
+                        session_dirs=cfg.session_dirs,
                     )
                     self._respond(
                         200, body, "application/json; charset=utf-8",
@@ -716,6 +737,7 @@ def make_handler(*, index_html: str, cfg: ServeConfig):
                     status, body = feed_json(
                         parse_qs(url.query),
                         project_filter=cfg.project_filter,
+                        session_dirs=cfg.session_dirs,
                     )
                     ctype = (
                         "application/json; charset=utf-8"

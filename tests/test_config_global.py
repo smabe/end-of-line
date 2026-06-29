@@ -16,6 +16,7 @@ from end_of_line.config import (
     ConfigError,
     global_config_path,
     load_project_config,
+    load_session_dirs,
 )
 from tests import CluTestCase
 
@@ -279,6 +280,57 @@ class GlobalMergeTestCase(CluTestCase):
                              "quiet_hours": "cd"})
         cfg = load_project_config(self.project)
         self.assertIsNone(cfg.notify.quiet_hours)
+
+
+class SessionDirsTestCase(CluTestCase):
+    """`load_session_dirs` reads the machine-wide `session_dirs` key — the cwds
+    whose Claude sessions clu top/serve surface without a registered plan."""
+
+    def _write_global(self, raw: dict) -> None:
+        path = global_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(raw))
+
+    def test_missing_file_is_empty(self) -> None:
+        self.assertEqual(load_session_dirs(), [])
+
+    def test_absent_key_is_empty(self) -> None:
+        self._write_global({"notify": {"channels": []}})
+        self.assertEqual(load_session_dirs(), [])
+
+    def test_reads_and_resolves_absolute(self) -> None:
+        d = self.tmp_path / "proj"
+        d.mkdir()
+        self._write_global({"session_dirs": [str(d)]})
+        self.assertEqual(load_session_dirs(), [str(d.resolve())])
+
+    def test_expanduser(self) -> None:
+        self._write_global({"session_dirs": ["~/somewhere"]})
+        from pathlib import Path
+        self.assertEqual(load_session_dirs(), [str(Path("~/somewhere").expanduser().resolve())])
+
+    def test_skips_non_string_and_dedups(self) -> None:
+        d = self.tmp_path / "proj"
+        d.mkdir()
+        self._write_global({"session_dirs": [str(d), 42, None, str(d)]})
+        self.assertEqual(load_session_dirs(), [str(d.resolve())])
+
+    def test_skips_non_absolute_entries(self) -> None:
+        # "" / relative paths would resolve against clu's cwd — must be rejected.
+        d = self.tmp_path / "proj"
+        d.mkdir()
+        self._write_global({"session_dirs": ["", "relative/path", ".", str(d)]})
+        self.assertEqual(load_session_dirs(), [str(d.resolve())])
+
+    def test_malformed_file_is_empty(self) -> None:
+        path = global_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json")
+        self.assertEqual(load_session_dirs(), [])
+
+    def test_non_list_value_is_empty(self) -> None:
+        self._write_global({"session_dirs": "/a/single/string"})
+        self.assertEqual(load_session_dirs(), [])
 
 
 if __name__ == "__main__":

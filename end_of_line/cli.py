@@ -61,7 +61,7 @@ from . import (
     state as st,
 )
 from ._xdg_guard import assert_xdg_safe, clu_config_dir
-from .config import CONFIG_FILENAME, ProjectConfig, load_project_config
+from .config import CONFIG_FILENAME, ProjectConfig, load_project_config, load_session_dirs
 from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
@@ -4202,6 +4202,7 @@ def cmd_top(args) -> int:
         interval=args.interval if args.interval is not None else 1.5,
         project_filter=getattr(args, "project", None),
         cols=getattr(args, "cols", None),
+        session_dirs=load_session_dirs(),
     )
 
 
@@ -4224,6 +4225,7 @@ def cmd_serve(args) -> int:
             cert=getattr(args, "cert", None),
             key=getattr(args, "key", None),
             http=getattr(args, "http", False),
+            session_dirs=load_session_dirs(),
         )
     except webserver.ConfigError as exc:
         return _die(ExitCode.INVALID_VALUE, str(exc))
@@ -4269,6 +4271,9 @@ def cmd_demo(args) -> int:
         if args.serve:
             from . import webserver
 
+            # `session_dirs` is intentionally NOT passed: `clu demo --serve` is a
+            # self-contained synthetic showcase, so it shows only the demo fleet —
+            # surfacing the operator's real interactive sessions would pollute it.
             cfg = webserver.build_config(
                 lan=False,
                 host=None,

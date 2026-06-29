@@ -1244,6 +1244,36 @@ home than the per-project `.orchestrator.json`). Keep credentials in this global
 only — projects reference a channel by `kind`; never re-embed the token per project, or
 rotation becomes an N-file edit.
 
+### Watch extra session directories (`session_dirs`)
+
+`clu top` and `clu serve` surface non-clu Claude sessions (the rows with a `sess`
+marker / `SESS` badge) for every **registered** project. Between plan batches the
+registry is empty, so nothing shows. To surface your own interactive Claude sessions
+in specific project directories — even with no registered plan — list those cwds in the
+same global file:
+
+```json
+{
+  "session_dirs": [
+    "/Users/you/projects/end-of-line",
+    "/Users/you/projects/HealthData"
+  ]
+}
+```
+
+- Paths are `~`-expanded and resolved to absolute — they must match the cwd Claude
+  ran in (its **exact** project root; a session started in a *subdirectory* of a listed
+  dir is not surfaced).
+- Missing / renamed dirs are skipped silently each poll; the feature is inert when the
+  key is absent (the common case).
+- A `session_dir` that is also a registered project isn't double-listed.
+- Same liveness as registered sessions: a session shows only while its transcript was
+  written within the last 5 minutes, and clicking it streams its feed (incl. `agent`
+  events when it spawns subagents / runs `/code-review`).
+- This widens *which cwds* are scanned, not *where transcripts live*: clu always reads
+  `~/.claude/projects/`; `CLAUDE_CONFIG_DIR` / the `~/.config/claude/projects` location
+  is not honored.
+
 ### How global and per-project config merge
 
 A project's `.orchestrator.json` is layered **on top of** the global config, keyed by
