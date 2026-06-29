@@ -271,6 +271,36 @@ actually run — and PID/heartbeat from the OS and state. None of it is the
 worker LLM's self-report, so `clu top` is an independent check that a worker is
 producing work, not just claiming to.
 
+### Non-clu Claude sessions — `sess` rows
+
+`clu top` also surfaces **any live Claude session** in a watched project, not
+just clu-dispatched workers — your own interactive session shows up next to the
+fleet. These render as their own tier below the workers, marked `sess` in the
+PID column (health glyph `◇`), named from the session's own transcript title
+(its `customTitle` → `aiTitle` → latest prompt), with the same live
+COMMAND / WROTE / SAYING columns:
+
+```
+PROJECT/PLAN·PHASE          RAN     ACT     HB  PID   COMMAND              WROTE          SAYING
+HealthData/logging·impl  25m25s    15s    51s   ok    pytest -k logging    logging.py 4s  tests pass, wiring next
+end-of-line · Refactor…       —    13s      —   sess  git diff HEAD        —              extracting the helper now
+```
+
+A session is shown only while it's **live** — its transcript was written within
+the last 5 minutes (there's no end-of-session marker to rely on, so mtime is the
+liveness signal); an idle session drops off until it acts again. Which cwds are
+watched comes from two places, unioned:
+
+- **registered clu projects** (always — every project with a plan in the
+  registry), and
+- the **`session_dirs`** list in `~/.config/clu/config.json` — list your project
+  roots there to see their sessions even when no plan is registered (the common
+  case between plan batches). See "Watch extra session directories
+  (`session_dirs`)" below.
+
+`--project X` scopes the sessions the same as the workers; a dir that's both
+registered and in `session_dirs` isn't listed twice.
+
 ### Deterministic transcript lookup — the `{session_id}` placeholder
 
 By default `clu top` finds a worker's transcript by encoding its working
@@ -305,6 +335,15 @@ clu serve --no-transcript       # metrics only — omit command / SAYING / write
 `GET /` serves the dashboard (the same Tron view as `clu top`, with split /
 strip / phone geometries; `↑↓`/`jk` select, `w` cycles geometry); the page polls
 `GET /api/workers` every ~1.5s for the live rows. Ctrl-C stops it.
+
+It renders the **same rows as `clu top`** — workers, blocked plans, and non-clu
+sessions (a cyan `SESS` badge; configured via `session_dirs`, below). Selecting
+a row opens a detail pane with a scrolling **activity feed**: every assistant
+line, Bash command, file write, and command result, tailed incrementally from
+that session's transcript. The feed also decodes **`Agent` / `Task` spawns** into
+their own `agent` events — so when a session runs `/code-review` or fans out
+subagents, you see each spawn (its subagent type) live as it happens. Sessions
+feed by session id, so clicking your own interactive session streams it too.
 
 ### Reaching it from your phone — `clu serve --lan`
 
