@@ -78,27 +78,42 @@ TASK_LIST_PROTOCOL_INSTRUCTION = (
 )
 
 
-def _active_plans_for_cwd() -> list[str]:
-    """Return slugs with status=running in the current CWD's registry entries.
+def _scan_entries(entries) -> tuple[bool, list[str]]:
+    """One pass over the pre-loaded registry list: returns
+    (any_live, running_slugs_for_cwd).
 
-    Local import keeps the no-active-plans path cheap; tolerates all failures
-    by returning [].
+    `any_live` — some entry's state is non-terminal (or unreadable, which
+    counts as live: a corrupt state file must not silence the dashboard).
+    Registry rows outlive plan liveness (done/halted rows persist until an
+    archive sweep), so the emit gate keys on state, not mere registration.
+
+    `running_slugs_for_cwd` — STATUS_RUNNING entries registered for the
+    current CWD, for the per-plan Monitor blocks.
+
+    Tolerates all failures by failing open on `any_live`.
     """
+    if not entries:
+        return (False, [])
     try:
         from end_of_line import registry  # local — avoid module-load cost
         from end_of_line import state as st
 
         cwd = Path(os.getcwd()).resolve()
+        any_live = False
         slugs: list[str] = []
-        for entry in registry.entries_for_project(cwd):
+        for entry in entries:
             data = registry.load_entry_state(entry)
             if data is None:
+                any_live = True  # unreadable state: assume live
                 continue
-            if data.get("status") == st.STATUS_RUNNING:
+            status = data.get("status")
+            if status not in st.TERMINAL_STATUSES:
+                any_live = True
+            if status == st.STATUS_RUNNING and Path(entry.project_root).resolve() == cwd:
                 slugs.append(entry.plan_slug)
-        return slugs
+        return (any_live, slugs)
     except Exception:
-        return []
+        return (True, [])
 
 
 def _per_plan_arming_block(slugs: list[str]) -> str:
@@ -138,14 +153,23 @@ def main() -> int:
         # Consume stdin so Claude Code doesn't see a broken-pipe on its
         # write side. The SessionStart payload isn't needed.
         _ = sys.stdin.read()
-        additional_context = INSTRUCTION
+        # The dashboard instruction costs every fresh session ~150 context
+        # tokens; emit nothing unless some registered plan is live (non-
+        # terminal state). One registry read feeds both the emit gate and
+        # the per-plan scan. A registry read failure falls back to emitting
+        # (the pre-gate behavior) rather than silently going dark.
         try:
-            slugs = _active_plans_for_cwd()
-            if slugs:
-                additional_context += _per_plan_arming_block(slugs)
-                additional_context += TASK_LIST_PROTOCOL_INSTRUCTION
+            from end_of_line import registry  # local — avoid module-load cost
+
+            emit, slugs = _scan_entries(registry.entries())
         except Exception:
-            pass
+            emit, slugs = True, []
+        if not (emit or slugs):
+            return 0
+        additional_context = INSTRUCTION
+        if slugs:
+            additional_context += _per_plan_arming_block(slugs)
+            additional_context += TASK_LIST_PROTOCOL_INSTRUCTION
         payload = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",

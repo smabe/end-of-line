@@ -23,16 +23,44 @@ from tests import must
 
 
 class SessionStartHookScriptTest(unittest.TestCase):
-    """The hook script itself — invoked by Claude Code on session start."""
+    """The hook script itself — invoked by Claude Code on session start.
 
-    def test_main_emits_hook_specific_output(self) -> None:
+    Hermetic: a tmp XDG_CONFIG_HOME isolates the registry, so tests never
+    read (or depend on) the developer's real ~/.config/clu state. Emission
+    is gated on a live (non-terminal) registered plan, so tests that expect
+    output must register one first.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._base = Path(self._tmp.name)
+        self._project = self._base / "some-project"
+        (self._project / "plans" / ".orchestrator").mkdir(parents=True)
+        self._xdg = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self._base)})
+        self._xdg.start()
+        self.addCleanup(self._xdg.stop)
+
+    def _register_plan(self, slug: str, status: str = st.STATUS_RUNNING) -> None:
+        registry.register(self._project, slug)
+        state_path = self._project / "plans" / ".orchestrator" / f"{slug}.state.json"
+        data = st.empty_state(slug, "plans")
+        data["status"] = status
+        st.save_atomic(state_path, data)
+
+    def _run(self) -> tuple[int, str]:
         with (
             mock.patch.object(sys, "stdin", io.StringIO("")),
             mock.patch.object(sys, "stdout", io.StringIO()) as out,
         ):
             rc = clu_session_start.main()
+        return rc, out.getvalue()
+
+    def test_main_emits_hook_specific_output(self) -> None:
+        self._register_plan("live-plan")
+        rc, raw = self._run()
         self.assertEqual(rc, 0)
-        payload = json.loads(out.getvalue())
+        payload = json.loads(raw)
         self.assertIn("hookSpecificOutput", payload)
         self.assertEqual(
             payload["hookSpecificOutput"]["hookEventName"],
@@ -42,6 +70,28 @@ class SessionStartHookScriptTest(unittest.TestCase):
         self.assertIn("clu operator dashboard", ctx)
         self.assertIn("clu watch --all --operator", ctx)
         self.assertIn("persistent=True", ctx)
+
+    def test_empty_registry_emits_nothing(self) -> None:
+        rc, raw = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "")
+
+    def test_terminal_only_registry_emits_nothing(self) -> None:
+        # Registry rows persist after plans finish (until an archive sweep);
+        # a registry holding only terminal plans must not cost the session
+        # the dashboard tokens.
+        self._register_plan("finished", status=st.STATUS_DONE)
+        self._register_plan("halted", status=st.STATUS_HALTED)
+        rc, raw = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(raw, "")
+
+    def test_registry_read_failure_falls_back_to_emitting(self) -> None:
+        with mock.patch.object(registry, "entries", side_effect=OSError("boom")):
+            rc, raw = self._run()
+        self.assertEqual(rc, 0)
+        ctx = json.loads(raw)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("clu operator dashboard", ctx)
 
     def test_additional_context_under_10k_chars(self) -> None:
         # Claude Code documents a 10K cap on additionalContext; the
@@ -235,6 +285,14 @@ class SessionStartActivePlansTest(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_no_active_plans_omits_per_plan_block(self) -> None:
+        # A live plan elsewhere on the host keeps the dashboard block, but
+        # with nothing running in THIS cwd there must be no per-plan block.
+        other = self._base / "elsewhere"
+        other.mkdir()
+        (other / "plans" / ".orchestrator").mkdir(parents=True)
+        registry.register(other, "elsewhere-plan")
+        state_path = other / "plans" / ".orchestrator" / "elsewhere-plan.state.json"
+        st.save_atomic(state_path, st.empty_state("elsewhere-plan", "plans"))
         rc, ctx = self._run_hook()
         self.assertEqual(rc, 0)
         self.assertIn("clu watch --all --operator", ctx)
@@ -260,13 +318,20 @@ class SessionStartActivePlansTest(unittest.TestCase):
         self.assertEqual(ctx.count("clu task-list protocol"), 1)
 
     def test_non_running_plans_excluded(self) -> None:
+        # paused/halted/done are all TERMINAL_STATUSES: nothing to watch,
+        # so the hook now emits nothing at all (not even the dashboard).
         self._register_plan("paused-plan", status=st.STATUS_PAUSED)
         self._register_plan("halted-plan", status=st.STATUS_HALTED)
         self._register_plan("done-plan", status=st.STATUS_DONE)
-        rc, ctx = self._run_hook()
+        out = io.StringIO()
+        with (
+            mock.patch.object(os, "getcwd", return_value=str(self._project.resolve())),
+            mock.patch.object(sys, "stdin", io.StringIO("")),
+            mock.patch.object(sys, "stdout", out),
+        ):
+            rc = clu_session_start.main()
         self.assertEqual(rc, 0)
-        self.assertNotIn("--task-list", ctx)
-        self.assertNotIn("TASK_CREATE", ctx)
+        self.assertEqual(out.getvalue(), "")
 
     def test_other_project_plans_excluded(self) -> None:
         other = self._base / "other-project"
