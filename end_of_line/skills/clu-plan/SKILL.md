@@ -609,6 +609,19 @@ conflicts across worktrees were the canonical failure (clu #50;
 | <phase-id> | `<slug>-<phase-id>.md` | <one-line scope> | <Nh> |
 | <next-phase-id> | `<slug>-<next-phase-id>.md` | ... | ... |
 
+## Verification record
+
+_Written by Step 3b from the agents' reported counts, never from
+intention — one line per auditor, one for the prober. Filled example:_
+
+- grounding: 14 claims checked, 2 fixed, 1 promoted, 0 refuted
+- executability: 9 acceptance items across 3 sub-plans checked, 1 fixed, 0 promoted
+- coherence: 6 cross-file restatements checked, 1 contradiction fixed
+- prober (p1): files LISTED 3 / MISSING 1 (added to p1 + Files touched); no workarounds; suite green
+
+_A plan with no `modified` entry in `## Files touched` replaces the
+prober line with: `prober: not fired (no existing code modified)`._
+
 ## Findings log
 
 _Empty at plan time. As phases run, the worker appends one dated bullet
@@ -642,6 +655,17 @@ Undersize → lease expires
 mid-phase and the worker halts; oversize is fine. Estimate honestly;
 a 4-hour phase tagged `1h` is a footgun. Shipped in lease-reliability
 (#57/#58).
+
+**The `## Verification record` section is inert to clu's parser by
+construction.** `parse_sessions_index` reads table rows only until the
+first blank line or `##` heading after them (plan_parser.py:48-61), so
+a section between the Sessions index and the Findings log is never
+scanned. Keep one invariant clean anyway: no line in the master — this
+section included — may begin with the literal marker `Approval:`. That
+line-start form is the machine-wide draft gate's plan-detection
+trigger; the byte-exact `## Sessions index` exemption is checked
+first, so a clu master survives it, but the invariant is what keeps
+that true rather than lucky.
 
 #### Sub-plan template (one per phase)
 
@@ -706,12 +730,327 @@ See `plans/<slug>.md`. Summary:
 - **<another>** — <...>
 ```
 
+### Step 3b: Verify the drafts (mandatory — runs before the operator sees the master)
+
+Every grounding rule the drafts obey — verify-or-block, sub-plan
+self-sufficiency, Non-goal asymmetry rationale — was self-certified by
+the same session that just wrote them, and a self-certified rule is
+the one that rots. This step is the adversarial read-back: three
+read-only auditors plus a dry-run prober, dispatched over the
+IN-MEMORY drafts before the operator is asked to `ship`. Running it
+after presenting would invert it into the failure it prevents: the
+operator becomes the reviewer.
+
+**Everything is pasted, nothing is read from disk.** The drafts exist
+only in memory until `ship` (Step 5), so every brief below receives
+the draft text VERBATIM in its prompt — the full master plus every
+sub-plan for the auditors, the first sub-plan for the prober. This
+also matches worktree reality: an agent worktree branches from the
+default branch and carries only tracked files
+(code.claude.com/docs/en/worktrees), so an agent told to "read the
+plan file" would find nothing even if the mandate allowed early
+writes. The briefs are self-contained and carry none of `/plan`'s
+line-start dispatch-gate markers — clu-plan's dispatches stay
+invisible to the machine-wide plan-dispatch gate by design; carrying
+its markers would hard-couple clu authoring to `/plan`'s exact
+boilerplate wording.
+
+**Dispatch all agents in a single message so they run in parallel.
+All are `subagent_type: "general-purpose"` — never `Explore`** (same
+mechanics as Step 2: Explore omits CLAUDE.md, and the grounding
+auditor's whole job is checking claims under the verify-or-block rule
+an Explore agent silently loses). The three auditors are READ-ONLY —
+they never edit anything; you apply every fix to the in-memory
+drafts. Their axes are disjoint and none can answer another's
+question, so never collapse them into one generic "review this plan"
+— that paraphrase is the degradation the split exists to prevent.
+
+**Effort is fixed per agent, and it is the dial to turn if this step
+feels expensive — never the agent count.** Coherence at **low** (its
+evidence is the drafts' own text; it opens no source). Grounding and
+executability at **medium** (mechanical checks — open the file, run
+the grep, match two lists — whose accuracy holds there). The prober
+at the **session's effort**, never lowered: it is the only agent here
+that writes and runs code, which is the work this step actually pays
+for. Dropping an agent deletes an axis no other agent covers;
+lowering effort deletes nothing.
+
+**The auditors verify by EXECUTION, not plausibility** — with the one
+deliberate exception of coherence, whose evidence IS the drafts'
+text and which quotes both halves of every contradiction. For the
+other two, an auditor that reasons about whether a claim is plausible
+reproduces the drafting session's assumptions. The instruction is to
+RUN the check — open the file, run the grep, fetch the URL — and
+quote what came back.
+
+**1. Grounding auditor** (medium effort):
+
+```
+Auditing the drafted clu plan {slug} for GROUNDING. Goal: {one-line
+goal}. The full master and every sub-plan are pasted below — they
+exist nowhere on disk, so the pasted text is the entire plan. Extract
+every EXISTENCE or BEHAVIOR claim about the codebase or an external
+system — file paths, symbol names, signatures, schema fields, config
+keys, version numbers, quoted behavior, file:line citations — from
+the master AND every sub-plan, and check each against the actual
+source this session. (Goals and Non-goals state intent, not fact —
+skip them. A file or symbol a sub-plan says it will CREATE does not
+exist yet and its absence is not a finding; a path or symbol the plan
+tells the worker to READ or MODIFY must exist now.) Search as though
+at least one claim does not resolve — reporting zero unresolved is a
+valid result, but only alongside the evidence below. Report a table:
+claim · where in the drafts · resolves? (yes / no / partially — with
+what the source actually says). Quote the CURRENT source verbatim at
+three or more cited locations, so the report proves you opened the
+files rather than echoing the drafts back. Separately list (i) every
+claim you could NOT check and why — a claim whose source you did not
+actually open goes here regardless of how plausible it reads;
+plausibility is not a resolution — and (ii) every
+existence-or-behavior claim carrying no citation at all. Also flag
+hedged phrasing ('should be', 'presumably', 'I believe'); any
+Failure-modes entry whose antecedent is statically checkable (an
+unlooked-up fact wearing risk's clothing); and any flat assertion
+about how a framework or external API behaves — that is a behavior
+claim and gets the same doc-quote-or-probe treatment as a claim
+anywhere else in the drafts.
+You are NOT to invoke `/clu-plan` or `/plan`, and NOT to edit any
+file. Cite file:line for local sources, URL+section for fetched ones.
+A claim you did not open a source for is reported as unverified, not
+as a finding. End with counts — e.g. 'checked 14 claims, 12 resolve,
+2 do not, 1 uncheckable, 1 uncited.' Keep prose under 400 words; the
+claims table and source quotes do not count toward that.
+The drafts follow: {master + every sub-plan, verbatim}
+```
+
+**2. Executability auditor** (medium effort):
+
+```
+Auditing the drafted clu plan {slug} for EXECUTABILITY. Goal:
+{one-line goal}. The full master and every sub-plan are pasted below
+— they exist nowhere on disk. Each sub-plan is executed by a
+cold-context worker that reads ONLY that sub-plan plus the master;
+judge every sub-plan on that footing. Search as though at least one
+sub-plan cannot be executed standalone — reporting zero is valid only
+with the per-item accounting below. Answer each as a list, not prose:
+(a) COVERAGE — for each sub-plan, do its `## Produce` items (failing
+tests / implementation / acceptance) deliver the scope its
+Sessions-index row claims, and does every check under the numbered
+`3. **Acceptance.**` item verify something the Produce items build?
+Name any acceptance check nothing produces and any Produce item no
+check covers. (b) SET MISMATCH — files in the master's `## Files
+touched` appearing in no sub-plan's Produce items, and files a
+sub-plan edits that are missing from `## Files touched` or carry the
+wrong phase tag. (c) ORDERING — does any sub-plan depend on an output
+a LATER Sessions-index row produces? (d) SELF-SUFFICIENCY — for each
+sub-plan, using ONLY its own text plus the master, list every
+referent it needs in order to EXECUTE but neither defines nor names a
+source for: inputs, outputs, call sites, symbols. A pointer that
+names where the thing lives ('see the master', 'settled in phase 1')
+is not a gap — an unsourced referent is. Open every `## Read first`
+pointer and confirm it resolves: the file exists and the cited lines
+are about what the sub-plan says they are. (e) EXCLUSIONS — does
+every Non-goal excluding some members of a peer set carry its
+one-sentence why-the-asymmetry-is-safe rationale? (f) INHERITED
+DECISIONS — does the master record as settled (in Locked design
+decisions, or anywhere it treats a choice as made) any decision that
+changes what the operator sees or how the feature behaves, without
+citing an explicit operator sign-off? Name each. (g) FORMAT — every
+Sessions-index row's Effort cell parses (`Nh` / `Nmin`, decimals ok,
+ranges `N-Mh` / `N-Mmin`; `45m` and bare integers silently parse as
+no estimate and fall back to the default lease), and every phase id
+derived from the row's filename matches
+`^[a-z0-9][a-z0-9_-]{0,63}$`.
+You are NOT to invoke `/clu-plan` or `/plan`, and NOT to edit any
+file. Cite file:line for local sources, URL+section for fetched ones.
+A claim you did not open a source for is reported as unverified, not
+as a finding. End with counts — e.g. 'checked 9 acceptance items
+across 3 sub-plans, 4 Read-first pointers, 6 Files-touched entries.'
+Report in under 400 words.
+The drafts follow: {master + every sub-plan, verbatim}
+```
+
+**3. Coherence auditor** (low effort):
+
+```
+Auditing the drafted clu plan {slug} for COHERENCE. Goal: {one-line
+goal}. The full master and every sub-plan are pasted below — they
+exist nowhere on disk. You are NOT checking the drafts against the
+codebase — another auditor does that, and you should not open a
+source file at all. You are checking the drafts against THEMSELVES:
+which two parts of this text cannot both be true? Search as though
+the drafts contradict themselves at least once — reporting zero is
+valid only with the accounting below. Report as a list, each entry
+naming BOTH locations and quoting both: (a) SUMMARY VS MECHANISM — a
+Locked design decision, a Goal line, or any stated rule whose scope
+is wider or narrower than what the sub-plans' Produce steps actually
+do; walk each stated rule against the steps. (b) UNREACHABLE OUTCOME
+— an acceptance check or Per-phase-done-checklist item the Produce
+items as written cannot satisfy. (c) SELF-VIOLATING SCOPE — a Produce
+item that does what a Non-goal excludes. (d) SPLIT FACT — the same
+fact stated in two places with different content (master vs sub-plan,
+or sub-plan vs sub-plan), including counts and line hints. (e)
+UNVERIFIED CHARACTERIZATION — any sentence describing what the code
+or product DOES, as opposed to where something lives; flag every one,
+even when its citation resolves perfectly — a correct file:line
+proves a symbol exists, never that a description of behavior is
+accurate.
+You are NOT to invoke `/clu-plan` or `/plan`, and NOT to edit any
+file. End with counts — e.g. 'checked 11 stated rules against their
+mechanisms, 4 characterizations, 6 cross-file restatements, 1
+contradiction.' Report in under 400 words; quoted pairs do not count
+toward that.
+The drafts follow: {master + every sub-plan, verbatim}
+```
+
+**4. Dry-run prober — fires when the plan modifies existing code.**
+The trigger is observable: any `modified` tag in the draft `## Files
+touched`. A plan that only creates new files skips the prober, and
+the record says so. Dispatch ONE agent with `isolation: "worktree"`
+at the session's effort, and paste the FIRST sub-plan's text verbatim
+— the first Sessions-index row is what dispatches first, and its
+dependencies exist on the default branch now. "Green" for the probe
+is the project's own test gate — the same command the master's
+Per-phase done checklist names; clu projects need no build step.
+
+One deliberate narrowing: `/plan`'s prober also carries a bigger-size
+scratch run (its item vii), a confessed-design-decisions channel (its
+item viii), and deferred phase-start re-probes of later phases — all
+tied to its resume-mode seam, which clu (cold workers, no resume
+mode) has no equivalent of; this adaptation keeps the five channels
+below and drops those deliberately rather than silently.
+
+```
+You are in a throwaway git worktree. Below is the FIRST phase of a
+clu plan that exists nowhere on disk — the pasted text is all there
+is; do not go looking for plan files. START IMPLEMENTING it here. You
+are not delivering the phase and your diff will be discarded —
+implement only as far as you need to discharge this brief's duties,
+then stop. Go far enough to hit the real call sites and run the
+project's test gate from this worktree's own path; a green gate is
+what gives your file list its authority. If it does not pass, fix it
+and run again. Skip the sub-plan's commit / attest / complete step
+entirely — those callbacks are the real pipeline and this is a probe.
+If you cannot reach green after real attempts, that IS a finding:
+label it APPROACH (or SKETCH, when the plan's own code shape is what
+will not run), quote the actual error, and say what you tried — never
+hand back a file list from a tree that never went green as though it
+were complete. If an acceptance check names an observable output (a
+numeric result, a formatted artifact, a command's output), produce it
+and measure it against the check before stopping, and report any miss
+as MEASURED.
+Report: (i) anything in the phase text that did not survive contact —
+quote it and label which kind: SKETCH (a code shape or instruction in
+the sub-plan that is wrong as written), APPROACH (the design itself
+does not work against the real code), or MEASURED (an acceptance
+observable you produced that misses its check — quote the check, the
+measurement, and the delta); (ii) every file you edited, marked
+LISTED or MISSING against the sub-plan's Produce items, and for each
+MISSING file the one-line reason it was unavoidable; (iii) anything
+the sub-plan lists that you did NOT need to touch; (iv) did you work
+around any constraint to reach green? If you hit a restriction and
+routed around it — a wrapper, a shim, anything whose job is to dodge
+rather than to do — name the constraint, name the workaround, and say
+what the design would look like WITHOUT it, including which files
+that version would touch. Answer even when the workaround was
+reasonable and built cleanly; (v) name three behaviors the OLD code
+provided that yours does not, and where each is re-established — not
+three defects; 'this one is re-established at X' is the useful half,
+and an honest two beats a padded three. Look hardest at what a
+deleted line did BEYOND its stated job.
+You are NOT to invoke `/clu-plan` or `/plan`. Do NOT commit and do
+NOT report on code quality. The phase text follows: {first sub-plan,
+verbatim}
+```
+
+**Route the prober's report by channel — none of it is advisory:**
+
+- **A MISSING file is a draft edit, not a finding to weigh.** Add it
+  to the sub-plan's Produce items AND the master's `## Files touched`
+  with the right phase tag. The prober attempted the change and you
+  did not; when its list and the draft disagree, the draft is what's
+  wrong. The only judgment left is which phase owns each missing
+  file.
+- **SKETCH → fix the draft in place.** A code shape that is wrong as
+  written, or two parts of the drafts prescribing different things,
+  is a drafting error; correct it and name the fix in the record.
+- **APPROACH → back to Step 2**, with what the prober hit as the
+  sharper research question. Do not patch the drafts around a design
+  that does not work against the real code.
+- **MEASURED → the drafts' own claim falsified.** Fix whichever half
+  is wrong: the acceptance check misdescribes the intent → fix the
+  check (route like SKETCH); the design cannot produce the check →
+  route like APPROACH.
+- **A confessed WORKAROUND is a design fork, arriving disguised as
+  good news.** The prober still went green and its file list is
+  honestly complete — for the design it happened to build, which
+  nothing else in this step can see. Compare the two shapes it
+  describes: if the workaround-free design is the better shape, take
+  it and add ITS files (usually strictly more) to the drafts; only
+  when both are genuinely defensible does it go to the operator at
+  Step 4 as a forced binary decision, drafted with the
+  workaround-free version as the default. Never inherit the
+  workaround silently because it built.
+- **Old-code behaviors — channel (v) — are claims to check, not
+  notes.** Read each "re-established at X" and verify it: the same
+  outcome by another route is fine; the same outcome at another TIME
+  is a behavior change wearing re-establishment's clothing. A
+  behavior the prober cannot place routes by cost: one a user would
+  notice losing becomes an acceptance check on the phase, naming the
+  observable it protects; an internal one becomes a bullet in the
+  sub-plan's `## Failure modes to watch`.
+
+**One pass, blocking.** Dispatch once, fix what comes back once, then
+proceed to Step 4 — no second findings round, and never hand the
+operator the master plus a findings list to triage; that is the
+inversion this step exists to stop. Every fix is named in the record.
+A finding you cannot close cleanly in the single pass is PROMOTED: it
+goes to the operator at Step 4 as a forced binary decision, with the
+drafts edited to the auditor's reading as the default (same bake-in
+rule as the reuse and exclusion specialists). "The auditor was
+probably wrong" is not a close — refuting a finding means checking
+the source yourself and citing it in the record.
+
+Exactly three carve-outs exist, and each is a FIRST pass over work or
+text no agent saw — not a second round, so none contradicts the rule:
+
+1. **An auditor that cannot report counts did not run** — re-dispatch
+   it. That re-runs a pass that never happened.
+2. **A fix that introduces a construct appearing in neither the
+   pre-audit draft nor the finding is a new mechanism** — untested
+   design minted during the fix pass — and it earns ONE scoped
+   re-probe of the affected sub-plan section (verbatim paste, same
+   worktree isolation) before the record is written. A re-probe that
+   faults the fix → correct it with the probe's citation, or promote.
+3. **The Step 5 ship-guard**: a sub-plan the operator changed after
+   this pass gets the affected auditor re-run over the changed text
+   before files land on disk (see Step 5's preamble).
+
+**Write the `## Verification record` into the in-memory master** —
+between `## Sessions index` and `## Findings log`; the master
+template above shows the format. One line per auditor with its
+reported counts, one line for the prober's LISTED/MISSING split — or
+`prober: not fired (no existing code modified)`. The record is
+written from the agents' REPORTED counts, never from intention: carry
+each count sentence in, don't restate it from memory. Fixed,
+promoted, and refuted findings are counted separately, so an
+all-refuted pass and a clean pass cannot look alike.
+
+**Legacy drafts get the pass too.** A master about to be presented
+without a `## Verification record` — drafted before this step
+existed, or carried in from an earlier session — gets the full Step
+3b pass before presentation; the record's absence is not an
+exemption, it is the signal the pass never ran.
+
 ### Step 4: Present the master only and await `ship`
 
-After drafting all files in memory, present **only the master file**
-to the operator with this exact framing:
+After drafting all files in memory and running the Step 3b pass,
+present **only the master file** to the operator with this exact
+framing:
 
 > Here's the master — N sub-plan files drafted alongside it in memory.
+> Verified pre-ship: <the `## Verification record` compressed to one
+> line — e.g. "grounding 14 checked / 2 fixed · executability clean ·
+> coherence 1 fixed · prober LISTED 3 / MISSING 1 (added)">.
 > Read the master (locked decisions, non-goals, Sessions index) and
 > say `ship` to write + queue, or tell me what to change. If you want
 > to see a specific sub-plan before shipping, name it and I'll expand
@@ -728,6 +1067,11 @@ to the operator with this exact framing:
 > scope based on `<file:line>` dependency on `<included items>`. To
 > keep the exclusion, give me the one-sentence invariant that makes it
 > safe.
+>
+> [If Step 3b promoted a finding]
+> **Verification finding needs your call:** <what the auditor or
+> prober found>. Drafted with <the auditor's reading> as default. If
+> you want it the other way, say so and I'll restructure.
 
 Then **wait**. Do not write to disk. Silence is not approval. If the
 operator picks copy-and-defer for a reuse decision, record the
@@ -750,6 +1094,15 @@ the master.
 ### Step 5: On `ship`, write files + optionally init/queue
 
 When the operator says `ship` (or equivalent):
+
+**Ship-guard first — re-verify anything that changed after the Step
+3b pass.** If the operator's Step 4 edits touched any sub-plan
+(directly, or via a locked-decision change propagated into one), the
+affected auditor re-runs over the changed text BEFORE any file lands
+on disk, and the `## Verification record` is refreshed from its
+reported counts. This is Step 3b's third carve-out — a first pass
+over text no agent saw, not a second findings round. Unchanged drafts
+re-run nothing.
 
 1. **Author the plan files in a single tight pipeline.** Write all
    master + sub-plan files via `Write` tool calls in one assistant
@@ -1196,6 +1549,13 @@ Smallest-first.
 |---|---|---|---|
 | timeout | `auth-cleanup-timeout.md` | Session timeout config + 401-on-expire (#100) | 1h |
 | rotation | `auth-cleanup-rotation.md` | 24h token rotation + 5min grace (closes #100 #101) | 2h |
+
+## Verification record
+
+- grounding: 11 claims checked, 1 fixed, 0 promoted, 0 refuted
+- executability: 6 acceptance items across 2 sub-plans checked, 0 fixed, 0 promoted
+- coherence: 4 cross-file restatements checked, 0 contradictions
+- prober (timeout): files LISTED 2 / MISSING 0; no workarounds; suite green
 
 ## Findings log
 
