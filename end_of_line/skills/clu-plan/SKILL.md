@@ -18,8 +18,8 @@ clu's dispatch contract requires a master plan file with a `## Sessions
 index` markdown table whose rows declare each phase, PLUS one sub-plan
 file per phase. The sub-plan is the worker's brief — what to read, what
 to build, when to call `clu complete`. A `/plan`-style single file
-fails `parse_sessions_index()` and the supervisor errors `no Sessions
-index in plans/<slug>.md`.
+yields no phases, and the supervisor errors `no Sessions index in
+plans/<slug>.md` at dispatch.
 
 This skill produces both: the master AND every sub-plan, in the format
 that workers dispatched via `claude --print '/clu-phase ...'` can act on.
@@ -347,6 +347,13 @@ it. Cite file:line. Plan-time decisions stay in Locked design decisions;
 this section is runtime-only: written by workers, read by every phase._
 ```
 
+The `## Sessions index` heading must be byte-exact — case-sensitive,
+single space. The machine-wide plan-draft gate
+(`~/.claude/hooks/plan_draft_gate.py`) matches that exact spelling to
+exempt clu masters from its write-freeze. clu's own parser is
+case-insensitive, so a variant spelling parses fine for clu yet
+silently loses the exemption.
+
 The Sessions index is load-bearing. `parse_sessions_index()` derives
 phase IDs from the sub-plan filename: if the filename is
 `<slug>-<phase>.md`, the phase ID is `<phase>`. Both must be valid
@@ -355,8 +362,12 @@ slugs per `st.validate_slug` regex `^[a-z0-9][a-z0-9_-]{0,63}$`.
 **The `Effort` column is mechanically load-bearing, not decorative.**
 `parse_effort_minutes()` reads it at `clu init` time to scale each
 phase's lease TTL (default 60min × `lease_ttl_scale`, capped by
-`lease_ttl_minutes`). Formats accepted: `45m`, `1h`, `2.5h`, or a
-bare integer interpreted as minutes. Undersize → lease expires
+`lease_ttl_minutes`). Formats accepted: `Nh` or `Nmin`, decimals ok,
+case-insensitive — e.g. `1h`, `2.5h`, `90min` — plus ranges `N-Mh` /
+`N-Mmin`, which resolve to the UPPER bound (`1-2h` → 120 minutes).
+Anything else — notably `45m` or a bare `90` — parses as no estimate
+and silently falls back to the default lease TTL, with no error.
+Undersize → lease expires
 mid-phase and the worker halts; oversize is fine. Estimate honestly;
 a 4-hour phase tagged `1h` is a footgun. Shipped in lease-reliability
 (#57/#58).

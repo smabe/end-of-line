@@ -50,7 +50,7 @@ INSTRUCTION = (
 )
 
 # Compressed from /clu-plan SKILL.md "Reacting to task-list protocol
-# notifications" (lines 327-373). Emitted only when active plans are detected.
+# notifications". Emitted only when active plans are detected.
 TASK_LIST_PROTOCOL_INSTRUCTION = (
     "## clu task-list protocol\n\n"
     "The `--task-list` Monitor stream emits two line shapes:\n\n"
