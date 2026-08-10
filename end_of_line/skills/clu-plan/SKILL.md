@@ -93,17 +93,18 @@ phase added a single ~15-line helper plus 5 tests and could have
 shipped inside the next phase's commit without losing TDD-ability.
 Each saved phase is ~30–60s of dead time off the plan's wall clock.
 
-### Step 2: Pre-author research (mandatory — EPCC's Explore)
+### Step 2: Pre-author research (mandatory)
 
-This is the E in EPCC (Explore → Plan → Code → Commit), the same
-unconditional explore gate as `/plan` Mode 1 step 4 — but for
-clu-plans it runs BEFORE drafting (not after a first approval),
-because the master's Locked-decisions and Files-touched sections
-commit to specific file paths, function signatures, and behaviors
-the moment they're written. A worker dispatched off those paths
-inherits whatever the research got wrong. There is no "small plan"
-exception and no opt-out: research grounds the master, and the master
-is the contract the cold-context worker can't push back on.
+This is the E in EPCC (explore → plan → code → commit) — the same
+unconditional pre-draft exploration gate `/plan` enforces before any
+plan text is written — but for clu-plans it runs BEFORE drafting (not
+after a first approval), because the master's Locked-decisions and
+Files-touched sections commit to specific file paths, function
+signatures, and behaviors the moment they're written. A worker
+dispatched off those paths inherits whatever the research got wrong.
+There is no "small plan" exception and no opt-out: research grounds
+the master, and the master is the contract the cold-context worker
+can't push back on.
 
 **Hand off opaque diagnostic cases to `/diagnose` first.** If the
 symptom is genuinely opaque (no obvious hypothesis, multiple plausible
@@ -112,35 +113,268 @@ cause BEFORE scoping phases here. /diagnose finds the cause; clu-plan
 scopes the fix. A cold worker can't run a disciplined diagnosis loop
 mid-phase — don't ship it a master built on a guessed root cause.
 
-**Three mandatory research dimensions, each its own agent, dispatched
-in parallel in a single message:**
+#### Stage zero — settle design forks first
 
-1. **Codebase / internal exploration** — `subagent_type: "Explore"`.
-   Brief: "Map the area this plan will touch. List existing helpers
-   to reuse instead of reimplementing. List callers of any function
-   we're changing. Note file sizes, naming patterns, and test
-   coverage of the surface. Quote file:line for every claim."
+Before any team below is briefed, read the operator's goal and the
+code long enough to answer one question: **is there a fork between two
+or more candidate designs whose outcomes would produce DIFFERENT
+Sessions-index row sets** — different row count, ordering, scope, or
+effort? If yes, that fork is settled NOW, by experiment, before Team A
+or B is briefed. Its verdict lands in the master's Locked design
+decisions, and the teams are briefed against a design that exists —
+research run against a fork answers about a shape that may be
+discarded.
 
-2. **Project-local API documentation + canonical samples** —
-   `subagent_type: "general-purpose"`. Brief: "For the dependencies
-   this plan touches, surface the framework's canonical pattern and
-   working examples (vendored docs, library README/examples in
-   site-packages, framework headers; fetch the vendor's official docs
-   when no local copy exists). What footguns does the doc itself call
-   out? Cite file:line for local sources or URL+section for fetched
-   docs." (For clu itself, stdlib-only — this dimension is light, but
-   still run it to confirm no new third-party dep is implied.)
+The clu-specific stake: a cold-context worker inherits an unsettled
+fork with no operator to ask. The anti-pattern is a Sessions-index row
+whose scope is "decide X" — every row after it was drafted against an
+assumed answer, and if the answer goes the other way, the plan gets
+rewritten mid-dispatch, which is the outcome planning exists to
+prevent.
 
-3. **Web prior art / community evidence** — `subagent_type:
-   "general-purpose"` with WebSearch + WebFetch. Brief: "How are
-   others solving this problem? GitHub issues, Stack Overflow, recent
-   blog posts. Vendor docs describe intended contracts that don't
-   always match shipped reality — independent corroboration is the
-   point. Cite URLs."
+**The instrument is a comparison probe:** ONE worktree-isolated agent
+(`isolation: "worktree"`) that builds the smallest version of BOTH
+candidates, measures the discriminating property, recommends nothing,
+and reports the measurement. Paste the candidate descriptions verbatim
+into its prompt — an agent worktree branches from the default branch
+and carries only tracked files (code.claude.com/docs/en/worktrees), so
+it cannot read unpushed or in-memory plan files. Its brief:
 
-Each brief also carries: the slug + one-line plan goal, an explicit
-"You are NOT to invoke `/clu-plan` or `/plan`; research only, report
-under 400 words," and a request for file:line / URL+section citations.
+```
+You are in a throwaway git worktree, settling ONE design question for
+a clu plan someone else is drafting. Your diff will be discarded and
+you are not delivering a feature. You are running an EXPERIMENT, and
+your report is a verdict with evidence. The question and the candidate
+designs are pasted in full below.
+
+Build the MINIMUM of each candidate that can answer the question — the
+smallest thing that exercises the discriminating property, not a
+finished implementation. Hold constant everything the fork does not
+force to differ: where you had a free choice, make it the same on both
+sides; where a candidate forced your hand, say so. Build and run from
+THIS worktree's own path — re-point any tooling whose defaults target
+the main checkout, and verify it took before trusting a number.
+
+Then MEASURE. Run it, drive it, record numbers or observed states — do
+NOT reason from documentation about what should happen; if docs
+settled this question you would not have been dispatched. Where docs
+disagree with what you measure, report both and trust the measurement.
+
+A verdict requires BOTH candidates built and measured. If you cannot
+stand a candidate up after real attempts, that IS the finding: report
+UNRESOLVED, say which candidate and what stopped you, and give
+whatever partial measurement you have.
+
+Report: (i) the VERDICT — which candidate, and the single property
+that decided it; (ii) the MEASUREMENT behind it, as raw as you can
+give it: what you ran, how many trials, what each returned; (iii) what
+you held constant, and anything you could not; (iv) what surprised you
+about EITHER candidate, whether or not it bears on the verdict; (v)
+the SHAPE the winner forces — the composition, types, or call pattern
+the plan must now be written against, as concretely as you can give
+it, ideally as the actual code you built. The research teams are
+briefed from that line next, so a vague shape means they analyse a
+design nobody has written down.
+
+You recommend nothing and you judge no code quality. You are NOT to
+invoke `/clu-plan` or `/plan`. Do NOT commit. The question and the
+candidate designs follow: {question_and_candidates}
+```
+
+Do NOT append the research boilerplate (further down) to this probe:
+the probe recommends nothing and measures instead of citing, so the
+effort-objection ban is meaningless to it and the 400-word cap fights
+its duty to report raw measurement.
+
+**Forks surfaced later by research are probed retroactively**, and the
+affected teams are then RE-DISPATCHED against the winner — their first
+pass answered about a shape you have now discarded, so its findings
+describe code that won't be written. **What does NOT trigger a probe:**
+a question whose answer changes only a sub-plan's internals — an
+implementation detail inside a phase — and leaves the Sessions-index
+row set alone. The trigger is "would the row set be different", not
+"could this go wrong later".
+
+#### Three research teams
+
+Why teams and not topics: the old shape asked three topic questions
+that were all versions of *what exists and what's canonical*. None
+asked **what breaks when I touch this** — which is where
+implementation surprises on refactors actually come from. Knowing a
+function has four callers says nothing about whether one of them
+depends on it being slow, on it running before something else, or on a
+side effect nobody wrote down. Team A exists for that question.
+
+Dispatch every agent in a single message so they run in parallel.
+Pass the briefs below as written (placeholders filled) — paraphrasing
+them into one generic "go research this" is the degradation the team
+split exists to prevent.
+
+**All research agents are `subagent_type: "general-purpose"` — never
+`Explore`.** Per Claude Code's subagent docs: "Explore and Plan are
+the only subagents that omit CLAUDE.md and git status. There is no
+frontmatter field or per-agent setting to change which agents skip
+them" (code.claude.com/docs/en/sub-agents, "What loads at startup").
+An Explore-typed researcher silently loses every standing project rule
+— the verify-before-stating gate, any project-specific API gate —
+which is exactly what research correctness depends on.
+
+**NEUTRAL BRIEFS FOR TEAMS A AND B.** They receive the operator's goal
+in the operator's words plus the files in play — **never the approach
+you have in mind.** A brief that says "we're adding a helper to X" has
+already handed the agent your assumption, and what comes back will
+agree with it. If you cannot describe the territory without naming
+your solution, that is the signal your solution is already doing
+load-bearing work before any research ran.
+
+**Team A — CHANGE IMPACT (3 agents).** *Skipped only when the plan
+creates new code and modifies none.* That trigger is observable — read
+the draft Files-touched list to decide — not a judgment call about
+whether something "counts as a refactor."
+
+A1 — fan-in and observable behavior:
+
+```
+Map who depends on {files/symbols in play}, and how far the dependency
+reaches.
+
+- Direct callers, then callers of those callers, out to the point
+  where a difference would become visible to a user or to another
+  system. Stop there and say where you stopped.
+- For each call site: what does it assume about this code that isn't
+  in the signature? Return-value shape, nullability, whether it can
+  throw, whether it's safe to call twice.
+- Which call sites would keep compiling but start behaving differently
+  if the change goes in? Those are the dangerous ones — a compiler
+  error is a fixed bug, a silent behavior change is a shipped one.
+
+Do NOT report a file map or a directory structure. If your report
+reads like an inventory of what exists, you have answered the wrong
+question.
+```
+
+A2 — incidental behavior:
+
+```
+Everything being changed or deleted here does something BEYOND its
+stated job. Find it.
+
+- What does this code do incidentally? Timing, ordering, caching, a
+  retry that is also acting as a debounce, a log line something greps
+  for, a lock held slightly longer than needed that another path
+  relies on.
+- For anything being DELETED: what was it doing that nobody
+  documented? Name the invariant it enforced, then search for where
+  that invariant would be re-established afterwards. If you can't
+  find one, say so — that is the finding.
+- What would still pass every existing test and still be broken?
+
+Quote file:line. Speculation is fine if labelled, but label it.
+```
+
+A3 — shared state and ordering contracts:
+
+```
+Map what else touches the same state as {files/symbols in play}.
+
+- Every other reader and writer of the same state, queue, cache,
+  file, or external resource.
+- Ordering contracts: what breaks if this runs earlier, later, twice,
+  not at all, or concurrently with its neighbours? Walk realistic
+  sequences, not just the happy path.
+- Where does this code's correctness depend on something else having
+  already run? Is that dependency enforced, or is it just true today?
+
+Cite file:line for each coupling. Rank by how silent the failure
+would be.
+```
+
+**Team B — ADVERSARIAL CODE READ (1 agent; 2 when the change spans
+modules).** Attacks the *existing* design — the neutral-brief rule
+applies to this team especially.
+
+B1 — attack the existing design:
+
+```
+Read {files in play}. Your job is not to review a proposed change —
+it is to find what is wrong with the code as it stands today.
+
+- What undocumented invariant does this code depend on? What would a
+  new contributor break within a week because nothing states it?
+- Where does the naming lie? Functions whose names describe less (or
+  more) than they do, types whose names describe a role they no
+  longer play.
+- What do you have to know that isn't in this file to change it
+  safely?
+- What is here only because of how it was built, rather than what it
+  needs to do?
+
+Then the question this brief exists for: if you were writing this
+from scratch today, knowing what it must do, what shape would it be?
+Describe that shape concretely. Do not soften it toward the current
+design and do not weigh how much work the difference would be — that
+is explicitly not your input. If the honest answer is "roughly what's
+there," say that plainly; a clean bill of health from this brief is a
+real result.
+```
+
+**Team C — IMPLEMENTATION SPECIALISTS (2 agents + the conditional
+specialists below).** Unlike A and B, these MAY be told the intended
+approach — their job is to check it against how the thing is meant to
+be used.
+
+C1 — project-local API documentation and canonical samples:
+
+```
+For the dependencies this plan touches, surface the framework's
+official guidance and working code patterns. Find where this
+project's docs live — vendored docs folders, library README and
+examples under site-packages / node_modules / Pods, framework
+headers, generated type stubs — and fetch from the vendor's official
+docs site when no local copy exists.
+
+- What does the framework's canonical pattern for this problem look
+  like?
+- Where are working examples, in this project's dependencies or in
+  vendor sample repos?
+- What footguns does the documentation itself call out?
+
+Cite file:line for local sources, URL+section for fetched docs.
+```
+
+(For clu itself, stdlib-only — this agent is light, but still run it
+to confirm no new third-party dep is implied.)
+
+C2 — web prior art and community evidence (WebSearch + WebFetch):
+
+```
+How are others in this language / framework / domain solving this
+problem? Stack Overflow threads, GitHub issues on the relevant
+libraries, recent blog posts, conference talks.
+
+Vendor docs are routinely incomplete, or describe an intended
+contract that doesn't match shipped reality — independent
+corroboration is the entire point of this agent. Gotchas and
+performance cliffs are usually the UNDOCUMENTED part, which is
+exactly why a doc quote alone cannot close every question.
+
+Cite a URL for every finding. "I found nothing credible" is a valid
+and useful answer; padding is not.
+```
+
+**Boilerplate — append to EVERY team and specialist brief** (never to
+the stage-zero probe):
+
+```
+Researching for clu plan {slug}. Goal: {one-line goal}.
+You are NOT to invoke `/clu-plan` or `/plan`. Research only. Report
+in under 400 words.
+Cite file:line for local sources, URL+section for fetched ones. A
+claim you did not open a source for is reported as unverified, not as
+a finding.
+Diff size, file count, and implementation effort are not your inputs.
+Recommend what is correct.
+```
 
 **Three framing questions to hold while designing the dispatch.**
 Everything below is scaffolding for these; answer them well and the
@@ -154,41 +388,69 @@ rest mostly takes care of itself:
    that's the brief for one specialist whose ONLY job is to surface it
    as a primary finding — not a footnote under broader coverage.
 3. **How many genuinely distinct dimensions am I researching?** That's
-   your agent count beyond the three mandatory ones.
+   your agent count beyond the three teams.
 
-**Agent count scales with research surface area — not plan size, not
-phase count.** Soft guidance for the extra slots beyond the three
-mandatory dimensions:
+**Baseline agent count, then scale with research surface area — not
+plan size, not phase count:**
 
-- **0 extra** when the three mandatory dimensions cover everything (a
-  single contained change).
-- **1–2 extra** when the plan spans extra dimensions — e.g. a schema
-  bump wants migration + caller-impact specialists on top of the three;
-  a notify-channel change wants delivery-semantics + config-merge.
-- **3+ extra** when the plan is genuinely cross-cutting AND
-  specialization buys clarity (multi-module refactor, new subsystem).
-  The extra slots are for *role specialization*, not chasing the same
+- **4 agents** for a plan that only creates new code: B1 + C1 + C2 +
+  any triggered conditional specialist. Team A is skipped because
+  there is no existing behavior to break.
+- **7 agents** for a plan that modifies existing code: A1–A3 + B1 +
+  C1 + C2, plus conditionals.
+- **+1–2** when the plan spans extra dimensions beyond those — e.g. a
+  schema bump wants migration + caller-impact specialists; a
+  notify-channel change wants delivery-semantics + config-merge. The
+  extra slots are for *role specialization*, not chasing the same
   question harder.
 - **Stop adding agents** when the marginal one would re-cover another's
   ground. Consolidation overhead grows with agent count; budget it.
 
-**Beyond the three, add specialist agents when the plan's shape
-demands it** (role specialization — each agent has one sharp job no
-other is doing). The full role-split catalog lives in `/plan` Mode 1
-step 4; the three that force a binary decision at approval are
-mandatory here when triggered:
+**The scale has a floor, and its trigger is observable — count the
+Sessions-index rows.** A single-phase plan (Sessions index with ONE
+row) collapses Team A to ONE agent carrying the A1+A2+A3 briefs
+concatenated, verbatim — 4 agents total. The floor compresses Team A
+only: no question is cut, and Team B's second agent plus the
+conditional specialists keep their own triggers.
+
+**Effort is the cost control, not headcount.** Dispatch the teams at
+the session's effort; dispatch the conditional specialists at **low**
+— each answers one narrow forced-binary question against a trigger
+that already fired, and quality holds there. Trimming an agent cuts a
+question; lowering its effort does not.
+
+**Additional role splits when the plan's shape demands them**
+(illustrative, not prescriptive — these compose on top of the three
+teams, one sharp job per agent):
+
+- **Algorithmic / numerical:** math-and-formulas · per-tick inner-loop
+  specialist · integration-with-existing-system.
+- **LLM orchestration:** prompt-design and structured-output ·
+  caching-and-token-budget · evals-and-regression-fixtures.
+- **Backend:** schema-and-migration · API-contract-and-versioning ·
+  caching-and-invalidation · error-and-retry semantics.
+- **Cross-cutting refactor:** callers-and-impact · test-coverage ·
+  deprecation-path · integration-test-strategy.
+
+**Three conditional specialists force a binary decision at approval.**
+Check all three triggers against every plan; each is mandatory when
+its trigger fires:
 
 - **Reuse / refactor specialist** — MANDATORY when the plan adds a
-  NEW file described as "mirrors / like / similar to / same family
-  as" an existing one, OR a sibling with the same suffix already
-  exists in the target dir. Brief it to read both, list concrete
-  duplication (blocks ≥30 lines, ≥3 near-verbatim methods, shared
-  chrome) with file:line, and recommend (a) **refactor-first**
-  (extract the shared base/helper as its OWN phase, then build the new
-  file on top in a later phase) or (b) copy-and-defer. The policy
-  default and override mechanics live under Critical rules: "New file
-  mirrors an existing file? Refactor first by default" — in short,
-  (a) wins and becomes the first row of the Sessions index.
+  NEW SOURCE file described as "mirrors / like / similar to / same
+  family as" an existing source file, OR a sibling with the same
+  suffix already exists in the target dir. Scope is SOURCE files only
+  — never markdown, docs, skill definitions, prompt templates, or
+  config: parallel structure in prose is a feature, and the code
+  thresholds below mean nothing for instructions. Brief it to read
+  both, list concrete duplication (blocks ≥30 lines, ≥3 near-verbatim
+  methods, shared chrome) with file:line, and recommend (a)
+  **refactor-first** (extract the shared base/helper as its OWN
+  phase, then build the new file on top in a later phase) or (b)
+  copy-and-defer. The policy default and override mechanics live
+  under Critical rules: "New file mirrors an existing file? Refactor
+  first by default" — in short, (a) wins and becomes the first row of
+  the Sessions index.
 
 - **Exclusion-safety specialist** — MANDATORY when a Non-goal will
   exclude some members of a peer set (some op types, endpoints,
@@ -207,21 +469,30 @@ mandatory here when triggered:
   solvers. The four required questions are inlined under "Critical
   rules" below — concentrate them in this agent's brief.
 
-**Skip-condition (narrow):** the three mandatory dimensions still run
-even for a single small phase. The only files you may skip re-reading
+**Skip-condition (narrow):** the teams still run even for a single
+small phase — Team A's new-code-only skip and the single-phase floor
+above are the only sanctioned reductions, and both compress headcount
+without cutting a question. The only files you may skip re-reading
 are ones you've *already read in this conversation* — cite them from
-that read instead of re-dispatching. You may not skip the API-docs or
-web dimensions on a "pure docs/config" basis.
+that read instead of re-dispatching. You may not skip C1 or C2 on a
+"pure docs/config" basis.
 
 **Consolidate as ground truth.** Walk away with: the corrected
-understanding of the touched area; any forced binary decisions from
-the reuse / exclusion specialists, with the recommended option (baked
-into the draft as the default — see Step 3); and **no unverified
-claims** (full rule under Critical rules: "No research deferrals —
-verify or block", including the only two legitimate carve-outs and
-the membership test for what counts as empirical). If research
-couldn't close a question, that's the signal Step 2 isn't done —
-finish it, or STOP and resolve it with the operator before drafting.
+understanding of the touched area — including what the change will
+BREAK (Team A), not only what exists; Team B's from-scratch shape,
+recorded even when the plan doesn't adopt it, so the approval
+conversation can see what was on the table; any forced binary
+decisions from the reuse / exclusion specialists, with the recommended
+option (baked into the draft as the default — see Step 3); and **no
+unverified claims** (full rule under Critical rules: "No research
+deferrals — verify or block", including the only two legitimate
+carve-outs and the membership test for what counts as empirical). An
+empirical unknown whose answer would change the Sessions-index row
+set is not a legitimate carve-out — that fork belonged to stage zero,
+and if research surfaced it late, probe it now and re-dispatch the
+affected teams. If research couldn't close a question, that's the
+signal Step 2 isn't done — finish it, or STOP and resolve it with the
+operator before drafting.
 
 ### Step 3: Draft all files in memory
 
