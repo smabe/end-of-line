@@ -94,4 +94,4 @@ Bring `end_of_line/skills/clu-plan/SKILL.md` to parity with the rewritten person
 
 ## Parking lot
 
-- Relocate the task-list Monitor protocol + teardown forensics + `clu ship` runbook out of clu-plan into clu-monitor / operations docs (B1: operations content parked in an authoring skill).
+- ~~Relocate the task-list Monitor protocol + teardown forensics + `clu ship` runbook out of clu-plan into clu-monitor / operations docs (B1: operations content parked in an authoring skill).~~ **Dispositioned at ship 2026-08-10: filed as #101.**
