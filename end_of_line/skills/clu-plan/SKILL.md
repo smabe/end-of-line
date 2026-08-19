@@ -119,81 +119,52 @@ Before any team below is briefed, read the operator's goal and the
 code long enough to answer one question: **is there a fork between two
 or more candidate designs whose outcomes would produce DIFFERENT
 Sessions-index row sets** — different row count, ordering, scope, or
-effort? If yes, that fork is settled NOW, by experiment, before Team A
-or B is briefed. Its verdict lands in the master's Locked design
-decisions, and the teams are briefed against a design that exists —
-research run against a fork answers about a shape that may be
-discarded.
+effort? Every such fork is routed HERE, before Team A or B is briefed,
+by what settles it. The teams are briefed against a design that
+exists — research run against an unsettled fork answers about a shape
+that may be discarded.
 
 The clu-specific stake: a cold-context worker inherits an unsettled
-fork with no operator to ask. The anti-pattern is a Sessions-index row
-whose scope is "decide X" — every row after it was drafted against an
-assumed answer, and if the answer goes the other way, the plan gets
+fork with no operator at its elbow. It can reach one via `clu block`,
+but that costs a dispatch round-trip and an iMessage the operator has
+to answer from wherever they are. The anti-pattern is a Sessions-index
+row whose scope is "decide X" — every row after it was drafted against
+an assumed answer, and if the answer goes the other way, the plan gets
 rewritten mid-dispatch, which is the outcome planning exists to
 prevent.
 
-**The instrument is a comparison probe:** ONE worktree-isolated agent
-(`isolation: "worktree"`) that builds the smallest version of BOTH
-candidates, measures the discriminating property, recommends nothing,
-and reports the measurement. Paste the candidate descriptions verbatim
-into its prompt — an agent worktree branches from the default branch
-and carries only tracked files (code.claude.com/docs/en/worktrees), so
-it cannot read unpushed or in-memory plan files. Its brief:
+**Route each fork by what closes it:**
 
-```
-You are in a throwaway git worktree, settling ONE design question for
-a clu plan someone else is drafting. Your diff will be discarded and
-you are not delivering a feature. You are running an EXPERIMENT, and
-your report is a verdict with evidence. The question and the candidate
-designs are pasted in full below.
+- **Closable by reading code or docs this session** → close it now and
+  write it into the master's Locked design decisions as a settled
+  decision, with the `file:line` or URL that closed it.
+- **Hinges on the operator's product intent** → ask now, as a
+  plain-English forced binary: what is being decided, what each answer
+  commits the plan to, evidence beneath. Do not defer it to Step 4 —
+  the row set depends on the answer, so drafting first means drafting
+  a plan you may throw away.
+- **Only the research can inform it** → NAME it now and brief the
+  teams neutrally on the territory the candidates share (the
+  neutral-brief rule stands — no agent is told the candidates). When
+  research returns, read its findings against each candidate, draft on
+  the one the evidence best supports, and cite the findings that
+  support the reading. The fork then goes to the operator at Step 4 as
+  a forced binary carrying the evidence for BOTH candidates, so your
+  reading is theirs to overturn rather than a silent default. If they
+  pick the other candidate, re-run the affected research against the
+  winner and re-run Step 3b over the rewrite.
 
-Build the MINIMUM of each candidate that can answer the question — the
-smallest thing that exercises the discriminating property, not a
-finished implementation. Hold constant everything the fork does not
-force to differ: where you had a free choice, make it the same on both
-sides; where a candidate forced your hand, say so. Build and run from
-THIS worktree's own path — re-point any tooling whose defaults target
-the main checkout, and verify it took before trusting a number.
-
-Then MEASURE. Run it, drive it, record numbers or observed states — do
-NOT reason from documentation about what should happen; if docs
-settled this question you would not have been dispatched. Where docs
-disagree with what you measure, report both and trust the measurement.
-
-A verdict requires BOTH candidates built and measured. If you cannot
-stand a candidate up after real attempts, that IS the finding: report
-UNRESOLVED, say which candidate and what stopped you, and give
-whatever partial measurement you have.
-
-Report: (i) the VERDICT — which candidate, and the single property
-that decided it; (ii) the MEASUREMENT behind it, as raw as you can
-give it: what you ran, how many trials, what each returned; (iii) what
-you held constant, and anything you could not; (iv) what surprised you
-about EITHER candidate, whether or not it bears on the verdict; (v)
-the SHAPE the winner forces — the composition, types, or call pattern
-the plan must now be written against, as concretely as you can give
-it, ideally as the actual code you built. The research teams are
-briefed from that line next, so a vague shape means they analyse a
-design nobody has written down.
-
-You recommend nothing and you judge no code quality. You are NOT to
-invoke `/clu-plan` or `/plan`. Do NOT commit. The question and the
-candidate designs follow: {question_and_candidates}
-```
-
-Do NOT append the research boilerplate (further down) to this probe:
-the probe recommends nothing and measures instead of citing, so the
-effort-objection ban is meaningless to it and the 400-word cap fights
-its duty to report raw measurement.
-
-**Forks surfaced later by research are probed retroactively**, and the
-affected teams are then RE-DISPATCHED against the winner — their first
-pass answered about a shape you have now discarded, so its findings
-describe code that won't be written. **What does NOT trigger a probe:**
-a question whose answer changes only a sub-plan's internals — an
-implementation detail inside a phase — and leaves the Sessions-index
-row set alone. The trigger is "would the row set be different", not
-"could this go wrong later".
+**Forks surfaced later by research are routed the same way
+retroactively**, and once a winner exists the affected teams are
+RE-DISPATCHED against it — their first pass answered about a shape you
+have now discarded, so its findings describe code that won't be
+written. That re-dispatch does not count against the agent-count
+table: re-asking a question against the design that actually won is
+not new breadth. **What does NOT count as a fork:** a question whose
+answer changes only a sub-plan's internals — an implementation detail
+inside a phase — and leaves the Sessions-index row set alone. The
+trigger is "would the row set be different", not "could this go wrong
+later".
 
 #### Three research teams
 
@@ -362,8 +333,7 @@ Cite a URL for every finding. "I found nothing credible" is a valid
 and useful answer; padding is not.
 ```
 
-**Boilerplate — append to EVERY team and specialist brief** (never to
-the stage-zero probe):
+**Boilerplate — append to EVERY team and specialist brief:**
 
 ```
 Researching for clu plan {slug}. Goal: {one-line goal}.
@@ -489,10 +459,10 @@ deferrals — verify or block", including the only two legitimate
 carve-outs and the membership test for what counts as empirical). An
 empirical unknown whose answer would change the Sessions-index row
 set is not a legitimate carve-out — that fork belonged to stage zero,
-and if research surfaced it late, probe it now and re-dispatch the
-affected teams. If research couldn't close a question, that's the
-signal Step 2 isn't done — finish it, or STOP and resolve it with the
-operator before drafting.
+and if research surfaced it late, settle it now by stage zero's
+routing and re-dispatch the affected teams. If research couldn't
+close a question, that's the signal Step 2 isn't done — finish it, or
+STOP and resolve it with the operator before drafting.
 
 ### Step 3: Draft all files in memory
 
@@ -612,15 +582,11 @@ conflicts across worktrees were the canonical failure (clu #50;
 ## Verification record
 
 _Written by Step 3b from the agents' reported counts, never from
-intention — one line per auditor, one for the prober. Filled example:_
+intention — one line per auditor. Filled example:_
 
 - grounding: 14 claims checked, 2 fixed, 1 promoted, 0 refuted
 - executability: 9 acceptance items across 3 sub-plans checked, 1 fixed, 0 promoted
 - coherence: 6 cross-file restatements checked, 1 contradiction fixed
-- prober (p1): files LISTED 3 / MISSING 1 (added to p1 + Files touched); no workarounds; suite green
-
-_A plan with no `modified` entry in `## Files touched` replaces the
-prober line with: `prober: not fired (no existing code modified)`._
 
 ## Findings log
 
@@ -736,20 +702,17 @@ Every grounding rule the drafts obey — verify-or-block, sub-plan
 self-sufficiency, Non-goal asymmetry rationale — was self-certified by
 the same session that just wrote them, and a self-certified rule is
 the one that rots. This step is the adversarial read-back: three
-read-only auditors plus a dry-run prober, dispatched over the
-IN-MEMORY drafts before the operator is asked to `ship`. Running it
+read-only auditors, dispatched over the IN-MEMORY drafts before the
+operator is asked to `ship`. Running it
 after presenting would invert it into the failure it prevents: the
 operator becomes the reviewer.
 
 **Everything is pasted, nothing is read from disk.** The drafts exist
 only in memory until `ship` (Step 5), so every brief below receives
 the draft text VERBATIM in its prompt — the full master plus every
-sub-plan for the auditors, the first sub-plan for the prober. This
-also matches worktree reality: an agent worktree branches from the
-default branch and carries only tracked files
-(code.claude.com/docs/en/worktrees), so an agent told to "read the
-plan file" would find nothing even if the mandate allowed early
-writes. The briefs are self-contained and carry none of `/plan`'s
+sub-plan. An agent told to "read the plan file" would find nothing
+even if the mandate allowed early writes. The briefs are
+self-contained and carry none of `/plan`'s
 line-start dispatch-gate markers — clu-plan's dispatches stay
 invisible to the machine-wide plan-dispatch gate by design; carrying
 its markers would hard-couple clu authoring to `/plan`'s exact
@@ -769,11 +732,9 @@ question, so never collapse them into one generic "review this plan"
 feels expensive — never the agent count.** Coherence at **low** (its
 evidence is the drafts' own text; it opens no source). Grounding and
 executability at **medium** (mechanical checks — open the file, run
-the grep, match two lists — whose accuracy holds there). The prober
-at the **session's effort**, never lowered: it is the only agent here
-that writes and runs code, which is the work this step actually pays
-for. Dropping an agent deletes an axis no other agent covers;
-lowering effort deletes nothing.
+the grep, match two lists — whose accuracy holds there). Dropping an
+agent deletes an axis no other agent covers; lowering effort deletes
+nothing.
 
 **The auditors verify by EXECUTION, not plausibility** — with the one
 deliberate exception of coherence, whose evidence IS the drafts'
@@ -902,103 +863,6 @@ toward that.
 The drafts follow: {master + every sub-plan, verbatim}
 ```
 
-**4. Dry-run prober — fires when the plan modifies existing code.**
-The trigger is observable: any `modified` tag in the draft `## Files
-touched`. A plan that only creates new files skips the prober, and
-the record says so. Dispatch ONE agent with `isolation: "worktree"`
-at the session's effort, and paste the FIRST sub-plan's text verbatim
-— the first Sessions-index row is what dispatches first, and its
-dependencies exist on the default branch now. "Green" for the probe
-is the project's own test gate — the same command the master's
-Per-phase done checklist names; clu projects need no build step.
-
-One deliberate narrowing: `/plan`'s prober also carries a bigger-size
-scratch run (its item vii), a confessed-design-decisions channel (its
-item viii), and deferred phase-start re-probes of later phases — all
-tied to its resume-mode seam, which clu (cold workers, no resume
-mode) has no equivalent of; this adaptation keeps the five channels
-below and drops those deliberately rather than silently.
-
-```
-You are in a throwaway git worktree. Below is the FIRST phase of a
-clu plan that exists nowhere on disk — the pasted text is all there
-is; do not go looking for plan files. START IMPLEMENTING it here. You
-are not delivering the phase and your diff will be discarded —
-implement only as far as you need to discharge this brief's duties,
-then stop. Go far enough to hit the real call sites and run the
-project's test gate from this worktree's own path; a green gate is
-what gives your file list its authority. If it does not pass, fix it
-and run again. Skip the sub-plan's commit / attest / complete step
-entirely — those callbacks are the real pipeline and this is a probe.
-If you cannot reach green after real attempts, that IS a finding:
-label it APPROACH (or SKETCH, when the plan's own code shape is what
-will not run), quote the actual error, and say what you tried — never
-hand back a file list from a tree that never went green as though it
-were complete. If an acceptance check names an observable output (a
-numeric result, a formatted artifact, a command's output), produce it
-and measure it against the check before stopping, and report any miss
-as MEASURED.
-Report: (i) anything in the phase text that did not survive contact —
-quote it and label which kind: SKETCH (a code shape or instruction in
-the sub-plan that is wrong as written), APPROACH (the design itself
-does not work against the real code), or MEASURED (an acceptance
-observable you produced that misses its check — quote the check, the
-measurement, and the delta); (ii) every file you edited, marked
-LISTED or MISSING against the sub-plan's Produce items, and for each
-MISSING file the one-line reason it was unavoidable; (iii) anything
-the sub-plan lists that you did NOT need to touch; (iv) did you work
-around any constraint to reach green? If you hit a restriction and
-routed around it — a wrapper, a shim, anything whose job is to dodge
-rather than to do — name the constraint, name the workaround, and say
-what the design would look like WITHOUT it, including which files
-that version would touch. Answer even when the workaround was
-reasonable and built cleanly; (v) name three behaviors the OLD code
-provided that yours does not, and where each is re-established — not
-three defects; 'this one is re-established at X' is the useful half,
-and an honest two beats a padded three. Look hardest at what a
-deleted line did BEYOND its stated job.
-You are NOT to invoke `/clu-plan` or `/plan`. Do NOT commit and do
-NOT report on code quality. The phase text follows: {first sub-plan,
-verbatim}
-```
-
-**Route the prober's report by channel — none of it is advisory:**
-
-- **A MISSING file is a draft edit, not a finding to weigh.** Add it
-  to the sub-plan's Produce items AND the master's `## Files touched`
-  with the right phase tag. The prober attempted the change and you
-  did not; when its list and the draft disagree, the draft is what's
-  wrong. The only judgment left is which phase owns each missing
-  file.
-- **SKETCH → fix the draft in place.** A code shape that is wrong as
-  written, or two parts of the drafts prescribing different things,
-  is a drafting error; correct it and name the fix in the record.
-- **APPROACH → back to Step 2**, with what the prober hit as the
-  sharper research question. Do not patch the drafts around a design
-  that does not work against the real code.
-- **MEASURED → the drafts' own claim falsified.** Fix whichever half
-  is wrong: the acceptance check misdescribes the intent → fix the
-  check (route like SKETCH); the design cannot produce the check →
-  route like APPROACH.
-- **A confessed WORKAROUND is a design fork, arriving disguised as
-  good news.** The prober still went green and its file list is
-  honestly complete — for the design it happened to build, which
-  nothing else in this step can see. Compare the two shapes it
-  describes: if the workaround-free design is the better shape, take
-  it and add ITS files (usually strictly more) to the drafts; only
-  when both are genuinely defensible does it go to the operator at
-  Step 4 as a forced binary decision, drafted with the
-  workaround-free version as the default. Never inherit the
-  workaround silently because it built.
-- **Old-code behaviors — channel (v) — are claims to check, not
-  notes.** Read each "re-established at X" and verify it: the same
-  outcome by another route is fine; the same outcome at another TIME
-  is a behavior change wearing re-establishment's clothing. A
-  behavior the prober cannot place routes by cost: one a user would
-  notice losing becomes an acceptance check on the phase, naming the
-  observable it protects; an internal one becomes a bullet in the
-  sub-plan's `## Failure modes to watch`.
-
 **One pass, blocking.** Dispatch once, fix what comes back once, then
 proceed to Step 4 — no second findings round, and never hand the
 operator the master plus a findings list to triage; that is the
@@ -1010,27 +874,29 @@ rule as the reuse and exclusion specialists). "The auditor was
 probably wrong" is not a close — refuting a finding means checking
 the source yourself and citing it in the record.
 
-Exactly three carve-outs exist, and each is a FIRST pass over work or
-text no agent saw — not a second round, so none contradicts the rule:
+Exactly two carve-outs exist, and each is a FIRST pass over work or
+text no agent saw — not a second round, so neither contradicts the
+rule:
 
 1. **An auditor that cannot report counts did not run** — re-dispatch
    it. That re-runs a pass that never happened.
-2. **A fix that introduces a construct appearing in neither the
-   pre-audit draft nor the finding is a new mechanism** — untested
-   design minted during the fix pass — and it earns ONE scoped
-   re-probe of the affected sub-plan section (verbatim paste, same
-   worktree isolation) before the record is written. A re-probe that
-   faults the fix → correct it with the probe's citation, or promote.
-3. **The Step 5 ship-guard**: a sub-plan the operator changed after
+2. **The Step 5 ship-guard**: a sub-plan the operator changed after
    this pass gets the affected auditor re-run over the changed text
    before files land on disk (see Step 5's preamble).
+
+**A fix that introduces a construct appearing in neither the pre-audit
+draft nor the finding is a new mechanism** — untested design minted
+during the fix pass, which nothing in this step will re-read. It does
+not ship on the drafting session's say-so: restate it as a correction
+the finding actually supplies, or promote it to the operator at Step
+4. Classify every fix before writing the record; the record cannot
+tell a correction and a new mechanism apart for you.
 
 **Write the `## Verification record` into the in-memory master** —
 between `## Sessions index` and `## Findings log`; the master
 template above shows the format. One line per auditor with its
-reported counts, one line for the prober's LISTED/MISSING split — or
-`prober: not fired (no existing code modified)`. The record is
-written from the agents' REPORTED counts, never from intention: carry
+reported counts. The record is written from the agents' REPORTED
+counts, never from intention: carry
 each count sentence in, don't restate it from memory. Fixed,
 promoted, and refuted findings are counted separately, so an
 all-refuted pass and a clean pass cannot look alike.
@@ -1050,7 +916,7 @@ framing:
 > Here's the master — N sub-plan files drafted alongside it in memory.
 > Verified pre-ship: <the `## Verification record` compressed to one
 > line — e.g. "grounding 14 checked / 2 fixed · executability clean ·
-> coherence 1 fixed · prober LISTED 3 / MISSING 1 (added)">.
+> coherence 1 fixed">.
 > Read the master (locked decisions, non-goals, Sessions index) and
 > say `ship` to write + queue, or tell me what to change. If you want
 > to see a specific sub-plan before shipping, name it and I'll expand
@@ -1069,8 +935,8 @@ framing:
 > safe.
 >
 > [If Step 3b promoted a finding]
-> **Verification finding needs your call:** <what the auditor or
-> prober found>. Drafted with <the auditor's reading> as default. If
+> **Verification finding needs your call:** <what the auditor found>.
+> Drafted with <the auditor's reading> as default. If
 > you want it the other way, say so and I'll restructure.
 
 Then **wait**. Do not write to disk. Silence is not approval. If the
@@ -1287,6 +1153,18 @@ doubt whether a lingering plan was ever init'ed, check for
 
 ## Critical rules
 
+- 🪦 **The probe fleet is REMOVED — do not resurrect it.** The
+  stage-zero comparison probe, Step 3b's dry-run prober, and the
+  new-mechanism scoped re-probe were removed 2026-08-18 at the
+  operator's direction, in parity with the bundled `/plan` fork: what
+  a rehearsal probe finds (missing Produce items, code shapes that
+  don't compile), the phase's real worker finds and fixes in the same
+  dispatch, and a cold worker that hits a genuine surprise has `clu
+  block` as its channel back. Do not re-add worktree probe dispatches
+  to any step and do not restore them from git history. Design forks
+  now route by what settles them (Step 2, stage zero); a fix that
+  mints a new mechanism is restated or promoted (Step 3b) rather than
+  re-probed.
 - **Every sub-plan ends with `clu complete --plan ... --phase ...
   --token <T>`.** That's the worker's exit contract (per `/clu-phase`
   SKILL.md and the project CLAUDE.md mandate `--token on every worker
@@ -1565,7 +1443,6 @@ Smallest-first.
 - grounding: 11 claims checked, 1 fixed, 0 promoted, 0 refuted
 - executability: 6 acceptance items across 2 sub-plans checked, 0 fixed, 0 promoted
 - coherence: 4 cross-file restatements checked, 0 contradictions
-- prober (timeout): files LISTED 2 / MISSING 0; no workarounds; suite green
 
 ## Findings log
 
