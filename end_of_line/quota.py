@@ -52,7 +52,10 @@ _APOS = "['’�]"
 _QUOTA_SIGNATURES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("session_limit", re.compile(rf"you{_APOS}ve hit your session limit", re.IGNORECASE)),
     ("weekly_limit", re.compile(rf"you{_APOS}ve hit your weekly limit", re.IGNORECASE)),
-    ("model_limit", re.compile(rf"you{_APOS}ve hit your (?:opus|sonnet|haiku) limit", re.IGNORECASE)),
+    (
+        "model_limit",
+        re.compile(rf"you{_APOS}ve hit your (?:opus|sonnet|haiku) limit", re.IGNORECASE),
+    ),
     ("usage_credits", re.compile(rf"you{_APOS}re out of usage credits", re.IGNORECASE)),
     (
         "extra_usage",

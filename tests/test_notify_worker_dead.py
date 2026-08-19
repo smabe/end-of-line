@@ -25,10 +25,7 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import config
-from end_of_line import inbox
-from end_of_line import notify
-from end_of_line import quota
+from end_of_line import config, inbox, notify, quota
 from end_of_line import state as st
 from end_of_line.cli import main
 from tests import CluTestCase, plan_body
