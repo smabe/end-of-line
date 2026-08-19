@@ -251,6 +251,41 @@ class OperatorCliFlagTest(CluTestCase):
         self.assertIn("mutually exclusive", err.getvalue().lower())
 
 
+class WorkerDeadReportedRegistrationTest(unittest.TestCase):
+    """The daemon's death event must be operator-visible, default-visible,
+    formatted, and task-mapped — miss any of the four and #104's live watch
+    streams stay silent exactly as they did in the incident."""
+
+    def _evt(self):
+        return _evt(
+            st.EVENT_PHASE_WORKER_DEAD_REPORTED,
+            phase="impl",
+            pid=4242,
+            log_path="/p/plans/.orchestrator/logs/impl.sess.log",
+            reporter="heartbeat_daemon",
+        )
+
+    def test_renders_under_operator(self) -> None:
+        out = project_event(self._evt(), "my-plan", operator=True)
+        self.assertIn("WORKER DEAD", must(out))
+
+    def test_default_visible(self) -> None:
+        # Not verbose-only — a plain `clu watch` must surface it too.
+        out = project_event(self._evt(), "my-plan")
+        self.assertIsNotNone(out)
+
+    def test_in_task_status_map(self) -> None:
+        from end_of_line.watch import _TASK_STATUS_MAP
+
+        self.assertIn(st.EVENT_PHASE_WORKER_DEAD_REPORTED, _TASK_STATUS_MAP)
+
+    def test_inbox_wedge_instruction_registered(self) -> None:
+        from end_of_line.hooks.clu_inbox_surface import WEDGE_INSTRUCTION_BLOCKS
+
+        types = [t for t, _ in WEDGE_INSTRUCTION_BLOCKS]
+        self.assertIn("phase_worker_dead_reported", types)
+
+
 class OperatorVisibleHasFormatterTest(unittest.TestCase):
     """Every operator-visible event must have a renderer. Forward-compat
     guard: adding a new event to _OPERATOR_VISIBLE without a _FORMATTERS

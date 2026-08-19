@@ -108,6 +108,22 @@ STALLED_CLAIM_INSTRUCTION = (
     "every recovery path mutates state the operator owns.\n"
 )
 
+WORKER_DEAD_REPORTED_INSTRUCTION = (
+    "\n## Worker-death reports\n\n"
+    "The heartbeat daemon detected a worker PID dead mid-phase "
+    "(`phase_worker_dead_reported` events above) and reported it within ~120s. "
+    "The claim is being released for redispatch by death-recovery — if the "
+    "recovery half hasn't run yet, the claim may still be live. Investigate "
+    "autonomously: read the post-mortem log named in the event's `log_path`, "
+    "then check `git status` / `git log` in the project / worktree for "
+    "uncommitted work the dead worker left on disk. If the phase re-dispatched "
+    "cleanly, nothing is needed. If a claim is stranded, recommend "
+    "`clu release-claim --plan <P> --phase <X>` (nothing recoverable) or "
+    "`clu force-complete --plan <P> --phase <X> --commit <sha>` (work on disk). "
+    "**Do NOT run any of these until the operator explicitly approves** — "
+    "every recovery path mutates state the operator owns.\n"
+)
+
 
 # Registry of (event_type, instruction) pairs for #70 wedge-class
 # composition. main() iterates this once and appends each instruction
@@ -119,6 +135,7 @@ WEDGE_INSTRUCTION_BLOCKS: list[tuple[str, str]] = [
     ("tool_stuck", TOOL_STUCK_INSTRUCTION),
     ("attestation_refused", ATTESTATION_REFUSED_INSTRUCTION),
     ("stalled_claim", STALLED_CLAIM_INSTRUCTION),
+    ("phase_worker_dead_reported", WORKER_DEAD_REPORTED_INSTRUCTION),
 ]
 
 

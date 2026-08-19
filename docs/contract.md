@@ -127,6 +127,7 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
     {"ts": "ISO8601", "type": "blocker_answered","blocker_id": "q-1", "answer": "..."},
     {"ts": "ISO8601", "type": "lease_expired",   "phase": "..."},
     {"ts": "ISO8601", "type": "phase_worker_dead", "phase": "...", "pid": 12345},
+    {"ts": "ISO8601", "type": "phase_worker_dead_reported", "phase": "...", "pid": 12345, "log_path": "plans/.orchestrator/logs/<phase>.<session>.log", "reporter": "heartbeat_daemon"},
     {"ts": "ISO8601", "type": "task_spawned",    "task": "task-1", "source": "simplify"},
     {"ts": "ISO8601", "type": "plan_completed"},
     {"ts": "ISO8601", "type": "queue_popped",   "slug": "...", "added_at": "...", "added_by": "operator | worker", "position": 1},
@@ -171,6 +172,30 @@ Sibling lock file: `<plan_slug>.state.json.lock` (managed automatically).
 
 - `lease_extended` — emitted by `clu extend-lease` (operator-only; no `--token` required). Fields: `phase` (current phase id), `extended_by_minutes` (the argument passed), `new_expires` (ISO-8601 UTC string of the new expiry), `operator: true`. Semantics: `new_expires = max(now, current_lease_expires) + timedelta(minutes=N)`, so extending an already-expired (stalled) claim anchors from `now`, never backwards.
 - `attempts_reset` — emitted alongside `claim_force_released` when `clu release-claim --reset-attempts` is passed. Fields: `phase`, `operator: true`. Resets the attempt floor so the next dispatch starts fresh. `attempts_for_phase()` counts `phase_started` events after the most-recent of EITHER `retry_requested` OR `attempts_reset` — both act as floor markers; most-recent wins.
+
+### Worker-death event semantics
+
+Two distinct events record a dead worker, by two different processes with two
+different evidences — collapsing them would make the state file lie about who
+saw what:
+
+- `phase_worker_dead` — emitted by the **supervisor tick** (`_detect_dead_pid`)
+  when the claim's worker PID is gone or PID-recycled to an unrelated process
+  (cmdline mismatch) but the lease hasn't expired. The supervisor releases the
+  claim and reaps in the same lock window, so its idempotency is structural.
+  Fields: `phase`, `pid`.
+- `phase_worker_dead_reported` — emitted by the **per-worker heartbeat daemon**
+  (`clu notify-worker-dead`) when its cmdline-anchored liveness probe finds the
+  worker PID dead, ~120s after death rather than at the next tick. Token-validated
+  (the daemon holds the claim token; `append_event` itself does no claim check).
+  Fields: `phase`, `pid`, `log_path` (the ATTEMPT log the dispatcher stamped — the
+  post-mortem target, not the daemon's `.hb.log` sidecar), `reporter`
+  (`"heartbeat_daemon"`). Deduped via the claim's `worker_death_reported` marker:
+  the daemon stamps it, and the supervisor's own worker-dead branch consults it to
+  suppress a duplicate operator notification while still emitting its own event,
+  releasing, and reaping. This event does NOT release the claim (that is
+  death-recovery); it is default-visible in `clu watch` because #104's complaint
+  is precisely that live watch streams saw nothing when the worker died.
 
 ### Quality-attestation event semantics
 

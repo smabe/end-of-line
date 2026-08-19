@@ -48,6 +48,11 @@ _DEFAULT_VISIBLE: frozenset[str] = frozenset(
             # Dead-PID detection (#72) — operator-actionable: a worker died, the
             # claim got released, next tick re-dispatches.
             getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
+            # Heartbeat-daemon death report (#104) — DEFAULT-visible, not
+            # verbose-only: #104's complaint is that live watch streams saw
+            # zero lines when the worker died, so an event only --verbose shows
+            # would reproduce the incident.
+            getattr(st, "EVENT_PHASE_WORKER_DEAD_REPORTED", None),
         },
     )
 )
@@ -83,6 +88,7 @@ _OPERATOR_VISIBLE: frozenset[str] = frozenset(
             st.EVENT_HEARTBEAT_LOOP_FAILING,
             getattr(st, "EVENT_PHASE_WORKER_DEAD", None),
             getattr(st, "EVENT_WORKER_IDLE", None),
+            getattr(st, "EVENT_PHASE_WORKER_DEAD_REPORTED", None),
         },
     )
 )
@@ -258,6 +264,15 @@ if _WORKER_IDLE:
     )
 
 
+# Heartbeat-daemon death-report formatter (#104) — splice in when defined.
+# "(daemon)" distinguishes it from the supervisor's own WORKER DEAD line.
+_WORKER_DEAD_REPORTED = getattr(st, "EVENT_PHASE_WORKER_DEAD_REPORTED", None)
+if _WORKER_DEAD_REPORTED:
+    _FORMATTERS[_WORKER_DEAD_REPORTED] = lambda slug, e: (
+        f"{_phase_prefix(slug, e)}: WORKER DEAD (daemon) pid={e.get('pid', '?')}"
+    )
+
+
 _TASK_STATUS_MAP: dict[str, str] = {
     st.EVENT_PHASE_STARTED: "in_progress",
     st.EVENT_PHASE_COMPLETED: "completed",
@@ -273,6 +288,8 @@ if _ATTEST_REFUSED:
     _TASK_STATUS_MAP[_ATTEST_REFUSED] = "in_progress"
 if _WORKER_DEAD:
     _TASK_STATUS_MAP[_WORKER_DEAD] = "in_progress"
+if _WORKER_DEAD_REPORTED:
+    _TASK_STATUS_MAP[_WORKER_DEAD_REPORTED] = "in_progress"
 
 _TASK_VERBOSE_STATUS_MAP: dict[str, str] = {
     st.EVENT_LEASE_EXTENDED: "in_progress",

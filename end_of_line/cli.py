@@ -1112,6 +1112,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to heartbeat-errors sidecar log (included in inbox details)",
     )
 
+    p_notify_dead = sub.add_parser(
+        "notify-worker-dead",
+        help="Heartbeat daemon reports its worker PID died mid-phase (#104)",
+    )
+    add_common(p_notify_dead)
+    p_notify_dead.add_argument("--token", required=True, help="Worker claim token")
+    p_notify_dead.add_argument("--phase", required=True)
+
     p_activity = sub.add_parser(
         "activity",
         help=(
@@ -1494,6 +1502,7 @@ def main(argv: list[str] | None = None) -> int:
         "heartbeat": cmd_heartbeat,
         "heartbeat-daemon": cmd_heartbeat_daemon,
         "notify-heartbeat-failure": cmd_notify_heartbeat_failure,
+        "notify-worker-dead": cmd_notify_worker_dead,
         "activity": cmd_activity,
         "register": cmd_register,
         "pause": cmd_pause,
@@ -6033,6 +6042,88 @@ def cmd_notify_heartbeat_failure(args, cfg: ProjectConfig, state_path: Path) -> 
     if notify_body:
         notify.notify(cfg.notify, notify.KIND_HEARTBEAT_LOOP_FAILING, notify_body)
     print(f"notify-heartbeat-failure {args.phase}: notified")
+    return ExitCode.OK
+
+
+# The heartbeat daemon's death report runs on a `setsid`-detached, reaper-immune
+# process's exit path. A blocking flock there would strand it forever, so the
+# report acquires the lock with a bounded budget and degrades to a log line on
+# LockTimeout. Generous enough that a normal supervisor tick (classify + release
+# + reap) clears the lock first; bounded so a wedged tick can't hang the daemon.
+_WORKER_DEAD_REPORT_LOCK_TIMEOUT_S = 10.0
+
+
+@_translate_claim_mismatch
+def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """Heartbeat daemon reports its worker PID died mid-phase (#104).
+
+    The daemon detects worker death within ~120s (cmdline-anchored liveness
+    probe) and, before this callback existed, threw that knowledge into a
+    sidecar log nobody watches live. This turns the detection into a durable
+    event, an inbox entry, an operator notification, and a `clu watch` line —
+    through the same token-validated worker-callback contract every other
+    daemon callback uses. `append_event` does no claim validation, so a direct
+    daemon write would be the project's first unvalidated worker-side mutation.
+
+    Token-validated and idempotent — the claim's worker_death_reported marker
+    prevents a duplicate event/inbox/notify if the daemon fires more than once.
+    Does NOT release the claim; that is phase death-recovery. The lock is
+    bounded (`LockTimeout` → skip, exit OK) so the detached daemon can't hang.
+
+    Reads pid + log_path off the live claim: log_path is the ATTEMPT log the
+    dispatcher stamped, the file a post-mortem wants — never the daemon's own
+    .hb.log sidecar.
+    """
+    st.validate_slug(args.plan)
+    notify_body = None
+    pid = None
+    log_path = None
+    try:
+        with st.mutate(
+            state_path, timeout_seconds=_WORKER_DEAD_REPORT_LOCK_TIMEOUT_S
+        ) as data:
+            st.assert_claim_match(data, args.token, args.phase)
+            claim = data["current_claim"]
+            if st.worker_death_already_reported(claim):
+                print(f"notify-worker-dead {args.phase}: already reported, skipping")
+                return ExitCode.OK
+            st.mark_worker_death_reported(claim, st._now_utc())
+            pid = claim.get("pid")
+            log_path = claim.get("log_path")
+            st.append_event(
+                data,
+                st.EVENT_PHASE_WORKER_DEAD_REPORTED,
+                phase=args.phase,
+                pid=pid,
+                log_path=log_path,
+                reporter="heartbeat_daemon",
+            )
+            notify_body = notify.render_worker_dead_reported(
+                args.plan, args.phase, pid, log_path
+            )
+    except st.LockTimeout as exc:
+        print(
+            f"notify-worker-dead {args.phase}: lock timeout ({exc.path}), skipping",
+            file=sys.stderr,
+        )
+        return ExitCode.OK
+    try:
+        inbox.write_event(
+            type="phase_worker_dead_reported",
+            plan_slug=args.plan,
+            project_root=str(cfg.project_root.resolve()),
+            summary=f"Worker died for {args.plan}/{args.phase} (pid {pid})",
+            details={
+                "phase_id": args.phase,
+                "pid": pid,
+                "log_path": log_path,
+            },
+        )
+    except OSError:
+        pass
+    if notify_body:
+        notify.notify(cfg.notify, notify.KIND_WORKER_DEAD_REPORTED, notify_body)
+    print(f"notify-worker-dead {args.phase}: reported")
     return ExitCode.OK
 
 

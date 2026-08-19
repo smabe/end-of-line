@@ -549,5 +549,49 @@ class WorkerIdleWindowSatisfiedTestCase(unittest.TestCase):
         self.assertFalse(st.worker_idle_window_satisfied(claim, now))
 
 
+class TestMutateTimeout(TempStateMixin, unittest.TestCase):
+    """`mutate(path, timeout_seconds=...)` forwards to `locked` — the daemon's
+    death report needs a bounded lock so it can never hang on its exit path."""
+
+    def _seed(self) -> None:
+        data = st.empty_state("foo", "plans")
+        with st.locked(self.state_path):
+            st.save_atomic(self.state_path, data)
+
+    def test_timeout_raises_when_lock_held(self) -> None:
+        import fcntl
+
+        self._seed()
+        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with self.assertRaises(st.LockTimeout):
+                with st.mutate(self.state_path, timeout_seconds=0.1):
+                    pass  # pragma: no cover — lock is held, never entered
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_no_timeout_round_trips_normally(self) -> None:
+        self._seed()
+        with st.mutate(self.state_path) as data:
+            data["plan_slug"] = "changed"
+        self.assertEqual(st.load(self.state_path)["plan_slug"], "changed")
+
+
+class TestWorkerDeathMarker(unittest.TestCase):
+    """The dedup marker the daemon stamps so the supervisor doesn't re-notify."""
+
+    def test_unset_reads_false(self) -> None:
+        self.assertFalse(st.worker_death_already_reported({}))
+
+    def test_mark_then_read_true(self) -> None:
+        claim: dict = {}
+        st.mark_worker_death_reported(claim, st._now_utc())
+        self.assertTrue(st.worker_death_already_reported(claim))
+        self.assertIn("worker_death_reported_at", claim)
+
+
 if __name__ == "__main__":
     unittest.main()

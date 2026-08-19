@@ -257,6 +257,15 @@ EVENT_TOOL_STUCK = "tool_stuck"
 # operator-approval checkpoint from user-CLAUDE.md applies.
 # Fields: plan, phase, pid, low_cpu_minutes. Deduped via worker_idle_notified.
 EVENT_WORKER_IDLE = "worker_idle"
+# The per-worker heartbeat daemon detected its worker PID dead (cmdline-anchored
+# liveness probe) and reported it through the token-validated `notify-worker-dead`
+# callback — distinct from EVENT_PHASE_WORKER_DEAD, which is the supervisor's own
+# tick-side observation. Two processes, two evidences; collapsing them would make
+# the state file lie about who saw what. Deduped via the claim's
+# worker_death_reported marker so the supervisor doesn't re-notify.
+# Fields: phase, pid, log_path (the ATTEMPT log, not the daemon .hb.log sidecar),
+# reporter ("heartbeat_daemon").
+EVENT_PHASE_WORKER_DEAD_REPORTED = "phase_worker_dead_reported"
 
 # Per-project verify opt-out (quality.verify_required: false). Fires on
 # every cmd_complete under the opt-out so the audit trail records the
@@ -555,6 +564,7 @@ def locked_json(
     *,
     expected_version: int,
     empty: Callable[[], dict] | None = None,
+    timeout_seconds: float | None = None,
 ) -> Iterator[dict]:
     """Generic lock + load + yield-for-mutation + atomic write.
 
@@ -564,8 +574,14 @@ def locked_json(
     state.mutate passes None and lets load() raise FileNotFoundError;
     registry and queue tolerate missing-on-first-write and pass a real
     factory.
+
+    `timeout_seconds` is forwarded to `locked`: None (default) blocks
+    indefinitely; a positive value raises `LockTimeout` if the budget
+    elapses. The heartbeat daemon's death report passes a bounded budget so
+    a contended lock on its exit path can't strand a `setsid`-detached,
+    reaper-immune process forever.
     """
-    with locked(path):
+    with locked(path, timeout_seconds=timeout_seconds):
         if not path.exists() and empty is not None:
             data = empty()
         else:
@@ -575,13 +591,24 @@ def locked_json(
 
 
 @contextmanager
-def mutate(state_path: Path) -> Iterator[dict]:
+def mutate(
+    state_path: Path,
+    *,
+    timeout_seconds: float | None = None,
+) -> Iterator[dict]:
     """Take the lock, load, yield data for mutation, write atomically on exit.
 
     Use this for every read-modify-write. Plain `locked()` is for the rare
     case where multiple files need to be coordinated under one lock.
+
+    `timeout_seconds` (default None → block forever) is forwarded to `locked`
+    for callers that must not hang — e.g. the heartbeat daemon's death report.
     """
-    with locked_json(state_path, expected_version=SCHEMA_VERSION) as data:
+    with locked_json(
+        state_path,
+        expected_version=SCHEMA_VERSION,
+        timeout_seconds=timeout_seconds,
+    ) as data:
         yield data
 
 
@@ -985,6 +1012,22 @@ def mark_worker_idle_emitted(claim: dict, now: _dt.datetime) -> None:
     """Stamp worker_idle_notified + timestamp on the claim."""
     claim["worker_idle_notified"] = True
     claim["worker_idle_notified_at"] = now.strftime(_ISO_FMT)
+
+
+def worker_death_already_reported(claim: dict) -> bool:
+    """True if the heartbeat daemon already reported this claim's worker dead.
+
+    The dedup marker the supervisor consults before firing its own operator
+    notification — without it a single death pings the operator twice (daemon
+    + tick). See EVENT_PHASE_WORKER_DEAD_REPORTED.
+    """
+    return bool(claim.get("worker_death_reported", False))
+
+
+def mark_worker_death_reported(claim: dict, now: _dt.datetime) -> None:
+    """Stamp worker_death_reported + timestamp on the claim."""
+    claim["worker_death_reported"] = True
+    claim["worker_death_reported_at"] = now.strftime(_ISO_FMT)
 
 
 def append_cpu_sample(claim: dict, cpu_pct: float, now: _dt.datetime) -> None:

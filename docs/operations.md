@@ -1446,6 +1446,7 @@ Outbound — fired during supervisor ticks. Kinds:
 | `queue_corrupt` | `queue.json` corrupt and auto-repair disabled OR throttle exhausted | **Bypasses quiet hours** |
 | `stuck_blocker` | Open blocker un-consumed for >30 min; re-pings every 30 min | Gated (inbox always writes) |
 | `stalled_claim` | Live claim's lease expired with plan status still `running`; one-shot per claim | Gated (inbox always writes) |
+| `phase_worker_dead_reported` | Fired by the **per-worker heartbeat daemon** (not a tick) ~120s after it detects its worker PID dead mid-phase; one-shot per claim, deduped so the supervisor's own worker-dead branch won't re-ping. Carries the post-mortem log path. Default-visible in `clu watch` | Gated (inbox always writes) |
 | `quota_paused` | Worker killed by a quota limit with a parseable reset; project pauses, then auto-resumes (see "Recovering from a quota pause") | Gated |
 | `quota_resumed` | Canary survived the reset; quota pause cleared | Gated |
 | `quota_stuck` | Quota death whose reset didn't parse; no auto-resume — needs `rm quota.json` | **Bypasses quiet hours** |
@@ -1548,6 +1549,9 @@ shipped with the inbox in #20:
 - `queue_*` — queue lifecycle (skipped, corrupt, repaired, repair_failed)
 - `stuck_blocker` — blocker open >30min and not consumed; re-pings every 30min
 - `stalled_claim` — claim's lease expired with plan status still RUNNING
+- `phase_worker_dead_reported` — heartbeat daemon detected its worker PID dead
+  mid-phase (~120s after death); the surfaced entry carries a wedge-instruction
+  block naming the post-mortem log and the operator-approval recovery paths
 
 iMessages and inbox writes are independent: quiet hours
 (`notify.quiet_hours` in `.orchestrator.json`) suppress iMessages but

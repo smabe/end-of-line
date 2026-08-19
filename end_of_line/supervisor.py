@@ -697,6 +697,15 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                 claim,
                 cmdline_match=cmdline_match,
             ):
+                # The heartbeat daemon may already have reported this death
+                # (#104) — it detects within ~120s and pings the operator +
+                # inbox + watch through notify-worker-dead. If so, suppress the
+                # duplicate operator notification here, but STILL emit the
+                # supervisor's own event, release, and reap — those are the
+                # durable transition, and the daemon deliberately does not do
+                # them (that is death-recovery). Read the marker before release
+                # wipes the claim.
+                already_reported = st.worker_death_already_reported(claim)
                 # Quota classification (#94) must read the log BEFORE
                 # release — release_claim_and_emit clears the claim that
                 # carries log_path. A quota match suppresses the misleading
@@ -748,7 +757,7 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                         phase_id=phase_id,
                         token=claimed_by,
                         notify_body=None
-                        if quota_match is not None
+                        if (quota_match is not None or already_reported)
                         else notify.render_worker_dead(
                             data["plan_slug"],
                             phase_id,

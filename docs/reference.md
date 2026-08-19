@@ -56,14 +56,20 @@ the file.
   defaults baked in.
 - `locked(state_path)` — `flock` context manager with `O_NOFOLLOW`
   on the sibling lockfile.
-- `locked_json(path, *, expected_version, empty=None)` — generic
-  lock + load + yield-for-mutation + atomic-write. The shared primitive
-  every clu JSON file (state, registry, queue) is built on. Pass `empty`
-  to tolerate a missing-on-first-write file; state.json passes `None` so
-  load() raises `FileNotFoundError` as documented.
-- `mutate(state_path)` — lock + load + yield + atomic-write. Thin wrapper
-  over `locked_json` for state files. The default read-modify-write
-  helper; only drop to `locked()` when coordinating multiple files.
+- `locked_json(path, *, expected_version, empty=None, timeout_seconds=None)`
+  — generic lock + load + yield-for-mutation + atomic-write. The shared
+  primitive every clu JSON file (state, registry, queue) is built on. Pass
+  `empty` to tolerate a missing-on-first-write file; state.json passes
+  `None` so load() raises `FileNotFoundError` as documented. `timeout_seconds`
+  forwards to `locked` — `None` (default) blocks forever; a positive budget
+  raises `LockTimeout`.
+- `mutate(state_path, *, timeout_seconds=None)` — lock + load + yield +
+  atomic-write. Thin wrapper over `locked_json` for state files. The default
+  read-modify-write helper; only drop to `locked()` when coordinating
+  multiple files. `timeout_seconds` (default `None` → block forever) bounds
+  the lock for callers that must not hang — the heartbeat daemon's death
+  report passes a budget because it runs on a `setsid`-detached,
+  reaper-immune exit path where a blocking `flock` would strand it forever.
 - `load(state_path, *, expected_version)` — JSON read + schema check.
   Reused by `registry.py` with its own version.
 - `save_atomic(state_path, data)` — tmp + fsync + rename. Caller must
@@ -551,18 +557,26 @@ live claim every 120s while the worker PID is alive.
   the consecutive-failure count that fires the operator self-report.
 - `ACTION_OK / ACTION_STRIKE / ACTION_EXIT_WORKER_DEAD /
   ACTION_EXIT_CLAIM_GONE` — the per-tick verdicts.
-- `tick_once(state_path, phase, token, worker_pid, *, pid_alive, ping)
-  -> str` — the pure decision core: dead worker PID → exit; ping
-  rejected (`ClaimMismatch` — claim released or superseded) → exit, NOT
-  a strike; any other failure → strike. The ping is in-process
+- `tick_once(state_path, phase, token, worker_pid, plan=None, *,
+  pid_alive, ping) -> str` — the pure decision core: dead worker PID →
+  exit; ping rejected (`ClaimMismatch` — claim released or superseded) →
+  exit, NOT a strike; any other failure → strike. The ping is in-process
   (`state.record_heartbeat` under `state.mutate`) — the same code path
   `cmd_heartbeat` uses, so the daemon holds no subprocess PATH
-  assumptions.
+  assumptions. The default liveness probe (`_make_pid_alive(plan)`) is
+  **cmdline-anchored** via `state.claim_worker_alive` with the plan slug as
+  `cmdline_match` — a bare `kill(0)` false-positives on PID reuse, and
+  since death now drives an operator notification (#104) that would page
+  the operator about a stranger's process.
 - `run_loop(...)` — ticks until an exit action. The 3rd consecutive
   strike fires the `notify-heartbeat-failure` path once (best-effort —
   a broken transport never kills the loop); success resets the counter.
-  `sleep` / `tick` / `notify_failure` / `max_ticks` are injectable so
-  tests run without wall-clock or forking.
+  On the worker-dead exit it fires `report_death` → `clu notify-worker-dead`
+  (#104), turning the detection into an event/inbox/notify/watch line;
+  claim-gone (a normal `clu complete`/`block` release) never reports. The
+  report call is wrapped so nothing — `LockTimeout` included — can stop the
+  loop returning 0. `sleep` / `tick` / `notify_failure` / `report_death` /
+  `max_ticks` are injectable so tests run without wall-clock or forking.
 - `run(..., detach=True)` — `_daemonize` (double-fork + setsid, stdio
   redirected to the sidecar log `logs/<phase>.<token>.hb.log`), then
   the loop. The parent returns 0 immediately; the daemon `os._exit`s

@@ -396,3 +396,25 @@ without anyone reading the word "Monitor".
   (the #90 `clu *` exemption) where these pass. Phase 2 touches the heartbeat
   daemon and supervisor tests; if you see this exact red cluster, don't chase
   it — confirm the failing modules are only those four and trust `clu verify`.
+- **2026-08-19 (death-report):** the dedup marker death-recovery reads is
+  `claim["worker_death_reported"]` (boolean) via
+  `st.worker_death_already_reported(claim)` / `st.mark_worker_death_reported(claim, now)`
+  — stamped INSIDE the `notify-worker-dead` lock window, BEFORE the release that
+  death-recovery adds. Recovery must read it (or the supervisor's own marker
+  check) before releasing, since release wipes the claim. The death event and
+  the inbox entry both carry `log_path = claim["log_path"]` (the ATTEMPT log the
+  dispatcher stamped, NOT the `.hb.log` sidecar) — that is the field recovery
+  feeds to `quota.classify_log_tail`, so recovery reads it off the same claim,
+  not off the event.
+- **2026-08-19 (death-report):** `st.mutate` now accepts `timeout_seconds`
+  (keyword-only, default `None` = block forever, forwarded through `locked_json`
+  → `locked`). `cmd_notify_worker_dead` passes `_WORKER_DEAD_REPORT_LOCK_TIMEOUT_S`
+  (10s, `cli.py`) and catches `st.LockTimeout` → logs + exits OK. When
+  death-recovery adds release/quota logic to the SAME lock window, keep it under
+  one bounded-timeout `st.mutate` — a second unbounded lock reintroduces the
+  strand-forever hazard the daemon's `setsid` detach makes unrecoverable.
+- **2026-08-19 (death-report):** the new event does make `fleet.summarize_plan`
+  show recent last-activity for a plan whose worker just died — checked, and it
+  reads correctly, not misleadingly: something DID just happen (the death was
+  reported), so surfacing it as recent activity is the signal the operator
+  wants, not a false "healthy" green. No change made.

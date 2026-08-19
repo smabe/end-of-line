@@ -162,6 +162,7 @@ class RunLoopTestCase(unittest.TestCase):
             sleep=lambda s: None,
             tick=tick,
             notify_failure=lambda *args: self.fail("must not notify"),
+            report_death=lambda *args: None,
             max_ticks=10,
         )
         self.assertEqual(rc, 0)
@@ -302,6 +303,88 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
         self.assertEqual(
             log_path.parent, (self.state_path.parent / "logs").resolve()
         )
+
+
+class CmdlineProbeTestCase(CluTestCase):
+    """The default liveness probe is cmdline-anchored via claim_worker_alive.
+
+    A bare kill(0) false-positives on PID reuse; once death drives an operator
+    notification, that false positive would page the operator about somebody
+    else's process. tick_once threads the plan slug through as cmdline_match.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.tmp_path
+        (self.project / "plans").mkdir()
+        (self.project / "plans" / "test-plan.md").write_text(PLAN_BODY)
+        self.state_path = (
+            self.project / "plans" / ".orchestrator" / "test-plan.state.json"
+        )
+        main(["init", "--project", str(self.project), "--plan", "test-plan"])
+        with st.mutate(self.state_path) as data:
+            self.token = st.claim_phase(data, "a", lease_minutes=30)
+
+    def test_default_probe_passes_plan_as_cmdline_match(self) -> None:
+        with mock.patch.object(hbd.st, "claim_worker_alive", return_value=False) as cwa:
+            action = hbd.tick_once(
+                self.state_path, "a", self.token, 12345, plan="test-plan"
+            )
+        self.assertEqual(action, hbd.ACTION_EXIT_WORKER_DEAD)
+        cwa.assert_called_once()
+        self.assertEqual(cwa.call_args.kwargs.get("cmdline_match"), "test-plan")
+        self.assertEqual(cwa.call_args.args[0].get("pid"), 12345)
+
+    def test_default_probe_alive_pings(self) -> None:
+        with mock.patch.object(hbd.st, "claim_worker_alive", return_value=True):
+            action = hbd.tick_once(
+                self.state_path, "a", self.token, 12345, plan="test-plan"
+            )
+        self.assertEqual(action, hbd.ACTION_OK)
+
+
+class RunLoopDeathReportTestCase(unittest.TestCase):
+    """The death report fires exactly once on worker-dead, never on claim-gone,
+    and a report that raises (LockTimeout included) can't hang or kill the loop."""
+
+    def _run(self, actions, *, report=None):
+        reports: list[tuple] = []
+        script = iter(actions)
+        rc = hbd.run_loop(
+            project_root="/proj",
+            plan="test-plan",
+            phase="a",
+            token="session-aaaa1111bbbb2222",
+            worker_pid=123,
+            state_path="/proj/plans/.orchestrator/test-plan.state.json",
+            log_path="/proj/plans/.orchestrator/logs/a.tok.hb.log",
+            sleep=lambda s: None,
+            tick=lambda *a: next(script),
+            notify_failure=lambda *a: None,
+            report_death=report or (lambda *a: reports.append(a)),
+            max_ticks=len(actions),
+        )
+        return rc, reports
+
+    def test_worker_dead_reports_once(self) -> None:
+        rc, reports = self._run([hbd.ACTION_EXIT_WORKER_DEAD])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(reports), 1)
+        # report_death(project_root, plan, phase, token, state_path)
+        self.assertEqual(reports[0][1], "test-plan")
+        self.assertEqual(reports[0][2], "a")
+
+    def test_claim_gone_does_not_report(self) -> None:
+        rc, reports = self._run([hbd.ACTION_EXIT_CLAIM_GONE])
+        self.assertEqual(rc, 0)
+        self.assertEqual(reports, [])
+
+    def test_lock_timeout_in_report_is_swallowed(self) -> None:
+        def boom(*a):
+            raise st.LockTimeout("/proj/plans/.orchestrator/test-plan.state.json")
+
+        rc, _ = self._run([hbd.ACTION_EXIT_WORKER_DEAD], report=boom)
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":

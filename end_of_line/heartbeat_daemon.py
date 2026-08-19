@@ -40,18 +40,22 @@ ACTION_STRIKE = "strike"
 ACTION_EXIT_WORKER_DEAD = "exit_worker_dead"
 ACTION_EXIT_CLAIM_GONE = "exit_claim_gone"
 
-_EXIT_ACTIONS = frozenset({ACTION_EXIT_WORKER_DEAD, ACTION_EXIT_CLAIM_GONE})
 
+def _make_pid_alive(plan: str | None):
+    """Cmdline-anchored liveness probe closing over the plan slug.
 
-def _pid_alive(pid: int) -> bool:
-    """Signal-0 liveness probe. EPERM means alive-but-not-ours."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    Delegates to `st.claim_worker_alive` so the probe requires the plan slug
+    as a whole token in the process cmdline (the #76 marker check) — a bare
+    `os.kill(pid, 0)` false-positives on PID reuse, and once death drives an
+    operator notification that false positive would page the operator about a
+    stranger's process. `plan=None` (bare kill(0) semantics) is preserved for
+    callers that inject their own probe.
+    """
+
+    def probe(pid: int) -> bool:
+        return st.claim_worker_alive({"pid": pid}, cmdline_match=plan)
+
+    return probe
 
 
 def _ping(state_path, token: str, phase: str) -> None:
@@ -83,17 +87,46 @@ def _notify_failure(project_root, plan: str, phase: str, token: str, log_path) -
         print(f"notify-heartbeat-failure exited {rc}", file=sys.stderr)
 
 
+def _report_death(project_root, plan: str, phase: str, token: str, state_path) -> None:
+    """Report worker death through the token-validated `notify-worker-dead`.
+
+    In-process `cli.main` call (lazy import — cli.py imports this module),
+    mirroring `_notify_failure`. The command is idempotent per claim and
+    bounds its own lock, so a contended state file can't hang this exit path;
+    `run_loop` wraps the call anyway so nothing — LockTimeout included — can
+    stop the loop from returning 0.
+    """
+    from end_of_line.cli import main as cli_main
+
+    rc = cli_main(
+        [
+            "notify-worker-dead",
+            "--project", str(project_root),
+            "--plan", plan,
+            "--phase", phase,
+            "--token", token,
+        ]
+    )
+    if rc != 0:
+        print(f"notify-worker-dead exited {rc}", file=sys.stderr)
+
+
 def tick_once(
     state_path,
     phase: str,
     token: str,
     worker_pid: int,
+    plan: str | None = None,
     *,
     pid_alive=None,
     ping=None,
 ) -> str:
-    """One heartbeat tick → action. Pure decision core; the loop interprets it."""
-    pid_alive = pid_alive or _pid_alive
+    """One heartbeat tick → action. Pure decision core; the loop interprets it.
+
+    `plan` is the cmdline marker for the default liveness probe (see
+    `_make_pid_alive`); injected `pid_alive` overrides it for tests.
+    """
+    pid_alive = pid_alive or _make_pid_alive(plan)
     ping = ping or _ping
     if not pid_alive(worker_pid):
         return ACTION_EXIT_WORKER_DEAD
@@ -120,6 +153,7 @@ def run_loop(
     sleep=time.sleep,
     tick=tick_once,
     notify_failure=None,
+    report_death=None,
     max_ticks: int | None = None,
 ) -> int:
     """Tick until an exit action (or `max_ticks`, the test seam).
@@ -127,14 +161,28 @@ def run_loop(
     Consecutive failures count up, the 3rd fires the notify path once,
     success resets the counter to zero. The notify call is best-effort —
     a broken transport must not kill the loop.
+
+    On worker-dead exit the loop fires the `report_death` callback so the
+    detection turns into an operator-visible event/inbox/notify (#104); the
+    call is wrapped so no exception — LockTimeout included — can stop the
+    loop returning 0. Claim-gone (a `clu complete`/`block` release) is a
+    normal finish, NOT a death, so it never reports.
     """
     notify_failure = notify_failure or _notify_failure
+    report_death = report_death or _report_death
     strikes = 0
     ticks = 0
     while max_ticks is None or ticks < max_ticks:
-        action = tick(state_path, phase, token, worker_pid)
+        action = tick(state_path, phase, token, worker_pid, plan)
         ticks += 1
-        if action in _EXIT_ACTIONS:
+        if action == ACTION_EXIT_WORKER_DEAD:
+            try:
+                report_death(project_root, plan, phase, token, state_path)
+            except Exception as exc:  # noqa: BLE001 — report must never hang/kill the loop
+                print(f"notify-worker-dead failed: {exc!r}", file=sys.stderr)
+            print(f"heartbeat-daemon exiting: {action}", file=sys.stderr)
+            return 0
+        if action == ACTION_EXIT_CLAIM_GONE:
             print(f"heartbeat-daemon exiting: {action}", file=sys.stderr)
             return 0
         if action == ACTION_STRIKE:

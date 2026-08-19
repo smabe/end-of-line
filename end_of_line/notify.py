@@ -77,6 +77,12 @@ KIND_WORKER_IDLE = "worker_idle"
 KIND_QUOTA_PAUSED = "quota_paused"
 KIND_QUOTA_RESUMED = "quota_resumed"
 KIND_QUOTA_STUCK = "quota_stuck"
+# Heartbeat daemon reported its worker PID dead (#104). Deliberately NOT in
+# QUIET_HOURS_BYPASS_KINDS: that four-member set is reserved for halt-equivalent
+# states with no self-healing path, and a dead worker self-heals once
+# death-recovery releases the claim for redispatch. The overnight surface is the
+# inbox entry, which reaches the operator on their next Claude turn.
+KIND_WORKER_DEAD_REPORTED = "phase_worker_dead_reported"
 
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset(
     {
@@ -248,6 +254,18 @@ def render_worker_idle(
         f"Investigate: `kill -0 {pid}` confirms alive; `ps -p {pid}` for CPU; "
         f"`lsof -p {pid} -i` for sockets.\n"
         f"If wedged: `clu release-claim --plan {plan_slug} --phase {phase_id}` to free it."
+    )
+
+
+def render_worker_dead_reported(
+    plan_slug: str, phase_id: str, pid: int | None, log_path: str | None
+) -> str:
+    log_hint = f"\nPost-mortem log: {log_path}" if log_path else ""
+    return (
+        f"💀 {plan_slug}/{phase_id} (pid {pid}): heartbeat daemon detected the "
+        f"worker dead mid-phase.{log_hint}\n"
+        f"The claim will be released for redispatch (death-recovery). If it "
+        f"isn't, free it: `clu release-claim --plan {plan_slug} --phase {phase_id}`."
     )
 
 
