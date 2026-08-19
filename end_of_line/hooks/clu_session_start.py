@@ -53,6 +53,13 @@ INSTRUCTION = (
 # notifications". Emitted only when active plans are detected.
 TASK_LIST_PROTOCOL_INSTRUCTION = (
     "## clu task-list protocol\n\n"
+    "If `TaskCreate` / `TaskUpdate` are unavailable (not in the default "
+    "toolset on Opus 4.8 / Sonnet 5 / Fable 5 / Mythos 5 and newer, per "
+    "Claude Code 2.1.233), tell the operator once — set "
+    "`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in `~/.claude/settings.json` and "
+    "restart — then handle the lines below as plain text: surface "
+    "blockers, halts, and plan completion directly rather than dropping "
+    "them.\n\n"
     "The `--task-list` Monitor stream emits two line shapes:\n\n"
     "- `TASK_CREATE task=<id> [parent=<slug>] status=pending` — bootstrap "
     "lines at startup, one per plan + phase. The parent line (`task=<slug>`, "

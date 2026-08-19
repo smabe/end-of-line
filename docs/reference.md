@@ -1036,7 +1036,8 @@ emits one concise line per meaningful transition to stdout.
 - `project_event_task(event, plan_slug, *, verbose=False) -> str | None` —
   task-list projector. Same inputs as `project_event`; returns a
   `TASK_CREATE` or `TASK_UPDATE` protocol line for Claude's TaskCreate
-  UI, or `None` for events with no task-list representation. Phase-
+  UI (which needs `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` on newer models —
+  see `operations.md` § "Task-list mode"), or `None` for events with no task-list representation. Phase-
   scoped lines carry `parent=<slug>` (right after `task=`); plan-scoped
   lines (`plan_completed`, `paused`, `resumed`) omit it. Status mapping:
   `phase_started` → `in_progress`, `phase_completed` → `completed`,

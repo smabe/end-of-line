@@ -189,6 +189,13 @@ notification. The three channels are complementary: inbox for the
 walk-away path, per-plan task-list for active plan execution,
 `--operator` for the cross-plan dashboard.
 
+`--task-list` mode needs `TaskCreate` / `TaskUpdate`, which are not in
+the default toolset on Opus 4.8, Sonnet 5, Fable 5, Mythos 5, and newer
+models (Claude Code 2.1.233). If they're missing, tell the operator to
+set `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in `~/.claude/settings.json` and
+restart; until then the stream is still correct, so read the protocol
+lines as plain text rather than ignoring them.
+
 ## Failure modes
 
 - **`clu install-hook` not on PATH.** The user's clu install is broken

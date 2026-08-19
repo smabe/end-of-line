@@ -1212,6 +1212,16 @@ re-run nothing.
 
 ### Reacting to task-list protocol notifications
 
+**First, check you have the tools.** `TaskCreate` / `TaskUpdate` are
+not in the default toolset on Opus 4.8, Sonnet 5, Fable 5, Mythos 5,
+and newer models (Claude Code 2.1.233). If they aren't available,
+say so once — "task tools are off on this model; set
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in `~/.claude/settings.json` and
+restart to get the task tree" — then treat the protocol lines as
+plain text for the rest of the run: surface blockers, halts, and
+plan completion to the operator directly instead of dropping them.
+Never leave the stream unhandled because the UI is missing.
+
 With `--task-list`, the Monitor stream emits two line shapes:
 
 - `TASK_CREATE task=<id> [parent=<slug>] status=pending` —

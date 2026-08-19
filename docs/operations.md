@@ -749,7 +749,7 @@ else.
 | `Bash(gh *)` | Best-effort issue references; already optional per the `/clu-phase` skill. |
 | `Bash(command -v *)` | Resolving absolute tool paths under the minimal worker PATH. |
 | `Edit`, `Write` | File edits. Bare (unscoped) — see residual gaps below. |
-| `TodoWrite` | Worker self-tracking across a long phase. |
+| `TodoWrite` | Worker self-tracking across a long phase. Inert on Opus 4.8 / Sonnet 5 / Fable 5 / Mythos 5 and newer unless `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` reaches the worker (see "Task-list mode" above). |
 | `Task` | Review/search subagents (`/code-review` fan-out). |
 | `Skill` | `/clu-phase` itself, plus `/code-review` and friends. |
 
@@ -1635,6 +1635,36 @@ can parse to populate the native TaskCreate / TaskUpdate UI. Each Monitor
 notification is one structured line; Claude calls `TaskCreate` /
 `TaskUpdate` based on the prefix.
 
+**Prerequisite on newer models: `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`.**
+Claude Code 2.1.233 dropped the todo/task-tracking tools (`TaskCreate`,
+`TaskGet`, `TaskUpdate`, `TaskList`, `TodoWrite`) from the default
+toolset on Opus 4.8, Sonnet 5, Fable 5, Mythos 5, and newer models. Only
+the tools went away — `clu watch --task-list` still emits correct
+protocol lines, and the agent still reads them as notifications, so the
+failure is silent: the stream looks healthy and no task tree ever
+appears. One env var restores all five:
+
+```jsonc
+// ~/.claude/settings.json
+{ "env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" } }
+```
+
+Restart the session after setting it. Two notes on where to put it:
+
+- **The user-settings `env` block covers workers too.** `--settings`
+  loads *additional* settings on top of the user-level file (per
+  `claude --help`), so the worker sessions clu dispatches read the same
+  `env` block — that one edit covers your interactive sessions and the
+  `TodoWrite` allowlist entry in the dispatch recipe at once.
+- **A shell `export` does not reach workers.** Workers inherit the
+  dispatching process's environment (`build_worker_env` merges
+  `os.environ`), and under the `com.clu.tick` LaunchAgent that
+  environment is cron's, not your terminal's. To go the env route for
+  workers, set it in the LaunchAgent's `EnvironmentVariables` — the
+  settings file is the simpler path.
+
+On older models the tools are present by default and no switch is needed.
+
 ```bash
 clu watch --project . --plan my-feature --task-list
 ```
@@ -1911,6 +1941,23 @@ Refusal cases:
 - Phase has no `EVENT_PHASE_STARTED` and no active claim → suspicious
   (phase never ran); pass `--really` if you're certain on-disk work
   exists anyway.
+
+### `--task-list` runs but no task tree appears
+
+The Monitor is armed, `clu watch --task-list` is streaming, `clu status`
+shows the plan progressing — and Claude never renders a task list. The
+usual cause is not clu: Claude Code 2.1.233 removed `TaskCreate` /
+`TaskGet` / `TaskUpdate` / `TaskList` / `TodoWrite` from the default
+toolset on Opus 4.8, Sonnet 5, Fable 5, Mythos 5, and newer models, so
+the agent reads the protocol lines and has nowhere to put them.
+
+Fix: add `"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"}` to
+`~/.claude/settings.json` and restart the session (details and the
+worker-side implications in "Task-list mode (`--task-list`)" above).
+
+To confirm it's this and not a broken stream, run the watch command in a
+terminal — if `TASK_CREATE` lines print there, the producer is fine and
+the missing half is the consumer's toolset.
 
 ### Worker log shows `<tool>: command not found`
 
