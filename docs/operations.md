@@ -1139,6 +1139,55 @@ Absent or `null` → textual-merge-only mode (still catches the literal
 conflict class from the canonical 2026-05-18 incident). `--no-suite`
 overrides it to textual-only even when `test_command` is set.
 
+### Worker Bash timeout ceiling (`dispatch.bash_max_timeout_ms`)
+
+A dispatched `claude --print` worker runs its project gate as a
+foreground Bash call. Claude Code's Bash tool caps command timeouts at
+ten minutes out of the box (`BASH_MAX_TIMEOUT_MS`). That cap is the trap
+behind the 2026-08-19 worker death (#106): a command that **overruns the
+ceiling is moved to the background, not killed** — the worker gets back a
+"moved to the background ... you will be notified when it completes"
+result, believes it, and ends its turn to wait. Under `--print` there is
+no next turn, so the work is left staged and uncommitted.
+
+clu raises the ceiling for every phase worker by injecting
+`BASH_MAX_TIMEOUT_MS` into the worker subprocess env (via
+`build_worker_env`, the same route as the `CLU_*` claim vars — not a
+`--settings` env block, whose delivery is unproven, #102). The value
+comes from `dispatch.bash_max_timeout_ms`, default `1800000` (30 min):
+
+```json
+{
+  "dispatch": {
+    "command": "claude --print '{plan_slug}'",
+    "bash_max_timeout_ms": 1800000
+  }
+}
+```
+
+Set the field against a **two-sided invariant: gate duration < ceiling <
+lease TTL**.
+
+- **Lower bound (the one that bites):** the ceiling must comfortably
+  exceed the real gate, because an overrun backgrounds rather than
+  failing loudly. clu's own gate runs ~90 s, so 30 min is deep headroom;
+  a project with a heavier suite raises the field rather than reaching
+  for a background wait.
+- **Upper bound:** keep it under the phase's lease TTL (60 min by
+  default) so the Bash timeout fires while the worker is still alive to
+  re-run or `clu block` — not after the lease expires and the supervisor
+  reaps a worker that was doing exactly what it was told.
+
+An operator who already exports `BASH_MAX_TIMEOUT_MS` in the dispatch
+environment wins: the injection uses `setdefault`, so clu never clobbers
+a host tuning knob you set deliberately. Repair workers carry no claim
+and get no ceiling — they don't run gates. Note this widens a watchdog:
+the old 2-minute cap also bounded how long a single wedged command could
+hold a worker. The supervisor's stuck-tool detector
+(`stuck_tool_threshold_seconds`, 300 s) and `_emit_worker_idle` still
+fire well before 30 min, but they *notify*; they don't kill. For the
+5-to-30-minute window recovery is operator-in-the-loop.
+
 ## Setup: iMessage (macOS only)
 
 Configure during `clu init` (interactive prompt on macOS) or directly in `.orchestrator.json`:

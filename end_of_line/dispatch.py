@@ -140,6 +140,23 @@ def build_worker_env(
     is the correct behavior for them. Cfg-only calls with no PATH
     override keep returning None (inherit) — cmd_doctor's
     "(source: inherited)" display depends on it.
+
+    Also raises the Bash-tool timeout ceiling (BASH_MAX_TIMEOUT_MS) so a
+    long test gate runs in the foreground rather than being auto-
+    backgrounded past end-of-turn — the idiom that killed the incident
+    worker (#106). Three deliberate choices:
+      - setdefault, not assignment: an operator who already exports
+        BASH_MAX_TIMEOUT_MS for their own host tuning wins. This departs
+        from the unconditional PATH / CLU_* assignments above, which are
+        clu's own claim identity and not the operator's to override; the
+        Bash ceiling is a host knob clu shouldn't clobber.
+      - INSIDE the inject branch, never on the unconditional path. The
+        None-vs-dict return is load-bearing in opposite directions for
+        cmd_doctor ("(source: inherited)") and dispatch_repair_worker
+        (None => inherit, not a frozen os.environ copy). Setting it
+        unconditionally would flip both silently.
+      - Consequence, accepted: repair workers pass no claim kwargs, so
+        they get no ceiling — they don't run test gates.
     """
     inject = plan_slug is not None or phase_id is not None or token is not None
     if not cfg.dispatch.path and not inject:
@@ -152,6 +169,7 @@ def build_worker_env(
         env["CLU_PHASE"] = phase_id or ""
         env["CLU_TOKEN"] = token or ""
         env["CLU_PROJECT"] = str(cfg.project_root)
+        env.setdefault("BASH_MAX_TIMEOUT_MS", str(cfg.dispatch.bash_max_timeout_ms))
     return env
 
 

@@ -386,4 +386,13 @@ without anyone reading the word "Monitor".
 
 ## Findings log
 
-_(empty at plan time — workers append cross-phase findings as phases run)_
+- **2026-08-19 (foreground-gates):** running `python3 -m unittest discover -s
+  tests` directly from a worker's sandboxed Bash tool leaves ~45 tests red that
+  are purely environmental, NOT regressions: all of `test_webserver` (~36, fail
+  in `server_bind()` — the Seatbelt sandbox blocks socket binding) plus
+  `test_reap_orphan_pgroup` / `test_terminalize` / `test_zombie_sweep` (~9, fail
+  because the sandbox blocks cross-process-group signals, so `result.signaled`
+  is `None`). `clu verify` is authoritative — it runs the gate sandbox-exempt
+  (the #90 `clu *` exemption) where these pass. Phase 2 touches the heartbeat
+  daemon and supervisor tests; if you see this exact red cluster, don't chase
+  it — confirm the failing modules are only those four and trust `clu verify`.

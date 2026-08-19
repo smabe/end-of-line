@@ -256,6 +256,34 @@ class QualityFieldTests(_ConfigTestBase):
             load_project_config(self.root)
 
 
+class DispatchBashTimeoutFieldTests(_ConfigTestBase):
+    def test_bash_max_timeout_defaults_when_absent(self) -> None:
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.dispatch.bash_max_timeout_ms, 1_800_000)
+
+    def test_bash_max_timeout_explicit_value(self) -> None:
+        self._write({"dispatch": {"bash_max_timeout_ms": 600_000}})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.dispatch.bash_max_timeout_ms, 600_000)
+
+    def test_bash_max_timeout_non_int_raises(self) -> None:
+        self._write({"dispatch": {"bash_max_timeout_ms": "600000"}})
+        with self.assertRaises(ConfigError) as ctx:
+            load_project_config(self.root)
+        self.assertIn("bash_max_timeout_ms", str(ctx.exception))
+
+    def test_bash_max_timeout_negative_raises(self) -> None:
+        self._write({"dispatch": {"bash_max_timeout_ms": -1}})
+        with self.assertRaises(ConfigError):
+            load_project_config(self.root)
+
+    def test_bash_max_timeout_bool_raises(self) -> None:
+        # A bool is an int in Python; the validator must reject it explicitly.
+        self._write({"dispatch": {"bash_max_timeout_ms": True}})
+        with self.assertRaises(ConfigError):
+            load_project_config(self.root)
+
+
 class CoolantFieldTests(_ConfigTestBase):
     def test_coolant_defaults_when_absent(self) -> None:
         cfg = load_project_config(self.root)

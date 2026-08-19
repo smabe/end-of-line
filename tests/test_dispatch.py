@@ -16,7 +16,12 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
-from end_of_line.dispatch import dispatch_for_tick, dispatch_repair_worker, resolved_model
+from end_of_line.dispatch import (
+    build_worker_env,
+    dispatch_for_tick,
+    dispatch_repair_worker,
+    resolved_model,
+)
 from end_of_line.supervisor import TickResult
 from tests import CluTestCase
 
@@ -483,6 +488,52 @@ class ResolvedModelTestCase(unittest.TestCase):
         # shlex.split raises on unterminated quote — treat as absent
         # rather than crash the CLI on init/queue-add.
         self.assertIsNone(resolved_model("claude --print 'oops"))
+
+
+class BuildWorkerEnvBashTimeoutTestCase(CluTestCase):
+    """`build_worker_env` sets BASH_MAX_TIMEOUT_MS so a long gate runs in the
+    foreground rather than getting auto-backgrounded (worker-death-visibility
+    phase foreground-gates, #106)."""
+
+    def _cfg(self, **dispatch_kwargs) -> ProjectConfig:
+        return ProjectConfig(
+            project_root=self.tmp_path,
+            dispatch=DispatchSpec(kind="shell", command="ignored", **dispatch_kwargs),
+        )
+
+    def test_phase_dispatch_sets_configured_ceiling(self) -> None:
+        cfg = self._cfg(bash_max_timeout_ms=600_000)
+        env = build_worker_env(cfg, plan_slug="p", phase_id="a", token="tok")
+        assert env is not None
+        self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], "600000")
+
+    def test_phase_dispatch_default_ceiling_is_thirty_minutes(self) -> None:
+        # Build the expected value from the real dataclass default rather than
+        # retyping the number, so this pins whatever DispatchSpec() actually is.
+        import dataclasses
+
+        cfg = self._cfg()
+        env = build_worker_env(cfg, plan_slug="p", phase_id="a", token="tok")
+        expected = str(dataclasses.replace(cfg.dispatch).bash_max_timeout_ms)
+        assert env is not None
+        self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], expected)
+        self.assertEqual(expected, "1800000")
+
+    def test_inherited_ceiling_is_not_overwritten(self) -> None:
+        from unittest import mock
+
+        cfg = self._cfg(bash_max_timeout_ms=600_000)
+        with mock.patch.dict(os.environ, {"BASH_MAX_TIMEOUT_MS": "999999"}):
+            env = build_worker_env(cfg, plan_slug="p", phase_id="a", token="tok")
+        assert env is not None
+        self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], "999999")
+
+    def test_cfg_only_call_with_no_override_returns_none(self) -> None:
+        # Regression pin: the setdefault must stay INSIDE the inject branch.
+        # No path override and no claim kwargs => inherit (None), which
+        # cmd_doctor and dispatch_repair_worker both depend on.
+        cfg = self._cfg(bash_max_timeout_ms=600_000)
+        self.assertIsNone(build_worker_env(cfg))
 
 
 class RepairWorkerEnvTestCase(CluTestCase):

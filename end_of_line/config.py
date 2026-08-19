@@ -48,6 +48,16 @@ class DispatchSpec:
     # "as_pr" = open a GitHub PR and let auto_archive_rule pick up
     # cleanup once GitHub merges (clu-ship.md).
     ship_mode: str = "direct"
+    # BASH_MAX_TIMEOUT_MS injected into the worker subprocess env
+    # (build_worker_env) so a long test gate runs in the foreground
+    # instead of being auto-backgrounded past end-of-turn (#106).
+    # Two-sided invariant: gate duration < ceiling < lease TTL. Lower
+    # bound: a gate that overruns the ceiling is moved to the background,
+    # not killed, which is the failure this exists to prevent — keep the
+    # ceiling comfortably above the real gate. Upper bound: keep it under
+    # the 60-min default lease (state.py) so the Bash timeout fires while
+    # the worker is still alive to report, not after the lease reaps it.
+    bash_max_timeout_ms: int = 1_800_000
 
 
 @dataclass
@@ -264,7 +274,9 @@ def _validate_bool_field(raw: dict, name: str, default: bool) -> bool:
     return value
 
 
-def _validate_stuck_tool_threshold(raw: dict, key: str, default: int) -> int:
+def _validate_non_negative_int(raw: dict, key: str, default: int) -> int:
+    # A bool is an int in Python; reject it explicitly so `true` in JSON
+    # doesn't coerce to 1.
     value = raw.get(key, default)
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ConfigError(f"{key}: must be non-negative int, got {value!r}")
@@ -400,6 +412,11 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             path=raw_path,
             repair_command=disp.get("repair_command") or None,
             ship_mode=_validate_ship_mode(disp),
+            bash_max_timeout_ms=_validate_non_negative_int(
+                disp,
+                "bash_max_timeout_ms",
+                1_800_000,
+            ),
         ),
         notify=NotifySpec(
             channels=channels,
@@ -413,12 +430,12 @@ def load_project_config(project_root: Path) -> ProjectConfig:
         quality=_validate_quality(raw),
         coolant=_validate_coolant(raw),
         lease_ttl_scale=_validate_lease_ttl_scale(raw),
-        stuck_tool_threshold_seconds=_validate_stuck_tool_threshold(
+        stuck_tool_threshold_seconds=_validate_non_negative_int(
             raw,
             "stuck_tool_threshold_seconds",
             300,
         ),
-        stuck_tool_cpu_threshold_seconds=_validate_stuck_tool_threshold(
+        stuck_tool_cpu_threshold_seconds=_validate_non_negative_int(
             raw,
             "stuck_tool_cpu_threshold_seconds",
             5,

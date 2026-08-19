@@ -158,6 +158,11 @@ resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
   resolution when neither `--direct` nor `--as-pr` is passed. Values:
   `"direct"` (local merge + push, default) or `"as_pr"` (open a PR
   via `gh pr create`). Validated by `_validate_ship_mode`.
+- `DispatchSpec.bash_max_timeout_ms: int` — `BASH_MAX_TIMEOUT_MS` for
+  the worker subprocess, so a long foreground test gate isn't
+  auto-backgrounded (#106). Default `1_800_000` (30 min), against the
+  invariant `gate duration < ceiling < lease TTL`. Validated by
+  `_validate_non_negative_int` (rejects non-int, negative, and bool).
 - `ProjectConfig.state_path(plan_slug)` — returns the canonical state
   path; raises `InvalidSlug` if resolution escapes the orchestrator dir.
 - `ProjectConfig.queue_path()` — `<project>/<plan_dir>/.orchestrator/
@@ -358,7 +363,12 @@ instead of block-buffering until exit — a wedged worker otherwise leaves a
   or token, and the activity hook's empty-token short-circuit is the
   correct behavior for them. Cfg-only call with no PATH override keeps
   returning `None` — `clu doctor`'s "(source: inherited)" display
-  depends on it.
+  depends on it. Also `setdefault`s `BASH_MAX_TIMEOUT_MS` (from
+  `dispatch.bash_max_timeout_ms`) inside the inject branch, so a long
+  test gate runs in the foreground instead of being auto-backgrounded
+  past end-of-turn (#106); `setdefault` lets an operator who already
+  exports the var win, and keeping it inside the branch preserves the
+  `None`-inherit contract. Repair workers (no kwargs) get no ceiling.
 - `dispatch_repair_worker(cfg, corrupt_path, backup_path, diagnosis,
   log_path, *, timeout_sec=60)` — synchronous repair-worker spawn for a
   corrupt `queue.json`. Renders `cfg.dispatch.repair_command`, waits for

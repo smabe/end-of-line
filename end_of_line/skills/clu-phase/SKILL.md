@@ -201,13 +201,41 @@ These mandates apply on every project that uses clu. The project's CLAUDE.md add
 
 - **Honor the project's CLAUDE.md.** It's the project-specific layer of these mandates: naming conventions, exit-code patterns, event constants, files to avoid. Read it before your first commit on a project, and re-read when you're unsure.
 
-- **Run FOCUSED tests during TDD iterations; the FULL suite exactly twice.** The full suite is expensive (minutes on real projects) and is empirically where worker wall-clock goes. During red/green/refactor loops, run only the test module or case you're working on (`python3 -m unittest tests.test_foo` or `-k <pattern>`); spot-check neighbors you touched. The full suite runs exactly twice per phase: once before the commit (the green you claim) and once via `clu verify` (the trustless re-check that stamps). Iterating with full-suite runs between every small edit multiplies the phase's duration for no added safety — the two full runs are the safety.
+- **Run FOCUSED tests during TDD iterations; the FULL suite exactly twice.** The full suite is expensive (minutes on real projects) and is empirically where worker wall-clock goes. During red/green/refactor loops, run only the test module or case you're working on (`python3 -m unittest tests.test_foo` or `-k <pattern>`); spot-check neighbors you touched. The full suite runs exactly twice per phase: once before the commit (the green you claim) and once via `clu verify` (the trustless re-check that stamps). Iterating with full-suite runs between every small edit multiplies the phase's duration for no added safety — the two full runs are the safety. Run each full-suite pass as a **blocking foreground Bash call with an explicit `timeout`** — never arm a Monitor or background the gate and end your turn to wait for it (see "Never end your turn to wait" under `## Common pitfalls`).
 
 - **Re-run verification right before complete.** The project's primary check — test suite, build, lint, whichever is authoritative — must pass at the moment you exit, not just at some point earlier in the phase. Run it from a fresh process before calling `clu complete` so you're verifying the post-edit state, not stale memory of an earlier run. Record the exact result (test count + delta, lint clean, build green) and put it in the completion summary. A wrong "tests passed" claim is the single fastest way to lose operator trust; a worker that consistently re-verifies and reports honestly is the foundation everything else builds on. `clu verify` does this for you AND stamps; running the test suite manually and skipping `clu verify` will still leave `complete` refused.
 
 - **The completion summary is load-bearing.** When you call `clu complete`, your final message to the operator is the only signal they have about what shipped. Mention what actually committed (SHA), the verification result from the mandate above (count + delta), and anything you tried that didn't work and the operator should know about (e.g. "couldn't run `gh issue close` because the binary wasn't on PATH; operator should close manually"). Silence on a failure mode reads as "everything went fine," which is worse than admitting a small thing didn't.
 
 ## Common pitfalls
+
+- **Never end your turn to wait for something.** You are a dispatched
+  `claude --print` worker: the run ends the moment you emit your final
+  result, and any command still running in the background is terminated
+  about five seconds later. There is no next turn to wake up in. This
+  forbids the whole family of "start it, end the turn, get woken up"
+  shapes — arming a Monitor and ending the turn to wait for its event,
+  a `run_in_background` Bash call followed by end of turn, any scheduled
+  wakeup. Each one has the same result: your work is left staged and
+  uncommitted, your claim is orphaned until the lease expires, and the
+  operator finds out hours later. The replacement is always the same —
+  run the thing (a test gate, a build, a long command) as a **blocking
+  foreground Bash call with an explicit `timeout` argument** and read its
+  result in the same turn. clu-dispatched workers get `BASH_MAX_TIMEOUT_MS`
+  raised from `dispatch.bash_max_timeout_ms` (30 minutes by default), so a
+  long gate has room to finish in the foreground; a project whose gate
+  runs longer raises that field rather than reaching for a background wait.
+
+- **A "moved to the background" result is NOT a result.** You can reach
+  the fatal shape without ever choosing it: run a gate that overruns the
+  Bash ceiling and Claude Code hands you back `Command did not complete
+  within its Ns timeout and was moved to the background ... You will be
+  notified when it completes.` Do not believe it. No notification is
+  coming — the run ends at end of turn and the backgrounded command dies
+  with it. Treat a backgrounded result as a failure to get a result:
+  re-run the command in the foreground with a longer explicit `timeout`,
+  or `clu block` if it genuinely cannot finish inside the ceiling. Never
+  end the turn to wait for the notification.
 
 - **Command shapes that get DENIED under hardened dispatch** (`dontAsk` +
   allowlist; the standard since #90): the allowlist prefix-matches each

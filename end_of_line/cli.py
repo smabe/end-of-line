@@ -2639,9 +2639,12 @@ def cmd_doctor(args) -> int:
     """Smoke-test the worker subprocess env: print PATH + resolved binaries.
 
     Read-only: no state.json read or write, no registry mutation. Reuses
-    `dispatch.build_worker_env` so what the operator sees here is byte-for-
-    byte what a real worker would inherit. Refuses on a project without an
-    `.orchestrator.json` — without one there's no override config to report,
+    `dispatch.build_worker_env` to show PATH resolution. It calls it with no
+    claim kwargs, so the phase-dispatch-only injections — CLU_PLAN / CLU_PHASE
+    / CLU_TOKEN / CLU_PROJECT and the BASH_MAX_TIMEOUT_MS ceiling — are NOT
+    reflected here; this probe covers the PATH override, which is what usually
+    breaks a worker's ability to find gh/pipx/clu. Refuses on a project without
+    an `.orchestrator.json` — without one there's no override config to report,
     and the operator is asking about a project that isn't initialized.
     """
     cfg_path = args.project / CONFIG_FILENAME
