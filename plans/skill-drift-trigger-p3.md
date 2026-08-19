@@ -10,6 +10,8 @@ See the master `plans/skill-drift-trigger.md`. The decisions binding this phase:
 
 ## Work
 
+**Carried in from p2 (shipped `22ac6d0`).** `skill_sync` now exports `installed_path(name)`, `bundled_bytes(name)` and `is_writable_target(target)` beyond p2's declared `Produces:` line — use them rather than re-deriving. `scan()` raises `ValueError` for a name outside `BUNDLED_SKILLS`. `BUNDLED_SKILLS` is imported lazily INSIDE `scan()` because `cli` imports this module; a module-scope import cycles, and p3 extends the same module. **And resolve any temp `HOME` before asserting on writability** — on macOS `$TMPDIR` sits under `/var`, a symlink, so an unresolved temp home makes every target read `writable=False`.
+
 **Carried in from p1 (shipped `853a7f4`).** The test harness now patches `HOME` for you: `CluTestCase` points it at `tmp_path / "home"`, and `isolate_registry` patches it too — its signature is now `isolate_registry(testcase, tmp_path, home: Path | None = None)`. Any test class in this phase should subclass `CluTestCase` (or call `isolate_registry`) and **not** re-patch `HOME` itself. p1 also found three production constants that bind `Path.home()` at IMPORT time — `top.py:34`, `notify_imessage_inbound.py:24` and `:25` — which no `setUp` patch can reach; if this phase touches any of them, an env patch will not isolate it.
 
 - `scripts/gen_skill_manifest.py` — new. Walks `git log` for each `end_of_line/skills/*/SKILL.md`, collects the SHA-256 of every committed version, and writes `end_of_line/skills_manifest.json`. Run by a human when skills change; not run at install time.

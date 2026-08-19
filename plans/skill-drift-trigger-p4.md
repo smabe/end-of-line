@@ -12,6 +12,11 @@ See the master `plans/skill-drift-trigger.md`. The decisions binding this phase:
 
 ## Work
 
+**Carried in from p2 (shipped `22ac6d0`).** Two constraints, both promoted to Done criteria below rather than left as prose:
+- **Gate repair on `writable`, never on `placement`.** On a real machine the symlink is the skill DIRECTORY, so the leaf is a regular file and `placement` is `"file"` while `writable` is `False`. A placement-keyed guard never fires on the hazard this plan exists to prevent.
+- **Resolve the temp `HOME` in any test that asserts a repair HAPPENED.** On macOS `$TMPDIR` sits under `/var`, itself a symlink, so an unresolved temp home makes every target `writable=False` and a repair assertion silently passes over a repair that never ran.
+Also available from p2 beyond its declared `Produces:` line: `installed_path(name)`, `bundled_bytes(name)`, `is_writable_target(target)`. `scan()` now raises `ValueError` for a name outside `BUNDLED_SKILLS`.
+
 **Carried in from p1 (shipped `853a7f4`).** The test harness now patches `HOME` for you: `CluTestCase` points it at `tmp_path / "home"`, and `isolate_registry` patches it too — its signature is now `isolate_registry(testcase, tmp_path, home: Path | None = None)`. Any test class in this phase should subclass `CluTestCase` (or call `isolate_registry`) and **not** re-patch `HOME` itself. p1 also found three production constants that bind `Path.home()` at IMPORT time — `top.py:34`, `notify_imessage_inbound.py:24` and `:25` — which no `setUp` patch can reach; if this phase touches any of them, an env patch will not isolate it.
 
 - `end_of_line/skill_sync.py` — add the write path.
@@ -72,6 +77,9 @@ See the master `plans/skill-drift-trigger.md`. The decisions binding this phase:
 - The refusal path stays quiet because `writable` is computed once at scan time and the filesystem changes before the write. Re-check immediately before `os.replace`, not only in `scan()`.
 
 ## Done criteria
+
+- **Repair is gated on `writable`, and a test proves a placement-keyed guard would not do.** Build the real-machine shape — a skill whose parent DIRECTORY is a symlink, leaving `placement == "file"` — stale it, run `repair()`, and show the file behind the symlink is byte-identical afterwards. State the `placement` and `writable` values the fixture produced; a fixture reporting `placement == "link"` is testing the wrong shape.
+- **Every repair test resolves its temp `HOME` before asserting.** For one such test, state the `writable` value observed with the home unresolved and with it resolved. If they are both `False`, the test is asserting nothing and the criterion is not met.
 
 - The suite passes: `python3 -m unittest discover -s tests`, full count reported.
 - `clu verify` passes, including basedpyright.

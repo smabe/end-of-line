@@ -54,6 +54,27 @@ See the master `plans/skill-drift-trigger.md`. The decisions binding this phase:
 - **Alternatives considered:** a `repair: bool` flag on the existing printer — rejected under the project's own rule that an abstraction needing a mode flag to serve its callers is two functions in a trenchcoat.
 - **Evidence:** `end_of_line/cli.py:2799` (returns `None`, prints), `cli.py:2681` (its single caller).
 
+### Finding: the operator's machine has ZERO `link` placements  *(status: active)*
+- `~/.claude/skills/plan` and `brainstorm` are symlinks into `abe-skills`, but the `SKILL.md` INSIDE each is a regular file — so both scan as `placement="file", writable=False`. A `link` placement (a symlinked `SKILL.md` itself) is real and tested, but it is not the shape that occurs here.
+- **Consequence, and it is the whole point of the finding:** the doctor's unwritable line is keyed on `writable`, NOT on `placement == "link"` as this shard's Work text said. Keying on placement would have re-committed the leaf-only bug one layer up — it would never fire on the exact configuration the plan cites as the hazard. **p4 must gate repair on `writable`, never on `placement`.**
+
+### Finding: on macOS every temp dir has a symlink on its path to root  *(status: active)*
+- `$TMPDIR` sits under `/var` → `/private/var`, and `/tmp` → `/private/tmp`. Verified this session: an unresolved temp path yields one symlinked component (`/var`); the real home `/Users/smabe` yields none.
+- So p1's harness home (`tmp_path / "home"`, unresolved) makes **every** target scan `writable=False`. Correct by the walk-to-root rule, and it means **any test asserting that a repair HAPPENED silently asserts nothing unless the home is resolved.** p2 handled it locally by resolving the home in both test classes' `setUp`; it deliberately did NOT change `tests/__init__.py`, because `tests/test_home_isolation.py:52-53` asserts the unresolved value and its parent relationship. That trade stays open.
+- Production is unaffected: the real home has no symlink on its path, so all five clu-owned skills scan `writable=True` and `clu doctor` is silent on this machine.
+
+### Finding: an `absent` skill under an unwritable path must be excluded  *(status: active)*
+- Otherwise doctor warns about a symlink for a skill that is not installed at all. The formatter skips `absent` before the writability branch.
+
+### Finding: `skill_sync` imports `BUNDLED_SKILLS` lazily  *(status: active)*
+- `cli` imports `skill_sync`, so a module-scope import would cycle. The import sits inside `scan()`. p3 and p4 both extend this module and will hit the same constraint.
+- p2 also exports `installed_path(name)`, `bundled_bytes(name)` and `is_writable_target(target)` beyond the declared `Produces:` line — added for p3/p4 rather than left for them to re-derive.
+
+### Finding: three defects in the new code, found at review  *(status: active)*
+- A differing skill clu cannot write landed in **both** doctor sections — "re-sync with `--force`" beside "clu won't write through it". Probed and fixed: unwritable skills are excluded from the drift list, and their unusable line carries the difference.
+- `scan()` raised `FileNotFoundError` for an unbundled name **only when** a file happened to exist at that path, and returned a clean `absent` when it did not. Names are validated up front now, so one mistake takes one shape.
+- The byte comparison round-tripped through SHA-256 on two in-memory buffers. Inherited from the old check; now a direct comparison, which matters because p4 puts `scan()` on the `init` and `queue add` paths.
+
 ## Failure modes to anticipate
 
 - `Path.resolve()` used anywhere in the placement decision collapses the symlink distinction the whole phase turns on. Use `is_symlink()` on each component; resolve only for display.

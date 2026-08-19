@@ -47,9 +47,20 @@ Promoted to approval: the symlink-vs-name exclusion change, and the wording of t
 
 Downstream sweep at p1 — p2 1 item corrected (the `test_skill_drift.py:38` note, now a confirmed fact rather than a prediction) + carry-in note added · p3 clean, carry-in note added · p4 clean, carry-in note added · code: p1 pinned `HOME` suite-wide and changed `isolate_registry`'s signature to take an optional `home`; no earlier phase of this plan has shipped source for it to obsolete, and the one thing it made redundant — `test_skill_drift.py:38`'s per-test patch — sets an identical value, so it is dead weight rather than a false constraint and p2 owns removing it. No constraint required promotion to a downstream Done criterion; the sweep's findings were informational.
 
-NEXT phase is **p2**. Read `plans/skill-drift-trigger-p2.md` FIRST — it is the self-sufficient packet for that phase.
+**p2 SHIPPED** — `22ac6d0`.
 
-The three decisions binding p2, pulled inline so a compaction that drops the shard still leaves them visible:
+**Spec check at p2** — work items 4/4 evidenced · interface conforms (`SkillStatus` and `scan(...)` shipped as declared; three helpers exported beyond the line, recorded) · none uncovered · +2 test files re-evidenced after review fixes
+
+Downstream sweep at p2 — p3 clean, carry-in note added · p4 2 constraints promoted to Done criteria (gate repair on `writable` not `placement`; resolve the temp HOME before asserting a repair happened) · code: p2 pinned write-safety to a filesystem property and removed the `except OSError` swallow that reported an unreadable install as in sync; it obsoleted nothing p1 shipped — p1's harness and guards are untouched and still green — and it made `tests/test_skill_drift.py`'s per-test HOME patch redundant, which p2 removed as part of its own Work rather than leaving as dead weight.
+
+NEXT phase is **p3**. Read `plans/skill-drift-trigger-p3.md` FIRST — it is the self-sufficient packet for that phase.
+
+The three decisions binding p3, pulled inline so a compaction that drops the shard still leaves them visible:
+- Provenance lives in a SIDECAR under `clu_config_dir()`, never in the SKILL.md — a stamp inside the file makes the installed copy differ from the bundled one by construction.
+- Recognition needs a hash HISTORY (a shipped manifest of previously released fingerprints), not one hash; one hash can only say "differs".
+- An unrecognized copy is reported, never prompted on — `init` and `queue add` run in scripts and under cron.
+
+p2's decisions, kept for the record:
 - Detection, policy and formatting split apart: `scan()` returns data and prints nothing; `cmd_doctor` becomes a formatter over it.
 - **Write-safety is keyed on the filesystem, not on the `VENDORED_SKILLS` name list** — a target is unsafe when its leaf OR any parent is a symlink. The name set survives only as an ownership signal.
 - One `SKILL.md` per skill is the packaged unit; `scan()` compares that one file and asserts the invariant rather than walking directories.
