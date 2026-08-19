@@ -18,7 +18,17 @@ where = ["."]
 include = ["end_of_line*"]
 
 [tool.setuptools.package-data]
-end_of_line = ["skills/*/SKILL.md", "hooks/*.py", "web/*.html", "web/*.png", "worker-settings.template.json"]
+end_of_line = [
+    "skills/*/SKILL.md",
+    # Fingerprints of every SKILL.md clu has shipped. Without it in the
+    # wheel, every installed copy reads as foreign and clu never repairs a
+    # stale skill — silently, for exactly the users the feature is for.
+    "skills_manifest.json",
+    "hooks/*.py",
+    "web/*.html",
+    "web/*.png",
+    "worker-settings.template.json",
+]
 
 [project.optional-dependencies]
 # Dev-only — pipx install ruff && pipx install basedpyright recommended,

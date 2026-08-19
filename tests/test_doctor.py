@@ -317,16 +317,46 @@ class DoctorCommandTestCase(_DoctorProjectTestCase):
         self.assertIn("override", stdout)
 
     def test_doctor_reports_resolver_error_for_unmatched_handle(self) -> None:
-        # No override + a synthetic handle that won't match the operator's
-        # real chat.db → resolver surfaces SelfChatLookupError, doctor prints
-        # the hint pointing at the override knob.
+        # No override + a handle that matches no chat → resolver surfaces
+        # SelfChatLookupError, doctor prints the hint pointing at the override.
+        #
+        # The chat.db is SYNTHETIC and DEFAULT_CHAT_DB is patched to it. This
+        # test used to rely on the operator's real ~/Library/Messages/chat.db
+        # being present and simply not containing the handle, which made it
+        # pass or fail on machine state. Once the suite began redirecting HOME
+        # (853a7f4), DEFAULT_CHAT_DB — bound from Path.home() at IMPORT time —
+        # resolved to a temp path with no database, so doctor took the
+        # "chat.db inaccessible" branch instead and never reached the resolver.
+        # It still passed under `unittest discover` only because some earlier
+        # module imported notify_imessage_inbound while HOME was still real.
+        # Patching the module attribute is the only thing an env patch cannot
+        # substitute for here.
+        import sqlite3
+        from unittest import mock
+
+        from end_of_line import notify_imessage_inbound as nii
+
+        chat_db = self.project / "chat.db"
+        conn = sqlite3.connect(str(chat_db))
+        conn.execute(
+            "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, "
+            "service_name TEXT, room_name TEXT, is_archived INTEGER)"
+        )
+        conn.execute("CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT)")
+        conn.execute("CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER)")
+        conn.commit()
+        conn.close()
+
         self._write_cfg_with_notify(
             [
                 {"kind": "imessage", "to": "+15550000000"},
             ]
         )
-        _, stdout, _ = self._run_doctor()
+        with mock.patch.object(nii, "DEFAULT_CHAT_DB", chat_db):
+            _, stdout, _ = self._run_doctor()
+
         self.assertIn("Notify channels:", stdout)
+        self.assertNotIn("chat.db inaccessible", stdout)
         self.assertIn("self_chat_id", stdout)
         self.assertIn("+15550000000", stdout)
 

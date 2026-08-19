@@ -2423,7 +2423,14 @@ def cmd_install_skill(args) -> int:
             # destination), hardlinks (don't modify the shared inode), and
             # regular files (replace cleanly with a fresh inode).
             target.unlink()
-        target.write_bytes(bundled.read_bytes())
+        payload = bundled.read_bytes()
+        target.write_bytes(payload)
+        # Provenance: remember the exact bytes clu just wrote, so this copy is
+        # recognized as clu's own even after the bundle moves on and its hash
+        # is no longer the current one. Without this, recognition would rest
+        # on the shipped manifest alone, which a clu newer than the manifest
+        # cannot be in.
+        skill_sync.record_install(name, skill_sync.digest(payload))
         print(f"Installed {name} skill to {target}")
 
     if _decide_inject_claude_md_note(args):
@@ -2820,21 +2827,43 @@ def _print_skill_drift_health() -> None:
     bytes, not mtime); this is formatting and policy only. Quiet when every
     installed skill matches; skills that aren't installed aren't drift.
 
+    A differing copy is reported one of two ways, never one indistinguishable
+    message: `recognized` (clu wrote it, it is just behind) gets the `--force`
+    re-sync line; `foreign` (matches no version clu ever shipped) is named as a
+    local edit clu leaves alone, because pointing `--force` at it would destroy
+    the edit.
+
     `VENDORED_SKILLS` acts here as an OWNERSHIP signal, not a write guard:
     clu isn't canonical for those, so neither a content difference nor a
     symlinked install is worth a warning — both are their expected steady
     state. A dangling or unreadable install is reported for every skill.
     """
     statuses = skill_sync.scan()
+    # A manifest that is present but corrupt makes every copy clu wrote read as
+    # `foreign`, which turns the section below into a confident lie about the
+    # operator's own files. Absent is fine and silent; unreadable is not.
+    _, manifest_problem = skill_sync.load_manifest()
+    if manifest_problem is not None:
+        print(
+            f"clu's shipped skill fingerprints are unreadable ({manifest_problem}) — "
+            "skills clu installed will be misreported below as local edits"
+        )
     # A skill clu cannot write is NEVER listed as drift: the drift header tells
     # the operator to re-sync with `--force`, and telling them to run a command
     # that cannot work is worse than not mentioning the difference. The
     # unwritable line below carries the difference instead.
-    drifted = [
+    differing = [
         s
         for s in statuses
         if s.content == "differs" and s.writable and s.name not in VENDORED_SKILLS
     ]
+    # Two states, two messages. A copy clu itself wrote (recognized) is simply
+    # behind the bundle and re-syncing costs the operator nothing. A copy clu
+    # never wrote (foreign) holds somebody's edit, and the same `--force`
+    # sentence would be an instruction to destroy it. Collapsing both into one
+    # line is the failure this split exists to prevent.
+    drifted = [s for s in differing if s.provenance == "recognized"]
+    foreign = [s for s in differing if s.provenance == "foreign"]
     unusable: list[tuple[skill_sync.SkillStatus, str]] = []
     for s in statuses:
         if s.placement == "broken":
@@ -2858,6 +2887,13 @@ def _print_skill_drift_health() -> None:
         )
         for s in drifted:
             print(f"  {s.name} — {s.target} differs from the bundled copy")
+    if foreign:
+        print("Installed skills clu didn't write (left alone — edited locally):")
+        for s in foreign:
+            print(
+                f"  {s.name} — {s.target} matches no version clu shipped; "
+                f"`clu install-skill --only {s.name} --force` would overwrite the edit"
+            )
     if unusable:
         print("Installed skills clu can't compare or re-sync:")
         for s, reason in unusable:

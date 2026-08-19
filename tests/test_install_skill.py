@@ -22,6 +22,7 @@ from importlib.resources import files
 from pathlib import Path
 from unittest import mock
 
+from end_of_line import skill_sync
 from end_of_line.cli import (
     _CLU_NOTE_END,
     _CLU_NOTE_START,
@@ -29,16 +30,22 @@ from end_of_line.cli import (
     ExitCode,
     main,
 )
+from tests import isolate_registry
 
 
 class InstallSkillTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.home = Path(self.tmp.name)
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        # install-skill records what it wrote under `clu_config_dir()`, so the
+        # XDG base needs redirecting alongside HOME — patching HOME alone
+        # leaves the provenance sidecar in the developer's real ~/.config/clu
+        # on any machine that sets XDG_CONFIG_HOME. The XDG dir is a SIBLING
+        # of home, never home itself (same reason as CluTestCase: home ==
+        # the XDG dir trips assert_xdg_safe).
+        isolate_registry(self, Path(self.tmp.name) / "xdg", home=self.home)
         self.targets: dict[str, Path] = {
             name: self.home / ".claude" / "skills" / name / "SKILL.md"
             for name in BUNDLED_SKILLS
@@ -103,11 +110,16 @@ class OnlyFlagTests(InstallSkillTestBase):
         """Per-skill: `--only X` installs X and no other bundled skill."""
         for name in BUNDLED_SKILLS:
             with self.subTest(skill=name):
-                # Re-isolate HOME per subTest so prior installs don't leak.
+                # Re-isolate HOME and the XDG base per subTest so neither a
+                # prior install nor its provenance record leaks forward.
                 tmp = tempfile.TemporaryDirectory()
                 self.addCleanup(tmp.cleanup)
-                home = Path(tmp.name)
-                with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                home = Path(tmp.name) / "home"
+                home.mkdir()
+                with mock.patch.dict(
+                    os.environ,
+                    {"HOME": str(home), "XDG_CONFIG_HOME": str(Path(tmp.name) / "xdg")},
+                ):
                     targets = {
                         n: home / ".claude" / "skills" / n / "SKILL.md"
                         for n in BUNDLED_SKILLS
@@ -410,3 +422,62 @@ class DryRunTests(InstallSkillTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProvenanceRecordTests(InstallSkillTestBase):
+    """install-skill records the bytes it wrote, so a later scan recognizes them.
+
+    Without the record, recognition would rest on the shipped fingerprint
+    manifest alone — and a clu newer than its own manifest (the case right
+    after a skill changes) cannot be in it.
+    """
+
+    def test_no_sidecar_before_the_first_install(self):
+        self.assertEqual(skill_sync.installed_record(), {})
+        self.assertFalse(skill_sync.record_path().exists())
+
+    def test_install_records_the_hash_of_the_bytes_written(self):
+        rc, _, _ = self._run("--only", "clu-reply")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertEqual(
+            skill_sync.installed_record(),
+            {"clu-reply": skill_sync.digest(self.targets["clu-reply"].read_bytes())},
+        )
+
+    def test_default_install_records_every_skill(self):
+        rc, _, _ = self._run()
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertEqual(sorted(skill_sync.installed_record()), sorted(BUNDLED_SKILLS))
+
+    def test_a_recorded_install_scans_as_recognized_and_in_sync(self):
+        self._run("--only", "clu-reply")
+        status = next(s for s in skill_sync.scan(["clu-reply"]))
+        self.assertEqual(status.content, "in_sync")
+        self.assertEqual(status.provenance, "recognized")
+
+    def test_dry_run_records_nothing(self):
+        rc, _, _ = self._run("--dry-run")
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertEqual(skill_sync.installed_record(), {})
+
+    def test_a_refused_install_records_nothing(self):
+        # The pre-flight refusal is all-or-nothing; the record must not claim
+        # bytes that were never written.
+        self.targets["clu-phase"].parent.mkdir(parents=True)
+        self.targets["clu-phase"].write_bytes(b"someone else's file\n")
+        rc, _, _ = self._run()
+        self.assertEqual(rc, int(ExitCode.STATUS_TRANSITION))
+        self.assertEqual(skill_sync.installed_record(), {})
+
+    def test_force_overwrite_updates_the_record_to_the_new_bytes(self):
+        self.targets["clu-reply"].parent.mkdir(parents=True)
+        self.targets["clu-reply"].write_bytes(b"a stale copy\n")
+        skill_sync.record_install("clu-reply", skill_sync.digest(b"a stale copy\n"))
+
+        rc, _, _ = self._run("--only", "clu-reply", "--force")
+
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertEqual(
+            skill_sync.installed_record()["clu-reply"],
+            skill_sync.digest(self.bundled_bytes_by_name["clu-reply"]),
+        )

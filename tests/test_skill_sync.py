@@ -1,33 +1,45 @@
-"""`skill_sync.scan()` — placement + content classification, symlink-aware.
+"""`skill_sync` — placement, content, and provenance classification.
 
-Table-driven over the five `placement` values and the three `content` values,
-under the harness `HOME` (`CluTestCase` points `Path.home()` at a temp dir).
-Includes the three cases the old fused doctor check silently mis-reported: a
-dangling symlink (read as "not installed"), a real file under a symlinked
-parent (read as writable), and a file whose read raises (read as in sync).
+Table-driven over the five `placement` values, the three `content` values and
+the three `provenance` values, under the harness `HOME` (`CluTestCase` points
+`Path.home()` at a temp dir). Includes the three cases the old fused doctor
+check silently mis-reported: a dangling symlink (read as "not installed"), a
+real file under a symlinked parent (read as writable), and a file whose read
+raises (read as in sync) — plus the two provenance sources (clu's install
+record and the shipped fingerprint manifest) and the git-backed check that the
+manifest holds CONTENT hashes rather than git blob ids.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import subprocess
 from importlib.resources import files
 from pathlib import Path
 from unittest import mock, skipIf
 
 from end_of_line import skill_sync
+from end_of_line._xdg_guard import clu_config_dir
 from end_of_line.cli import BUNDLED_SKILLS
 from tests import CluTestCase
 
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def bundled_bytes(name: str) -> bytes:
     return files("end_of_line").joinpath(f"skills/{name}/SKILL.md").read_bytes()
 
 
-class SkillSyncScanTest(CluTestCase):
-    """One `SkillStatus` per skill, decided from the filesystem alone."""
+class SkillHomeTestCase(CluTestCase):
+    """A resolved temp `HOME` with an empty `~/.claude/skills/`.
+
+    Shared by the scan and provenance suites: both need a home whose path
+    carries no symlinks of its own, and both install SKILL.md fixtures into it.
+    Holds no tests.
+    """
 
     def setUp(self) -> None:
         super().setUp()
@@ -56,6 +68,15 @@ class SkillSyncScanTest(CluTestCase):
         target.write_bytes(content)
         return target
 
+    def _status(self, name: str) -> skill_sync.SkillStatus:
+        found = [s for s in skill_sync.scan([name]) if s.name == name]
+        self.assertEqual(len(found), 1, f"scan() returned {len(found)} records for {name}")
+        return found[0]
+
+
+class SkillSyncScanTest(SkillHomeTestCase):
+    """One `SkillStatus` per skill, decided from the filesystem alone."""
+
     def _install_link(self, name: str, content: bytes) -> Path:
         """SKILL.md is a symlink to a real file outside ~/.claude."""
         real = self.elsewhere / f"{name}-SKILL.md"
@@ -79,11 +100,6 @@ class SkillSyncScanTest(CluTestCase):
         (real_dir / "SKILL.md").write_bytes(content)
         (self.skills / name).symlink_to(real_dir, target_is_directory=True)
         return self.skills / name / "SKILL.md"
-
-    def _status(self, name: str) -> skill_sync.SkillStatus:
-        found = [s for s in skill_sync.scan([name]) if s.name == name]
-        self.assertEqual(len(found), 1, f"scan() returned {len(found)} records for {name}")
-        return found[0]
 
     # --- placement: all five ---------------------------------------------
 
@@ -240,3 +256,335 @@ class ScanNameValidationTest(CluTestCase):
 
     def test_bundled_names_still_scan(self):
         self.assertEqual(len(skill_sync.scan(["clu-phase"])), 1)
+
+
+class ProvenanceTest(SkillHomeTestCase):
+    """`provenance` — did clu write these bytes, or did somebody else?
+
+    Recognition is a MEMBERSHIP test over two sources, never an equality test
+    against one: clu's own install record (the sidecar under
+    `clu_config_dir()`) and the shipped manifest of fingerprints of every
+    SKILL.md version clu has released. A copy installed by an older clu has no
+    record entry and is recognized only by the manifest; a copy installed by a
+    newer clu than the manifest knows about is recognized only by the record.
+    """
+
+    def test_absent_install_reports_absent_provenance_and_unknown_content(self):
+        # Nothing installed: there are no bytes to attribute. `provenance` and
+        # `content` are pinned together here so the pairing is deliberate —
+        # every no-bytes placement reports ("absent", "unknown").
+        s = self._status("clu-phase")
+        self.assertEqual(s.provenance, "absent")
+        self.assertEqual(s.content, "unknown")
+
+    def test_unreadable_bytes_report_absent_provenance(self):
+        # A dangling symlink is "installed" in the loosest sense, but there is
+        # nothing to hash, so it cannot be attributed to anyone. Reporting it
+        # `foreign` would claim knowledge scan() does not have.
+        target = self.skills / "clu-plan" / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(self.elsewhere / "gone" / "SKILL.md")
+        s = self._status("clu-plan")
+        self.assertEqual(s.placement, "broken")
+        self.assertEqual(s.provenance, "absent")
+
+    def test_copy_matching_the_install_record_is_recognized(self):
+        # Input: bytes clu wrote earlier and recorded. Nothing in the manifest
+        # matches them — the record alone is enough.
+        body = b"# a clu-reply from a clu newer than the manifest\n"
+        self._install_file("clu-reply", body)
+        skill_sync.record_install("clu-reply", skill_sync.digest(body))
+        self.assertEqual(self._status("clu-reply").provenance, "recognized")
+
+    def test_copy_matching_an_older_shipped_fingerprint_is_recognized(self):
+        # Input: bytes clu shipped in some earlier version, installed before
+        # the sidecar existed, so the record is empty. This is the migration
+        # case the manifest exists for.
+        body = b"# the clu-reply skill as clu shipped it two releases ago\n"
+        self._install_file("clu-reply", body)
+        self.assertEqual(skill_sync.installed_record(), {})
+        with mock.patch.object(
+            skill_sync,
+            "shipped_fingerprints",
+            return_value={"clu-reply": [skill_sync.digest(body)]},
+        ):
+            self.assertEqual(self._status("clu-reply").provenance, "recognized")
+
+    def test_copy_matching_neither_source_is_foreign(self):
+        # Input: bytes nobody shipped — a hand edit.
+        self._install_file("clu-reply", b"# my own notes bolted onto clu-reply\n")
+        self.assertEqual(self._status("clu-reply").provenance, "foreign")
+
+    def test_one_edited_byte_makes_a_recognized_copy_foreign(self):
+        body = b"# clu wrote this\n"
+        self._install_file("clu-reply", body)
+        skill_sync.record_install("clu-reply", skill_sync.digest(body))
+        self.assertEqual(self._status("clu-reply").provenance, "recognized")
+
+        self._install_file("clu-reply", body[:-1] + b"!\n")
+
+        self.assertEqual(self._status("clu-reply").provenance, "foreign")
+
+    def test_a_fingerprint_recorded_for_one_skill_does_not_recognize_another(self):
+        # The record and the manifest are both keyed by skill NAME. A global
+        # hash-set membership test would recognize a clu-reply copy dropped
+        # into clu-phase's directory.
+        body = b"# shared bytes\n"
+        skill_sync.record_install("clu-reply", skill_sync.digest(body))
+        self._install_file("clu-phase", body)
+        self.assertEqual(self._status("clu-phase").provenance, "foreign")
+
+    def test_missing_manifest_degrades_to_the_record_alone(self):
+        # A wheel built without the manifest in package-data, or a clu older
+        # than the manifest. scan() must still classify, not raise.
+        recorded = b"# clu wrote this one\n"
+        self._install_file("clu-reply", recorded)
+        skill_sync.record_install("clu-reply", skill_sync.digest(recorded))
+        self._install_file("clu-phase", b"# and this one clu did not\n")
+
+        with mock.patch.object(skill_sync, "MANIFEST_FILENAME", "no-such-manifest.json"):
+            self.assertEqual(skill_sync.shipped_fingerprints(), {})
+            self.assertEqual(self._status("clu-reply").provenance, "recognized")
+            self.assertEqual(self._status("clu-phase").provenance, "foreign")
+
+    def test_current_bundled_copy_is_recognized_with_an_empty_record(self):
+        # The shipped manifest carries the current version, so a fresh install
+        # from an older clu — or one whose sidecar was deleted — is still ours.
+        self._install_file("clu-reply", bundled_bytes("clu-reply"))
+        self.assertEqual(skill_sync.installed_record(), {})
+        s = self._status("clu-reply")
+        self.assertEqual(s.content, "in_sync")
+        self.assertEqual(s.provenance, "recognized")
+
+    def test_every_scanned_skill_carries_a_provenance(self):
+        self.assertTrue(all(s.provenance for s in skill_sync.scan()))
+
+
+class InstallRecordTest(CluTestCase):
+    """The sidecar at `clu_config_dir()/installed-skills.json`."""
+
+    def _sidecar(self) -> Path:
+        return clu_config_dir() / "installed-skills.json"
+
+    def test_record_install_writes_the_versioned_schema(self):
+        skill_sync.record_install("clu-plan", "a" * 64)
+        self.assertEqual(
+            json.loads(self._sidecar().read_text()),
+            {"schema_version": 1, "skills": {"clu-plan": "a" * 64}},
+        )
+
+    def test_record_install_accumulates_across_skills_and_overwrites_per_skill(self):
+        skill_sync.record_install("clu-plan", "a" * 64)
+        skill_sync.record_install("clu-phase", "b" * 64)
+        skill_sync.record_install("clu-plan", "c" * 64)
+        self.assertEqual(
+            skill_sync.installed_record(),
+            {"clu-plan": "c" * 64, "clu-phase": "b" * 64},
+        )
+
+    def test_installed_record_returns_the_skills_map_not_the_wrapper(self):
+        skill_sync.record_install("clu-plan", "a" * 64)
+        self.assertEqual(skill_sync.installed_record(), {"clu-plan": "a" * 64})
+
+    def test_installed_record_is_empty_when_no_sidecar_exists(self):
+        self.assertFalse(self._sidecar().exists())
+        self.assertEqual(skill_sync.installed_record(), {})
+
+    def test_corrupt_sidecar_reads_as_empty_rather_than_raising(self):
+        self._sidecar().parent.mkdir(parents=True, exist_ok=True)
+        self._sidecar().write_text("{ this is not json")
+        self.assertEqual(skill_sync.installed_record(), {})
+
+    def test_sidecar_from_a_future_schema_is_ignored_not_misread(self):
+        # The version field exists so a shape change is DETECTABLE. A v2 file
+        # whose "skills" map means something else must not be read as v1.
+        self._sidecar().parent.mkdir(parents=True, exist_ok=True)
+        self._sidecar().write_text(json.dumps({"schema_version": 2, "skills": {"clu-plan": {}}}))
+        self.assertEqual(skill_sync.installed_record(), {})
+
+    def test_record_install_replaces_an_unreadable_sidecar(self):
+        # Degrading to manifest-only recognition is the cost of a corrupt
+        # cache; refusing to record forever is not.
+        self._sidecar().parent.mkdir(parents=True, exist_ok=True)
+        self._sidecar().write_text("{ this is not json")
+        skill_sync.record_install("clu-plan", "a" * 64)
+        self.assertEqual(skill_sync.installed_record(), {"clu-plan": "a" * 64})
+
+    def test_the_sidecar_lives_beside_the_registry_not_inside_a_skill(self):
+        skill_sync.record_install("clu-plan", "a" * 64)
+        self.assertEqual(self._sidecar().parent, clu_config_dir())
+        self.assertTrue(self._sidecar().exists())
+
+
+class ShippedManifestTest(CluTestCase):
+    """`skills_manifest.json` — the fingerprint history that ships in the wheel."""
+
+    def test_manifest_covers_exactly_the_bundled_skills(self):
+        self.assertEqual(sorted(skill_sync.shipped_fingerprints()), sorted(BUNDLED_SKILLS))
+
+    def test_every_skill_has_at_least_one_fingerprint(self):
+        # A skill with an empty list is a generation bug, not an empty history:
+        # every bundled skill was committed at least once. `audit-skill` has
+        # the shortest history (one commit) and is the case most likely to look
+        # like a bug while being correct.
+        for name, hashes in skill_sync.shipped_fingerprints().items():
+            self.assertGreater(len(hashes), 0, f"{name} has no shipped fingerprints")
+
+    def test_fingerprints_are_lowercase_sha256_hex_and_deduped(self):
+        for name, hashes in skill_sync.shipped_fingerprints().items():
+            self.assertEqual(len(hashes), len(set(hashes)), f"{name} has duplicates")
+            for h in hashes:
+                self.assertRegex(h, r"^[0-9a-f]{64}$", f"{name}: {h!r}")
+
+    def test_the_current_bundled_version_of_every_skill_is_in_the_manifest(self):
+        # THE currency guard. When a SKILL.md changes and the manifest is not
+        # regenerated, the version just shipped is in no manifest and every
+        # user who installs it reads as foreign — silently, forever. This test
+        # is what makes the generator get re-run.
+        manifest = skill_sync.shipped_fingerprints()
+        for name in BUNDLED_SKILLS:
+            current = skill_sync.digest(bundled_bytes(name))
+            self.assertIn(
+                current,
+                manifest.get(name, []),
+                f"{name}'s current SKILL.md is absent from skills_manifest.json — "
+                f"run `python3 scripts/gen_skill_manifest.py` and commit the result",
+            )
+
+
+@skipIf(not (REPO_ROOT / ".git").exists(), "manifest history needs a git checkout")
+class ShippedManifestAgainstGitTest(SkillHomeTestCase):
+    """The manifest against real git history — the end-to-end recognition path.
+
+    The failure this guards is silent: hashing the git BLOB ID instead of the
+    file CONTENT produces a well-formed manifest in which nothing ever matches,
+    so every installed copy reads as foreign and the feature does nothing.
+    """
+
+    SKILL = "clu-reply"
+
+    def _committed_bytes(self, rev: str) -> bytes:
+        path = f"end_of_line/skills/{self.SKILL}/SKILL.md"
+        out = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "show", f"{rev}:{path}"],
+            capture_output=True,
+            check=True,
+        )
+        return out.stdout
+
+    def _oldest_rev(self) -> str:
+        path = f"end_of_line/skills/{self.SKILL}/SKILL.md"
+        out = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "log", "--format=%H", "--", path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        revs = out.stdout.split()
+        self.assertGreater(len(revs), 1, f"{self.SKILL} needs >1 committed version")
+        return revs[-1]
+
+    def test_an_older_committed_version_is_in_the_manifest_by_content_hash(self):
+        old = self._committed_bytes(self._oldest_rev())
+        self.assertIn(
+            skill_sync.digest(old),
+            skill_sync.shipped_fingerprints()[self.SKILL],
+        )
+
+    def test_the_manifest_holds_no_git_blob_ids(self):
+        # `git hash-object` prepends "blob <len>\0" before hashing, so a blob
+        # id never equals a hash taken of the same bytes on disk. If the
+        # generator recorded blob ids, they would be in here (and nothing
+        # else would ever match).
+        blob = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "rev-parse",
+                f"{self._oldest_rev()}:end_of_line/skills/{self.SKILL}/SKILL.md",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.assertNotIn(blob, skill_sync.shipped_fingerprints()[self.SKILL])
+
+    def test_an_older_shipped_version_installs_as_recognized_and_an_edit_as_foreign(self):
+        old = self._committed_bytes(self._oldest_rev())
+        self._install_file(self.SKILL, old)
+
+        recognized = self._status(self.SKILL)
+
+        self.assertEqual(recognized.content, "differs")
+        self.assertEqual(recognized.provenance, "recognized")
+
+        self._install_file(self.SKILL, old + b"# and one line of my own\n")
+
+        edited = self._status(self.SKILL)
+
+        self.assertEqual(edited.content, "differs")
+        self.assertEqual(edited.provenance, "foreign")
+
+
+class ManifestHealthTest(SkillHomeTestCase):
+    """Absent and unreadable are different conditions and must not collapse.
+
+    A missing manifest is the documented degradation. A corrupt one is a
+    defect that fails in the worst direction: every copy clu wrote reads as
+    `foreign`, so doctor calls the operator's untouched file a local edit and
+    repair declines to touch it. Silent unless something says so.
+    """
+
+    def _manifest(self) -> Path:
+        return Path(str(files("end_of_line").joinpath(skill_sync.MANIFEST_FILENAME)))
+
+    def _swap_manifest(self, text: str) -> None:
+        path = self._manifest()
+        original = path.read_bytes()
+        self.addCleanup(path.write_bytes, original)
+        path.write_text(text)
+
+    def test_healthy_manifest_reports_no_problem(self):
+        fingerprints, problem = skill_sync.load_manifest()
+
+        self.assertIsNone(problem)
+        self.assertTrue(fingerprints)
+
+    def test_corrupt_manifest_reports_a_reason_and_no_fingerprints(self):
+        self._swap_manifest("{ not json at all")
+
+        fingerprints, problem = skill_sync.load_manifest()
+
+        self.assertEqual(fingerprints, {})
+        self.assertIsNotNone(problem)
+        self.assertIn("JSON", str(problem))
+
+    def test_non_object_manifest_reports_a_reason(self):
+        self._swap_manifest("[]")
+
+        _, problem = skill_sync.load_manifest()
+
+        self.assertIsNotNone(problem)
+        self.assertIn("object", str(problem))
+
+    def test_one_bad_entry_is_named_and_the_rest_survive(self):
+        self._swap_manifest(json.dumps({"clu-phase": ["a" * 64], "clu-plan": "not-a-list"}))
+
+        fingerprints, problem = skill_sync.load_manifest()
+
+        self.assertIn("clu-phase", fingerprints)
+        self.assertNotIn("clu-plan", fingerprints)
+        self.assertIsNotNone(problem)
+        self.assertIn("clu-plan", str(problem))
+
+    def test_corrupt_manifest_turns_a_clu_written_copy_foreign(self):
+        # The consequence the reason string exists to explain: without the
+        # manifest, an untouched copy clu installed reads as somebody's edit.
+        self._install_file("clu-phase", skill_sync.bundled_bytes("clu-phase"))
+        self.assertEqual(skill_sync.scan(["clu-phase"])[0].provenance, "recognized")
+
+        self._swap_manifest("{ not json at all")
+
+        self.assertEqual(skill_sync.scan(["clu-phase"])[0].provenance, "foreign")
+

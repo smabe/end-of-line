@@ -43,6 +43,16 @@ class SkillDriftHealthTest(GitProjectTestCase):
         d.mkdir(parents=True, exist_ok=True)
         (d / "SKILL.md").write_bytes(content)
 
+    def _install_as_clu(self, name: str, content: bytes) -> None:
+        """Install `content` AND record it as clu's own write.
+
+        A stale copy is only "drift clu can re-sync" when clu wrote it —
+        anything else is somebody's edit and gets the foreign line instead. So
+        a drift-section test has to state which of the two it is seeding.
+        """
+        self._install(name, content)
+        skill_sync.record_install(name, skill_sync.digest(content))
+
     def _bundled(self, name: str) -> bytes:
         return files("end_of_line").joinpath(f"skills/{name}/SKILL.md").read_bytes()
 
@@ -72,10 +82,39 @@ class SkillDriftHealthTest(GitProjectTestCase):
         self.assertIn("won't write through it", out)
 
     def test_drift_flagged(self):
-        self._install("clu-phase", b"# a stale, behind-the-bundle copy\n")
+        # A copy clu itself wrote, since left behind by the bundle.
+        self._install_as_clu("clu-phase", b"# a stale, behind-the-bundle copy\n")
         out = self._doctor()
         self.assertIn("differ from the bundle", out)
         self.assertIn("clu-phase", out)
+
+    def test_foreign_copy_is_reported_as_a_local_edit_not_as_drift(self):
+        # Same difference from the bundle, different cause: these bytes match
+        # no version clu ever shipped, so the `--force` re-sync instruction
+        # would be an instruction to destroy the operator's edit.
+        self._install("clu-phase", b"# my own edits on top of clu-phase\n")
+
+        out = self._doctor()
+
+        self.assertNotIn("differ from the bundle", out)
+        self.assertIn("clu didn't write", out)
+        self.assertIn("edited locally", out)
+        self.assertIn("clu-phase", out)
+
+    def test_recognized_and_foreign_get_different_lines(self):
+        # The failure this guards: two different states producing one
+        # indistinguishable message.
+        self._install_as_clu("clu-phase", b"# stale but clu's own\n")
+        self._install("clu-plan", b"# hand-edited by the operator\n")
+
+        out = self._doctor()
+
+        stale_section = out[out.index("differ from the bundle") : out.index("clu didn't write")]
+        edited_section = out[out.index("clu didn't write") :]
+        self.assertIn("clu-phase", stale_section)
+        self.assertNotIn("clu-plan", stale_section)
+        self.assertIn("clu-plan", edited_section)
+        self.assertNotIn("clu-phase", edited_section)
 
     def test_in_sync_is_quiet(self):
         self._install("clu-phase", self._bundled("clu-phase"))
@@ -93,7 +132,7 @@ class SkillDriftHealthTest(GitProjectTestCase):
 
     def test_only_drifted_skill_named(self):
         self._install("clu-phase", self._bundled("clu-phase"))  # in sync
-        self._install("clu-plan", b"# stale clu-plan\n")  # drifted
+        self._install_as_clu("clu-plan", b"# stale clu-plan\n")  # drifted
         out = self._doctor()
         self.assertIn("clu-plan", out)
         # clu-phase is in sync, so it must not appear in the drift list.
@@ -107,6 +146,9 @@ class SkillDriftHealthTest(GitProjectTestCase):
         self._install("plan", b"# the operator's own richer /plan\n")
         out = self._doctor()
         self.assertNotIn("differ from the bundle", out)
+        # Nor in the foreign section: clu is not canonical for `plan`, so a
+        # copy it never wrote is the expected steady state, not a finding.
+        self.assertNotIn("clu didn't write", out)
 
     def test_vendored_differs_native_in_sync_is_quiet(self):
         # A differing vendored skill alongside an in-sync native skill produces
@@ -116,6 +158,7 @@ class SkillDriftHealthTest(GitProjectTestCase):
         self._install("clu-phase", self._bundled("clu-phase"))  # native, in sync
         out = self._doctor()
         self.assertNotIn("differ from the bundle", out)
+        self.assertNotIn("clu didn't write", out)
 
     def test_vendored_skills_subset_of_bundled(self):
         # Guards a typo in VENDORED_SKILLS that would silently never match a
