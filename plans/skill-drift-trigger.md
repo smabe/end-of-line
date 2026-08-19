@@ -61,7 +61,20 @@ Downstream sweep at p2 — p3 clean, carry-in note added · p4 2 constraints pro
 
 Downstream sweep at p3 — p4 3 constraints carried, 2 promoted to Done criteria (a repairable fixture must be RECORDED, not merely stale; manual runs need a resolved temp home) · no other unshipped shards remain · code: p3 pinned provenance as the gate on what may be overwritten, and in doing so **falsified a test p1 shipped** — `tests/test_doctor.py`'s resolver test reached an import-time `Path.home()` constant that p1's redirect broke, passing only under `discover` ordering. Bisected to `853a7f4` and fixed in this phase rather than left; the guard p1 built could not see it, because the constant binds before any `setUp` runs.
 
-NEXT phase is **p4** — the last. Read `plans/skill-drift-trigger-p4.md` FIRST.
+**p4 SHIPPED** — `79e2258`. **All four phases shipped; the plan is complete.**
+
+**Spec check at p4** — work items 5/5 evidenced · interface conforms (`RepairResult`, `repair()` shipped as declared) · 1 file unclaimed by the Work list (`plans/skill-drift-trigger-p4.md`, the shard itself — its own failure mode instructed the worker to "record the answer here", and the decision block it added is kept) · +2 files re-evidenced after review fixes
+
+No downstream sweep: p4 was the plan's last phase, so there are no unshipped shards to sweep. code: p4 pinned repair to `recognized AND writable` and obsoleted nothing earlier phases shipped — p1's harness, p2's scan and p3's provenance are all still live and green.
+
+**Plan-level Done criteria — all met.**
+- Full suite `python3 -m unittest discover -s tests` → **2168/2168**.
+- Project `verify_command` (`basedpyright && unittest discover`) → exit 0, 0 errors.
+- End-to-end on the REAL home, both directions, snapshot-guarded: `clu-plan` staled to committed revision `3a15f2e3` read `recognized`+`differs`, `repair()` brought it to the bundle and the bytes genuinely changed; hand-edited it read `foreign`, `repair()` refused with that reason, and the edit survived byte-identical. Final hash equals the original.
+- The real `~/.claude/skills/` rolled-up hash is `89d1c410…` before AND after a full verify run.
+- `docs/reference.md` carries `SkillStatus`, `scan`, `repair`, `record_install`, `installed_record`, and all five exist in the shipped module.
+
+Ready to ship (`/plan ship skill-drift-trigger`).
 
 The decisions binding p4, pulled inline so a compaction that drops the shard still leaves them visible:
 - **Repair only what is `recognized` AND `writable`.** A `foreign` copy is reported and left byte-identical; a symlinked path is refused, never warned-and-written.

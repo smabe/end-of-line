@@ -72,6 +72,59 @@ Also available from p2 beyond its declared `Produces:` line: `installed_path(nam
 - **Alternatives considered:** always printing a status line — rejected as noise. Printing nothing ever — rejected: overwriting a file with no record of it is worse than a line, and a refused `foreign` copy MUST be reported or the user never learns their edit is being skipped.
 - **Evidence:** operator decision, 2026-08-19 (auto-update chosen specifically so there is "no warning to miss").
 
+### Decision: repair does NOT refuse on a dirty editable checkout  *(status: active — decided at p4, as that failure mode instructs)*
+- **Rationale:** the hazard is real and narrower than it looks. Under
+  `pipx install -e`, `importlib.resources.files()` resolves into the
+  checkout, so repair installs whatever is in the working tree — including
+  uncommitted skill edits. But that reaches exactly one machine, the
+  maintainer's, and on that machine installing the working copy is the
+  behaviour they already get from `clu install-skill` and the behaviour
+  dogfooding depends on. Refusing would buy a maintainer-only guard at the
+  price of a `git` shell-out on every `clu init` and `clu queue add`, plus
+  its own failure modes (no git on PATH, a submodule, a detached bundle
+  outside any repo) on the two commands this feature exists to keep quiet.
+  The recovery is also cheap and local: `git checkout` the skill and re-run
+  either command. A wheel install — every non-maintainer — resolves into
+  `site-packages` and cannot hit this at all.
+- **Alternatives considered:** refusing when the resolved bundle path is
+  inside a git working tree with modifications — rejected on the cost above.
+  Warning without refusing — rejected: it puts a line on the maintainer's
+  every run, which is the noise the one-line summary was designed to avoid,
+  and it warns about the outcome they wanted.
+- **Evidence:** probed this session on this machine —
+  `/Users/smabe/.local/pipx/venvs/end-of-line/bin/python -c "from
+  importlib.resources import files; print(files('end_of_line').joinpath(
+  'skills/clu-reply/SKILL.md'))"` resolves to
+  `/Users/smabe/projects/end-of-line/end_of_line/skills/clu-reply/SKILL.md`,
+  confirming the editable install reads the checkout rather than a copy.
+  `~/.local/pipx/venvs/end-of-line/lib/*/site-packages/` holds
+  `__editable__.end_of_line-0.1.0.pth`, not a package directory.
+
+### Finding: batching the sidecar creates an error trap the phase did not name  *(status: active)*
+- With one lock per run instead of one per skill, an exception partway through would leave files written but unrecorded. An unrecorded write can read as `foreign` next time, and repair would then refuse its own output. `repair()` records what it already wrote in a `finally` before the error propagates; a test pins it.
+- The trap is narrower than it first looks and the reason matters: bytes just written equal the bundled copy, whose hash is in the shipped manifest, so recognition normally survives via that route. It bites only where the manifest cannot help — an editable install carrying uncommitted skill edits.
+
+### Finding: the write-safety re-check must precede `mkstemp`, not `os.replace`  *(status: active)*
+- This shard's failure mode said "re-check immediately before `os.replace`". Following that literally still writes a temp file into the symlinked directory clu is refusing to touch, because `mkstemp(dir=...)` runs first. The check is at the top of `_write_atomic`. **The shard's wording was wrong**; the code is right.
+
+### Finding: every line hint in this shard was stale on arrival  *(status: active)*
+- p3's landing shifted them: `_spawn_post_action_tick` is at `cli.py:3364` not 3299; the `--token` worker branch returns around `3267-3277` not `3202-3210`; the install write is near 2455 not 2410-2416. All still findable by symbol name — which is exactly why the plan rule says anchor on symbols and treat `:NNN` as a hint tagged to a commit.
+
+### Finding: the idempotence criterion is not literally executable  *(status: active)*
+- Running `clu init` twice on the SAME plan hits the "State already exists" guard and returns 1 long before repair. The criterion was satisfied with two different plan slugs. **A defect in the criterion as written**, not in the code.
+
+### Finding: two judgment calls the phase did not settle  *(status: active)*
+- **`VENDORED_SKILLS` suppresses the REPORT, never the write.** On the operator's machine `plan` and `brainstorm` are symlinked, so an unfiltered refusal list would print a line on EVERY `clu init` and `clu queue add` — the permanent line the silent-unless-it-acted decision exists to prevent. The filter is in `cli.py` (formatting); `repair()` stays name-blind, so the plan's non-goal holds. A test pins that a recognized, writable `plan` IS written.
+- **A failed write is reported to stderr and swallowed at the call site.** `repair()` propagates; the caller absorbs. Letting it through would take `clu queue add` down over a broken `~/.claude`, a robustness regression for a convenience feature.
+
+### Finding: the convenience path could hang or crash the command  *(status: active — found at review)*
+- `_record_installs` took `state.locked` with no timeout, which blocks indefinitely by contract, and `repair()` now runs on `clu init` and `clu queue add`. A stale lock file alone hangs an operator command with no output. Bounded at 5s.
+- `state.LockTimeout` subclasses `RuntimeError`, **not** `OSError` — probed — so the existing `except OSError` could not have caught the timeout that fix introduces. The two had to be fixed together or a hang becomes a crash. Both call sites now catch both, and `clu install-skill` reports rather than aborting a half-finished multi-skill install.
+
+### Finding: environment notes for anyone re-running this  *(status: active)*
+- `ruff check .` fails repo-wide at HEAD with current ruff — 3 errors in files this plan never touched (`quota.py`, `webserver.py`, `test_notify_worker_dead.py`). `scripts/canary.sh` runs `ruff check .`, so the weekly canary will fail on them.
+- The commit-gate hook blocks `git commit` anywhere while this repo has unreviewed changes, including inside a throwaway temp project. `clu init` needs no git project unless `--worktree` is passed.
+
 ## Failure modes to anticipate
 
 - **Repair placed above the `--token` branch** (`cli.py:3201-3210`), so a worker rewrites the operator's skills mid-phase. Named in Locked decisions and tested for; it is the highest-consequence placement error in this phase.
