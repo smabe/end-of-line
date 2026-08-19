@@ -2031,6 +2031,7 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     registry.register(cfg.project_root, args.plan)
     _ensure_quality_stub(cfg.project_root)
     print(f"Initialized {state_path}")
+    _refresh_bundled_skills()
     _print_worker_model(cfg)
     _ensure_worker_settings()
     _maybe_print_worktree_conflict_hint(
@@ -2303,6 +2304,64 @@ BUNDLED_SKILLS = (
 # BUNDLED_SKILLS (tests/test_skill_drift.py guards this).
 VENDORED_SKILLS = frozenset({"brainstorm", "plan"})
 
+# Refusal reasons from `skill_sync.repair()` in the operator's words. "left
+# alone" is the user-facing phrasing of `foreign`; the two must not drift
+# apart, which is why doctor's foreign section says the same thing.
+_REPAIR_REASONS = {
+    "foreign": "edited locally",
+    "symlink": "symlink on its path",
+    "unreadable": "unreadable",
+}
+
+
+def _refresh_bundled_skills() -> None:
+    """Bring clu's own installed skills current, and say so in one line.
+
+    Called from `clu init` and `clu queue add` — the two moments a person is
+    present. Never at dispatch and never on the tick: a repair firing there
+    rewrites a skill under a running worker.
+
+    Silent when everything is already current. A status line on every run is a
+    line people learn to skip, which is how a stale skill went unnoticed for
+    eight days in the first place; a line only when something changed is one
+    worth reading. A `foreign` copy is still named every time, because a
+    skipped edit the operator never hears about is worse than a repeated line.
+
+    `VENDORED_SKILLS` is an OWNERSHIP signal here, exactly as in doctor, and
+    NOT a write guard: `plan` and `brainstorm` are ones clu bundles without
+    being canonical for, and the operator's own copy is normally a symlink
+    into their own checkout. Naming those on every run would put a permanent
+    line on a command that is meant to be quiet. What protects them from being
+    WRITTEN is the symlink on their path, never their name.
+
+    A failed write is reported and swallowed: refreshing skills is a
+    convenience beside the command the operator actually ran, and a broken
+    `~/.claude` must not take `clu queue add` down with it.
+    """
+    try:
+        result = skill_sync.repair()
+    except (OSError, st.LockTimeout) as exc:
+        # LockTimeout is a RuntimeError, not an OSError — catching only the
+        # latter would let a contended sidecar abort the command this function
+        # exists to stay out of the way of.
+        print(
+            f"skills: refresh failed ({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+        return
+    parts: list[str] = []
+    if result.updated:
+        parts.append("updated " + ", ".join(result.updated))
+    refused = [(n, r) for n, r in result.refused if n not in VENDORED_SKILLS]
+    if refused:
+        parts.append(
+            "left alone: "
+            + ", ".join(f"{name} ({_REPAIR_REASONS[reason]})" for name, reason in refused)
+        )
+    if parts:
+        print("skills: " + " · ".join(parts))
+
+
 _CLU_NOTE_START = "<!-- clu:start autonomous-loop-pacing -->"
 _CLU_NOTE_END = "<!-- clu:end autonomous-loop-pacing -->"
 _CLU_NOTE_BODY = (
@@ -2430,7 +2489,16 @@ def cmd_install_skill(args) -> int:
         # is no longer the current one. Without this, recognition would rest
         # on the shipped manifest alone, which a clu newer than the manifest
         # cannot be in.
-        skill_sync.record_install(name, skill_sync.digest(payload))
+        try:
+            skill_sync.record_install(name, skill_sync.digest(payload))
+        except (OSError, st.LockTimeout) as exc:
+            # The skill IS installed; only the provenance note failed. Say so
+            # rather than aborting a half-finished multi-skill install.
+            print(
+                f"warning: installed {name} but could not record it "
+                f"({type(exc).__name__}: {exc})",
+                file=sys.stderr,
+            )
         print(f"Installed {name} skill to {target}")
 
     if _decide_inject_claude_md_note(args):
@@ -3277,6 +3345,16 @@ def cmd_queue_add(args) -> int:
         return _cmd_queue_add_worker(args)
     if args.source_plan is not None or args.source_phase is not None:
         return _die(ExitCode.GENERIC, "--plan/--phase require --token (worker mode only)")
+
+    # BELOW the worker branch above and ABOVE `_spawn_post_action_tick` at the
+    # end of this function — both edges matter. Above the worker branch, a
+    # worker calling `queue add` mid-phase rewrites the operator's skills
+    # underneath itself; below the detached tick, that tick can already have
+    # dispatched a worker that read the stale copy, and everything looks
+    # correct afterwards. Repairing before validation is deliberate: a
+    # `queue add` that refreshes and then rejects a slug leaves the skills
+    # current and nothing queued, which is idempotent and costs nothing.
+    _refresh_bundled_skills()
 
     slugs = list(args.slugs)
 

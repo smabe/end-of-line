@@ -1568,6 +1568,67 @@ project per tick" invariant, paralleling `supervisor.tick`'s per-plan chain.
   `field_updates_per_plan`; state writes are batched per path into a single
   `st.mutate` window.
 
+### `skill_sync.py`
+
+Drift detection and repair between clu's bundled skills and the copies
+installed at `~/.claude/skills/<name>/SKILL.md`. Three layers kept apart:
+`scan()` returns facts and writes nothing, `repair()` applies policy and
+owns the only write, and the callers (`cmd_doctor`, `cmd_init`,
+`cmd_queue_add`) do the formatting.
+
+**Key types and functions**
+
+- `SkillStatus` — frozen dataclass: `name`, `target` (Path), `placement`
+  (`"file" | "link" | "absent" | "broken" | "unreadable"`), `content`
+  (`"in_sync" | "differs" | "unknown"`), `writable` (bool), `provenance`
+  (`"recognized" | "foreign" | "absent"`).
+- `scan(names: Iterable[str] | None = None) -> list[SkillStatus]` — one
+  record per skill, defaulting to every `cli.BUNDLED_SKILLS` in order.
+  Read-only: creates no directories. Raises `ValueError` for a name that
+  is not a bundled skill.
+- `RepairResult` — frozen dataclass: `updated` (list of names written),
+  `refused` (list of `(name, reason)` with reason `"foreign" | "symlink"
+  | "unreadable"`).
+- `repair(names: Iterable[str] | None = None) -> RepairResult` — rewrite
+  every installed copy that is both `recognized` and `writable` from the
+  bundled bytes, then record what it wrote. Called by `cmd_init` and the
+  operator path of `cmd_queue_add`; never from a worker, never from the
+  tick.
+- `record_install(name: str, digest: str) -> None` — remember that clu
+  wrote these bytes for this skill.
+- `installed_record() -> dict[str, str]` — name → hex digest of what clu
+  last wrote, from the sidecar at `clu_config_dir()/installed-skills.json`.
+  A missing, corrupt, or future-schema file reads as `{}`.
+
+Supporting surface: `installed_path`, `bundled_bytes`,
+`is_writable_target`, `digest`, `load_manifest` (fingerprints + a reason
+string when they are unusable), `shipped_fingerprints`, `record_path`.
+
+**Invariants and gotchas**
+
+- `placement` is decided with `is_symlink()` BEFORE `exists()` — `exists()`
+  follows the link, so a dangling symlink would otherwise read as "nothing
+  installed", i.e. as no drift at all.
+- `writable` is a filesystem property, never a name: false when the leaf OR
+  any parent component is a symlink. On a real machine the symlink is the
+  skill DIRECTORY, so the leaf is a regular file and `placement` reads
+  `"file"` — a placement-keyed guard never fires on the shape that matters.
+  `VENDORED_SKILLS` is an ownership signal for what gets REPORTED, not a
+  write guard.
+- `provenance` is a membership test over TWO sources — clu's install record
+  and `skills_manifest.json` — never equality against one. One hash can only
+  say "differs"; two sources tell an old clu copy apart from a hand edit.
+- `repair()` writes with `mkstemp(dir=target.parent)` → `fsync` →
+  `os.replace`, never unlink-then-write, and re-checks `writable`
+  immediately before that write: `mkstemp` with `dir=` inside a symlinked
+  parent has already written into the directory clu was refusing to touch.
+- The install record is written ONCE per `repair()` run, and still written
+  when a later write raises — an unrecorded write reads as `foreign` next
+  time, which would make repair refuse its own output forever.
+- A present-but-corrupt `skills_manifest.json` turns every copy clu wrote
+  into `foreign`. `load_manifest()`'s reason string exists so doctor can say
+  so instead of calling the operator's untouched file a local edit.
+
 ### `cli.py`
 
 argparse dispatch + the `ExitCode` enum + the `_die` helper + the

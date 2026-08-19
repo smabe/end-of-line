@@ -5,6 +5,10 @@ heartbeat loop at the incident, and clu had no way to surface it. doctor reports
 drift from `skill_sync.scan()` and formats it; the classification itself is
 covered in tests/test_skill_sync.py. HOME is redirected by the harness
 (`CluTestCase.setUp`) so we never read the real ~/.claude.
+
+The second suite here covers the write path's CALL SITES — `clu init` and
+`clu queue add` repairing what they can, staying quiet when there is nothing
+to say, and a worker-mode `queue add` doing neither.
 """
 
 from __future__ import annotations
@@ -13,11 +17,12 @@ import io
 import os
 from contextlib import redirect_stdout
 from importlib.resources import files
+from pathlib import Path
 from unittest import mock, skipIf
 
 from end_of_line import skill_sync
 from end_of_line.cli import ExitCode, main
-from tests import GitProjectTestCase, write_config
+from tests import GitProjectTestCase, must, write_config
 
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
@@ -241,3 +246,218 @@ class SkillDriftHealthTest(GitProjectTestCase):
         self.assertIn("can't compare or re-sync", out)
         self.assertIn("a symlink on its path", out)
         self.assertIn("clu-phase", out)
+
+
+class SkillRepairCallSiteTest(GitProjectTestCase):
+    """`clu init` and `clu queue add` bring clu's own skills current.
+
+    The two moments a person is present. Never at dispatch, never on the
+    supervisor tick, and never from a worker — a repair firing there rewrites
+    a skill under a running worker.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Resolved for the same reason as the class above: on macOS the raw
+        # harness home carries a symlink on its path, which makes every skill
+        # unwritable and every repair assertion vacuous.
+        self.home = (self.tmp_path / "home").resolve()
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.skills = self.home / ".claude" / "skills"
+        self.skills.mkdir(parents=True, exist_ok=True)
+
+    # --- fixtures ---------------------------------------------------------
+
+    def _bundled(self, name: str) -> bytes:
+        return files("end_of_line").joinpath(f"skills/{name}/SKILL.md").read_bytes()
+
+    def _install(self, name: str, content: bytes) -> Path:
+        target = self.skills / name / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return target
+
+    def _install_recognized(self, name: str, content: bytes) -> Path:
+        """A stale copy clu itself wrote — the only shape repair may replace.
+
+        Recorded, not merely written: arbitrary stale bytes match no shipped
+        fingerprint and classify `foreign`, which is the copy repair must
+        leave alone. Asserted here so a drifting fixture fails at the fixture
+        rather than passing a repair assertion from the leave-alone path.
+        """
+        target = self._install(name, content)
+        skill_sync.record_install(name, skill_sync.digest(content))
+        self.assertEqual(skill_sync.scan([name])[0].provenance, "recognized")
+        return target
+
+    def _plan(self, slug: str) -> None:
+        (self.project / "plans" / f"{slug}.md").write_text("# placeholder\n")
+
+    def _run(self, argv: list[str]) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(argv)
+        self.assertEqual(rc, ExitCode.OK, buf.getvalue())
+        return buf.getvalue()
+
+    def _init(self, slug: str) -> str:
+        self._plan(slug)
+        return self._run(["init", "--project", str(self.project), "--plan", slug])
+
+    def _queue_add(self, slug: str) -> str:
+        self._plan(slug)
+        with mock.patch("end_of_line.cli._spawn_post_action_tick"):
+            return self._run(["queue", "add", slug, "--project", str(self.project)])
+
+    # --- init -------------------------------------------------------------
+
+    def test_init_brings_a_stale_recognized_skill_current(self):
+        target = self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+
+        out = self._init("second-plan")
+
+        self.assertEqual(target.read_bytes(), self._bundled("clu-reply"))
+        self.assertIn("skills: updated clu-reply", out)
+
+    def test_a_second_init_is_silent_and_changes_nothing(self):
+        # Idempotence from a KNOWN-STALE start: the first run must be seen to
+        # act, or "both runs printed nothing" would satisfy the same words
+        # while proving the feature never ran at all. A second `init` needs a
+        # second plan slug — re-initializing one that exists refuses before
+        # it reaches repair.
+        target = self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+        self.assertIn("skills: updated clu-reply", self._init("second-plan"))
+        after_first = target.read_bytes()
+
+        out = self._init("third-plan")
+
+        self.assertNotIn("skills:", out)
+        self.assertEqual(target.read_bytes(), after_first)
+
+    def test_init_is_silent_when_nothing_is_installed(self):
+        out = self._init("second-plan")
+
+        self.assertNotIn("skills:", out)
+
+    # --- queue add --------------------------------------------------------
+
+    def test_queue_add_brings_a_stale_recognized_skill_current(self):
+        target = self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+
+        out = self._queue_add("next-plan")
+
+        self.assertEqual(target.read_bytes(), self._bundled("clu-reply"))
+        self.assertIn("skills: updated clu-reply", out)
+
+    def test_queue_add_leaves_a_foreign_copy_alone_and_names_it(self):
+        body = b"# my own edits on top of audit-skill\n"
+        target = self._install("audit-skill", body)
+
+        out = self._queue_add("next-plan")
+
+        self.assertEqual(target.read_bytes(), body)
+        self.assertIn("left alone: audit-skill (edited locally)", out)
+
+    def test_updated_and_left_alone_share_one_line(self):
+        self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+        self._install("audit-skill", b"# my own edits\n")
+
+        out = self._queue_add("next-plan")
+
+        line = must(
+            next((ln for ln in out.splitlines() if ln.startswith("skills:")), None)
+        )
+        self.assertEqual(
+            line,
+            "skills: updated clu-reply · left alone: audit-skill (edited locally)",
+        )
+
+    def test_queue_add_repairs_before_the_detached_tick(self):
+        # Ordering, not inspection: the detached tick can dispatch a worker
+        # immediately, and a worker that starts before the repair reads the
+        # stale skill. Everything looks correct afterwards, which is what
+        # makes this worth pinning.
+        self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+        order: list[str] = []
+        self._plan("next-plan")
+
+        with (
+            mock.patch.object(
+                skill_sync,
+                "repair",
+                side_effect=lambda *a, **k: (
+                    order.append("repair"),
+                    skill_sync.RepairResult(updated=[], refused=[]),
+                )[1],
+            ),
+            mock.patch(
+                "end_of_line.cli._spawn_post_action_tick",
+                side_effect=lambda cfg: order.append("tick"),
+            ),
+        ):
+            self._run(["queue", "add", "next-plan", "--project", str(self.project)])
+
+        self.assertEqual(order, ["repair", "tick"])
+
+    def test_worker_mode_queue_add_writes_nothing(self):
+        # A worker calling `queue add` mid-plan must never rewrite the
+        # operator's skills — the phase it is running may be the one that
+        # edited them.
+        body = b"# stale, but clu wrote it\n"
+        target = self._install_recognized("clu-reply", body)
+        token = self._claim()
+        self._plan("chained-plan")
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(
+                [
+                    "queue",
+                    "add",
+                    "chained-plan",
+                    "--project",
+                    str(self.project),
+                    "--token",
+                    token,
+                    "--plan",
+                    "test-plan",
+                    "--phase",
+                    "a",
+                ]
+            )
+
+        self.assertEqual(rc, ExitCode.OK, buf.getvalue())
+        self.assertEqual(target.read_bytes(), body)
+        self.assertNotIn("skills:", buf.getvalue())
+
+    # --- ownership --------------------------------------------------------
+
+    def test_a_symlinked_vendored_skill_is_not_reported(self):
+        # `plan` and `brainstorm` are the two clu bundles without being
+        # canonical for them, and the operator's own copy is normally a
+        # symlink into their own checkout. Naming it on every `queue add`
+        # would put a permanent line on a command that is supposed to be
+        # quiet unless something happened.
+        real = self.tmp_path / "operators-own-plan.md"
+        real.write_bytes(b"# the operator's own richer /plan\n")
+        (self.skills / "plan").mkdir(parents=True)
+        (self.skills / "plan" / "SKILL.md").symlink_to(real)
+
+        out = self._queue_add("next-plan")
+
+        self.assertNotIn("skills:", out)
+        self.assertEqual(real.read_bytes(), b"# the operator's own richer /plan\n")
+
+    def test_a_symlinked_native_skill_is_named_as_refused(self):
+        real = self.tmp_path / "elsewhere-clu-reply.md"
+        real.write_bytes(b"# stale bytes clu wrote, reached through a link\n")
+        skill_sync.record_install("clu-reply", skill_sync.digest(real.read_bytes()))
+        (self.skills / "clu-reply").mkdir(parents=True)
+        (self.skills / "clu-reply" / "SKILL.md").symlink_to(real)
+
+        out = self._queue_add("next-plan")
+
+        self.assertIn("left alone: clu-reply (symlink on its path)", out)
+        self.assertEqual(real.read_bytes(), b"# stale bytes clu wrote, reached through a link\n")

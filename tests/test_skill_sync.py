@@ -12,15 +12,18 @@ manifest holds CONTENT hashes rather than git blob ids.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
 import subprocess
+import time
 from importlib.resources import files
 from pathlib import Path
 from unittest import mock, skipIf
 
 from end_of_line import skill_sync
+from end_of_line import state as st
 from end_of_line._xdg_guard import clu_config_dir
 from end_of_line.cli import BUNDLED_SKILLS
 from tests import CluTestCase
@@ -587,4 +590,348 @@ class ManifestHealthTest(SkillHomeTestCase):
         self._swap_manifest("{ not json at all")
 
         self.assertEqual(skill_sync.scan(["clu-phase"])[0].provenance, "foreign")
+
+
+
+class SkillRepairTest(SkillHomeTestCase):
+    """`repair()` — the write path, gated on `recognized` AND `writable`.
+
+    The fixture discipline here is the whole point. Arbitrary stale bytes
+    classify `foreign`, which is the copy repair must LEAVE ALONE — so a
+    "stale but repairable" fixture has to be RECORDED as clu's own write, not
+    merely written. A repair test built by writing bytes alone asserts the
+    opposite of what it means to, and passes green while proving nothing.
+    """
+
+    def _install_recognized(self, name: str, content: bytes) -> Path:
+        """Install `content` and record it as clu's own — the repairable shape.
+
+        Asserts the provenance BEFORE handing the fixture back, so a fixture
+        that silently drifted to `foreign` fails here rather than passing a
+        repair assertion by exercising the leave-alone path.
+        """
+        target = self._install_file(name, content)
+        skill_sync.record_install(name, skill_sync.digest(content))
+        self.assertEqual(
+            self._status(name).provenance,
+            "recognized",
+            f"{name} fixture is not repairable — repair would leave it alone",
+        )
+        return target
+
+    # --- the repairable case ---------------------------------------------
+
+    def test_recognized_stale_copy_is_brought_current(self):
+        target = self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+
+        before = self._status("clu-reply")
+        self.assertEqual(before.provenance, "recognized")
+        self.assertEqual(before.content, "differs")
+        self.assertTrue(before.writable)
+
+        result = skill_sync.repair()
+
+        self.assertEqual(result.updated, ["clu-reply"])
+        self.assertEqual(result.refused, [])
+        self.assertEqual(target.read_bytes(), bundled_bytes("clu-reply"))
+
+    def test_the_repaired_copy_is_recognized_next_time(self):
+        # Without the record, the bytes repair just wrote would read as
+        # `foreign` on the next scan the moment the bundle moves ahead of the
+        # manifest — clu calling its own write somebody's edit.
+        self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+
+        skill_sync.repair()
+
+        self.assertEqual(
+            skill_sync.installed_record()["clu-reply"],
+            skill_sync.digest(bundled_bytes("clu-reply")),
+        )
+        after = self._status("clu-reply")
+        self.assertEqual(after.content, "in_sync")
+        self.assertEqual(after.provenance, "recognized")
+
+    def test_repair_is_idempotent(self):
+        self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+        self.assertEqual(skill_sync.repair().updated, ["clu-reply"])
+
+        again = skill_sync.repair()
+
+        self.assertEqual(again.updated, [])
+        self.assertEqual(again.refused, [])
+
+    def test_a_vendored_skill_is_not_excluded_from_the_write_by_name(self):
+        # VENDORED_SKILLS is an ownership signal for REPORTING, never a write
+        # guard: `plan` and `brainstorm` are protected by being symlinked, and
+        # a recognized regular-file copy of either is clu's own to refresh.
+        self._install_recognized("plan", b"# a clu-shipped /plan, since superseded\n")
+
+        self.assertEqual(skill_sync.repair().updated, ["plan"])
+
+    def test_names_limits_what_repair_touches(self):
+        self._install_recognized("clu-reply", b"# stale clu-reply\n")
+        untouched = self._install_recognized("clu-phase", b"# stale clu-phase\n")
+
+        result = skill_sync.repair(["clu-reply"])
+
+        self.assertEqual(result.updated, ["clu-reply"])
+        self.assertEqual(untouched.read_bytes(), b"# stale clu-phase\n")
+
+    # --- the leave-alone cases -------------------------------------------
+
+    def test_foreign_copy_is_untouched_and_reported(self):
+        body = b"# my own notes bolted onto clu-reply\n"
+        target = self._install_file("clu-reply", body)
+        self.assertEqual(self._status("clu-reply").provenance, "foreign")
+
+        result = skill_sync.repair()
+
+        self.assertEqual(result.updated, [])
+        self.assertEqual(result.refused, [("clu-reply", "foreign")])
+        self.assertEqual(target.read_bytes(), body)
+
+    def test_symlinked_parent_directory_is_refused_and_the_real_file_untouched(self):
+        # The real-machine shape: the skill DIRECTORY is the symlink, so the
+        # leaf is a regular file and `placement` reads "file". A guard keyed
+        # on placement never fires here; only `writable` does.
+        real_dir = self.elsewhere / "clu-reply-dir"
+        real_dir.mkdir()
+        real = real_dir / "SKILL.md"
+        body = b"# stale bytes clu itself wrote, in the operator's checkout\n"
+        real.write_bytes(body)
+        (self.skills / "clu-reply").symlink_to(real_dir, target_is_directory=True)
+        skill_sync.record_install("clu-reply", skill_sync.digest(body))
+
+        before = self._status("clu-reply")
+        self.assertEqual(before.placement, "file")
+        self.assertNotEqual(before.placement, "link")
+        self.assertFalse(before.writable)
+        self.assertEqual(before.provenance, "recognized")
+        self.assertEqual(before.content, "differs")
+
+        result = skill_sync.repair()
+
+        self.assertEqual(result.updated, [])
+        self.assertEqual(result.refused, [("clu-reply", "symlink")])
+        self.assertEqual(real.read_bytes(), body)
+        # No temp file either: `mkstemp(dir=...)` inside the symlinked parent
+        # would already have written into the directory clu is refusing.
+        self.assertEqual(sorted(p.name for p in real_dir.iterdir()), ["SKILL.md"])
+
+    def test_symlinked_skill_md_is_refused_and_its_destination_untouched(self):
+        real = self.elsewhere / "clu-reply-SKILL.md"
+        body = b"# stale bytes clu wrote, reached through a link\n"
+        real.write_bytes(body)
+        target = self.skills / "clu-reply" / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(real)
+        skill_sync.record_install("clu-reply", skill_sync.digest(body))
+        self.assertEqual(self._status("clu-reply").placement, "link")
+
+        result = skill_sync.repair()
+
+        self.assertEqual(result.refused, [("clu-reply", "symlink")])
+        self.assertEqual(real.read_bytes(), body)
+        self.assertTrue(target.is_symlink())
+
+    def test_dangling_symlink_is_refused(self):
+        target = self.skills / "clu-reply" / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(self.elsewhere / "gone" / "SKILL.md")
+
+        result = skill_sync.repair()
+
+        self.assertEqual(result.updated, [])
+        self.assertEqual(result.refused, [("clu-reply", "symlink")])
+        self.assertTrue(target.is_symlink())
+        self.assertFalse(target.exists())
+
+    @skipIf(IS_ROOT, "root reads mode-000 files")
+    def test_unreadable_install_is_refused(self):
+        target = self._install_file("clu-reply", b"# unreadable\n")
+        target.chmod(0o000)
+        self.addCleanup(target.chmod, 0o644)
+
+        result = skill_sync.repair()
+
+        self.assertEqual(result.updated, [])
+        self.assertEqual(result.refused, [("clu-reply", "unreadable")])
+
+    def test_a_skill_that_is_not_installed_is_neither_written_nor_reported(self):
+        # Repair refreshes what is installed; it is not an installer.
+        result = skill_sync.repair()
+
+        self.assertEqual(result.updated, [])
+        self.assertEqual(result.refused, [])
+        self.assertFalse((self.home / ".claude" / "skills" / "clu-reply").exists())
+
+    def test_an_in_sync_copy_is_silent(self):
+        self._install_file("clu-reply", bundled_bytes("clu-reply"))
+
+        result = skill_sync.repair()
+
+        self.assertEqual(result.updated, [])
+        self.assertEqual(result.refused, [])
+
+    def test_an_unwritable_but_in_sync_copy_is_not_reported(self):
+        # Nothing is being skipped: the bytes already match. Reporting it
+        # would put a line on every run, which is the noise the one-line
+        # summary exists to avoid.
+        real_dir = self.elsewhere / "clu-reply-dir"
+        real_dir.mkdir()
+        (real_dir / "SKILL.md").write_bytes(bundled_bytes("clu-reply"))
+        (self.skills / "clu-reply").symlink_to(real_dir, target_is_directory=True)
+        self.assertFalse(self._status("clu-reply").writable)
+
+        result = skill_sync.repair()
+
+        self.assertEqual(result.refused, [])
+
+    # --- write mechanics --------------------------------------------------
+
+    def test_a_write_that_fails_before_replace_leaves_the_original_intact(self):
+        body = b"# stale, but clu wrote it\n"
+        target = self._install_recognized("clu-reply", body)
+
+        with mock.patch.object(skill_sync.os, "replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                skill_sync.repair(["clu-reply"])
+
+        self.assertEqual(target.read_bytes(), body)
+        # And the temp file is cleaned up rather than left beside the skill.
+        self.assertEqual(sorted(p.name for p in target.parent.iterdir()), ["SKILL.md"])
+
+    def test_a_failed_write_still_records_the_skills_already_written(self):
+        # The sidecar is batched, so a raise partway through must not lose the
+        # record of what already landed — an unrecorded write reads as
+        # `foreign` next time and repair then refuses it forever.
+        self._install_recognized("clu-monitor", b"# stale clu-monitor\n")
+        self._install_recognized("clu-reply", b"# stale clu-reply\n")
+        real_replace = skill_sync.os.replace
+        calls: list[int] = []
+
+        def fail_on_the_second(src, dst):
+            calls.append(1)
+            if len(calls) > 1:
+                raise OSError("boom")
+            return real_replace(src, dst)
+
+        with mock.patch.object(skill_sync.os, "replace", side_effect=fail_on_the_second):
+            with self.assertRaises(OSError):
+                skill_sync.repair()
+
+        self.assertIn("clu-monitor", skill_sync.installed_record())
+
+    def test_the_sidecar_is_written_once_for_a_multi_skill_repair(self):
+        # `record_install` locks and rewrites the whole sidecar per call. That
+        # is fine for the rare explicit install and not fine on a path that
+        # now runs at every `clu init` and `clu queue add`.
+        self._install_recognized("clu-monitor", b"# stale clu-monitor\n")
+        self._install_recognized("clu-reply", b"# stale clu-reply\n")
+        real_save = skill_sync.st.save_atomic
+        saved: list[Path] = []
+
+        def spy(path, data):
+            saved.append(Path(path))
+            return real_save(path, data)
+
+        with mock.patch.object(skill_sync.st, "save_atomic", side_effect=spy):
+            result = skill_sync.repair()
+
+        self.assertEqual(result.updated, ["clu-monitor", "clu-reply"])
+        self.assertEqual(saved, [skill_sync.record_path()])
+
+    def test_a_target_that_becomes_unwritable_between_scan_and_write_is_refused(self):
+        # `writable` is computed once at scan time and the filesystem can
+        # change before the write. The re-check must precede `mkstemp`, not
+        # only `os.replace`: mkstemp with `dir=` inside a symlinked parent has
+        # already written into the directory clu was refusing to touch.
+        real_dir = self.elsewhere / "clu-reply-dir"
+        real_dir.mkdir()
+        body = b"# stale bytes clu wrote\n"
+        (real_dir / "SKILL.md").write_bytes(body)
+        (self.skills / "clu-reply").symlink_to(real_dir, target_is_directory=True)
+        skill_sync.record_install("clu-reply", skill_sync.digest(body))
+        stale = dataclasses.replace(self._status("clu-reply"), writable=True)
+
+        with mock.patch.object(skill_sync, "scan", return_value=[stale]):
+            result = skill_sync.repair()
+
+        self.assertEqual(result.updated, [])
+        self.assertEqual(result.refused, [("clu-reply", "symlink")])
+        self.assertEqual((real_dir / "SKILL.md").read_bytes(), body)
+        self.assertEqual(sorted(p.name for p in real_dir.iterdir()), ["SKILL.md"])
+
+    def test_repair_result_is_frozen(self):
+        result = skill_sync.repair()
+        with self.assertRaises(AttributeError):
+            setattr(result, "updated", ["clu-reply"])
+
+    def test_the_unresolved_harness_home_would_make_every_skill_unrepairable(self):
+        # The evidence behind `SkillHomeTestCase`'s resolve, stated as a test.
+        # On macOS $TMPDIR sits under /var — itself a symlink to /private/var —
+        # so the raw harness home carries a symlink on its path to the root and
+        # every target under it reads writable=False. A repair suite that
+        # skipped the resolve would assert over a repair that never ran.
+        unresolved = self.tmp_path / "home"
+        if unresolved == self.home:
+            self.skipTest("$TMPDIR carries no symlink on this platform")
+        self._install_recognized("clu-reply", b"# stale, but clu wrote it\n")
+
+        with mock.patch.dict(os.environ, {"HOME": str(unresolved)}):
+            self.assertFalse(self._status("clu-reply").writable)
+            self.assertEqual(skill_sync.repair().updated, [])
+
+        self.assertTrue(self._status("clu-reply").writable)
+        self.assertEqual(skill_sync.repair().updated, ["clu-reply"])
+
+
+class RecordLockContentionTest(SkillHomeTestCase):
+    """The sidecar wait is bounded, and both call sites survive the timeout.
+
+    `state.locked` blocks forever by default and `repair()` now runs on
+    `clu init` and `clu queue add`, so an unbounded wait turns a stale lock
+    file into a hung operator command with no output. `LockTimeout` is a
+    RuntimeError, not an OSError, so a guard on OSError alone would convert
+    that hang into a crash rather than into a reported degradation.
+    """
+
+    def test_lock_timeout_is_not_an_oserror(self):
+        # Pins the fact both call sites' except clauses depend on.
+        self.assertFalse(issubclass(st.LockTimeout, OSError))
+
+    def test_record_installs_gives_up_rather_than_hanging(self):
+        path = skill_sync.record_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+
+        with st.locked(path):
+            with self.assertRaises(st.LockTimeout):
+                with mock.patch.object(skill_sync, "RECORD_LOCK_TIMEOUT_S", 0.3):
+                    skill_sync.record_install("clu-phase", "a" * 64)
+
+        self.assertLess(time.monotonic() - started, 10.0)
+
+    def test_repair_surfaces_the_timeout_rather_than_blocking(self):
+        # A recognized-but-stale fixture, inline: installed AND recorded, so
+        # it is the repairable case rather than the leave-alone one.
+        body = b"# an older copy clu itself wrote\n"
+        self._install_file("clu-phase", body)
+        skill_sync.record_install("clu-phase", skill_sync.digest(body))
+        self.assertEqual(skill_sync.scan(["clu-phase"])[0].provenance, "recognized")
+        path = skill_sync.record_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with st.locked(path):
+            with mock.patch.object(skill_sync, "RECORD_LOCK_TIMEOUT_S", 0.3):
+                with self.assertRaises(st.LockTimeout):
+                    skill_sync.repair(["clu-phase"])
+
+        # The write itself still landed — repair records on the way out, and
+        # the bytes now equal the bundle, which the manifest recognizes.
+        self.assertEqual(
+            skill_sync.installed_path("clu-phase").read_bytes(),
+            skill_sync.bundled_bytes("clu-phase"),
+        )
+        self.assertEqual(skill_sync.scan(["clu-phase"])[0].provenance, "recognized")
 
