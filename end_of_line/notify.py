@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import db
 from .notify_discord import DiscordNotifier
 from .notify_imessage import IMessageNotifier
 from .state_blocker import (
@@ -151,8 +152,8 @@ def notify(
                 summary=body.splitlines()[0][:200] if body else kind,
                 details={"full_body": body},
             )
-        except OSError as exc:
-            # Never let a broken inbox dir block the iMessage path.
+        except db.DEGRADABLE_ERRORS as exc:
+            # Never let a broken or contended inbox block the iMessage path.
             print(f"notify: inbox write failed ({kind}): {exc}", file=sys.stderr)
     if _GLOBAL_SUPPRESS:
         return False

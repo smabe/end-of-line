@@ -284,9 +284,9 @@ def _validate_non_negative_int(raw: dict, key: str, default: int) -> int:
 
 
 def global_config_path() -> Path:
-    """Machine-wide `~/.config/clu/config.json` (XDG-aware, mirrors
-    `registry.registry_path`). Holds shared notify channels + quiet_hours that
-    every project inherits (global-notify-config)."""
+    """Machine-wide `~/.config/clu/config.json` (XDG-aware, resolved through
+    `clu_config_dir` like every other host-level store). Holds shared notify
+    channels + quiet_hours that every project inherits (global-notify-config)."""
     path = clu_config_dir() / "config.json"
     assert_xdg_safe(path)
     return path

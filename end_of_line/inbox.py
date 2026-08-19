@@ -1,43 +1,72 @@
 """Per-event inbox surfaced to active Claude Code sessions.
 
-Pattern: clu writes one JSON file per event into `~/.config/clu/inbox/`.
-The bundled UserPromptSubmit hook script
-(`end_of_line.hooks.clu_inbox_surface`) reads the inbox at the start of
-every Claude turn, filters to events whose `project_root` matches the
-current working tree, formats them into a system reminder, and marks
-each one processed by moving it into `inbox/processed/`.
+Pattern: clu writes one row per event into the `inbox` table of the host
+database. The bundled UserPromptSubmit hook script
+(`end_of_line.hooks.clu_inbox_surface`) reads the inbox at the start of every
+Claude turn, filters to events whose `project_root` matches the current
+working tree, formats them into a system reminder, and flags the ones it
+surfaced as processed — reading and flagging in ONE transaction, via
+`claim_for_project`.
 
-Filenames carry an 8-char random hex suffix — collision-free under
-concurrent writes from supervisor + worker callbacks without a global
-counter.
+The `processed` flag replaces the move-into-`processed/` protocol the
+directory version used. That protocol's dedup came from `os.rename` being
+atomic, which it is — but two sessions surfacing the same event both saw it
+unprocessed first and both rendered it. `UPDATE … WHERE processed = 0` inside
+a write transaction is strictly stronger: the loser of the race sees nothing
+to claim.
+
+Arrival order comes from the autoincrement `id` rather than the 19-digit
+nanosecond filenames the directory version sorted lexically.
+
+The `inbox` keyword every function takes names the host DATABASE — the same
+test seam the directory path was, pointed at a different kind of store.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import secrets
-import time
 from pathlib import Path
 
+from . import db
 from . import state as st
 from ._xdg_guard import assert_xdg_safe, clu_config_dir
 
 SCHEMA_VERSION = 1
 
+# Where the events lived before they moved into the host database. Nothing in
+# clu reads or writes this directory any more; the path is kept only so the
+# quarantine sweep has a name to point at.
+LEGACY_INBOX_DIRNAME = "inbox"
+
+# Every column of an event payload, in the order `_payload` unpacks them.
+_EVENT_COLUMNS = "event_id, ts, type, plan_slug, project_root, summary, details"
+
 
 def inbox_root() -> Path:
-    path = clu_config_dir() / "inbox"
+    """The LEGACY event directory. Inert — see `LEGACY_INBOX_DIRNAME`."""
+    path = clu_config_dir() / LEGACY_INBOX_DIRNAME
     assert_xdg_safe(path)
     return path
 
 
-def _processed_root(inbox_dir: Path) -> Path:
-    return inbox_dir / "processed"
-
-
-def _is_event_file(p: Path) -> bool:
-    return not p.is_dir() and not p.name.startswith(".") and p.name.endswith(".json")
+def _payload(row: tuple) -> dict:
+    """One row → the event dict every consumer has always been handed."""
+    event_id, ts, type_, plan_slug, project_root, summary, details = row
+    try:
+        parsed = json.loads(details) if details else {}
+    except ValueError:
+        parsed = {}
+    return {
+        "id": event_id,
+        "schema_version": SCHEMA_VERSION,
+        "type": type_,
+        "plan_slug": plan_slug,
+        "project_root": project_root,
+        "timestamp": ts,
+        "summary": summary,
+        "details": parsed if isinstance(parsed, dict) else {},
+    }
 
 
 def write_event(
@@ -49,80 +78,55 @@ def write_event(
     details: dict | None = None,
     inbox: Path | None = None,
 ) -> str:
-    """Drop a single event file. Returns the event id."""
-    inbox_dir = inbox or inbox_root()
-    inbox_dir.mkdir(parents=True, exist_ok=True)
+    """Record a single event. Returns the event id."""
     event_id = f"evt-{secrets.token_hex(4)}"
-    ts = st.utcnow()
-    # Filename: <compact-ts>-<19-digit-ns>-<type>-<short>.json. The
-    # nanosecond suffix makes filenames strictly monotonic under tight-loop
-    # writes (the second-resolution `ts` ties otherwise), and the random
-    # short id is the collision tiebreaker against `time.time_ns()` returning
-    # the same value across processes.
-    safe_ts = ts.replace(":", "").replace("-", "")
-    short = event_id[-8:]
-    filename = f"{safe_ts}-{time.time_ns():019d}-{type}-{short}.json"
-    payload = {
-        "id": event_id,
-        "schema_version": SCHEMA_VERSION,
-        "type": type,
-        "plan_slug": plan_slug,
-        "project_root": str(Path(project_root).resolve()),
-        "timestamp": ts,
-        "summary": summary,
-        "details": details or {},
-    }
-    target = inbox_dir / filename
-    tmp = inbox_dir / f".{filename}.tmp"
-    tmp.write_text(json.dumps(payload, indent=2))
-    os.rename(tmp, target)
+    with db.host_conn(inbox) as conn, db.write_txn(conn) as cur:
+        cur.execute(
+            "INSERT INTO inbox (event_id, ts, type, plan_slug, project_root, summary, details) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                st.utcnow(),
+                type,
+                plan_slug,
+                str(Path(project_root).resolve()),
+                summary,
+                json.dumps(details or {}),
+            ),
+        )
     return event_id
 
 
 def read_unprocessed(inbox: Path | None = None) -> list[dict]:
-    """Return all event payloads in the inbox, sorted by timestamp ascending.
+    """Every unprocessed event, in arrival order.
 
-    Corrupt files are silently skipped — the surfacer must never crash
-    on a malformed sibling.
+    Tolerant by design, exactly as the missing-directory case was: an absent,
+    unreadable, or newer-schema store reads as an empty inbox. The surfacer
+    must never crash on the way to rendering a prompt.
     """
-    inbox_dir = inbox or inbox_root()
-    if not inbox_dir.exists():
+    try:
+        with db.host_conn(inbox) as conn:
+            rows = conn.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM inbox WHERE processed = 0 ORDER BY id"
+            ).fetchall()
+    except db.DEGRADABLE_ERRORS:
         return []
-    # Sort by filename — the embedded nanosecond suffix makes lexical
-    # order equivalent to arrival order (the event's `timestamp` field
-    # is second-resolution and ties under tight-loop writes).
-    events: list[dict] = []
-    for p in sorted(inbox_dir.iterdir(), key=lambda x: x.name):
-        if not _is_event_file(p):
-            continue
-        try:
-            events.append(json.loads(p.read_text()))
-        except (OSError, ValueError):
-            continue
-    return events
+    return [_payload(r) for r in rows]
 
 
 def mark_processed(event_id: str, inbox: Path | None = None) -> None:
-    """Move the file with `id == event_id` into `processed/`.
+    """Flag the event with `id == event_id` processed.
 
-    Idempotent: missing inbox, empty inbox, or unknown id all return
-    silently — the surfacer should never propagate cleanup failures.
+    Idempotent: an unknown id, or one already processed, updates nothing and
+    returns silently — the surfacer should never propagate cleanup failures.
+    `AND processed = 0` makes the check and the flag one statement, so a
+    second session cannot claim an event this one already took.
     """
-    inbox_dir = inbox or inbox_root()
-    if not inbox_dir.exists():
-        return
-    processed = _processed_root(inbox_dir)
-    processed.mkdir(parents=True, exist_ok=True)
-    for p in inbox_dir.iterdir():
-        if not _is_event_file(p):
-            continue
-        try:
-            data = json.loads(p.read_text())
-        except (OSError, ValueError):
-            continue
-        if data.get("id") == event_id:
-            os.rename(p, processed / p.name)
-            return
+    with db.host_conn(inbox) as conn, db.write_txn(conn) as cur:
+        cur.execute(
+            "UPDATE inbox SET processed = 1, processed_at = ? WHERE event_id = ? AND processed = 0",
+            (st.utcnow(), event_id),
+        )
 
 
 def list_for_project(
@@ -131,4 +135,56 @@ def list_for_project(
 ) -> list[dict]:
     """Return unprocessed events whose `project_root` matches `project_root`."""
     target = str(Path(project_root).resolve())
-    return [e for e in read_unprocessed(inbox) if e.get("project_root") == target]
+    try:
+        with db.host_conn(inbox) as conn:
+            rows = conn.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM inbox "
+                f"WHERE processed = 0 AND project_root = ? ORDER BY id",
+                (target,),
+            ).fetchall()
+    except db.DEGRADABLE_ERRORS:
+        return []
+    return [_payload(r) for r in rows]
+
+
+def claim_for_project(
+    project_root: str,
+    *,
+    limit: int,
+    inbox: Path | None = None,
+) -> list[dict]:
+    """Read this project's unprocessed events and flag the newest `limit` of
+    them processed, both inside ONE transaction.
+
+    Returns the SAME list `list_for_project` would — every unprocessed event
+    for the project, in arrival order — not just the flagged ones, and the
+    asymmetry is deliberate on both sides:
+
+    * Flagging is capped because the caller RENDERS at most `limit` events.
+      Claiming everything would silently consume events the operator never
+      saw; what is not claimed stays unprocessed for the next turn.
+    * The return is uncapped because the caller also needs to know how many
+      it is NOT showing, to say so in its truncation footer. Handing back
+      only the claimed set would erase that count.
+
+    The single transaction is the point: two sessions surfacing the same
+    event both used to see it unprocessed and both rendered it. Here the
+    loser's SELECT runs after the winner's UPDATE committed and finds
+    nothing.
+    """
+    target = str(Path(project_root).resolve())
+    with db.host_conn(inbox) as conn, db.write_txn(conn) as cur:
+        rows = cur.execute(
+            f"SELECT id, {_EVENT_COLUMNS} FROM inbox "
+            f"WHERE processed = 0 AND project_root = ? ORDER BY id",
+            (target,),
+        ).fetchall()
+        claimed = rows[-limit:] if limit > 0 else []
+        if claimed:
+            now = st.utcnow()
+            cur.executemany(
+                "UPDATE inbox SET processed = 1, processed_at = ? "
+                "WHERE id = ? AND processed = 0",
+                [(now, r[0]) for r in claimed],
+            )
+    return [_payload(r[1:]) for r in rows]

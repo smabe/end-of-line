@@ -16,14 +16,15 @@ import dataclasses
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
+from contextlib import contextmanager
 from importlib.resources import files
 from pathlib import Path
 from unittest import mock, skipIf
 
-from end_of_line import skill_sync
-from end_of_line import state as st
+from end_of_line import db, skill_sync
 from end_of_line._xdg_guard import clu_config_dir
 from end_of_line.cli import BUNDLED_SKILLS
 from tests import CluTestCase
@@ -364,17 +365,11 @@ class ProvenanceTest(SkillHomeTestCase):
 
 
 class InstallRecordTest(CluTestCase):
-    """The sidecar at `clu_config_dir()/installed-skills.json`."""
+    """The install receipt, in the host database's `skills` table."""
 
-    def _sidecar(self) -> Path:
-        return clu_config_dir() / "installed-skills.json"
-
-    def test_record_install_writes_the_versioned_schema(self):
+    def test_record_install_is_readable_back(self):
         skill_sync.record_install("clu-plan", "a" * 64)
-        self.assertEqual(
-            json.loads(self._sidecar().read_text()),
-            {"schema_version": 1, "skills": {"clu-plan": "a" * 64}},
-        )
+        self.assertEqual(skill_sync.installed_record(), {"clu-plan": "a" * 64})
 
     def test_record_install_accumulates_across_skills_and_overwrites_per_skill(self):
         skill_sync.record_install("clu-plan", "a" * 64)
@@ -385,38 +380,34 @@ class InstallRecordTest(CluTestCase):
             {"clu-plan": "c" * 64, "clu-phase": "b" * 64},
         )
 
-    def test_installed_record_returns_the_skills_map_not_the_wrapper(self):
-        skill_sync.record_install("clu-plan", "a" * 64)
-        self.assertEqual(skill_sync.installed_record(), {"clu-plan": "a" * 64})
-
-    def test_installed_record_is_empty_when_no_sidecar_exists(self):
-        self.assertFalse(self._sidecar().exists())
+    def test_installed_record_is_empty_when_nothing_was_recorded(self):
+        self.assertFalse(db.host_db_path().exists())
         self.assertEqual(skill_sync.installed_record(), {})
 
-    def test_corrupt_sidecar_reads_as_empty_rather_than_raising(self):
-        self._sidecar().parent.mkdir(parents=True, exist_ok=True)
-        self._sidecar().write_text("{ this is not json")
+    def test_an_unreadable_store_reads_as_empty_rather_than_raising(self):
+        # Recognition degrades to the manifest alone; doctor keeps running.
+        path = db.host_db_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ this is not a database")
         self.assertEqual(skill_sync.installed_record(), {})
 
-    def test_sidecar_from_a_future_schema_is_ignored_not_misread(self):
-        # The version field exists so a shape change is DETECTABLE. A v2 file
-        # whose "skills" map means something else must not be read as v1.
-        self._sidecar().parent.mkdir(parents=True, exist_ok=True)
-        self._sidecar().write_text(json.dumps({"schema_version": 2, "skills": {"clu-plan": {}}}))
+    def test_a_newer_schema_is_skipped_not_misread(self):
+        # Upstream decision #6: a store a newer clu wrote is skipped, never
+        # read optimistically.
+        skill_sync.record_install("clu-plan", "a" * 64)
+        conn = sqlite3.connect(str(db.host_db_path()))
+        conn.execute(f"PRAGMA user_version = {db.HOST_SCHEMA_VERSION + 1}")
+        conn.close()
         self.assertEqual(skill_sync.installed_record(), {})
 
-    def test_record_install_replaces_an_unreadable_sidecar(self):
-        # Degrading to manifest-only recognition is the cost of a corrupt
-        # cache; refusing to record forever is not.
-        self._sidecar().parent.mkdir(parents=True, exist_ok=True)
-        self._sidecar().write_text("{ this is not json")
+    def test_the_receipt_lives_beside_the_registry_not_inside_a_skill(self):
+        # A per-install stamp inside a SKILL.md would make the installed copy
+        # differ from the bundled one by construction, so every skill would
+        # report drift forever.
         skill_sync.record_install("clu-plan", "a" * 64)
-        self.assertEqual(skill_sync.installed_record(), {"clu-plan": "a" * 64})
-
-    def test_the_sidecar_lives_beside_the_registry_not_inside_a_skill(self):
-        skill_sync.record_install("clu-plan", "a" * 64)
-        self.assertEqual(self._sidecar().parent, clu_config_dir())
-        self.assertTrue(self._sidecar().exists())
+        self.assertEqual(db.host_db_path().parent, clu_config_dir())
+        self.assertTrue(db.host_db_path().exists())
+        self.assertFalse((Path.home() / ".claude" / "skills").exists())
 
 
 class ShippedManifestTest(CluTestCase):
@@ -822,24 +813,28 @@ class SkillRepairTest(SkillHomeTestCase):
 
         self.assertIn("clu-monitor", skill_sync.installed_record())
 
-    def test_the_sidecar_is_written_once_for_a_multi_skill_repair(self):
-        # `record_install` locks and rewrites the whole sidecar per call. That
-        # is fine for the rare explicit install and not fine on a path that
-        # now runs at every `clu init` and `clu queue add`.
+    def test_the_receipt_is_written_in_one_transaction_for_a_multi_skill_repair(self):
+        # `record_install` takes the write lock per call. That is fine for the
+        # rare explicit install and not fine on a path that now runs at every
+        # `clu init` and `clu queue add`.
         self._install_recognized("clu-monitor", b"# stale clu-monitor\n")
         self._install_recognized("clu-reply", b"# stale clu-reply\n")
-        real_save = skill_sync.st.save_atomic
-        saved: list[Path] = []
+        real_write_txn = skill_sync.db.write_txn
+        opened: list[float | None] = []
 
-        def spy(path, data):
-            saved.append(Path(path))
-            return real_save(path, data)
+        def spy(conn, **kw):
+            opened.append(kw.get("timeout_s"))
+            return real_write_txn(conn, **kw)
 
-        with mock.patch.object(skill_sync.st, "save_atomic", side_effect=spy):
+        with mock.patch.object(skill_sync.db, "write_txn", side_effect=spy):
             result = skill_sync.repair()
 
         self.assertEqual(result.updated, ["clu-monitor", "clu-reply"])
-        self.assertEqual(saved, [skill_sync.record_path()])
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(
+            skill_sync.installed_record()["clu-monitor"],
+            skill_sync.digest(skill_sync.bundled_bytes("clu-monitor")),
+        )
 
     def test_a_target_that_becomes_unwritable_between_scan_and_write_is_refused(self):
         # `writable` is computed once at scan time and the filesystem can
@@ -887,26 +882,36 @@ class SkillRepairTest(SkillHomeTestCase):
 
 
 class RecordLockContentionTest(SkillHomeTestCase):
-    """The sidecar wait is bounded, and both call sites survive the timeout.
+    """The receipt's wait is bounded, and both call sites survive the timeout.
 
-    `state.locked` blocks forever by default and `repair()` now runs on
-    `clu init` and `clu queue add`, so an unbounded wait turns a stale lock
-    file into a hung operator command with no output. `LockTimeout` is a
-    RuntimeError, not an OSError, so a guard on OSError alone would convert
-    that hang into a crash rather than into a reported degradation.
+    `repair()` runs on `clu init` and `clu queue add`, so an unbounded wait
+    turns a stuck writer into a hung operator command with no output. `DbBusy`
+    is a RuntimeError, not an OSError, so a guard on OSError alone would
+    convert that hang into a crash rather than into a reported degradation.
     """
 
-    def test_lock_timeout_is_not_an_oserror(self):
+    @contextmanager
+    def _write_lock_held(self):
+        """Hold the host DB's write lock from a second connection."""
+        db.host_db_path().parent.mkdir(parents=True, exist_ok=True)
+        holder = db.connect(db.host_db_path())
+        db.ensure_host_schema(holder)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+
+    def test_db_busy_is_not_an_oserror(self):
         # Pins the fact both call sites' except clauses depend on.
-        self.assertFalse(issubclass(st.LockTimeout, OSError))
+        self.assertFalse(issubclass(db.DbBusy, OSError))
 
     def test_record_installs_gives_up_rather_than_hanging(self):
-        path = skill_sync.record_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
 
-        with st.locked(path):
-            with self.assertRaises(st.LockTimeout):
+        with self._write_lock_held():
+            with self.assertRaises(db.DbBusy):
                 with mock.patch.object(skill_sync, "RECORD_LOCK_TIMEOUT_S", 0.3):
                     skill_sync.record_install("clu-phase", "a" * 64)
 
@@ -919,12 +924,10 @@ class RecordLockContentionTest(SkillHomeTestCase):
         self._install_file("clu-phase", body)
         skill_sync.record_install("clu-phase", skill_sync.digest(body))
         self.assertEqual(skill_sync.scan(["clu-phase"])[0].provenance, "recognized")
-        path = skill_sync.record_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
 
-        with st.locked(path):
+        with self._write_lock_held():
             with mock.patch.object(skill_sync, "RECORD_LOCK_TIMEOUT_S", 0.3):
-                with self.assertRaises(st.LockTimeout):
+                with self.assertRaises(db.DbBusy):
                     skill_sync.repair(["clu-phase"])
 
         # The write itself still landed — repair records on the way out, and

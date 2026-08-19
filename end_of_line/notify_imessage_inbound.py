@@ -6,7 +6,6 @@ shim that re-exports this module's surface and provides the __main__ entry.
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import subprocess
@@ -15,9 +14,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import registry, state_locator
+from . import db, registry, state_locator
 from . import state as st
-from ._xdg_guard import assert_xdg_safe, clu_config_dir
 from .config import load_project_config
 from .notify_base import OpenBlocker, Reply
 
@@ -26,22 +24,12 @@ LEGACY_SEEN_PATH = Path.home() / ".clu" / "seen_msg_rowid"
 DEFAULT_POLL_SECONDS = 4
 POLL_BATCH_LIMIT = 500
 INBOUND_STATE_SCHEMA_VERSION = 1
+# The schema version of the `outbound_pending.json` file the marks lived in
+# before they became rows. Nothing reads or writes that file any more; the
+# constant is kept only so the quarantine sweep has a name to point at.
 OUTBOUND_PENDING_SCHEMA_VERSION = 1
 OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS = 60.0
 APPLE_EPOCH_OFFSET_SECONDS = 978_307_200  # Unix → Apple-epoch (Jan 1 2001).
-
-
-def inbound_state_path() -> Path:
-    """Lazy path resolution — env-driven so CluTestCase isolation works."""
-    path = clu_config_dir() / "inbound_state.json"
-    assert_xdg_safe(path)
-    return path
-
-
-def outbound_pending_path() -> Path:
-    path = clu_config_dir() / "outbound_pending.json"
-    assert_xdg_safe(path)
-    return path
 
 
 def unix_to_chatdb_ns(unix_seconds: float) -> int:
@@ -346,29 +334,55 @@ def read_inbound_state(
     *,
     legacy_path: Path = LEGACY_SEEN_PATH,
 ) -> dict:
-    """Load inbound state, tolerating missing / corrupt / schema-mismatched
-    files. Drops the legacy bare-int cursor file on first call."""
-    if path is None:
-        path = inbound_state_path()
+    """Load inbound state from the host database, tolerating an absent store.
+
+    Returns the same `{schema_version, last_inbound_rowid, outbound_rowids}`
+    shape it always did — the poller keeps that dict in memory between polls
+    and writes it back once per changed poll, so the shape is its cache, not
+    its storage format. `path` names the host DATABASE.
+
+    Drops the legacy bare-int cursor file on first call.
+    """
     _drop_legacy_seen(legacy_path)
-    if not path.exists():
-        return _empty_inbound_state()
+    state = _empty_inbound_state()
     try:
-        return st.load(path, expected_version=INBOUND_STATE_SCHEMA_VERSION)
-    except (json.JSONDecodeError, OSError, st.SchemaVersionMismatch):
-        return _empty_inbound_state()
+        with db.host_conn(path) as conn, db.read_txn(conn) as cur:
+            cursor_row = cur.execute(
+                "SELECT v FROM inbound_state WHERE k = 'last_inbound_rowid'"
+            ).fetchone()
+            floors = cur.execute("SELECT chat_id, floor_rowid FROM outbound_floors").fetchall()
+    except db.DEGRADABLE_ERRORS:
+        return state
+    if cursor_row is not None:
+        try:
+            state["last_inbound_rowid"] = int(cursor_row[0])
+        except (TypeError, ValueError):
+            pass
+    state["outbound_rowids"] = {chat_id: int(floor) for chat_id, floor in floors}
+    return state
 
 
-def write_inbound_state(path: Path, data: dict) -> None:
-    """Atomic write of inbound state via state.save_atomic."""
-    st.save_atomic(path, data)
+def write_inbound_state(path: Path | None, data: dict) -> None:
+    """Write the poller's cached state back, cursor and floors together.
 
-
-def _empty_outbound_pending() -> dict:
-    return {
-        "schema_version": OUTBOUND_PENDING_SCHEMA_VERSION,
-        "marks": [],
-    }
+    One transaction: a cursor that advanced past rows whose outbound floor
+    did not land would let clu's own message loop back in as operator input.
+    """
+    floors = [
+        (chat_id, int(floor)) for chat_id, floor in (data.get("outbound_rowids") or {}).items()
+    ]
+    with db.host_conn(path) as conn, db.write_txn(conn) as cur:
+        cur.execute(
+            "INSERT OR REPLACE INTO inbound_state (k, v) VALUES ('last_inbound_rowid', ?)",
+            (str(int(data.get("last_inbound_rowid", 0))),),
+        )
+        # Replace rather than upsert: the dict IS the whole floor map, so a
+        # chat dropped from it must not survive in the store.
+        cur.execute("DELETE FROM outbound_floors")
+        cur.executemany(
+            "INSERT INTO outbound_floors (chat_id, floor_rowid) VALUES (?, ?)",
+            floors,
+        )
 
 
 def append_outbound_mark(
@@ -379,19 +393,17 @@ def append_outbound_mark(
 ) -> None:
     """Append a {chat_id, sent_at} mark for the inbound poller to drain.
 
-    Cross-process safe via state.locked_json. Best-effort by convention —
-    callers wrap in try/except so a state write failure doesn't fail the
-    send. The poll-side reply grammar still drops clu's own rows even if
-    no mark gets recorded.
+    Multi-writer safe: one INSERT in one transaction, so N notifiers sending
+    at once cannot lose each other's marks the way a read-modify-write over a
+    shared list could. Best-effort by convention — callers wrap in try/except
+    so a store failure doesn't fail the send. The poll-side reply grammar
+    still drops clu's own rows even if no mark gets recorded.
     """
-    if path is None:
-        path = outbound_pending_path()
-    with st.locked_json(
-        path,
-        expected_version=OUTBOUND_PENDING_SCHEMA_VERSION,
-        empty=_empty_outbound_pending,
-    ) as data:
-        data["marks"].append({"chat_id": chat_id, "sent_at": sent_at})
+    with db.host_conn(path) as conn, db.write_txn(conn) as cur:
+        cur.execute(
+            "INSERT INTO outbound_marks (chat_id, sent_at) VALUES (?, ?)",
+            (chat_id, sent_at),
+        )
 
 
 def drain_outbound_marks(
@@ -403,30 +415,43 @@ def drain_outbound_marks(
 ) -> dict[str, int]:
     """Resolve pending outbound marks into chat_id → max-ROWID floors.
 
+    `conn` is the read-only chat.db handle; `path` is clu's own host database.
+
     For each mark: query the chat for the highest is_from_me=1 ROWID newer
     than `sent_at`. If found, contribute to the floor and drop the mark.
     If not yet visible and the mark is younger than `sanity_timeout`,
     keep it for next tick. Older marks are dropped — silently-failed
     osascript sends shouldn't accumulate forever.
+
+    **No host transaction is open while chat.db is being queried**, and that
+    shape is deliberate. The marks used to live in their own file under their
+    own flock, so holding it across these queries blocked nothing else. They
+    now share ONE database with the registry, the inbox and the monitor
+    marker, so a write transaction held across N queries of Apple's chat.db —
+    a large database, joined three ways, entirely outside clu's control —
+    would block every other host writer for however long that takes. The
+    supervisor's inbox notes are best-effort with a bounded wait, so they
+    would be silently dropped rather than delayed. Instead: read the marks,
+    let go, query chat.db, then take the write lock once to delete what
+    resolved.
+
+    Resolving a mark twice is harmless and is why this split is safe: the
+    floor is `MAX(ROWID)` over a fixed window, so two pollers computing it
+    reach the same number, and the delete is keyed by id — the second one
+    removes nothing rather than removing someone else's mark.
     """
     if now is None:
         now = time.time()
-    if path is None:
-        path = outbound_pending_path()
     floors: dict[str, int] = {}
-    if not path.exists():
-        return floors
-    with st.locked_json(
-        path,
-        expected_version=OUTBOUND_PENDING_SCHEMA_VERSION,
-        empty=_empty_outbound_pending,
-    ) as data:
-        if not data["marks"]:
+    with db.host_conn(path) as host:
+        with db.read_txn(host) as cur:
+            marks = cur.execute(
+                "SELECT id, chat_id, sent_at FROM outbound_marks ORDER BY id"
+            ).fetchall()
+        if not marks:
             return floors
-        kept = []
-        for mark in data["marks"]:
-            chat_id = mark["chat_id"]
-            sent_at = mark["sent_at"]
+        resolved: list[tuple[int]] = []
+        for mark_id, chat_id, sent_at in marks:
             row = conn.execute(
                 "SELECT MAX(m.ROWID) FROM message m "
                 "JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
@@ -437,9 +462,12 @@ def drain_outbound_marks(
             ).fetchone()
             if row and row[0] is not None:
                 floors[chat_id] = max(floors.get(chat_id, 0), row[0])
-            elif now - sent_at < sanity_timeout:
-                kept.append(mark)
-        data["marks"] = kept
+                resolved.append((mark_id,))
+            elif now - sent_at >= sanity_timeout:
+                resolved.append((mark_id,))
+        if resolved:
+            with db.write_txn(host) as cur:
+                cur.executemany("DELETE FROM outbound_marks WHERE id = ?", resolved)
     return floors
 
 
@@ -477,22 +505,16 @@ class IMessageInboundPoller:
         db_path: Path | None = None,
         registry_loader: Callable | None = None,
         self_chat_id: str | None = None,
-        state_path: Path | None = None,
-        pending_path: Path | None = None,
+        store_path: Path | None = None,
     ) -> None:
         self._db_path = db_path or DEFAULT_CHAT_DB
         self._registry_loader = registry_loader or registry.entries
         self._self_chat_id = self_chat_id
-        self._state_path_override = state_path
-        self._pending_path_override = pending_path
+        # The cursor and the outbound marks share one store now, so one
+        # override covers both. `db_path` above is chat.db — Apple's, read-only.
+        self._store_path = store_path
         self._conn: sqlite3.Connection | None = None
-        self._state: dict | None = None  # cached; read from disk once on first poll
-
-    def _state_path(self) -> Path:
-        return self._state_path_override or inbound_state_path()
-
-    def _pending_path(self) -> Path:
-        return self._pending_path_override or outbound_pending_path()
+        self._state: dict | None = None  # cached; read from the store once on first poll
 
     def poll(self) -> list[Reply]:
         """Run one poll iteration; dispatches matched replies internally.
@@ -508,10 +530,10 @@ class IMessageInboundPoller:
         if self._conn is None:
             self._conn = open_chat_db(self._db_path)
         if self._state is None:
-            self._state = read_inbound_state(self._state_path())
+            self._state = read_inbound_state(self._store_path)
 
         # Step 1 — drain pending outbound marks into the floor map.
-        floors = drain_outbound_marks(self._conn, path=self._pending_path())
+        floors = drain_outbound_marks(self._conn, path=self._store_path)
         state_changed = False
         for chat_id, new_floor in floors.items():
             current = self._state["outbound_rowids"].get(chat_id, 0)
@@ -533,5 +555,5 @@ class IMessageInboundPoller:
             self._state["last_inbound_rowid"] = new_last
             state_changed = True
         if state_changed:
-            write_inbound_state(self._state_path(), self._state)
+            write_inbound_state(self._store_path, self._state)
         return []

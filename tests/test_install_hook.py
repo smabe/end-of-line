@@ -16,13 +16,15 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import monitor
+from end_of_line import db, monitor
 from end_of_line.cli import ExitCode, main
 from tests import must
 
@@ -75,6 +77,37 @@ class FreshInstallTests(InstallHookTestBase):
         self.assertIn("hook_path", m)
         self.assertIn("settings_json_path", m)
         self.assertTrue(m["hook_installed_at"].endswith("Z"))
+
+    def test_marker_crosses_a_process_boundary(self) -> None:
+        # The marker's whole job is to be read by a LATER invocation — the CLI
+        # hint, `/clu-monitor`'s short-circuit. In-process assertions would
+        # pass against a value cached in this interpreter, so this one asks a
+        # fresh python, exactly the way the next `clu` command will.
+        rc, _, err = self._run_install()
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertEqual(self._is_scheduled_in_a_fresh_process(), "True")
+
+        monitor.clear_marker()
+        self.assertEqual(self._is_scheduled_in_a_fresh_process(), "False")
+
+    def _is_scheduled_in_a_fresh_process(self) -> str:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = (
+            str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", "")
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from end_of_line import monitor; print(monitor.is_scheduled())",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        return proc.stdout.strip()
 
     def test_install_idempotent_by_path_match(self) -> None:
         rc1, _, _ = self._run_install()
@@ -217,6 +250,20 @@ class UninstallTests(InstallHookTestBase):
         rc, _, _ = self._run_uninstall()
         self.assertEqual(rc, int(ExitCode.OK))
         self.assertFalse(monitor.is_scheduled())
+
+    def test_uninstall_survives_a_marker_it_cannot_clear(self) -> None:
+        # Clearing used to be an unlink that could not realistically fail. The
+        # marker now lives in the host database, and the hook entry is already
+        # gone from settings.json by the time it is cleared — so a raise here
+        # would leave a half-finished uninstall reported as a traceback.
+        rc, _, _ = self._run_install()
+        self.assertEqual(rc, int(ExitCode.OK))
+        with mock.patch.object(monitor, "clear_marker", side_effect=db.DbBusy("host db busy")):
+            rc, _, err = self._run_uninstall()
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertIn("monitor marker could not be cleared", err)
+        # The hook entry itself is gone — the half that matters succeeded.
+        self.assertNotIn("clu_inbox_surface", self.settings.read_text())
 
     def test_uninstall_idempotent_when_absent(self) -> None:
         # No settings.json, no marker.

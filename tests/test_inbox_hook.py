@@ -1,9 +1,9 @@
 """Tests for the `clu_inbox_surface` UserPromptSubmit hook script.
 
 The hook script is invoked by Claude Code at the start of every user
-prompt. It reads `~/.config/clu/inbox/`, filters events to the current
-project_root, emits `hookSpecificOutput` JSON on stdout, and marks each
-surfaced event processed.
+prompt. It claims the current project's unprocessed events out of clu's host
+database — reading and flagging in one transaction — and emits
+`hookSpecificOutput` JSON on stdout.
 
 Tests invoke the script as a subprocess to exercise the full headless
 boundary — stdin payload + stdout JSON shape + filesystem side effects.
@@ -26,14 +26,7 @@ from end_of_line.notify_base import open_blockers_with_details
 from tests import isolate_monitor_marker
 
 
-def _run_hook(
-    *,
-    cwd: Path,
-    xdg: Path,
-    stdin_payload: str = "{}",
-    timeout: float = 5.0,
-) -> tuple[int, str, str, float]:
-    """Run the hook as a subprocess from `cwd` with `XDG_CONFIG_HOME=xdg`."""
+def _hook_env(xdg: Path) -> dict:
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = str(xdg)
     env["PYTHONPATH"] = (
@@ -43,6 +36,31 @@ def _run_hook(
         + os.pathsep
         + env.get("PYTHONPATH", "")
     )
+    return env
+
+
+def _start_hook(*, cwd: Path, xdg: Path) -> subprocess.Popen:
+    """Launch the hook WITHOUT waiting, so two can be in flight at once."""
+    return subprocess.Popen(
+        [sys.executable, "-m", "end_of_line.hooks.clu_inbox_surface"],
+        cwd=str(cwd),
+        env=_hook_env(xdg),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _run_hook(
+    *,
+    cwd: Path,
+    xdg: Path,
+    stdin_payload: str = "{}",
+    timeout: float = 5.0,
+) -> tuple[int, str, str, float]:
+    """Run the hook as a subprocess from `cwd` with `XDG_CONFIG_HOME=xdg`."""
+    env = _hook_env(xdg)
     start = time.time()
     proc = subprocess.run(
         [sys.executable, "-m", "end_of_line.hooks.clu_inbox_surface"],
@@ -107,6 +125,50 @@ class HookSurfacingTests(HookTestBase):
         self.assertIn("proj-a event 1", ctx)
         self.assertIn("proj-a event 2", ctx)
         self.assertNotIn("proj-b event", ctx)
+
+    def test_hook_claims_what_it_surfaced_end_to_end(self) -> None:
+        # The whole round trip against one host database: an event written by
+        # clu, rendered by the hook, and gone from the unprocessed set in the
+        # same breath.
+        event_id = inbox.write_event(
+            type="halted",
+            plan_slug="foo",
+            project_root=str(self.proj),
+            summary="the thing that halted",
+        )
+        self.assertEqual([e["id"] for e in inbox.read_unprocessed()], [event_id])
+
+        rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
+        self.assertEqual(rc, 0, msg=err)
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("the thing that halted", ctx)
+        self.assertEqual(inbox.read_unprocessed(), [])
+
+        # Second turn: nothing left to say.
+        rc2, out2, _, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(out2, "")
+
+    def test_two_racing_hooks_surface_an_event_exactly_once(self) -> None:
+        # The race the directory version could not win: both sessions saw the
+        # event unprocessed, both rendered it, and only the rename deduped —
+        # after the operator had already been told twice.
+        inbox.write_event(
+            type="halted",
+            plan_slug="foo",
+            project_root=str(self.proj),
+            summary="only-once-please",
+        )
+        procs = [_start_hook(cwd=self.proj, xdg=self.xdg) for _ in range(2)]
+        outs = []
+        for proc in procs:
+            out, err = proc.communicate(input="{}", timeout=10)
+            self.assertEqual(proc.returncode, 0, msg=err)
+            outs.append(out)
+
+        surfaced = [o for o in outs if "only-once-please" in o]
+        self.assertEqual(len(surfaced), 1, msg=f"expected exactly one render; got {outs}")
+        self.assertEqual(inbox.read_unprocessed(), [])
 
     def test_hook_marks_surfaced_events_processed(self) -> None:
         inbox.write_event(
@@ -177,15 +239,17 @@ class HookSurfacingTests(HookTestBase):
         ctx = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("cwd fallback", ctx)
 
-    def test_hook_exits_zero_on_corrupt_event_file(self) -> None:
+    def test_hook_exits_zero_with_a_stray_file_in_the_retired_inbox_dir(self) -> None:
         inbox.write_event(
             type="halted",
             plan_slug="foo",
             project_root=str(self.proj),
             summary="ok",
         )
-        # Corrupt a sibling file.
+        # A host upgrading from the directory version still has one, possibly
+        # with unreadable files in it. Nothing may read it any more.
         root = inbox.inbox_root()
+        root.mkdir(parents=True, exist_ok=True)
         (root / "bogus.json").write_text("{{{ not valid")
         rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
         self.assertEqual(rc, 0, msg=err)

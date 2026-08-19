@@ -5,20 +5,26 @@ projects. Features that walk all plans on a host (fleet view, inbound
 reply routing) need a central index because the state files themselves
 live scattered under each project's `plans/.orchestrator/`.
 
-Stored at `$XDG_CONFIG_HOME/clu/registry.json` (default `~/.config/clu/`).
-Writes go through the same tmp+fsync+rename + flock primitives as the
-per-plan state files.
+Stored in the `registry` table of the host database at
+`$XDG_CONFIG_HOME/clu/clu.db` (default `~/.config/clu/`). The `path`
+keyword every function still takes now names that DATABASE rather than a
+JSON file — the argument exists for the same reason it always did, so a
+test can point the store somewhere of its own.
+
+`entries()` is the hottest read in the system: `clu top` and `clu serve`
+call it every frame. It is one SELECT on a connection opened and closed
+inside the call — never a transaction held across frames, which would pin
+the WAL and grow the file without bound.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
+from . import db
 from . import state as st
-from ._xdg_guard import assert_xdg_safe, clu_config_dir
-
-SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -28,32 +34,22 @@ class PlanEntry:
     registered_at: str
 
 
-def registry_path() -> Path:
-    path = clu_config_dir() / "registry.json"
-    assert_xdg_safe(path)
-    return path
-
-
-def _empty() -> dict:
-    return {"schema_version": SCHEMA_VERSION, "plans": []}
-
-
-def _load(path: Path) -> dict:
-    if not path.exists():
-        return _empty()
-    return st.load(path, expected_version=SCHEMA_VERSION)
-
-
-def _mutate(path: Path):
-    """lock + load + yield-for-mutation + atomic write. Tolerates a missing
-    file (first-register creates it) via the shared `state.locked_json`
-    primitive."""
-    return st.locked_json(path, expected_version=SCHEMA_VERSION, empty=_empty)
-
-
 def entries(path: Path | None = None) -> list[PlanEntry]:
-    path = path or registry_path()
-    return [PlanEntry(**row) for row in _load(path).get("plans", [])]
+    """Every registered pair, in registration order.
+
+    Tolerant by design, exactly as the missing-file case was: a host
+    database that does not exist yet, is momentarily locked, or was written
+    by a newer clu all read as an EMPTY registry rather than taking down a
+    caller that walks every plan on the host.
+    """
+    try:
+        with db.host_conn(path) as conn:
+            rows = conn.execute(
+                "SELECT project_root, plan_slug, registered_at FROM registry ORDER BY rowid"
+            ).fetchall()
+    except db.DEGRADABLE_ERRORS:
+        return []
+    return [PlanEntry(*row) for row in rows]
 
 
 def entries_for_project(project_root: Path, path: Path | None = None) -> list[PlanEntry]:
@@ -68,20 +64,16 @@ def register(project_root: Path, plan_slug: str, *, path: Path | None = None) ->
     if not project_root.is_dir():
         raise FileNotFoundError(f"project_root not a directory: {project_root}")
 
-    with _mutate(path or registry_path()) as data:
-        key = (str(project_root), plan_slug)
-        if any((row["project_root"], row["plan_slug"]) == key for row in data["plans"]):
-            return False
-        data["plans"].append(
-            asdict(
-                PlanEntry(
-                    project_root=str(project_root),
-                    plan_slug=plan_slug,
-                    registered_at=st.utcnow(),
-                )
-            )
+    with db.host_conn(path) as conn, db.write_txn(conn) as cur:
+        # INSERT OR IGNORE against the (project_root, plan_slug) primary key:
+        # the duplicate check and the insert are one statement, so two clu
+        # processes registering the same pair cannot both see "absent" first.
+        cur.execute(
+            "INSERT OR IGNORE INTO registry (project_root, plan_slug, registered_at) "
+            "VALUES (?, ?, ?)",
+            (str(project_root), plan_slug, st.utcnow()),
         )
-    return True
+        return cur.rowcount > 0
 
 
 def load_entry_state(entry: PlanEntry) -> dict | None:
@@ -109,14 +101,31 @@ def load_entry_state(entry: PlanEntry) -> dict | None:
 
 def unregister(project_root: Path, plan_slug: str, *, path: Path | None = None) -> bool:
     project_root = project_root.resolve()
-    target = path or registry_path()
-    if not target.exists():
-        return False
-    with _mutate(target) as data:
-        before = len(data["plans"])
-        data["plans"] = [
-            row
-            for row in data["plans"]
-            if (row["project_root"], row["plan_slug"]) != (str(project_root), plan_slug)
-        ]
-        return len(data["plans"]) != before
+    with db.host_conn(path) as conn, db.write_txn(conn) as cur:
+        cur.execute(
+            "DELETE FROM registry WHERE project_root = ? AND plan_slug = ?",
+            (str(project_root), plan_slug),
+        )
+        return cur.rowcount > 0
+
+
+def _unregister_many(
+    targets: Iterable[tuple[str, str]],
+    *,
+    path: Path | None = None,
+) -> int:
+    """Remove several (project_root, plan_slug) pairs in ONE transaction.
+
+    `clu unregister --all-archived` prunes a batch and the operator sees one
+    all-or-nothing transition, not a half-pruned registry. Private because
+    the batch shape has exactly one caller; `unregister` is the public one.
+    """
+    rows = [(root, slug) for root, slug in targets]
+    if not rows:
+        return 0
+    with db.host_conn(path) as conn, db.write_txn(conn) as cur:
+        cur.executemany(
+            "DELETE FROM registry WHERE project_root = ? AND plan_slug = ?",
+            rows,
+        )
+        return cur.rowcount

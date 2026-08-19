@@ -39,6 +39,7 @@ from pathlib import Path
 from . import (
     coolant,
     cross_plan_rules,
+    db,
     demo,
     demo_worker,
     dispatch,
@@ -2144,15 +2145,9 @@ def cmd_unregister_all_archived(args) -> int:
         if args.dry_run:
             print("Would unregister:")
         else:
-            # Atomic batch removal under one _mutate window — operators see
-            # one all-or-nothing transition, not a half-pruned registry.
-            targets = {(p, s) for p, s in to_remove}
-            with registry._mutate(registry.registry_path()) as data:
-                data["plans"] = [
-                    row
-                    for row in data["plans"]
-                    if (row["project_root"], row["plan_slug"]) not in targets
-                ]
+            # Atomic batch removal in one transaction — operators see one
+            # all-or-nothing transition, not a half-pruned registry.
+            registry._unregister_many({(p, s) for p, s in to_remove})
             print(f"Unregistered {len(to_remove)} plans:")
         for proj_root, slug in to_remove:
             print(f"  {proj_root}  →  {slug}")
@@ -2340,10 +2335,10 @@ def _refresh_bundled_skills() -> None:
     """
     try:
         result = skill_sync.repair()
-    except (OSError, st.LockTimeout) as exc:
-        # LockTimeout is a RuntimeError, not an OSError — catching only the
-        # latter would let a contended sidecar abort the command this function
-        # exists to stay out of the way of.
+    except db.DEGRADABLE_ERRORS as exc:
+        # DbBusy is a RuntimeError and a sqlite error is neither — catching
+        # only OSError would let a contended install receipt abort the command
+        # this function exists to stay out of the way of.
         print(
             f"skills: refresh failed ({type(exc).__name__}: {exc})",
             file=sys.stderr,
@@ -2491,7 +2486,7 @@ def cmd_install_skill(args) -> int:
         # cannot be in.
         try:
             skill_sync.record_install(name, skill_sync.digest(payload))
-        except (OSError, st.LockTimeout) as exc:
+        except db.DEGRADABLE_ERRORS as exc:
             # The skill IS installed; only the provenance note failed. Say so
             # rather than aborting a half-finished multi-skill install.
             print(
@@ -2666,7 +2661,7 @@ def cmd_uninstall_hook(args) -> int:
     """
     settings_path = _hook_settings_path()
     if not settings_path.exists():
-        monitor.clear_marker()
+        _clear_monitor_marker()
         return ExitCode.OK
     try:
         data = json.loads(settings_path.read_text())
@@ -2708,8 +2703,30 @@ def cmd_uninstall_hook(args) -> int:
         tmp = settings_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, settings_path)
-    monitor.clear_marker()
+    _clear_monitor_marker()
     return ExitCode.OK
+
+
+def _clear_monitor_marker() -> None:
+    """Clear the monitor marker, reporting rather than crashing if it can't.
+
+    Clearing used to be an `unlink` that swallowed "already gone" and could
+    not realistically fail. The marker now lives in the host database, so a
+    contended or unreadable store raises — and the hook entry has ALREADY been
+    removed from settings.json by the time this runs. A traceback there would
+    leave the operator with a half-finished uninstall and no idea which half.
+    Silence would be worse still: the marker survives, so `is_scheduled()`
+    keeps answering True about a hook that is gone. So: say so, and exit OK.
+    """
+    try:
+        monitor.clear_marker()
+    except db.DEGRADABLE_ERRORS as exc:
+        print(
+            f"hook removed, but the monitor marker could not be cleared "
+            f"({type(exc).__name__}: {exc}) — `clu install-hook` will report it "
+            f"as still installed until this is retried",
+            file=sys.stderr,
+        )
 
 
 _DOCTOR_PROBE_SCRIPT = (
@@ -4856,9 +4873,9 @@ def _write_attestation_refused_inbox(
                 "head_sha": head_sha,
             },
         )
-    except (OSError, ValueError, TypeError):
-        # Never let a broken inbox dir / serialization failure block the
-        # refusal exit path. The state event is the source of truth; the
+    except (*db.DEGRADABLE_ERRORS, ValueError, TypeError):
+        # Never let a broken/contended inbox or a serialization failure block
+        # the refusal exit path. The state event is the source of truth; the
         # inbox is a parallel surface.
         pass
 
@@ -6170,7 +6187,7 @@ def cmd_notify_heartbeat_failure(args, cfg: ProjectConfig, state_path: Path) -> 
                 "log_path": args.log,
             },
         )
-    except OSError:
+    except db.DEGRADABLE_ERRORS:
         pass
     if notify_body:
         notify.notify(cfg.notify, notify.KIND_HEARTBEAT_LOOP_FAILING, notify_body)
@@ -6313,7 +6330,7 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
                 "log_path": log_path,
             },
         )
-    except OSError:
+    except db.DEGRADABLE_ERRORS:
         pass
     for kind, body in notifies:
         notify.notify(cfg.notify, kind, body)

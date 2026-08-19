@@ -432,9 +432,8 @@ class ProvenanceRecordTests(InstallSkillTestBase):
     after a skill changes) cannot be in it.
     """
 
-    def test_no_sidecar_before_the_first_install(self):
+    def test_no_record_before_the_first_install(self):
         self.assertEqual(skill_sync.installed_record(), {})
-        self.assertFalse(skill_sync.record_path().exists())
 
     def test_install_records_the_hash_of_the_bytes_written(self):
         rc, _, _ = self._run("--only", "clu-reply")

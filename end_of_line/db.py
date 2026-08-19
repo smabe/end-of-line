@@ -85,9 +85,9 @@ def project_db_path(orchestrator_dir: Path) -> Path:
 def host_db_path() -> Path:
     """The host database under `$XDG_CONFIG_HOME/clu` (default `~/.config/clu`).
 
-    Goes through `assert_xdg_safe` for the same reason `registry.registry_path`
-    does: under `CLU_TEST_MODE=1` a test that forgot its isolation fails loudly
-    instead of writing into the operator's real config dir.
+    Goes through `assert_xdg_safe` for the same reason the JSON stores it
+    replaces did: under `CLU_TEST_MODE=1` a test that forgot its isolation
+    fails loudly instead of writing into the operator's real config dir.
     """
     path = clu_config_dir() / DB_FILENAME
     assert_xdg_safe(path)
@@ -156,6 +156,51 @@ def connect(
         conn.close()
         raise
     return conn
+
+
+@contextmanager
+def host_conn(
+    path: Path | None = None,
+    *,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> Iterator[sqlite3.Connection]:
+    """Open the host database, ensure its schema, and close it on the way out.
+
+    Every host-DB store — registry, monitor marker, the iMessage / Discord
+    sidecars, the inbox, the skill receipt — needs the same three lines, and
+    all of them want the connection SHORT-LIVED: the Discord notifier is
+    constructed once per notification, and a reader that keeps a handle across
+    frames pins the WAL (see `read_txn`). One helper so none of them invents
+    its own lifetime.
+
+    `path` overrides `host_db_path()` and exists for the same reason the old
+    `path=` keyword on these functions did: a test points it at its own file.
+    """
+    conn = connect(path or host_db_path(), timeout_s=timeout_s)
+    try:
+        ensure_host_schema(conn)
+        yield conn
+    finally:
+        conn.close()
+
+
+# What a caller catches when it would rather DEGRADE than fail — a read that
+# returns empty (registry, marker, cursor, inbox) or a best-effort write that
+# is skipped (the inbox notes beside a durable state change). Both used to be
+# `except OSError` against a file; against a database the same failure arrives
+# as `sqlite3.Error`, and contention as `DbBusy`, so a guard that named only
+# OSError would convert a busy store into a crashed tick. `SchemaTooNew` is in
+# the set because upstream decision #6 says a newer database is SKIPPED.
+#
+# Deliberately NOT in the set: the plain `RuntimeError` raised when WAL did not
+# take. That one means the concurrency model is not in force, and `connect`
+# raises it precisely so somebody hears about it.
+DEGRADABLE_ERRORS: tuple[type[BaseException], ...] = (
+    SchemaTooNew,
+    DbBusy,
+    sqlite3.Error,
+    OSError,
+)
 
 
 def _require_wal(conn: sqlite3.Connection, path: Path) -> None:

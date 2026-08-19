@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from end_of_line import notify_inbound, registry
+from end_of_line import db, notify_inbound, registry
 from end_of_line.notify_inbound import OpenBlocker
 from tests import isolate_registry
 
@@ -665,7 +665,7 @@ class InboundStateTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
-        self.state_path = self.tmp / "inbound_state.json"
+        self.state_path = self.tmp / "clu.db"
         self.legacy_path = self.tmp / "seen_msg_rowid"
 
     def tearDown(self) -> None:
@@ -677,7 +677,7 @@ class InboundStateTestCase(unittest.TestCase):
             legacy_path=self.legacy_path,
         )
 
-    def test_missing_file_returns_empty_defaults(self) -> None:
+    def test_missing_store_returns_empty_defaults(self) -> None:
         data = self._read()
         self.assertEqual(data["schema_version"], notify_inbound.INBOUND_STATE_SCHEMA_VERSION)
         self.assertEqual(data["last_inbound_rowid"], 0)
@@ -692,20 +692,35 @@ class InboundStateTestCase(unittest.TestCase):
         self.assertEqual(reloaded["last_inbound_rowid"], 42)
         self.assertEqual(reloaded["outbound_rowids"], {"+15551234567": 99})
 
+    def test_a_dropped_floor_does_not_survive_the_write(self) -> None:
+        # The dict IS the whole floor map; a chat removed from it must not
+        # linger in the store and keep suppressing that chat's rows.
+        data = self._read()
+        data["outbound_rowids"] = {"+1555": 10, "+1666": 20}
+        notify_inbound.write_inbound_state(self.state_path, data)
+        data["outbound_rowids"] = {"+1555": 11}
+        notify_inbound.write_inbound_state(self.state_path, data)
+        self.assertEqual(self._read()["outbound_rowids"], {"+1555": 11})
+
     def test_legacy_seen_file_unlinked_on_first_read(self) -> None:
         # Operators upgrading from the bare-int format had ~/.clu/seen_msg_rowid.
-        # First load of the new JSON state must drop the legacy file; cursor
+        # First load of the new state must drop the legacy file; cursor
         # resets to 0 and the poll_once LIMIT bounds the re-scan.
         self.legacy_path.write_text("123")
         self._read()
         self.assertFalse(self.legacy_path.exists())
 
-    def test_corrupt_json_returns_defaults(self) -> None:
-        self.state_path.write_text("{not valid json")
+    def test_unreadable_store_returns_defaults(self) -> None:
+        self.state_path.write_text("{not a database")
         self.assertEqual(self._read()["last_inbound_rowid"], 0)
 
-    def test_schema_mismatch_returns_defaults(self) -> None:
-        self.state_path.write_text(json.dumps({"schema_version": 999, "last_inbound_rowid": 50}))
+    def test_newer_schema_returns_defaults(self) -> None:
+        data = self._read()
+        data["last_inbound_rowid"] = 50
+        notify_inbound.write_inbound_state(self.state_path, data)
+        conn = sqlite3.connect(str(self.state_path))
+        conn.execute(f"PRAGMA user_version = {db.HOST_SCHEMA_VERSION + 1}")
+        conn.close()
         self.assertEqual(self._read()["last_inbound_rowid"], 0)
 
 
@@ -714,10 +729,14 @@ class OutboundPendingTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.db_path = self.tmp / "chat.db"
-        self.pending_path = self.tmp / "outbound_pending.json"
+        self.pending_path = self.tmp / "clu.db"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def _marks(self) -> list[tuple]:
+        with db.host_conn(self.pending_path) as conn:
+            return conn.execute("SELECT chat_id, sent_at FROM outbound_marks ORDER BY id").fetchall()
 
     def test_append_then_drain_resolves_floor(self) -> None:
         sent_at = 1_000_000_000.0
@@ -746,8 +765,7 @@ class OutboundPendingTestCase(unittest.TestCase):
         )
         self.assertEqual(floors, {DEFAULT_CHAT_ID: 7})
         # Mark should be drained.
-        remaining = json.loads(self.pending_path.read_text())["marks"]
-        self.assertEqual(remaining, [])
+        self.assertEqual(self._marks(), [])
 
     def test_drain_no_visible_row_keeps_young_mark(self) -> None:
         # osascript fired but chat.db hasn't surfaced our row yet.
@@ -765,8 +783,7 @@ class OutboundPendingTestCase(unittest.TestCase):
             now=sent_at + 5,
         )
         self.assertEqual(floors, {})
-        remaining = json.loads(self.pending_path.read_text())["marks"]
-        self.assertEqual(len(remaining), 1)
+        self.assertEqual(len(self._marks()), 1)
 
     def test_drain_stale_mark_dropped(self) -> None:
         # Silently-failed osascript: no row ever appears and the mark
@@ -784,10 +801,66 @@ class OutboundPendingTestCase(unittest.TestCase):
             path=self.pending_path,
             now=sent_at + notify_inbound.OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS + 1,
         )
-        remaining = json.loads(self.pending_path.read_text())["marks"]
-        self.assertEqual(remaining, [])
+        self.assertEqual(self._marks(), [])
 
-    def test_drain_missing_file_returns_empty(self) -> None:
+    def test_append_from_several_writers_keeps_every_mark(self) -> None:
+        # The file version read-modify-wrote a shared list; two notifiers
+        # sending at once could drop one of the two marks.
+        for i in range(5):
+            notify_inbound.append_outbound_mark(
+                f"+1555000000{i}",
+                1_000_000_000.0 + i,
+                path=self.pending_path,
+            )
+        self.assertEqual(len(self._marks()), 5)
+
+    def test_drain_holds_no_host_write_lock_while_querying_chat_db(self) -> None:
+        # The marks used to have their own file and their own flock, so holding
+        # it across these queries blocked nothing else. They now share one
+        # database with the registry, the inbox and the monitor marker — so a
+        # write transaction held across a query of Apple's chat.db would block
+        # every other host writer, and the supervisor's best-effort inbox notes
+        # would be dropped rather than delayed.
+        sent_at = 1_000_000_000.0
+        date_ns = notify_inbound.unix_to_chatdb_ns(sent_at + 1)
+        _make_chat_db(
+            self.db_path,
+            [{"rowid": 7, "is_from_me": 1, "text": "BLOCKED: pick one", "date_ns": date_ns}],
+        )
+        notify_inbound.append_outbound_mark(DEFAULT_CHAT_ID, sent_at, path=self.pending_path)
+
+        witness: list[bool] = []
+        real_conn = notify_inbound.open_chat_db(self.db_path)
+
+        host_path = self.pending_path
+
+        class WatchingConn:
+            """Stands in for the chat.db handle; checks the host lock is free."""
+
+            def execute(self, *args: object, **kwargs: object) -> object:
+                other = db.connect(host_path)
+                try:
+                    with db.write_txn(other, timeout_s=0.2):
+                        witness.append(True)
+                except db.DbBusy:
+                    witness.append(False)
+                finally:
+                    other.close()
+                return real_conn.execute(*args, **kwargs)  # type: ignore[arg-type]
+
+        floors = notify_inbound.drain_outbound_marks(
+            WatchingConn(),  # type: ignore[arg-type]
+            path=self.pending_path,
+            now=sent_at + 5,
+        )
+        self.assertEqual(floors, {DEFAULT_CHAT_ID: 7})
+        self.assertTrue(witness, "the chat.db query never ran, so nothing was observed")
+        self.assertTrue(
+            all(witness),
+            "a host write transaction was open while chat.db was being queried",
+        )
+
+    def test_drain_missing_store_returns_empty(self) -> None:
         _make_chat_db(self.db_path, [])
         conn = notify_inbound.open_chat_db(self.db_path)
         floors = notify_inbound.drain_outbound_marks(

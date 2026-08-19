@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import inbox, monitor, registry
+from end_of_line import db, inbox, monitor, registry
 from end_of_line._xdg_guard import clu_config_dir
 
 
@@ -70,7 +70,7 @@ class XdgGuardRaisesTestCase(unittest.TestCase):
     def test_guard_raises_on_monitor_in_test_mode(self):
         with mock.patch.dict(os.environ, self._real_xdg_test_mode()):
             with self.assertRaises(RuntimeError) as ctx:
-                monitor.marker_path()
+                monitor.is_scheduled()
             self.assertIn("CluTestCase", str(ctx.exception))
 
 
@@ -104,6 +104,8 @@ class XdgGuardSilentTestCase(unittest.TestCase):
             # Remove CLU_TEST_MODE — mock.patch.dict restores it on exit.
             os.environ.pop("CLU_TEST_MODE", None)
             # Path producers do no I/O; guard returns early (no test mode).
+            # Deliberately NOT a store call — those open (and create) the real
+            # host database, which is exactly what this suite must not touch.
+            db.host_db_path()
             inbox.inbox_root()
-            registry.registry_path()
             monitor.marker_path()

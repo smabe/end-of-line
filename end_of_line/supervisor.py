@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import coolant, inbox, notify, quota, state_blocker
+from . import coolant, db, inbox, notify, quota, state_blocker
 from . import state as st
 from .config import ORCHESTRATOR_DIR, ProjectConfig
 from .plan_parser import parse_sessions_index
@@ -300,7 +300,7 @@ def _emit_stuck_blocker_repings(
                         "options": list(b["options"]),
                     },
                 )
-            except OSError:
+            except db.DEGRADABLE_ERRORS:
                 pass
             break
 
@@ -361,7 +361,7 @@ def _emit_stalled_claim_notify(
                 "claimed_by": claim.get("claimed_by"),
             },
         )
-    except OSError:
+    except db.DEGRADABLE_ERRORS:
         pass
 
 
@@ -458,7 +458,7 @@ def _emit_stuck_tool(
                     "cpu_seconds": d.cpu_seconds,
                 },
             )
-        except OSError:
+        except db.DEGRADABLE_ERRORS:
             pass
 
 
@@ -593,7 +593,7 @@ def _emit_worker_idle(
                 "low_cpu_minutes": round(low_cpu_minutes, 1),
             },
         )
-    except OSError:
+    except db.DEGRADABLE_ERRORS:
         pass
 
 

@@ -75,26 +75,55 @@ def _make_registry_loader(entries: list[registry.PlanEntry]):
 
 
 class DiscordInboundDefaultPathsTestCase(CluTestCase):
-    """Default cursor/state paths honor XDG (resolve under clu_config_dir())."""
+    """The default cursor/DM-cache store honors XDG (under clu_config_dir())."""
 
-    def test_default_paths_honor_xdg(self):
-        from end_of_line._xdg_guard import clu_config_dir
+    def test_default_store_honors_xdg(self):
+        from end_of_line import db
         from end_of_line.notify_discord_inbound import DiscordInboundPoller
 
         poller = DiscordInboundPoller(bot_token="T", user_id="U", bot_user_id="BOT")
-        self.assertEqual(poller.cursor_path, clu_config_dir() / "discord_cursor.json")
-        self.assertEqual(poller._state_path, clu_config_dir() / "discord_state.json")
-        self.assertTrue(str(poller.cursor_path).startswith(str(self.tmp_path)))
+        self.assertIsNone(poller.db_path)
+        poller._write_cursor("ch-1", "msg-1")
+        self.assertTrue(str(db.host_db_path()).startswith(str(self.tmp_path)))
+        self.assertEqual(poller._read_cursor(), {"ch-1": "msg-1"})
 
 
 class DiscordInboundPollerBase(CluTestCase):
     def setUp(self):
         super().setUp()
-        self.cursor_path = self.tmp_path / "discord_cursor.json"
-        self.state_path = self.tmp_path / "discord_state.json"
+        self.store = self.tmp_path / "discord.db"
         self.dm_channel_id = "dm-ch-42"
         # Pre-seed DM channel cache so _ensure_dm_channel skips API call.
-        self.state_path.write_text(json.dumps({"U": self.dm_channel_id}))
+        self._seed_dm_cache(self.store, "U", self.dm_channel_id)
+
+    @staticmethod
+    def _seed_dm_cache(store, user_id, channel_id) -> None:
+        from end_of_line import db
+
+        with db.host_conn(store) as conn, db.write_txn(conn) as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO discord_dm_cache (user_id, channel_id) VALUES (?, ?)",
+                (user_id, channel_id),
+            )
+
+    @staticmethod
+    def _seed_cursor(store, channel_id, message_id) -> None:
+        from end_of_line import db
+
+        with db.host_conn(store) as conn, db.write_txn(conn) as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO discord_cursor (channel_id, message_id) VALUES (?, ?)",
+                (channel_id, message_id),
+            )
+
+    @staticmethod
+    def _read_cursor(store) -> dict:
+        """Read the stored cursors WITHOUT going through the poller, so the
+        assertions below check the store rather than the object that wrote it."""
+        from end_of_line import db
+
+        with db.host_conn(store) as conn:
+            return dict(conn.execute("SELECT channel_id, message_id FROM discord_cursor"))
 
     def _poller(self, registry_loader=None, **kw):
         from end_of_line.notify_discord_inbound import DiscordInboundPoller
@@ -103,8 +132,7 @@ class DiscordInboundPollerBase(CluTestCase):
             bot_token="T",
             user_id="U",
             bot_user_id="BOT",
-            cursor_path=self.cursor_path,
-            state_path=self.state_path,
+            db_path=self.store,
             registry_loader=registry_loader or (lambda: []),
             **kw,
         )
@@ -126,7 +154,7 @@ class DiscordInboundPollerBase(CluTestCase):
 class PollMechanicsTestCase(DiscordInboundPollerBase):
     def test_poll_fetches_messages_after_cursor(self):
         # Pre-seed cursor so we expect ?after=msg-100 in the URL.
-        self.cursor_path.write_text(json.dumps({self.dm_channel_id: "msg-100"}))
+        self._seed_cursor(self.store, self.dm_channel_id, "msg-100")
         seen_urls: list[str] = []
 
         def fake_urlopen(req, timeout=None):
@@ -148,7 +176,7 @@ class PollMechanicsTestCase(DiscordInboundPollerBase):
         with mock.patch("urllib.request.urlopen", side_effect=self._urlopen_for_messages(messages)):
             p.poll()
 
-        cursor = json.loads(self.cursor_path.read_text())
+        cursor = self._read_cursor(self.store)
         self.assertEqual(cursor.get(self.dm_channel_id), "msg-20")
 
     def test_poll_filters_bot_own_messages(self):
@@ -175,6 +203,31 @@ class PollMechanicsTestCase(DiscordInboundPollerBase):
         # subprocess.run should have been called exactly once (for the USER message).
         self.assertEqual(mock_run.call_count, 1)
 
+    def test_cursor_survives_a_poller_restart(self):
+        # The regression the unlocked file version could lose: a cursor that
+        # does not come back after a restart makes the poller re-fetch
+        # messages it already answered, and re-answer them.
+        messages = [_msg("msg-77", "hi")]
+        first = self._poller()
+        with mock.patch("urllib.request.urlopen", side_effect=self._urlopen_for_messages(messages)):
+            first.poll()
+
+        seen_urls: list[str] = []
+
+        def fake_urlopen(req, timeout=None):
+            seen_urls.append(req.full_url)
+            return _make_resp([])
+
+        # A brand-new instance, as a restarted daemon would be.
+        second = self._poller()
+        self.assertEqual(second._read_cursor().get(self.dm_channel_id), "msg-77")
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            second.poll()
+        self.assertTrue(
+            any("after=msg-77" in u for u in seen_urls),
+            f"Expected the restarted poller to resume after msg-77; saw: {seen_urls}",
+        )
+
     def test_cursor_keyed_by_channel_id(self):
         # Verify cursor file stores {channel_id: message_id}, not a flat value.
         messages = [_msg("msg-99", "hi")]
@@ -182,7 +235,7 @@ class PollMechanicsTestCase(DiscordInboundPollerBase):
         with mock.patch("urllib.request.urlopen", side_effect=self._urlopen_for_messages(messages)):
             p.poll()
 
-        cursor = json.loads(self.cursor_path.read_text())
+        cursor = self._read_cursor(self.store)
         # Keyed by channel id, not flat.
         self.assertIn(self.dm_channel_id, cursor)
         self.assertEqual(cursor[self.dm_channel_id], "msg-99")
@@ -254,7 +307,7 @@ class ReplyCorrelationTestCase(DiscordInboundPollerBase):
                 p.poll()
 
         mock_run.assert_not_called()
-        cursor = json.loads(self.cursor_path.read_text())
+        cursor = self._read_cursor(self.store)
         self.assertEqual(cursor.get(self.dm_channel_id), "msg-1")
 
 
@@ -280,7 +333,7 @@ class RateLimitTestCase(DiscordInboundPollerBase):
                 p.poll()
 
         mock_sleep.assert_called_once_with(0.1)
-        cursor = json.loads(self.cursor_path.read_text())
+        cursor = self._read_cursor(self.store)
         self.assertEqual(cursor.get(self.dm_channel_id), "msg-5")
 
 
@@ -292,7 +345,7 @@ class RateLimitTestCase(DiscordInboundPollerBase):
 class DMChannelResolutionTestCase(DiscordInboundPollerBase):
     def test_dm_channel_resolved_at_startup(self):
         # No pre-seeded state_path — poller must call POST /users/@me/channels.
-        empty_state_path = self.tmp_path / "empty_discord_state.json"
+        empty_store = self.tmp_path / "empty_discord.db"
         dm_calls: list[str] = []
 
         def fake_urlopen(req, timeout=None):
@@ -308,8 +361,7 @@ class DMChannelResolutionTestCase(DiscordInboundPollerBase):
             bot_token="T",
             user_id="U",
             bot_user_id="BOT",
-            cursor_path=self.cursor_path,
-            state_path=empty_state_path,  # no cache
+            db_path=empty_store,  # no cache
             registry_loader=lambda: [],
         )
         with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
@@ -327,8 +379,7 @@ class DMChannelResolutionTestCase(DiscordInboundPollerBase):
             "T",
             "U",
             "BOT",
-            cursor_path=self.cursor_path,
-            state_path=self.state_path,
+            db_path=self.store,
         )
         self.assertIsInstance(p, InboundPoller)
 

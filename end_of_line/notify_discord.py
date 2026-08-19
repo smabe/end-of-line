@@ -3,21 +3,25 @@
 Implements Notifier via Discord's REST API (bot token, DM channel).
 stdlib only: urllib.request + json. No third-party deps.
 
-DM channel.id is cached in discord_state.json (keyed by user_id) to
-avoid a round-trip on every send. Blocker message_id is persisted on
-the plan's state.json for later Reply-UI correlation (phase discord-in).
+DM channel.id is cached in the host database's `discord_dm_cache` table
+(keyed by user_id) to avoid a round-trip on every send. Blocker message_id
+is persisted on the plan's state.json for later Reply-UI correlation
+(phase discord-in).
+
+This class is constructed once per notification (`notify.py`), so the cache
+read opens a connection and closes it again before the HTTP request goes
+out — a handle held across the network call would pin the store for as long
+as Discord takes to answer.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import notify_discord_http
+from . import db, notify_discord_http
 from . import state as st
-from ._xdg_guard import clu_config_dir
 
 if TYPE_CHECKING:
     from .config import ChannelSpec
@@ -31,13 +35,14 @@ class DiscordNotifier:
         bot_token: str,
         user_id: str,
         *,
-        state_path: Path | None = None,
+        db_path: Path | None = None,
         state_root: Path | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.user_id = user_id
-        # DM channel ID cache (keyed by user_id in the JSON file)
-        self.state_path = state_path or clu_config_dir() / "discord_state.json"
+        # Host database holding the DM channel ID cache. None means the
+        # default XDG-derived one; tests inject their own.
+        self.db_path = db_path
         # Optional: .orchestrator/ dir for persisting notify_metadata on blockers
         self._state_root = state_root
 
@@ -112,22 +117,24 @@ class DiscordNotifier:
 
     def _load_dm_cache(self) -> str | None:
         try:
-            with open(self.state_path) as f:
-                data = json.load(f)
-            return data.get(self.user_id)
-        except (OSError, json.JSONDecodeError):
+            with db.host_conn(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT channel_id FROM discord_dm_cache WHERE user_id = ?",
+                    (self.user_id,),
+                ).fetchone()
+        except db.DEGRADABLE_ERRORS:
             return None
+        return row[0] if row else None
 
     def _save_dm_cache(self, channel_id: str) -> None:
-        existing: dict = {}
-        try:
-            with open(self.state_path) as f:
-                existing = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
-        existing[self.user_id] = channel_id
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        st.save_atomic(self.state_path, existing)
+        # One upsert in one transaction. The file version read the whole map,
+        # edited it, and wrote it back unlocked — two notifiers for different
+        # users racing there silently lost one of the two entries.
+        with db.host_conn(self.db_path) as conn, db.write_txn(conn) as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO discord_dm_cache (user_id, channel_id) VALUES (?, ?)",
+                (self.user_id, channel_id),
+            )
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         return notify_discord_http.request(

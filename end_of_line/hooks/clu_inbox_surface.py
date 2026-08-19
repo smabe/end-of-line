@@ -1,9 +1,10 @@
 """UserPromptSubmit hook: surface unprocessed clu inbox events.
 
 Reads stdin (the hook payload — we don't need its contents but consume
-it to be a well-behaved hook), filters `~/.config/clu/inbox/` to events
-for the current project, emits `hookSpecificOutput` JSON on stdout, and
-marks each surfaced event processed.
+it to be a well-behaved hook), claims the current project's unprocessed
+events out of clu's host database, and emits `hookSpecificOutput` JSON on
+stdout. The claim reads and flags in ONE transaction, so two sessions
+prompting at the same moment cannot both render the same event.
 
 Failure semantics: exits 0 on any exception. A noisy crash would surface
 on the operator's screen as a stderr line, which is louder than the
@@ -235,12 +236,23 @@ def main() -> int:
         # write side. We don't actually need the payload.
         _ = sys.stdin.read()
         project_root = _resolve_project_root()
-        events = inbox.list_for_project(project_root)
-        events_context = _build_context(events)
 
+        # Blockers FIRST, before anything is claimed. This walks every
+        # registered plan's state file, so it is where a failure is most
+        # likely — and an event claimed before a crash is an event the
+        # operator never sees, which the old mark-afterwards ordering
+        # protected against. Nothing between the claim below and the write
+        # does I/O.
         entries = registry.entries()
         blockers = open_blockers_with_details(entries, project_root)
         blockers_section = _build_blockers_section(blockers)
+
+        # Read and claim in one transaction: two sessions submitting a prompt
+        # at the same moment must not both render the same event. `MAX_EVENTS`
+        # is what gets CLAIMED — the return still carries everything
+        # unprocessed, so `_build_context` can count what it is not showing.
+        events = inbox.claim_for_project(project_root, limit=MAX_EVENTS)
+        events_context = _build_context(events)
 
         # Append the investigate-then-recommend contracts once per class
         # for any wedge event present, in the registry order. The inbox
@@ -260,9 +272,6 @@ def main() -> int:
             }
         }
         sys.stdout.write(json.dumps(payload))
-        # Mark only the events we actually surfaced (the capped set).
-        for e in events[-MAX_EVENTS:]:
-            inbox.mark_processed(e["id"])
         return 0
     except Exception as exc:  # graceful — never alarm the operator
         try:

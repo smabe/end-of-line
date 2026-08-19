@@ -267,9 +267,8 @@ class TestSchemaVersion(TempStateMixin, unittest.TestCase):
 
 
 class TestLockedJson(TempStateMixin, unittest.TestCase):
-    """The generic lock+load+yield+save primitive (factored out of state.mutate
-    and registry._mutate). state.mutate and registry._mutate are both thin
-    wrappers around it now."""
+    """The generic lock+load+yield+save primitive behind `state.mutate` and the
+    other JSON stores that still use it."""
 
     def test_works_with_custom_empty_factory(self) -> None:
         path = self.tmp / "custom.json"

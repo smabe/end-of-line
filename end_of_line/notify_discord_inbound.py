@@ -12,15 +12,13 @@ __main__ or a LaunchAgent / systemd unit.
 
 from __future__ import annotations
 
-import json
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import notify_discord_http, registry, state_locator
+from . import db, notify_discord_http, registry, state_locator
 from . import state as st
-from ._xdg_guard import clu_config_dir
 from .notify_base import OpenBlocker, Reply
 from .notify_imessage_inbound import _cli_dispatch
 
@@ -36,15 +34,15 @@ class DiscordInboundPoller:
         user_id: str,
         bot_user_id: str,
         *,
-        cursor_path: Path | None = None,
-        state_path: Path | None = None,
+        db_path: Path | None = None,
         registry_loader: Callable | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.user_id = user_id
         self.bot_user_id = bot_user_id
-        self.cursor_path = cursor_path or clu_config_dir() / "discord_cursor.json"
-        self._state_path = state_path or clu_config_dir() / "discord_state.json"
+        # The per-channel cursor and the DM cache share the host database, so
+        # one override covers what used to be two files.
+        self.db_path = db_path
         self._registry_loader = registry_loader or registry.entries
         self._dm_channel_id: str | None = None
 
@@ -92,19 +90,21 @@ class DiscordInboundPoller:
 
     def _load_dm_cache(self) -> str | None:
         try:
-            return json.loads(self._state_path.read_text()).get(self.user_id)
-        except (OSError, json.JSONDecodeError):
+            with db.host_conn(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT channel_id FROM discord_dm_cache WHERE user_id = ?",
+                    (self.user_id,),
+                ).fetchone()
+        except db.DEGRADABLE_ERRORS:
             return None
+        return row[0] if row else None
 
     def _save_dm_cache(self, channel_id: str) -> None:
-        existing: dict = {}
-        try:
-            existing = json.loads(self._state_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            pass
-        existing[self.user_id] = channel_id
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        st.save_atomic(self._state_path, existing)
+        with db.host_conn(self.db_path) as conn, db.write_txn(conn) as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO discord_dm_cache (user_id, channel_id) VALUES (?, ?)",
+                (self.user_id, channel_id),
+            )
 
     # ------------------------------------------------------------------
     # Message fetch
@@ -176,16 +176,26 @@ class DiscordInboundPoller:
     # ------------------------------------------------------------------
 
     def _read_cursor(self) -> dict:
+        """channel_id → last-seen message_id. Empty when nothing was recorded.
+
+        A cursor that reads empty re-fetches the channel from the top, which
+        is why losing it mattered: the unlocked read-modify-write the file
+        version used could drop a just-written cursor when two pollers
+        overlapped, and the poller would replay messages it had answered.
+        """
         try:
-            return json.loads(self.cursor_path.read_text())
-        except (OSError, json.JSONDecodeError):
+            with db.host_conn(self.db_path) as conn:
+                rows = conn.execute("SELECT channel_id, message_id FROM discord_cursor").fetchall()
+        except db.DEGRADABLE_ERRORS:
             return {}
+        return dict(rows)
 
     def _write_cursor(self, channel_id: str, message_id: str) -> None:
-        existing = self._read_cursor()
-        existing[channel_id] = message_id
-        self.cursor_path.parent.mkdir(parents=True, exist_ok=True)
-        st.save_atomic(self.cursor_path, existing)
+        with db.host_conn(self.db_path) as conn, db.write_txn(conn) as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO discord_cursor (channel_id, message_id) VALUES (?, ?)",
+                (channel_id, message_id),
+            )
 
     # ------------------------------------------------------------------
     # HTTP

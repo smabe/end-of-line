@@ -152,8 +152,8 @@ class NotifyDispatchTestCase(CluTestCase):
         # After osascript fires, the notifier records a {chat_id, sent_at}
         # mark so the inbound poller can resolve the outbound-floor on the
         # next poll tick (otherwise clu's own row would loop back as input).
+        from end_of_line import db
         from end_of_line.notify_imessage import IMessageNotifier
-        from end_of_line.notify_imessage_inbound import outbound_pending_path
 
         with mock.patch("end_of_line.notify_imessage._osascript_send"):
             IMessageNotifier(to="+15551234567").send(
@@ -161,9 +161,10 @@ class NotifyDispatchTestCase(CluTestCase):
                 "body",
                 plan_slug="p",
             )
-        data = json.loads(outbound_pending_path().read_text())
-        self.assertEqual(len(data["marks"]), 1)
-        self.assertEqual(data["marks"][0]["chat_id"], "+15551234567")
+        with db.host_conn() as conn:
+            marks = conn.execute("SELECT chat_id FROM outbound_marks").fetchall()
+        self.assertEqual(len(marks), 1)
+        self.assertEqual(marks[0][0], "+15551234567")
 
     def test_malformed_quiet_hours_treated_as_loud(self) -> None:
         with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
@@ -274,6 +275,55 @@ class NotifyDispatchTestCase(CluTestCase):
                 inbox_writer=capture_inbox_writer(writes),
             )
         self.assertEqual(writes, [])
+
+
+class InboxWriteDegradesTestCase(CluTestCase):
+    """A contended host database skips the inbox note; it never fails the send.
+
+    The inbox write beside a notification is best-effort by design — the state
+    event is the source of truth. When the inbox was a directory, that guard
+    was `except OSError`. Contention on a database arrives as `DbBusy`, which
+    is a RuntimeError, so the narrow guard would have turned a busy store into
+    a crashed supervisor tick.
+    """
+
+    def test_a_busy_store_does_not_fail_the_notification(self) -> None:
+        from end_of_line import db
+
+        def busy_writer(**kw) -> str:
+            raise db.DbBusy("database is locked")
+
+        spec = NotifySpec.imessage_only("+15551234567", quiet_hours=None)
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            sent = notify.notify(
+                spec,
+                notify.KIND_BLOCKER,
+                "hello",
+                plan_slug="p",
+                project_root="/x",
+                inbox_writer=busy_writer,
+            )
+        self.assertTrue(sent)
+        m.assert_called_once()
+
+    def test_a_broken_store_does_not_fail_the_notification(self) -> None:
+        import sqlite3
+
+        def broken_writer(**kw) -> str:
+            raise sqlite3.DatabaseError("file is not a database")
+
+        spec = NotifySpec.imessage_only("+15551234567", quiet_hours=None)
+        with mock.patch("end_of_line.notify_imessage._osascript_send") as m:
+            sent = notify.notify(
+                spec,
+                notify.KIND_BLOCKER,
+                "hello",
+                plan_slug="p",
+                project_root="/x",
+                inbox_writer=broken_writer,
+            )
+        self.assertTrue(sent)
+        m.assert_called_once()
 
 
 class ChannelDispatchTestCase(unittest.TestCase):

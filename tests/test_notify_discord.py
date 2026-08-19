@@ -46,11 +46,11 @@ def _mock_resp(data: dict):
 
 class DiscordNotifierBasicTestCase(CluTestCase):
     def test_discord_notifier_kind_name(self):
-        n = DiscordNotifier("T", "U", state_path=self.tmp_path / "d.json")
+        n = DiscordNotifier("T", "U", db_path=self.tmp_path / "d.db")
         self.assertEqual(n.kind_name, "discord")
 
     def test_discord_notifier_is_a_notifier(self):
-        n = DiscordNotifier("T", "U", state_path=self.tmp_path / "d.json")
+        n = DiscordNotifier("T", "U", db_path=self.tmp_path / "d.db")
         self.assertIsInstance(n, Notifier)
 
     def test_from_spec_reads_channel_params(self):
@@ -59,14 +59,18 @@ class DiscordNotifierBasicTestCase(CluTestCase):
         self.assertEqual(n.bot_token, "T")
         self.assertEqual(n.user_id, "U")
 
-    def test_default_state_path_honors_xdg(self):
-        # No explicit state_path → resolves under clu_config_dir(), which
-        # CluTestCase points at the isolated temp XDG dir (not real ~/.config).
-        from end_of_line._xdg_guard import clu_config_dir
+    def test_default_store_honors_xdg(self):
+        # No explicit db_path → the DM cache lands in the host database under
+        # clu_config_dir(), which CluTestCase points at the isolated temp XDG
+        # dir (not real ~/.config).
+        from end_of_line import db
 
         n = DiscordNotifier("T", "U")
-        self.assertEqual(n.state_path, clu_config_dir() / "discord_state.json")
-        self.assertTrue(str(n.state_path).startswith(str(self.tmp_path)))
+        self.assertIsNone(n.db_path)
+        n._save_dm_cache("dm-ch-1")
+        self.assertTrue(str(db.host_db_path()).startswith(str(self.tmp_path)))
+        self.assertTrue(db.host_db_path().exists())
+        self.assertEqual(n._load_dm_cache(), "dm-ch-1")
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +81,10 @@ class DiscordNotifierBasicTestCase(CluTestCase):
 class DiscordNotifierSendTestCase(CluTestCase):
     def setUp(self):
         super().setUp()
-        self.discord_state = self.tmp_path / "discord_state.json"
+        self.discord_state = self.tmp_path / "discord.db"
 
     def _notifier(self, **kw):
-        return DiscordNotifier("T", "U", state_path=self.discord_state, **kw)
+        return DiscordNotifier("T", "U", db_path=self.discord_state, **kw)
 
     def _fake_urlopen(self, responses: list):
         """Return a side_effect function that pops from `responses` (dicts → success, exceptions → raise)."""
@@ -178,7 +182,7 @@ class DiscordNotifierSendTestCase(CluTestCase):
         notifier = DiscordNotifier(
             "T",
             "U",
-            state_path=self.discord_state,
+            db_path=self.discord_state,
             state_root=state_dir,
         )
         with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
