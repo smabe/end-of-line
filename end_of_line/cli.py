@@ -49,6 +49,7 @@ from . import (
     monitor,
     notify,
     queue,
+    quota,
     registry,
     state_blocker,
     state_locator,
@@ -6066,17 +6067,39 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
     daemon write would be the project's first unvalidated worker-side mutation.
 
     Token-validated and idempotent — the claim's worker_death_reported marker
-    prevents a duplicate event/inbox/notify if the daemon fires more than once.
-    Does NOT release the claim; that is phase death-recovery. The lock is
-    bounded (`LockTimeout` → skip, exit OK) so the detached daemon can't hang.
+    prevents a duplicate event/inbox/notify/release if the daemon fires more
+    than once, and the guard sits BEFORE the release so a repeat invocation
+    can't clear a newly dispatched worker's claim. The lock is bounded
+    (`LockTimeout` → skip, exit OK) so the detached daemon can't hang.
 
     Reads pid + log_path off the live claim: log_path is the ATTEMPT log the
     dispatcher stamped, the file a post-mortem wants — never the daemon's own
     .hb.log sidecar.
+
+    death-recovery (#104): the reporter also RELEASES the claim it reported
+    dead, so the phase is redispatchable by the next supervisor tick rather
+    than sitting claimed until a tick re-derives a death already on record.
+    Quota is classified BEFORE the release, in the same lock window, because
+    release clears the claim that carries `log_path` — mirroring the
+    supervisor's dead-PID branch (supervisor.py worker-dead ordering) so a
+    quota death still pauses the project and forgives the attempt (#94).
+
+    The reporter also REAPS the worker's process group after release. This is a
+    correction to the plan's locked "daemon does not reap" decision: that
+    decision assumed the supervisor's own reap stayed the backstop, but the
+    supervisor's reap lives inside its live-claim worker-dead branch — releasing
+    the claim here makes that branch unreachable, so an orphaned child the dead
+    worker left in its pgroup (the #106 backgrounded-gate shape) would leak and
+    could race the redispatched worker in the same worktree. The daemon's own
+    `setsid` puts it in a different pgroup, so the killpg can't reach itself, and
+    the `cmdline_match` guard (#76) keeps it from signalling a PID-reuse stranger.
+    Best-effort and OUTSIDE the bounded lock (killpg + a `ps` cmdline check),
+    so a slow reap can't strand the reaper-immune daemon on the lock.
     """
     st.validate_slug(args.plan)
-    notify_body = None
+    notifies: list[tuple[str, str]] = []
     pid = None
+    pgid = None
     log_path = None
     try:
         with st.mutate(
@@ -6089,6 +6112,7 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
                 return ExitCode.OK
             st.mark_worker_death_reported(claim, st._now_utc())
             pid = claim.get("pid")
+            pgid = claim.get("pgid") or pid
             log_path = claim.get("log_path")
             st.append_event(
                 data,
@@ -6098,8 +6122,46 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
                 log_path=log_path,
                 reporter="heartbeat_daemon",
             )
-            notify_body = notify.render_worker_dead_reported(
-                args.plan, args.phase, pid, log_path
+            # Quota classification MUST precede the release: release_claim_and_emit
+            # clears the claim that carries log_path, and classify_log_tail reads
+            # it. A quota match records the pause + EVENT_QUOTA_DEATH (attempt
+            # forgiveness) and swaps the generic death ping for the actionable
+            # quota-pause notification, exactly as the supervisor does.
+            quota_match = quota.classify_log_tail(log_path)
+            if quota_match is not None:
+                paused_until = quota.record_quota_death(
+                    data,
+                    quota_match,
+                    phase_id=args.phase,
+                    token=args.token,
+                    orchestrator_dir=state_path.parent,
+                )
+                notifies.append(
+                    notify.quota_pause_notification(
+                        args.plan,
+                        quota_match.line,
+                        paused_until,
+                        str(state_path.parent / quota.QUOTA_FILE_NAME),
+                    )
+                )
+            else:
+                notifies.append(
+                    (
+                        notify.KIND_WORKER_DEAD_REPORTED,
+                        notify.render_worker_dead_reported(
+                            args.plan, args.phase, pid, log_path
+                        ),
+                    )
+                )
+            # Durable state first (event + quota + release + coolant); the
+            # supervisor's own reap stays the backstop — the daemon's setsid
+            # puts it outside the group it would reap, and the worker PID is
+            # gone by definition.
+            st.release_claim_and_emit(
+                data,
+                expected_token=args.token,
+                expected_phase=args.phase,
+                **cfg.coolant.release_kwargs(),
             )
     except st.LockTimeout as exc:
         print(
@@ -6121,8 +6183,18 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
         )
     except OSError:
         pass
-    if notify_body:
-        notify.notify(cfg.notify, notify.KIND_WORKER_DEAD_REPORTED, notify_body)
+    for kind, body in notifies:
+        notify.notify(cfg.notify, kind, body)
+    # Reap the worker's process group last (durable state is already on disk).
+    # The dead worker's own PID is gone, but a backgrounded child it spawned
+    # survives by reparenting to launchd; the supervisor can no longer reap it
+    # (its reap needs the claim this callback just released). Guarded by the
+    # plan slug so a reused pgid belonging to a stranger is left alone.
+    if pgid:
+        try:
+            st.reap_orphan_pgroup(pgid, cmdline_match=args.plan)
+        except Exception:
+            pass
     print(f"notify-worker-dead {args.phase}: reported")
     return ExitCode.OK
 

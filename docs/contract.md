@@ -193,9 +193,15 @@ saw what:
   (`"heartbeat_daemon"`). Deduped via the claim's `worker_death_reported` marker:
   the daemon stamps it, and the supervisor's own worker-dead branch consults it to
   suppress a duplicate operator notification while still emitting its own event,
-  releasing, and reaping. This event does NOT release the claim (that is
-  death-recovery); it is default-visible in `clu watch` because #104's complaint
-  is precisely that live watch streams saw nothing when the worker died.
+  releasing, and reaping. The reporter also RELEASES the claim in the same lock
+  window (death-recovery, #104): it classifies quota from `log_path` FIRST — a
+  quota death still records the pause and forgives the attempt — then calls the
+  token-validated `release_claim_and_emit`, so the phase is redispatchable by the
+  next tick rather than sitting claimed until one re-derives a death already on
+  record. It does NOT reap the process group (the daemon's `setsid` puts it
+  outside that group; the supervisor's reap stays the backstop). It is
+  default-visible in `clu watch` because #104's complaint is precisely that live
+  watch streams saw nothing when the worker died.
 
 ### Quality-attestation event semantics
 

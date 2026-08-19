@@ -572,7 +572,8 @@ live claim every 120s while the worker PID is alive.
   strike fires the `notify-heartbeat-failure` path once (best-effort —
   a broken transport never kills the loop); success resets the counter.
   On the worker-dead exit it fires `report_death` → `clu notify-worker-dead`
-  (#104), turning the detection into an event/inbox/notify/watch line;
+  (#104), turning the detection into an event/inbox/notify/watch line AND
+  releasing the claim (quota-classified first) so the phase is redispatchable;
   claim-gone (a normal `clu complete`/`block` release) never reports. The
   report call is wrapped so nothing — `LockTimeout` included — can stop the
   loop returning 0. `sleep` / `tick` / `notify_failure` / `report_death` /

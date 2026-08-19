@@ -491,6 +491,11 @@ _TERMINATION_REASONS = {
     st.EVENT_PHASE_BLOCKED: "worker blocked on a question",
     st.EVENT_DISPATCH_FAILED: "previous dispatch failed",
     st.EVENT_SYSTEMIC_FAILURE: "systemic failure (rate-limit, auth, missing binary)",
+    st.EVENT_PHASE_WORKER_DEAD_REPORTED: (
+        "worker process died mid-phase (heartbeat daemon reported it) — the "
+        "likely cause is ending the turn to wait on a background task or Monitor, "
+        "which `claude --print` never resumes; run long steps in the foreground"
+    ),
 }
 
 

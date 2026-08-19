@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 from end_of_line import heartbeat_daemon as hbd
+from end_of_line import inbox
 from end_of_line import state as st
 from end_of_line.cli import main
 from tests import CluTestCase, plan_body
@@ -303,6 +304,43 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
         self.assertEqual(
             log_path.parent, (self.state_path.parent / "logs").resolve()
         )
+
+    def test_end_to_end_daemon_reports_and_releases(self) -> None:
+        # Acceptance (death-recovery): a real run_loop worker-dead exit drives
+        # the real notify-worker-dead callback, which reports the death AND
+        # releases the claim. This exercises the daemon→cli seam that the
+        # injected-report_death unit tests stub out.
+        log = self.state_path.parent / "logs" / "a.session-x.log"
+        with st.mutate(self.state_path) as data:
+            data["current_claim"]["pid"] = 4242
+            data["current_claim"]["log_path"] = str(log)
+        with (
+            mock.patch("end_of_line.state.coolant.emit_stop"),
+            mock.patch("end_of_line.state.reap_orphan_pgroup"),
+        ):
+            rc = hbd.run_loop(
+                project_root=self.project,
+                plan="test-plan",
+                phase="a",
+                token=self.token,
+                worker_pid=4242,
+                state_path=self.state_path,
+                log_path=self.state_path.parent / "logs" / "a.session-x.hb.log",
+                sleep=lambda _s: None,
+                tick=lambda *_a: hbd.ACTION_EXIT_WORKER_DEAD,
+                max_ticks=1,
+            )
+        self.assertEqual(rc, 0)
+        data = st.load(self.state_path)
+        types = [e["type"] for e in data["events"]]
+        self.assertIn(st.EVENT_PHASE_WORKER_DEAD_REPORTED, types)
+        self.assertIsNone(data["current_claim"])  # released, redispatchable
+        box = [
+            e
+            for e in inbox.read_unprocessed()
+            if e["type"] == "phase_worker_dead_reported"
+        ]
+        self.assertEqual(len(box), 1)
 
 
 class CmdlineProbeTestCase(CluTestCase):

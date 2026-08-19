@@ -1188,6 +1188,38 @@ hold a worker. The supervisor's stuck-tool detector
 fire well before 30 min, but they *notify*; they don't kill. For the
 5-to-30-minute window recovery is operator-in-the-loop.
 
+### Worker death: detection, report, recovery (#104)
+
+When a worker process dies mid-phase — signal, OOM, or the end-of-turn
+wait above — its heartbeat daemon notices within ~120 s (a
+cmdline-anchored liveness probe, so PID reuse can't fake a live worker)
+and fires `clu notify-worker-dead`. That one token-validated callback
+does three things in a single bounded lock window:
+
+1. **Reports** the death — a default-visible `phase_worker_dead_reported`
+   event, an inbox entry carrying the post-mortem log path, and an
+   operator notification — so `clu watch` and your channels see it in two
+   minutes instead of at the next tick (which, in the incident, was
+   9.5 hours away).
+2. **Classifies quota first.** If the worker log shows a quota limit, the
+   daemon records the project pause and forgives the attempt (#94) before
+   releasing — the operator gets the actionable `quota_paused`/`quota_stuck`
+   ping instead of a generic death notice. This ordering is load-bearing:
+   the release clears the claim that carries the log path, so classifying
+   after it would silently drop the pause.
+3. **Releases the claim** it just reported dead (token-validated), so the
+   phase is **redispatchable**.
+
+**The limit worth stating plainly:** releasing the claim makes the phase
+redispatchable; it does not dispatch it. Something still has to run a
+supervisor tick. If ticks themselves have stopped (the separate failure
+#103 owns), the phase waits for the next one exactly as before — what
+this closes is the gap where a dead worker's claim sat *un-released* until
+a tick arrived to re-derive a death already on record. The daemon does
+not reap the process group (its own `setsid` puts it outside that group,
+and the worker PID is gone by definition); the supervisor's reap stays the
+backstop for an orphaned heartbeat keeper.
+
 ## Setup: iMessage (macOS only)
 
 Configure during `clu init` (interactive prompt on macOS) or directly in `.orchestrator.json`:
@@ -1446,7 +1478,7 @@ Outbound — fired during supervisor ticks. Kinds:
 | `queue_corrupt` | `queue.json` corrupt and auto-repair disabled OR throttle exhausted | **Bypasses quiet hours** |
 | `stuck_blocker` | Open blocker un-consumed for >30 min; re-pings every 30 min | Gated (inbox always writes) |
 | `stalled_claim` | Live claim's lease expired with plan status still `running`; one-shot per claim | Gated (inbox always writes) |
-| `phase_worker_dead_reported` | Fired by the **per-worker heartbeat daemon** (not a tick) ~120s after it detects its worker PID dead mid-phase; one-shot per claim, deduped so the supervisor's own worker-dead branch won't re-ping. Carries the post-mortem log path. Default-visible in `clu watch` | Gated (inbox always writes) |
+| `phase_worker_dead_reported` | Fired by the **per-worker heartbeat daemon** (not a tick) ~120s after it detects its worker PID dead mid-phase; one-shot per claim, deduped so the supervisor's own worker-dead branch won't re-ping. Carries the post-mortem log path. The daemon also releases the claim (quota-classifying first) so the phase is redispatchable. Default-visible in `clu watch`. A quota death routes to `quota_paused`/`quota_stuck` instead of a generic death ping | Gated (inbox always writes) |
 | `quota_paused` | Worker killed by a quota limit with a parseable reset; project pauses, then auto-resumes (see "Recovering from a quota pause") | Gated |
 | `quota_resumed` | Canary survived the reset; quota pause cleared | Gated |
 | `quota_stuck` | Quota death whose reset didn't parse; no auto-resume — needs `rm quota.json` | **Bypasses quiet hours** |

@@ -418,3 +418,36 @@ without anyone reading the word "Monitor".
   reads correctly, not misleadingly: something DID just happen (the death was
   reported), so surfacing it as recent activity is the signal the operator
   wants, not a false "healthy" green. No change made.
+- **2026-08-19 (death-recovery):** the daemon's claim release DEFEATS the
+  supervisor's process-group reap. The locked decision "the daemon does not
+  reap; the supervisor's reap remains the backstop" rested on a false premise —
+  the supervisor's reap lives INSIDE its live-claim worker-dead branch
+  (`supervisor.py:696`, `if pid and not claim_worker_alive(...)`), which becomes
+  unreachable the moment this phase releases the claim. A dead worker's
+  backgrounded child (the #106 shape) would then leak and could race the
+  redispatched worker in the same worktree. FIXED by reaping the worker's pgroup
+  from the daemon itself after release — best-effort, guarded by the plan slug
+  (#76), outside the bounded lock, and safe because the daemon's own `setsid`
+  puts it in a different pgroup. This is a deliberate correction to a locked
+  design decision; the plan's stated reason for the daemon NOT reaping ("setsid
+  puts it outside the group") is in fact the reason it's SAFE to reap.
+- **2026-08-19 (death-recovery): two findings in code this phase did not touch,
+  for operator triage.** (a) `dispatch.bash_max_timeout_ms` is validated by
+  `_validate_non_negative_int` (`config.py`), which accepts `0`; a configured
+  `0` would `setdefault` `BASH_MAX_TIMEOUT_MS=0` into every worker and plausibly
+  neuter all foreground Bash timeouts — the phase foreground-gates feature would
+  silently invert. Worth a positive-floor validator. (b) The documented
+  two-sided invariant "gate < ceiling < lease TTL" is enforced nowhere: the
+  30-min default ceiling is validated independently of the effort-scaled lease,
+  so a low-effort phase with a sub-30-min lease could be reaped by lease-expiry
+  while legitimately running a foreground gate. Both are phase foreground-gates'
+  code (shipped in `0d65c89`); left for the operator to decide since this phase's
+  diff neither touches nor depends on them.
+- **2026-08-19 (death-recovery):** the worker-death dedup marker
+  (`worker_death_reported`) and the supervisor's `already_reported` suppression
+  are now effectively unreachable via the daemon path — this phase makes `mark`
+  and `release` atomic in one lock window, so the marker never survives to be
+  read. They remain CORRECT for the `LockTimeout` path (daemon marks/releases
+  nothing → supervisor handles the death fresh, no double-notify) and were
+  mandated by the sub-plan's failure-mode guard, so left in place as
+  defense-in-depth rather than removed.

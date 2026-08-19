@@ -62,3 +62,48 @@ class WorkerDeadDedupTestCase(SupervisorTestCase):
         result = self._tick_dead()
         self.assertEqual(result.action, "worker_dead")
         self.assertIsNotNone(result.notify_body)
+
+    def _daemon_report_and_release(self) -> None:
+        """Simulate the death-recovery daemon: report + release the claim, as
+        cmd_notify_worker_dead now does. Leaves no current_claim behind."""
+        tick(self.state_path, self.cfg)  # dispatch phase a
+        with st.locked(self.state_path):
+            data = st.load(self.state_path)
+            claim = data["current_claim"]
+            token = claim["claimed_by"]
+            st.mark_worker_death_reported(claim, st._now_utc())
+            st.append_event(
+                data,
+                st.EVENT_PHASE_WORKER_DEAD_REPORTED,
+                phase="a",
+                pid=claim.get("pid"),
+            )
+            st.release_claim_and_emit(
+                data,
+                expected_token=token,
+                expected_phase="a",
+                coolant_enabled=False,
+            )
+            st.save_atomic(self.state_path, data)
+
+    def test_tick_after_daemon_release_takes_no_worker_dead_action(self) -> None:
+        # The daemon already released — a tick five seconds later finds no
+        # claim, so it must NOT re-run the worker-dead branch (no second
+        # EVENT_PHASE_WORKER_DEAD, no duplicate operator ping).
+        self._daemon_report_and_release()
+        with mock.patch(
+            "end_of_line.state.claim_worker_alive", return_value=False
+        ):
+            result = self._tick_dead()
+        self.assertNotEqual(result.action, "worker_dead")
+        self.assertIsNone(result.notify_body)
+        types = [e["type"] for e in self._read()["events"]]
+        self.assertNotIn(st.EVENT_PHASE_WORKER_DEAD, types)
+
+    def test_tick_after_daemon_release_redispatches_phase(self) -> None:
+        # Recovery, not just tidy-up: with the claim released the very next tick
+        # dispatches the phase again (attempt budget permitting).
+        self._daemon_report_and_release()
+        result = tick(self.state_path, self.cfg)
+        self.assertEqual(result.action, "dispatch")
+        self.assertEqual(result.phase_id, "a")
