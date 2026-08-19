@@ -204,6 +204,10 @@ class PollOnceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
+        # poll_once resolves the machine-wide notify config under
+        # clu_config_dir(); without this it reads the developer's real
+        # ~/.config/clu/config.json.
+        isolate_registry(self, self.tmp)
         self.db_path = self.tmp / "chat.db"
         self.dispatched: list[tuple[Path, str, int]] = []  # (state_path, blocker_id, answer_index)
         self.ticks: list[tuple[Path, str]] = []
@@ -798,6 +802,7 @@ class PollOnceFloorTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
+        isolate_registry(self, self.tmp)
         self.db_path = self.tmp / "chat.db"
         self.dispatched: list[tuple[Path, str, int]] = []
         self.ticks: list[tuple[Path, str]] = []

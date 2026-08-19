@@ -15,6 +15,7 @@ from end_of_line.config import (
     DispatchSpec,
     load_project_config,
 )
+from tests import isolate_registry
 
 
 class _ConfigTestBase(unittest.TestCase):
@@ -22,6 +23,10 @@ class _ConfigTestBase(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name).resolve()
+        # load_project_config merges the machine-wide config under
+        # clu_config_dir(); without this these tests read the developer's real
+        # ~/.config/clu/config.json (and resolve the real HOME to find it).
+        isolate_registry(self, self.root)
 
     def _write(self, raw: dict) -> None:
         (self.root / CONFIG_FILENAME).write_text(json.dumps(raw))

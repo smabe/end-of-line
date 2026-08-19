@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import pwd
 import subprocess
 import tempfile
 import unittest
@@ -17,6 +18,40 @@ from end_of_line.cli import main as cli_main
 from end_of_line.config import CONFIG_FILENAME
 
 _T = TypeVar("_T")
+
+# The developer's actual home, read from the password database rather than
+# `$HOME` so it stays correct no matter when this module is imported and no
+# matter what the harness has already patched. Used only to prove a test never
+# wrote there.
+REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+
+# Where `real_home_canary` writes: the exact shape clu installs a skill into,
+# so the guard exercises the path later phases actually use.
+CANARY_RELPATH = Path(".claude") / "skills" / "clu-home-canary" / "SKILL.md"
+
+
+def real_home_canary(testcase: unittest.TestCase) -> Path:
+    """Write a canary skill under `Path.home()` and prove it missed the real home.
+
+    The failure this guards is silent: a test that writes to the developer's
+    real `~/.claude/skills/` leaves a green run behind. Fails `testcase` if
+    `Path.home()` still points at `REAL_HOME`, or if the twin path under the
+    real home exists after the write. Returns the path actually written.
+    """
+    home = Path.home().resolve()
+    if home == REAL_HOME:
+        testcase.fail(
+            f"Path.home() is the developer's real home ({home}) inside a test — "
+            f"HOME is not patched (see CluTestCase.setUp in tests/__init__.py)"
+        )
+    target = home / CANARY_RELPATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# clu test-harness canary — must never reach the real home\n")
+    testcase.assertFalse(
+        (REAL_HOME / CANARY_RELPATH).exists(),
+        f"a test wrote into the developer's real home: {REAL_HOME / CANARY_RELPATH}",
+    )
+    return target
 
 
 def must(x: _T | None) -> _T:
@@ -93,11 +128,18 @@ class CluTestCase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp_path = Path(tmp.name)
-        isolate_registry(self, self.tmp_path)
+        (self.tmp_path / "home").mkdir(exist_ok=True)
+        isolate_registry(self, self.tmp_path, home=self.tmp_path / "home")
         patcher = mock.patch.dict(
             os.environ,
             {
                 "CLU_TEST_MODE": "1",
+                # A SIBLING of XDG_CONFIG_HOME (which isolate_registry points at
+                # tmp_path itself), never tmp_path — HOME == the XDG dir makes
+                # clu_config_dir() a child of Path.home(), and assert_xdg_safe
+                # then raises on every registry / inbox / monitor / notify /
+                # worker-settings write under CLU_TEST_MODE=1.
+                "HOME": str(self.tmp_path / "home"),
                 # Empty CLU_COOLANT_SCRIPT_DIR + redirected COOLANT_* keep tests
                 # off any real coolant install on the dev machine. Tests that
                 # exercise coolant resolution override these explicitly.
@@ -112,16 +154,36 @@ class CluTestCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
 
-def isolate_registry(testcase: unittest.TestCase, tmp_path: Path) -> None:
-    """Point clu's XDG-based registry at a per-test temp dir.
+def isolate_registry(
+    testcase: unittest.TestCase, tmp_path: Path, home: Path | None = None
+) -> None:
+    """Point clu's XDG-based registry AND `HOME` at per-test temp dirs.
 
-    Without this, `cmd_init` writes to the user's real
-    `~/.config/clu/registry.json` during tests. Call from setUp after
-    creating tmp_path; the patch auto-restores via addCleanup.
+    Without the XDG patch, `cmd_init` writes to the user's real
+    `~/.config/clu/registry.json` during tests. `HOME` is patched for the
+    same reason one level up: clu also reads and writes
+    `~/.claude/skills/<name>/SKILL.md`, and the ~30 test classes that call
+    this helper instead of subclassing `CluTestCase` would otherwise reach
+    the developer's real home. Call from setUp after creating tmp_path;
+    both patches auto-restore via addCleanup.
+
+    `HOME` defaults to its OWN temp dir rather than a subdirectory of `tmp_path`,
+    because callers routinely pass a git project root here (e.g.
+    tests/test_verify_opt_out.py, tests/test_worktree_cleanup.py) and a
+    home directory inside a worktree would show up in the `git status`
+    that clu's own quality gates read. `CluTestCase` can use
+    `tmp_path / "home"` safely — its project lives in a sibling subdir.
     """
+    if home is None:
+        # No home supplied: allocate one. Callers that already have a home to
+        # use pass it, so `CluTestCase` does not pay for a directory it is
+        # about to override one line later.
+        holder = tempfile.TemporaryDirectory()
+        testcase.addCleanup(holder.cleanup)
+        home = Path(holder.name)
     patcher = mock.patch.dict(
         os.environ,
-        {"XDG_CONFIG_HOME": str(tmp_path)},
+        {"XDG_CONFIG_HOME": str(tmp_path), "HOME": str(home)},
     )
     patcher.start()
     testcase.addCleanup(patcher.stop)
