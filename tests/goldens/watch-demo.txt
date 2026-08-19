@@ -1,0 +1,10 @@
+[snapshot] demo-block: running, active=none
+demo-block/a: completed
+demo-block/b: completed
+demo-block/c: started (attempt 1)
+demo-block/c: BLOCKED q-1 — Demo blocker: which way should the demo worker go?
+demo-block: answer received for q-1: left
+demo-block: blocker q-1 consumed — phase resuming
+demo-block/c: started (attempt 1)
+demo-block/c: completed
+demo-block: PLAN DONE
