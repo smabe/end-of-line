@@ -53,9 +53,22 @@ Downstream sweep at p1 — p2 1 item corrected (the `test_skill_drift.py:38` not
 
 Downstream sweep at p2 — p3 clean, carry-in note added · p4 2 constraints promoted to Done criteria (gate repair on `writable` not `placement`; resolve the temp HOME before asserting a repair happened) · code: p2 pinned write-safety to a filesystem property and removed the `except OSError` swallow that reported an unreadable install as in sync; it obsoleted nothing p1 shipped — p1's harness and guards are untouched and still green — and it made `tests/test_skill_drift.py`'s per-test HOME patch redundant, which p2 removed as part of its own Work rather than leaving as dead weight.
 
-NEXT phase is **p3**. Read `plans/skill-drift-trigger-p3.md` FIRST — it is the self-sufficient packet for that phase.
+**p3 SHIPPED** — `6777324`.
 
-The three decisions binding p3, pulled inline so a compaction that drops the shard still leaves them visible:
+**Spec check at p3** — work items 6/6 evidenced · interface conforms (`record_install`, `installed_record`, `SkillStatus.provenance` shipped as declared; `digest`, `shipped_fingerprints`, `record_path`, `load_manifest`, `MANIFEST_FILENAME` exported beyond the line, recorded) · 2 files unclaimed by the Work list (`tests/test_skill_drift.py`, `tests/test_install_skill.py`), both reported as required by the described work and recorded as a planning defect · +2 files added at review (`tests/test_doctor.py` regression fix, manifest-health tests), re-evidenced
+
+**CORRECTION to this plan's own verification record.** The read-back concluded that `tests/test_skill_drift.py` was mis-credited to p3 "which never touches it" and moved it to p4. That was wrong — p3 changes how doctor classifies a differing copy, so it re-classifies the fixtures those tests depend on and cannot avoid the file. The overview now credits it P2, P3, P4.
+
+Downstream sweep at p3 — p4 3 constraints carried, 2 promoted to Done criteria (a repairable fixture must be RECORDED, not merely stale; manual runs need a resolved temp home) · no other unshipped shards remain · code: p3 pinned provenance as the gate on what may be overwritten, and in doing so **falsified a test p1 shipped** — `tests/test_doctor.py`'s resolver test reached an import-time `Path.home()` constant that p1's redirect broke, passing only under `discover` ordering. Bisected to `853a7f4` and fixed in this phase rather than left; the guard p1 built could not see it, because the constant binds before any `setUp` runs.
+
+NEXT phase is **p4** — the last. Read `plans/skill-drift-trigger-p4.md` FIRST.
+
+The decisions binding p4, pulled inline so a compaction that drops the shard still leaves them visible:
+- **Repair only what is `recognized` AND `writable`.** A `foreign` copy is reported and left byte-identical; a symlinked path is refused, never warned-and-written.
+- **Gate on `writable`, never on `placement`** — the symlink is usually the skill DIRECTORY, so the leaf reads as a regular file.
+- **Placement inside `queue add` is boxed:** after the `--token` worker branch returns, before `_spawn_post_action_tick`. Above the first and workers rewrite operator skills mid-phase; below the second and a detached tick already dispatched on the stale copy.
+
+p3's decisions, kept for the record:
 - Provenance lives in a SIDECAR under `clu_config_dir()`, never in the SKILL.md — a stamp inside the file makes the installed copy differ from the bundled one by construction.
 - Recognition needs a hash HISTORY (a shipped manifest of previously released fingerprints), not one hash; one hash can only say "differs".
 - An unrecognized copy is reported, never prompted on — `init` and `queue add` run in scripts and under cron.
@@ -88,7 +101,9 @@ p1's decisions, kept for the record:
 - `scripts/gen_skill_manifest.py` — P3 (new) — regenerates the manifest from git history.
 - `pyproject.toml` — P3 — add the manifest to `package-data`; without it the file is unpackaged and every install reads as foreign.
 - `tests/test_skill_sync.py` — P2 (new), P3, P4 — the module's own tests.
-- `tests/test_skill_drift.py` — P2, P4 — existing drift tests move onto `scan()`; P4 adds the init/queue-add call-site tests.
+- `tests/test_skill_drift.py` — P2, P3, P4 — drift tests move onto `scan()` (P2), re-classified for provenance (P3), init/queue-add call sites (P4).
+- `tests/test_install_skill.py` — P3 — XDG isolation + provenance-record tests.
+- `tests/test_doctor.py` — P3 — synthetic chat.db, fixing a p1 regression `discover` ordering masked.
 - `tests/test_home_isolation.py` — P1 (new) — the harness-isolation guard tests.
 - `docs/reference.md` — P4 — per-module public surface for `skill_sync`.
 

@@ -47,7 +47,7 @@ See the master `plans/skill-drift-trigger.md`. The decisions binding this phase:
   SHA-256 of the bytes clu last wrote, with a schema version alongside it so a
   future shape change is detectable rather than silently misread:
   ```json
-  {"version": 1, "skills": {"clu-plan": "<64-hex>", "clu-phase": "<64-hex>"}}
+  {"schema_version": 1, "skills": {"clu-plan": "<64-hex>", "clu-phase": "<64-hex>"}}
   ```
 
 - `end_of_line/cli.py` — `cmd_install_skill` calls `record_install()` after each successful write, so copies written from now on are recognized by the record rather than only by the manifest. `_print_skill_drift_health` reports `foreign` copies distinctly from `differs`.
@@ -68,6 +68,31 @@ See the master `plans/skill-drift-trigger.md`. The decisions binding this phase:
 - **Rationale:** clu has no build step beyond packaging, and adding one for this would put git access into the install path. A checked-in generated file is inspectable in review and diffable.
 - **Alternatives considered:** computing fingerprints at install time from git — rejected: an installed clu has no git checkout. A setuptools build hook — rejected as a new build dependency against a zero-dep project.
 - **Evidence:** `pyproject.toml:15-21` (packaging is `setuptools.packages.find` plus `package-data`; no custom build).
+
+### Finding: writing stale bytes no longer produces a REPAIRABLE copy  *(status: active)*
+- Before provenance, any stale bytes read as `differs`. Now arbitrary stale bytes read as **`foreign`** — the leave-alone path. Two existing doctor tests were asserting a section they no longer reach, and were corrected via an `_install_as_clu` helper.
+- **p4 depends on this directly:** a test that wants "stale but repairable" must install a copy AND record it (or use a real shipped fingerprint). Writing bytes alone produces the case p4 must NOT touch, so a repair test built that way asserts the opposite of what it means to.
+
+### Finding: `tests/test_install_skill.py` isolated `HOME` but never `XDG_CONFIG_HOME`  *(status: active)*
+- It subclasses plain `unittest.TestCase`. The moment install started writing a provenance sidecar under `clu_config_dir()`, that became a write into the developer's real `~/.config/clu` on any machine that sets `XDG_CONFIG_HOME` — and with no `CLU_TEST_MODE` set, `assert_xdg_safe` would not have caught it either. It failed to leak here only because that variable is unset on this machine. Routed through `isolate_registry(self, tmp/"xdg", home=tmp/"home")`.
+
+### Finding: the generator must include the WORKING-TREE copy  *(status: active)*
+- Otherwise the currency guard is unsatisfiable in a single commit: a manifest generated before committing a skill change can never contain that change, so every skill edit would need two commits with a red one in between.
+
+### Finding: the macOS symlink trap bites at the CLI level, not only in tests  *(status: active)*
+- p2 recorded it for tests. The first `clu doctor` demo put every skill in the "can't compare or re-sync" section because `$TMPDIR` lives under `/var` → `/private/var`. **Any manual p4 verification must build its temp home with `cd $(mktemp -d) && pwd -P`**, or nothing will ever look repairable.
+
+### Finding: the sidecar key is `schema_version`, not `version`  *(status: active)*
+- The shard specified `{"version": 1, ...}`, which is not the repo-wide convention (`dispatch.py:49`, `monitor.py:41`, `inbox.py:67` all use `schema_version`) and would have left the file unreadable by `state.locked_json`. Corrected during the review pass, while the file is new and nothing is in the field.
+
+### Finding: an unreadable manifest is not the same as an absent one  *(status: active — found at review)*
+- Both degraded to `{}`, and the corrupt case fails in the worst direction: every copy clu wrote reads as `foreign`, doctor calls the operator's untouched file a local edit, and p4 would decline to repair it. Probed. Split so absent stays silent and correct while unreadable returns a reason doctor prints. The same collapse existed per-entry and for a future-schema sidecar.
+
+### Finding: p1 shipped a regression this phase found and fixed  *(status: active)*
+- `tests/test_doctor.py`'s resolver test reached `DEFAULT_CHAT_DB`, bound from `Path.home()` at IMPORT time — the exact hazard p1 recorded. p1's suite-wide `HOME` redirect made it resolve to a temp path with no database, so doctor took the "chat.db inaccessible" branch and never reached the resolver. It passed under `unittest discover` only because an earlier module imported `notify_imessage_inbound` while `HOME` was still real, and failed standalone and under `partest`. Bisected: clean at `96b886c`, failing from `853a7f4`. Fixed with a synthetic chat.db and a module-attribute patch. **The gate did not catch this** — `discover` order masked it.
+
+### Finding: two unlisted files, and the plan's own audit was wrong about one  *(status: active)*
+- `tests/test_skill_drift.py` and `tests/test_install_skill.py`, both required by the described work. The master's verification record concluded that this shard "never touches" `test_skill_drift.py` and re-credited it to p4 — **that conclusion was wrong**: p3 changes how doctor classifies a differing copy, which re-classifies the fixtures those tests depend on, so p3 cannot avoid the file.
 
 ## Failure modes to anticipate
 

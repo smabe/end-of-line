@@ -12,6 +12,12 @@ See the master `plans/skill-drift-trigger.md`. The decisions binding this phase:
 
 ## Work
 
+**Carried in from p3 (shipped `6777324`).** Three constraints, the first two promoted to Done criteria below:
+- **A "stale but repairable" fixture must be RECORDED, not just written.** Arbitrary stale bytes now classify `foreign`, which is the copy repair must leave alone — so a repair test built by writing bytes asserts the opposite of what it means to. Install and record it, or use a real shipped fingerprint.
+- **Manual CLI verification needs a resolved temp home** — build it with `cd $(mktemp -d) && pwd -P`. On macOS `$TMPDIR` sits under `/var`, a symlink, so an unresolved home puts every skill in the can-not-repair path and nothing ever looks repairable.
+- **Batch the sidecar write if repair updates several skills.** `record_install()` takes a cross-process lock and rewrites the whole sidecar per call; that is fine for the rare explicit install, but p4 puts it on `clu init` and `clu queue add`.
+New surface available: `load_manifest() -> tuple[dict, str | None]`, `shipped_fingerprints()`, `digest()`, `record_path()`, `installed_record()`, `record_install()`, `MANIFEST_FILENAME`.
+
 **Carried in from p2 (shipped `22ac6d0`).** Two constraints, both promoted to Done criteria below rather than left as prose:
 - **Gate repair on `writable`, never on `placement`.** On a real machine the symlink is the skill DIRECTORY, so the leaf is a regular file and `placement` is `"file"` while `writable` is `False`. A placement-keyed guard never fires on the hazard this plan exists to prevent.
 - **Resolve the temp `HOME` in any test that asserts a repair HAPPENED.** On macOS `$TMPDIR` sits under `/var`, itself a symlink, so an unresolved temp home makes every target `writable=False` and a repair assertion silently passes over a repair that never ran.
@@ -77,6 +83,9 @@ Also available from p2 beyond its declared `Produces:` line: `installed_path(nam
 - The refusal path stays quiet because `writable` is computed once at scan time and the filesystem changes before the write. Re-check immediately before `os.replace`, not only in `scan()`.
 
 ## Done criteria
+
+- **The repairable fixture is proven repairable before the repair is asserted.** State the `provenance` value the fixture produced BEFORE calling `repair()`; if it reads `foreign`, the test is exercising the leave-alone path and the criterion is not met however green it looks.
+- **The manual end-to-end run uses a resolved temp home.** Quote the home path used and its `writable` value; an unresolved `/var/...` path makes every skill unrepairable and the run proves nothing.
 
 - **Repair is gated on `writable`, and a test proves a placement-keyed guard would not do.** Build the real-machine shape — a skill whose parent DIRECTORY is a symlink, leaving `placement == "file"` — stale it, run `repair()`, and show the file behind the symlink is byte-identical afterwards. State the `placement` and `writable` values the fixture produced; a fixture reporting `placement == "link"` is testing the wrong shape.
 - **Every repair test resolves its temp `HOME` before asserting.** For one such test, state the `writable` value observed with the home unresolved and with it resolved. If they are both `False`, the test is asserting nothing and the criterion is not met.
