@@ -51,6 +51,7 @@ from . import (
     queue,
     quota,
     registry,
+    skill_sync,
     state_blocker,
     state_locator,
     supervisor,
@@ -2811,39 +2812,56 @@ def _print_demo_sweep_health() -> None:
 
 def _print_skill_drift_health() -> None:
     """Warn when an installed `~/.claude/skills/<name>/SKILL.md` differs from
-    the bundled copy (#75).
+    the bundled copy, or when clu can't compare it at all (#75).
 
     A stale installed skill is what made the pre-#72 heartbeat loop ship at the
     incident — clu had no way to surface that the deployed copy was behind.
-    SHA-256 over raw bytes, not mtime: mtime false-positives on every reinstall.
-    Quiet when every installed skill matches; skills that aren't installed
-    aren't drift.
-    """
-    import hashlib
-    from importlib.resources import files
+    Every filesystem fact comes from `skill_sync.scan()` (SHA-256 over raw
+    bytes, not mtime); this is formatting and policy only. Quiet when every
+    installed skill matches; skills that aren't installed aren't drift.
 
-    drifted: list[str] = []
-    for name in BUNDLED_SKILLS:
-        if name in VENDORED_SKILLS:
-            continue  # clu isn't canonical for these — a local diff isn't drift.
-        installed_path = Path.home() / ".claude" / "skills" / name / "SKILL.md"
-        if not installed_path.exists():
-            continue
-        try:
-            bundled = files("end_of_line").joinpath(f"skills/{name}/SKILL.md").read_bytes()
-            installed = installed_path.read_bytes()
-        except OSError:
-            continue
-        if hashlib.sha256(bundled).digest() != hashlib.sha256(installed).digest():
-            drifted.append(name)
-    if not drifted:
-        return
-    print(
-        "Installed skills differ from the bundle "
-        "(re-sync with `clu install-skill --only <name> --force`):"
-    )
-    for name in drifted:
-        print(f"  {name} — ~/.claude/skills/{name}/SKILL.md differs from the bundled copy")
+    `VENDORED_SKILLS` acts here as an OWNERSHIP signal, not a write guard:
+    clu isn't canonical for those, so neither a content difference nor a
+    symlinked install is worth a warning — both are their expected steady
+    state. A dangling or unreadable install is reported for every skill.
+    """
+    statuses = skill_sync.scan()
+    # A skill clu cannot write is NEVER listed as drift: the drift header tells
+    # the operator to re-sync with `--force`, and telling them to run a command
+    # that cannot work is worse than not mentioning the difference. The
+    # unwritable line below carries the difference instead.
+    drifted = [
+        s
+        for s in statuses
+        if s.content == "differs" and s.writable and s.name not in VENDORED_SKILLS
+    ]
+    unusable: list[tuple[skill_sync.SkillStatus, str]] = []
+    for s in statuses:
+        if s.placement == "broken":
+            unusable.append((s, "dangling symlink, points at nothing"))
+        elif s.placement == "unreadable":
+            unusable.append((s, "can't be read, check permissions"))
+        elif s.placement == "absent":
+            continue  # nothing installed is nothing to report — not even a path
+        elif not s.writable and s.name not in VENDORED_SKILLS:
+            # Keyed on `writable`, not on a `link` placement: the symlink is
+            # usually the skill DIRECTORY, which leaves the leaf a regular
+            # file. A placement-only test misses every install shaped that way.
+            differs = " and differs from the bundle" if s.content == "differs" else ""
+            unusable.append(
+                (s, f"a symlink on its path{differs}; clu won't write through it")
+            )
+    if drifted:
+        print(
+            "Installed skills differ from the bundle "
+            "(re-sync with `clu install-skill --only <name> --force`):"
+        )
+        for s in drifted:
+            print(f"  {s.name} — {s.target} differs from the bundled copy")
+    if unusable:
+        print("Installed skills clu can't compare or re-sync:")
+        for s, reason in unusable:
+            print(f"  {s.name} — {reason}: {s.target}")
 
 
 def _print_zombie_health(cfg: ProjectConfig) -> None:
