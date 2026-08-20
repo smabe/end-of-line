@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import demo, notify, registry, top
+from end_of_line import demo, notify, plan_store, registry, top
 from end_of_line import state as st
 from end_of_line.config import CONFIG_FILENAME, load_project_config
 from end_of_line.plan_parser import parse_sessions_index
@@ -85,7 +85,7 @@ class UpTest(CluTestCase):
         self.assertEqual(slugs, {"demo-busy", "demo-idle"})
         for p in plans:
             state = p.project_root / "plans" / ".orchestrator" / f"{p.slug}.state.json"
-            self.assertTrue(state.is_file())
+            self.assertTrue(plan_store.exists_for_path(state))
 
 
 class MultiPhaseTest(CluTestCase):

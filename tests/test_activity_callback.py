@@ -8,6 +8,7 @@ detector can scope to descendants spawned during the active tool call.
 from __future__ import annotations
 
 import subprocess
+import threading
 import unittest
 
 from end_of_line import state as st
@@ -152,40 +153,32 @@ class ActivityCallbackTestCase(CluTestCase):
 
     def test_drops_silently_on_lock_contention(self) -> None:
         # PreToolUse hook fires under load; if the supervisor or another
-        # callback is holding the state lock, we'd rather drop the marker
-        # update than freeze the worker's Bash invocation. clu activity
-        # exits 0 on lock-timeout; the marker just stays whatever it was.
+        # callback is holding the store's write lock, we'd rather drop the
+        # marker update than freeze the worker's Bash invocation. clu activity
+        # exits 0 on the bounded-wait timeout; the marker stays what it was.
+        started = threading.Event()
+        release = threading.Event()
 
-        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
-        # Hold the lock from a subprocess so flock contention is real
-        # (BSD flock is per-file; another FD in the same process is enough
-        # on macOS but subprocess is safer across platforms).
-        import subprocess as _sp
+        def hold() -> None:
+            # A real write transaction on the project database, held open —
+            # the direct replacement for the subprocess that used to hold the
+            # flock on the state file.
+            with st.mutate(self.state_path):
+                started.set()
+                release.wait(5)
 
-        holder = _sp.Popen(
-            [
-                "python3",
-                "-c",
-                "import fcntl,os,sys,time;"
-                f"fd=os.open(r'{lock_path}',os.O_RDWR|os.O_CREAT,0o600);"
-                "fcntl.flock(fd,fcntl.LOCK_EX);"
-                "sys.stdout.write('locked\\n');sys.stdout.flush();"
-                "time.sleep(5)",
-            ],
-            stdout=_sp.PIPE,
-            text=True,
-        )
+        holder = threading.Thread(target=hold)
+        holder.start()
         try:
-            assert holder.stdout is not None
-            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            self.assertTrue(started.wait(5))
             rc = main(self._argv("--start-bash"))
             self.assertEqual(rc, 0)
-            # Marker should NOT be set — we dropped the update.
-            data = st.load(self.state_path)
-            self.assertNotIn("active_tool_started_at", data["current_claim"])
         finally:
-            holder.terminate()
-            holder.wait(timeout=2)
+            release.set()
+            holder.join(5)
+        # Marker should NOT be set — we dropped the update.
+        data = st.load(self.state_path)
+        self.assertNotIn("active_tool_started_at", data["current_claim"])
 
 
 if __name__ == "__main__":

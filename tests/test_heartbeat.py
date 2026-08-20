@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -226,7 +225,7 @@ class StalledSupervisorTestCase(CluTestCase):
             st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        return st.load(self.state_path)
 
     def test_stalled_emitted_once_per_claim(self) -> None:
         tick(self.state_path, self.cfg)  # claims a

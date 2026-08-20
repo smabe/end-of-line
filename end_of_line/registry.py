@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import db
+from . import db, plan_store
 from . import state as st
 
 
@@ -91,7 +91,7 @@ def load_entry_state(entry: PlanEntry) -> dict | None:
         state_path = cfg.state_path(entry.plan_slug)
     except (OSError, st.InvalidSlug, ValueError):
         return None
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return None
     try:
         return st.load(state_path)

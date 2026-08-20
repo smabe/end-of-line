@@ -8,7 +8,6 @@ as part of clu-inbox phase `gap-notifications` (closes #20).
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,7 +49,7 @@ class StuckBlockerTestCase(unittest.TestCase):
             st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        return st.load(self.state_path)
 
     def _seed_blocker(self, age_minutes: int, last_repinged_minutes_ago: int | None = None) -> str:
         """Add a blocker on phase 'a' aged `age_minutes` (asked_at backdated)."""

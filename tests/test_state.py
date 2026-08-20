@@ -5,11 +5,14 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from end_of_line import db
 from end_of_line import state as st
 
 
@@ -17,7 +20,9 @@ class TempStateMixin:
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
-        self.state_path = self.tmp / "test.state.json"
+        # The slug in the filename is the KEY the store is read back by, so
+        # it matches the `plan_slug` these tests seed.
+        self.state_path = self.tmp / "foo.state.json"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -47,16 +52,17 @@ class TestEmptyState(unittest.TestCase):
 class TestAtomicWrite(TempStateMixin, unittest.TestCase):
     def test_save_load_roundtrip(self) -> None:
         data = st.empty_state("foo", "plans")
-        with st.locked(self.state_path):
-            st.save_atomic(self.state_path, data)
+        st.save_atomic(self.state_path, data)
         loaded = st.load(self.state_path)
         self.assertEqual(loaded["plan_slug"], "foo")
 
     def test_save_atomic_leaves_no_tmp_on_success(self) -> None:
-        data = st.empty_state("foo", "plans")
-        with st.locked(self.state_path):
-            st.save_atomic(self.state_path, data)
-        leftover = list(self.state_path.parent.glob("test.state.json.*.tmp"))
+        # The tmp+fsync+rename engine still serves the stores that are files
+        # (queue.json, quota.json), so this asserts against one of those rather
+        # than a plan-state path, which now routes to the database.
+        path = self.tmp / "plain.json"
+        st.save_atomic(path, {"schema_version": 1, "rows": []})
+        leftover = list(path.parent.glob("plain.json.*.tmp"))
         self.assertEqual(leftover, [])
 
 
@@ -247,21 +253,35 @@ class TestLockfileSymlink(TempStateMixin, unittest.TestCase):
 
 
 class TestSchemaVersion(TempStateMixin, unittest.TestCase):
-    def test_load_rejects_future_version(self) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text('{"schema_version": 999, "events": []}')
+    """Two loaders, two version checks.
+
+    A plan-state path is versioned by the database's `user_version`; the stores
+    still on files carry `schema_version` in the document. Both raise the same
+    `SchemaVersionMismatch`, which is what every tolerant reader catches.
+    """
+
+    def test_load_rejects_a_store_from_a_newer_clu(self) -> None:
+        st.save_atomic(self.state_path, st.empty_state("foo", "plans"))
+        conn = sqlite3.connect(str(db.project_db_path(self.state_path.parent)))
+        conn.execute(f"PRAGMA user_version = {db.PROJECT_SCHEMA_VERSION + 1}")
+        conn.close()
         with self.assertRaises(st.SchemaVersionMismatch):
             st.load(self.state_path)
 
-    def test_load_rejects_missing_version(self) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text('{"events": []}')
+    def test_file_loader_rejects_future_version(self) -> None:
+        path = self.tmp / "plain.json"
+        path.write_text('{"schema_version": 999, "rows": []}')
         with self.assertRaises(st.SchemaVersionMismatch):
-            st.load(self.state_path)
+            st.load(path, expected_version=1)
+
+    def test_file_loader_rejects_missing_version(self) -> None:
+        path = self.tmp / "plain.json"
+        path.write_text('{"rows": []}')
+        with self.assertRaises(st.SchemaVersionMismatch):
+            st.load(path, expected_version=1)
 
     def test_load_accepts_current_version(self) -> None:
-        with st.mutate(self.state_path) if False else st.locked(self.state_path):
-            st.save_atomic(self.state_path, st.empty_state("foo", "plans"))
+        st.save_atomic(self.state_path, st.empty_state("foo", "plans"))
         loaded = st.load(self.state_path)
         self.assertEqual(loaded["plan_slug"], "foo")
 
@@ -549,34 +569,39 @@ class WorkerIdleWindowSatisfiedTestCase(unittest.TestCase):
 
 
 class TestMutateTimeout(TempStateMixin, unittest.TestCase):
-    """`mutate(path, timeout_seconds=...)` forwards to `locked` — the daemon's
-    death report needs a bounded lock so it can never hang on its exit path."""
+    """`mutate(path, timeout_seconds=...)` bounds its wait for the store's write
+    lock — the activity hook and the daemon's death report both need to give up
+    rather than hang, and both catch `LockTimeout` by name."""
 
     def _seed(self) -> None:
-        data = st.empty_state("foo", "plans")
-        with st.locked(self.state_path):
-            st.save_atomic(self.state_path, data)
+        st.save_atomic(self.state_path, st.empty_state("foo", "plans"))
 
-    def test_timeout_raises_when_lock_held(self) -> None:
-        import fcntl
-
+    def test_timeout_raises_when_another_writer_holds_the_lock(self) -> None:
         self._seed()
-        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        started = threading.Event()
+        release = threading.Event()
+
+        def hold() -> None:
+            with st.mutate(self.state_path):
+                started.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            self.assertTrue(started.wait(5))
             with self.assertRaises(st.LockTimeout):
                 with st.mutate(self.state_path, timeout_seconds=0.1):
-                    pass  # pragma: no cover — lock is held, never entered
+                    pass  # pragma: no cover — the lock is held, never entered
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            release.set()
+            holder.join(5)
 
     def test_no_timeout_round_trips_normally(self) -> None:
         self._seed()
         with st.mutate(self.state_path) as data:
-            data["plan_slug"] = "changed"
-        self.assertEqual(st.load(self.state_path)["plan_slug"], "changed")
+            data["status"] = st.STATUS_PAUSED
+        self.assertEqual(st.load(self.state_path)["status"], st.STATUS_PAUSED)
 
 
 class TestWorkerDeathMarker(unittest.TestCase):

@@ -10,7 +10,6 @@ phase.
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,7 +51,7 @@ class StalledClaimTestCase(unittest.TestCase):
             st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        return st.load(self.state_path)
 
     def _claim_and_age(self, lease_minutes_past: int) -> None:
         """First tick dispatches phase 'a'; then backdate the lease."""

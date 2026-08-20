@@ -180,7 +180,7 @@ class _SystemicFixture(CluTestCase):
         self.log_path.write_text(body)
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        return st.load(self.state_path)
 
 
 class SystemicDispatchTestCase(_SystemicFixture):
@@ -378,7 +378,7 @@ class MultiPlanIndependenceTestCase(CluTestCase):
 
         for slug in ("t1", "t2"):
             sp = self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
-            data = json.loads(sp.read_text())
+            data = st.load(sp)
             self.assertEqual(
                 data["status"],
                 st.STATUS_PAUSED,

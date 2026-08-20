@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import coolant, db, inbox, notify, quota, state_blocker
+from . import coolant, db, inbox, notify, plan_store, quota, state_blocker
 from . import state as st
 from .config import ORCHESTRATOR_DIR, ProjectConfig
 from .plan_parser import parse_sessions_index
@@ -598,7 +598,7 @@ def _emit_worker_idle(
 
 
 def tick(state_path: Path, config: ProjectConfig) -> TickResult:
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return TickResult("idle", f"no state at {state_path}")
 
     side_notifies: list[tuple[str, str]] = []
@@ -934,6 +934,16 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
         return _attach(TickResult("idle", "all phases blocked or none dispatchable"))
 
 
+class _PlanRevived(Exception):
+    """A plan stopped looking like a zombie between the scan and the write.
+
+    Raised to leave `mutate_compat`'s transaction WITHOUT writing: exiting the
+    window normally would commit an unchanged document (and bump the plan's
+    version), which is the churn the old code avoided by saving only on the act
+    path.
+    """
+
+
 @dataclass
 class ZombieSweepResult:
     """One state file the registry-independent sweep terminalized (or, in
@@ -962,10 +972,10 @@ def sweep_zombie_states(
     like `fm-docs-sweep` would otherwise sit at `running` forever.
 
     Registered slugs are skipped — tick-all / the supervisor own them, and a
-    registered plan may legitimately sit claimless between phases. Corrupt /
-    stale-schema files are skipped (operator's `clu doctor` surfaces those).
-    Idempotent: re-checks the zombie predicate under the lock so a concurrent
-    tick that just revived a plan isn't terminalized.
+    registered plan may legitimately sit claimless between phases. Unreadable
+    plans are skipped (operator's `clu doctor` surfaces those).
+    Idempotent: re-checks the zombie predicate inside the write transaction so
+    a concurrent tick that just revived a plan isn't terminalized.
 
     Scope: `tick-all` calls this once per project it visits, and it visits only
     projects that appear in the registry. A project whose *every* plan is
@@ -976,35 +986,47 @@ def sweep_zombie_states(
     """
     orch_dir = cfg.project_root / cfg.plan_dir / ORCHESTRATOR_DIR
     results: list[ZombieSweepResult] = []
-    if not orch_dir.is_dir():
-        return results
-    suffix = ".state.json"
-    for path in sorted(orch_dir.glob(f"*{suffix}")):
-        slug = path.name[: -len(suffix)]
+    # The plans in the DATABASE, not the files in the directory. Legacy
+    # `*.state.json` left behind by the storage migration are inert — globbing
+    # would feed every one of them to the zombie predicate, and each is
+    # unregistered and stuck at whatever status it froze with.
+    for slug in plan_store.plan_slugs(orch_dir):
         if slug in registered_slugs:
             continue
         try:
-            data = st.load(path)
-        except (OSError, ValueError, st.SchemaVersionMismatch):
+            data = plan_store.snapshot(orch_dir, slug)
+        except (*db.DEGRADABLE_ERRORS, ValueError, st.SchemaVersionMismatch):
+            # `db.DbBusy` is the one this list did not used to need: reading a
+            # state FILE could not be "busy", so a contended plan is a failure
+            # mode the store introduced. Skipping one plan is right — the sweep
+            # is a backstop that runs every tick, and the next one re-reads it.
             continue
         if not st.is_zombie_state(data):
             continue
         if dry_run:
             results.append(ZombieSweepResult(slug, reaped=False, terminalized=False))
             continue
-        # Re-load + re-check under the lock so a concurrent tick that just
-        # revived this plan isn't terminalized. Use `locked` (not `mutate`) and
-        # save only on the act path — `mutate` would re-write the unchanged file
-        # on the revived-no-op branch (needless atomic rewrite + mtime churn).
-        with st.locked(path):
-            live = st.load(path)
-            if not st.is_zombie_state(live):
-                continue
-            reap = st.reap_claim(live)
-            if live.get("current_claim"):
-                st.release_claim_and_emit(live, **cfg.coolant.release_kwargs())
-            st.terminalize(live, reason="zombie_sweep")
-            st.save_atomic(path, live)
+        # Re-check inside the write transaction so a concurrent tick that just
+        # revived this plan isn't terminalized — and leave the transaction by
+        # raising on the revived branch, so nothing is written when there is
+        # nothing to do.
+        try:
+            with plan_store.mutate_compat(orch_dir, slug) as live:
+                if not st.is_zombie_state(live):
+                    raise _PlanRevived
+                reap = st.reap_claim(live)
+                if live.get("current_claim"):
+                    st.release_claim_and_emit(live, **cfg.coolant.release_kwargs())
+                st.terminalize(live, reason="zombie_sweep")
+        except _PlanRevived:
+            continue
+        except db.DbBusy:
+            # Same reason as the read above: the write lock is the project's
+            # now, so a tick working any plan in this project can hold it past
+            # the budget. Taking down the sweep — and, from `clu doctor`, the
+            # health report around it — over a plan the next tick will re-scan
+            # is the wrong trade.
+            continue
         results.append(
             ZombieSweepResult(slug, reaped=bool(reap and reap.signaled), terminalized=True)
         )

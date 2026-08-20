@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
 from pathlib import Path
 
 from end_of_line import state as st
@@ -46,13 +45,13 @@ def _make_state(
         "events": events or [],
         "created_at": TS,
     }
-    path.write_text(json.dumps(data))
+    # Through the store: `path` is the key to a row in the project database.
+    st.save_atomic(path, data)
 
 
 def _append_event(path: Path, event: dict) -> None:
-    data = json.loads(path.read_text())
-    data["events"].append(event)
-    path.write_text(json.dumps(data))
+    with st.mutate(path) as data:
+        data["events"].append(event)
 
 
 def _write_master(project: Path, slug: str, phases: list[str]) -> None:

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import notify
+from end_of_line import db, notify
 from end_of_line import state as st
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
@@ -45,10 +45,11 @@ class SupervisorTestCase(CluTestCase):
             st.save_atomic(self.state_path, data)
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        return st.load(self.state_path)
 
     def test_idle_when_no_state(self) -> None:
-        self.state_path.unlink()
+        # No plan in the store at all — the store's equivalent of no state file.
+        db.project_db_path(self.state_path.parent).unlink()
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "idle")
 
@@ -663,7 +664,7 @@ class QuotaGateSupervisorTests(CluTestCase):
         self.quota_path.write_text(json.dumps(base))
 
     def _read(self, slug: str) -> dict:
-        return json.loads(self.paths[slug].read_text())
+        return st.load(self.paths[slug])
 
     def _read_quota(self) -> dict:
         return json.loads(self.quota_path.read_text())

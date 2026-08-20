@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,7 +70,7 @@ class SpawnedTaskTestCase(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, 0)
-        data = json.loads(self.state_path.read_text())
+        data = st.load(self.state_path)
         self.assertEqual(data["spawned_tasks"][0]["status"], "done")
 
     def test_task_done_force_bypasses_token(self) -> None:

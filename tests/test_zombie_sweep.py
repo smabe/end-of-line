@@ -8,11 +8,13 @@ tick-all's registry walk can never revisit.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
+from unittest import mock
 
-from end_of_line import registry, supervisor
+from end_of_line import db, plan_store, registry, supervisor
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from tests import GitProjectTestCase, write_config
@@ -69,9 +71,8 @@ class SweepZombieStatesTest(GitProjectTestCase):
         st.save_atomic(self.state_path.parent / f"{slug}.state.json", base)
 
     def _read_slug(self, slug: str) -> dict:
-        import json
 
-        return json.loads((self.state_path.parent / f"{slug}.state.json").read_text())
+        return st.load(self.state_path.parent / f"{slug}.state.json")
 
     def _registered_slugs(self) -> set[str]:
         return {e.plan_slug for e in registry.entries_for_project(self.project)}
@@ -89,6 +90,28 @@ class SweepZombieStatesTest(GitProjectTestCase):
             [st.EVENT_PLAN_ABANDONED],
         )
 
+    def test_a_contended_plan_is_skipped_not_raised(self):
+        # Reading a state FILE could not be "busy", so contention is a failure
+        # mode the store introduced — and the write lock is the whole PROJECT's
+        # now, so a tick working any other plan can hold it past the budget.
+        # The sweep is a backstop that runs every tick; skipping one plan is
+        # right, taking down the caller (`clu doctor` prints this inline) is not.
+        self._write_state("fm-docs", status=st.STATUS_RUNNING, claim=None)
+        with mock.patch.object(plan_store, "snapshot", side_effect=db.DbBusy("project busy")):
+            out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
+        self.assertEqual(out, [])
+        # And the plan is untouched — a skip, not a silent terminalize.
+        self.assertEqual(self._read_slug("fm-docs")["status"], st.STATUS_RUNNING)
+
+    def test_a_plan_contended_at_the_write_is_skipped_not_raised(self):
+        # Same for the second window: the re-check happens inside the write
+        # transaction, so the budget can expire there too.
+        self._write_state("fm-docs", status=st.STATUS_RUNNING, claim=None)
+        with mock.patch.object(plan_store, "mutate_compat", side_effect=db.DbBusy("project busy")):
+            out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
+        self.assertEqual(out, [])
+        self.assertEqual(self._read_slug("fm-docs")["status"], st.STATUS_RUNNING)
+
     def test_registered_plan_skipped(self):
         # test-plan is registered by setUp; even if running it must be skipped.
         with st.mutate(self.state_path) as d:
@@ -96,6 +119,33 @@ class SweepZombieStatesTest(GitProjectTestCase):
         out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
         self.assertEqual(out, [])
         self.assertEqual(self._read()["status"], st.STATUS_RUNNING, "registered → untouched")
+
+    def test_legacy_state_files_are_not_swept(self):
+        # After the storage migration a project directory can hold `*.state.json`
+        # files nobody reads any more — quarantined later, inert now. The sweep
+        # enumerates the DATABASE: a glob would hand every one of these to the
+        # zombie predicate (they are unregistered and frozen at `running`) and
+        # chew them, which is a rewrite of files the migration promised to leave
+        # untouched.
+        legacy = self.state_path.parent / "legacy-plan.state.json"
+        legacy.write_text(
+            json.dumps(
+                {
+                    "schema_version": st.SCHEMA_VERSION,
+                    "plan_slug": "legacy-plan",
+                    "status": st.STATUS_RUNNING,
+                    "current_claim": None,
+                    "events": [],
+                }
+            )
+        )
+        before = legacy.read_bytes()
+        self._write_state("fm-docs", status=st.STATUS_RUNNING, claim=None)
+
+        out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
+
+        self.assertEqual([z.plan_slug for z in out], ["fm-docs"], "only the DB plan is swept")
+        self.assertEqual(legacy.read_bytes(), before, "the legacy file was rewritten")
 
     def test_terminal_unregistered_skipped(self):
         self._write_state("done-plan", status=st.STATUS_DONE, claim=None)
@@ -163,9 +213,8 @@ class SweepIntegrationTest(GitProjectTestCase):
         self._write_zombie("fm-docs")
         rc = main(["tick-all"])
         self.assertEqual(rc, ExitCode.OK)
-        import json
 
-        data = json.loads((self.state_path.parent / "fm-docs.state.json").read_text())
+        data = st.load(self.state_path.parent / "fm-docs.state.json")
         self.assertEqual(data["status"], st.STATUS_HALTED, "tick-all should terminalize it")
 
     def test_doctor_reports_zombie_dry_run(self):
@@ -180,7 +229,6 @@ class SweepIntegrationTest(GitProjectTestCase):
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("fm-docs", buf.getvalue())
         # Dry-run: doctor must NOT have terminalized it.
-        import json
 
-        data = json.loads((self.state_path.parent / "fm-docs.state.json").read_text())
+        data = st.load(self.state_path.parent / "fm-docs.state.json")
         self.assertEqual(data["status"], st.STATUS_RUNNING, "doctor is read-only")

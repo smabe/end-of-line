@@ -13,6 +13,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from end_of_line import db
 from end_of_line import state as st
 from end_of_line.cli import main
 from tests import CluTestCase
@@ -77,9 +78,9 @@ class TickAllTestCase(CluTestCase):
     def test_one_bad_plan_does_not_abort_others(self) -> None:
         p1 = self._make_project("alpha")
         p2 = self._make_project("beta")
-        # Corrupt alpha's state file — tick() will fail when it tries
-        # to load it. beta must still tick normally and overall exit 0.
-        self._state_path(p1).write_text("{ not valid json")
+        # Corrupt alpha's store — tick() will fail when it tries to read it.
+        # beta must still tick normally and overall exit 0.
+        db.project_db_path(self._state_path(p1).parent).write_bytes(b"not a database")
 
         rc, _, err = self._run()
         self.assertEqual(rc, 0)

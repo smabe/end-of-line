@@ -1,9 +1,16 @@
-"""Atomic state-file management.
+"""Plan state: the domain vocabulary, and the routing into its store.
 
-The state file is the single durable artifact across cold-context phases.
-Every mutation is wrapped in a file lock; every write is tmp+fsync+rename.
-The event log is append-only — projection from events can rebuild any
-derived field if state ever gets corrupted.
+Plan state is the single durable artifact across cold-context phases. It lives
+in the project database (`plans/.orchestrator/clu.db`, see `plan_store`), and
+`load` / `mutate` / `save_atomic` route a plan-state PATH to that store while
+keeping their signatures — the path is the key. The sibling stores still on
+files (`queue.json`, `quota.json`) keep the flock + tmp+fsync+rename engine in
+this module, which is why the routing is a predicate on the path rather than a
+mode on the caller.
+
+Everything else here is domain logic over the loaded dict — claims, blockers,
+events, liveness — and is storage-agnostic. The event log is append-only:
+projection from events can rebuild any derived field.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import coolant
+from . import coolant, db
 
 # Inner char-class body for a slug token — the single source of the slug
 # alphabet. Composed into `SLUG_PATTERN` below and into the cmdline token
@@ -94,6 +101,11 @@ def local_branch_exists(project_root: Path, branch: str) -> bool:
 
 
 SCHEMA_VERSION = 1
+
+# The suffix that makes a path a plan-state KEY rather than a file. `config`
+# builds these paths, `plan_store` re-exports this constant, and the three
+# primitives below route on it — one definition so the three can never disagree.
+STATE_SUFFIX = ".state.json"
 
 
 class SchemaVersionMismatch(Exception):
@@ -590,31 +602,74 @@ def locked_json(
         save_atomic(path, data)
 
 
+def _routes_to_store(path: Path) -> bool:
+    """True for a plan-state path — the key of a row in the project database.
+
+    Plan state lives in `plans/.orchestrator/clu.db`; the sibling stores in the
+    same directory (`queue.json`, `quota.json`) are still files, so the three
+    primitives below switch on the path they are given rather than on a flag.
+    """
+    return Path(path).name.endswith(STATE_SUFFIX)
+
+
+def _plan_store():
+    """The store, imported on use.
+
+    `plan_store` imports this module for `validate_slug` / `SCHEMA_VERSION`, so
+    the dependency runs one way at import time and the other way at call time.
+    """
+    from . import plan_store
+
+    return plan_store
+
+
 @contextmanager
 def mutate(
     state_path: Path,
     *,
     timeout_seconds: float | None = None,
 ) -> Iterator[dict]:
-    """Take the lock, load, yield data for mutation, write atomically on exit.
+    """Load, yield data for mutation, write it back — as one transaction.
 
     Use this for every read-modify-write. Plain `locked()` is for the rare
-    case where multiple files need to be coordinated under one lock.
+    case where multiple FILES need to be coordinated under one lock.
 
-    `timeout_seconds` (default None → block forever) is forwarded to `locked`
-    for callers that must not hang — e.g. the heartbeat daemon's death report.
+    `timeout_seconds` (default None → wait) bounds the wait for the store's
+    write lock; exceeding it raises `LockTimeout`, exactly as the flock budget
+    did, for callers that must not hang — the activity hook and the heartbeat
+    daemon's death report.
     """
-    with locked_json(
-        state_path,
-        expected_version=SCHEMA_VERSION,
-        timeout_seconds=timeout_seconds,
-    ) as data:
-        yield data
+    if not _routes_to_store(state_path):
+        with locked_json(
+            state_path,
+            expected_version=SCHEMA_VERSION,
+            timeout_seconds=timeout_seconds,
+        ) as data:
+            yield data
+        return
+    plan_store = _plan_store()
+    orch_dir, slug = plan_store.key_for_state_path(state_path)
+    try:
+        with plan_store.mutate_compat(orch_dir, slug, timeout_s=timeout_seconds) as data:
+            yield data
+    except db.DbBusy as exc:
+        # The bounded-wait currency callers already speak. `LockTimeout` is
+        # caught by name at the activity hook (2s budget, drop the write rather
+        # than freeze the worker's Bash call) and on the heartbeat daemon's
+        # exit path; the store's `DbBusy` means the same thing.
+        raise LockTimeout(state_path) from exc
 
 
 def load(state_path: Path, *, expected_version: int = SCHEMA_VERSION) -> dict:
-    """Read + schema-check a clu JSON file. `expected_version` lets sibling
-    schemas (e.g. registry.json) reuse the same loader."""
+    """Read + schema-check a clu store. `expected_version` lets sibling
+    schemas (e.g. queue.json) reuse the same loader.
+
+    A plan-state path routes to the project database and the version check is
+    the database's own `user_version` (`plan_store` raises the same
+    `SchemaVersionMismatch` for a store written by a newer clu).
+    """
+    if _routes_to_store(state_path):
+        return _plan_store().snapshot(*key_for(state_path))
     data = json.loads(state_path.read_text())
     actual = data.get("schema_version")
     if actual != expected_version:
@@ -624,8 +679,27 @@ def load(state_path: Path, *, expected_version: int = SCHEMA_VERSION) -> dict:
     return data
 
 
+def key_for(state_path: Path) -> tuple[Path, str]:
+    """(orchestrator dir, slug) for a plan-state path — the store's key."""
+    return _plan_store().key_for_state_path(state_path)
+
+
 def save_atomic(state_path: Path, data: dict) -> None:
-    """Write tmp + fsync + rename. Caller must hold the lock."""
+    """Write a whole document.
+
+    A plan-state path replaces that plan's rows (creating the plan if absent) —
+    the store-side meaning of "the file was overwritten". Nothing in the
+    orchestrator writes plan state this way any more; every writer goes through
+    `mutate`. It routes anyway because the whole-document write is what seeds a
+    plan in a test, and because a primitive that silently wrote a file the
+    engine no longer reads would be worse than one that routes.
+
+    Every other path is the file engine: tmp + fsync + rename, caller holds the
+    lock.
+    """
+    if _routes_to_store(state_path):
+        _plan_store().write_full(*key_for(state_path), data)
+        return
     state_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         prefix=state_path.name + ".",
@@ -1095,12 +1169,12 @@ def stamp_activity_marker(
     action: str,
     timeout_seconds: float | None = None,
 ) -> bool:
-    """Stamp or clear `current_claim.active_tool_started_at` under lock.
+    """Stamp or clear `current_claim.active_tool_started_at` in one window.
 
     `action` is "start" (PreToolUse) or "end" (PostToolUse). Token + phase
     are validated against the live claim; mismatch raises `ClaimMismatch`.
-    `timeout_seconds` is forwarded to `locked` — the hot-path hook entry
-    point passes 2.0 so a contended lock drops the update rather than
+    `timeout_seconds` is forwarded to `mutate` — the hot-path hook entry
+    point passes 2.0 so a contended store drops the update rather than
     freezing the worker's Bash invocation. Returns True on stamp, False
     on `LockTimeout`. Shared by `cli.cmd_activity` and the thin
     `end_of_line.activity_hook` entry point.
@@ -1108,15 +1182,13 @@ def stamp_activity_marker(
     if action not in ("start", "end"):
         raise ValueError(f"action must be 'start' or 'end', got {action!r}")
     try:
-        with locked(state_path, timeout_seconds=timeout_seconds):
-            data = load(state_path)
+        with mutate(state_path, timeout_seconds=timeout_seconds) as data:
             assert_claim_match(data, token, phase)
             claim = data["current_claim"]
             if action == "start":
                 mark_active_tool_start(claim, utcnow())
             else:
                 clear_active_tool(claim)
-            save_atomic(state_path, data)
     except LockTimeout:
         return False
     return True

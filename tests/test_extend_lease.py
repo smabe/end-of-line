@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import io
-import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -66,7 +65,7 @@ class ExtendLeaseTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        return st.load(self.state_path)
 
     def _write(self, mut) -> None:
         with st.locked(self.state_path):

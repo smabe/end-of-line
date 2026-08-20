@@ -1,11 +1,11 @@
 """Tests for watch.bootstrap_task_list — TASK_CREATE emission on startup."""
 
 import io
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from end_of_line import state as st
 from end_of_line.config import ProjectConfig
 from end_of_line.watch import bootstrap_task_list
 
@@ -25,10 +25,13 @@ class BootstrapEmissionTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _state_path(self, slug: str) -> Path:
+    def _state_path(self, slug: str, claim: dict | None = None) -> Path:
         p = self.tmp / "plans" / ".orchestrator" / f"{slug}.state.json"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("{}")
+        data = st.empty_state(slug, "plans")
+        if claim is not None:
+            data["current_claim"] = claim
+        st.save_atomic(p, data)
         return p
 
     def _plan_path(self, slug: str) -> Path:
@@ -123,18 +126,10 @@ class BootstrapEmissionTest(unittest.TestCase):
     def _state_path_with_claim(
         self, slug: str, phase_id: str, *, plan_status: str = "running"
     ) -> Path:
-        p = self.tmp / "plans" / ".orchestrator" / f"{slug}.state.json"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(
-            json.dumps(
-                {
-                    "plan_slug": slug,
-                    "status": plan_status,
-                    "current_claim": {"phase_id": phase_id},
-                }
-            )
-        )
-        return p
+        path = self._state_path(slug, claim={"phase_id": phase_id})
+        with st.mutate(path) as data:
+            data["status"] = plan_status
+        return path
 
     def test_bootstrap_emits_task_update_when_phase_active(self):
         slug = "my-plan"
@@ -156,7 +151,7 @@ class BootstrapEmissionTest(unittest.TestCase):
 
     def test_bootstrap_no_task_update_when_no_claim(self):
         slug = "my-plan"
-        state = self._state_path(slug)  # writes "{}" — current_claim absent
+        state = self._state_path(slug)  # no claim
         self._write_master(slug, ["p1"])
         sink = io.StringIO()
         bootstrap_task_list([state], _make_cfg_loader(self.tmp), sink)

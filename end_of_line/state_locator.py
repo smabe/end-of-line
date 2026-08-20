@@ -8,7 +8,6 @@ migrate phase wires them all to call here instead.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,7 +87,7 @@ def _load_open_blockers(entry: PlanEntry) -> tuple[Path, list[OpenBlocker]] | No
     """Resolve state_path from entry, load the state file, hydrate open blockers.
 
     Returns (state_path, blockers) on success; None on any recoverable failure
-    (missing file, schema mismatch, corrupt JSON, missing project config).
+    (no such plan, schema mismatch, unreadable store, missing project config).
     """
     from end_of_line.config import load_project_config  # local to avoid cycle
 
@@ -103,7 +102,7 @@ def _load_open_blockers(entry: PlanEntry) -> tuple[Path, list[OpenBlocker]] | No
     except FileNotFoundError:
         log.debug("state_locator: skipping %s — state file missing", entry.plan_slug)
         return None
-    except (st.SchemaVersionMismatch, json.JSONDecodeError, OSError) as exc:
+    except (st.SchemaVersionMismatch, ValueError, OSError) as exc:
         log.warning("state_locator: skipping %s — %s", entry.plan_slug, exc)
         return None
     return state_path, _hydrate_open_blockers(data, entry)

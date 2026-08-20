@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
+from . import plan_store
 from . import state as st
 from .plan_parser import parse_sessions_index
 
@@ -400,13 +401,13 @@ def bootstrap_task_list(
     If current_claim is running, also emit TASK_UPDATE to reconcile.
     """
     for state_path in state_paths:
-        if not state_path.exists():
+        if not plan_store.exists_for_path(state_path):
             continue
         slug = _slug_for_path(state_path)
         if not slug:
             continue
         try:
-            data: dict = json.loads(state_path.read_text())
+            data: dict = st.load(state_path)
         except Exception:
             data = {}
         cfg = cfg_loader(state_path)
@@ -443,6 +444,21 @@ def bootstrap_task_list(
             )
 
 
+def _event_id(event: dict) -> int:
+    """An event's monotonic row id, or 0 for an event that has none.
+
+    Events appended inside a mutate window carry no id until the store writes
+    them, and a hand-built fixture may carry none at all; 0 sorts them before
+    every stored event, which is where an un-persisted event belongs.
+    """
+    raw = event.get("id")
+    return int(raw) if isinstance(raw, int) else 0
+
+
+def _max_event_id(events: list[dict]) -> int:
+    return max((_event_id(e) for e in events), default=0)
+
+
 def _snapshot_line(slug: str, data: dict) -> str:
     claim = data.get("current_claim")
     active = f"active={claim['phase_id']}" if claim else "active=none"
@@ -474,16 +490,20 @@ def stream_loop(
     """
     if sink is None:
         sink = sys.stdout
+    # Cursor = the highest event id seen, never the list length. Ids are
+    # monotonic and never reused, so a later phase archiving a terminal plan's
+    # events out of the hot table cannot shrink the list under a live cursor —
+    # which a length cursor would read as "rewound", replaying history.
     cursors: dict[Path, int] = {}
     baseline: list[tuple[str, dict]] = []
 
     for path in list(state_paths):
         try:
             data = st.load(path)
-        except (FileNotFoundError, OSError, json.JSONDecodeError, st.SchemaVersionMismatch):
+        except (FileNotFoundError, OSError, ValueError, st.SchemaVersionMismatch):
             continue
         slug = _slug_for_path(path)
-        cursors[path] = len(data.get("events", []))
+        cursors[path] = _max_event_id(data.get("events", []))
         baseline.append((slug, data))
 
     if task_list_mode:
@@ -513,12 +533,15 @@ def stream_loop(
             for path in list(cursors.keys()):
                 try:
                     data = st.load(path)
-                except (FileNotFoundError, OSError, json.JSONDecodeError, st.SchemaVersionMismatch):
+                except (FileNotFoundError, OSError, ValueError, st.SchemaVersionMismatch):
                     cursors.pop(path, None)
                     continue
                 events = data.get("events", [])
                 slug = _slug_for_path(path)
-                for evt in events[cursors[path] :]:
+                seen = cursors[path]
+                for evt in events:
+                    if _event_id(evt) <= seen:
+                        continue
                     if task_list_mode:
                         line_or_none = project_event_task(evt, slug, verbose=verbose)
                     else:
@@ -533,7 +556,7 @@ def stream_loop(
                         )
                     else:
                         print(line_or_none, file=sink, flush=True)
-                cursors[path] = len(events)
+                cursors[path] = max(seen, _max_event_id(events))
             ticks += 1
             if max_ticks is None or ticks < max_ticks:
                 time.sleep(poll_interval)

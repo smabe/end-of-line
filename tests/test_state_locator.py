@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
+from end_of_line import db
 from end_of_line import state as st
 from end_of_line.registry import PlanEntry
 from end_of_line.state_locator import find_blocker_for_reply
@@ -31,10 +32,27 @@ def _make_project(tmp: Path, slug: str) -> tuple[Path, Path, PlanEntry]:
     return project, state_path, entry
 
 
+def _drop_plan(state_path: Path) -> None:
+    """The DB equivalent of deleting a state file: the plan's store is gone."""
+    db.project_db_path(state_path.parent).unlink()
+
+
+def _corrupt_store(state_path: Path) -> None:
+    """The DB equivalent of `write_bytes(b"not valid json{{{")`."""
+    db.project_db_path(state_path.parent).write_bytes(b"not a database at all")
+
+
+def _bump_schema(state_path: Path) -> None:
+    """Stamp a `user_version` this clu does not understand (upstream #6)."""
+    conn = sqlite3.connect(str(db.project_db_path(state_path.parent)))
+    conn.execute(f"PRAGMA user_version = {db.PROJECT_SCHEMA_VERSION + 1}")
+    conn.close()
+
+
 def _add_blocker_raw(state_path: Path, options: list[str] | None = None) -> None:
     """Append a bare open blocker directly — avoids touching EVENT_PHASE_BLOCKED
     so last_notified_at stays '' for all plans (stable tie in ambiguity tests)."""
-    data = json.loads(state_path.read_text())
+    data = st.load(state_path)
     opts = options if options is not None else ["yes", "no"]
     blocker_id = f"q-{len(data['blockers']) + 1}"
     data["blockers"].append(
@@ -118,7 +136,7 @@ class StateLocatorTestCase(unittest.TestCase):
         _, state_path, entry = _make_project(self.tmp, "plan-a")
         # Add then immediately answer the blocker
         _add_blocker_raw(state_path)
-        data = json.loads(state_path.read_text())
+        data = st.load(state_path)
         data["blockers"][0]["answer"] = "1"
         st.save_atomic(state_path, data)
         result = find_blocker_for_reply([entry], "1")
@@ -134,7 +152,7 @@ class StateLocatorTestCase(unittest.TestCase):
         _, sp_c, entry_c = _make_project(self.tmp, "plan-c")
         _add_blocker_raw(sp_a)
         # plan-b has no blockers, plan-c has corrupt JSON
-        sp_c.write_bytes(b"not valid json{{{")
+        _corrupt_store(sp_c)
         with self.assertLogs("end_of_line.state_locator", level=logging.WARNING) as cm:
             result = find_blocker_for_reply([entry_a, entry_b, entry_c], "plan-a 1")
         self.assertEqual(result.variant, "FOUND")
@@ -144,11 +162,9 @@ class StateLocatorTestCase(unittest.TestCase):
         _, sp_a, entry_a = _make_project(self.tmp, "plan-a")
         _, sp_b, entry_b = _make_project(self.tmp, "plan-b")
         _add_blocker_raw(sp_a)
-        # Write wrong schema_version for plan-b
-        data = json.loads(sp_b.read_text())
-        data["schema_version"] = 999
-        st.save_atomic(sp_b, data)
         _add_blocker_raw(sp_b)
+        # plan-b's store carries a schema this clu does not understand
+        _bump_schema(sp_b)
         with self.assertLogs("end_of_line.state_locator", level=logging.WARNING):
             result = find_blocker_for_reply([entry_a, entry_b], "plan-a 1")
         self.assertEqual(result.variant, "FOUND")
@@ -157,8 +173,8 @@ class StateLocatorTestCase(unittest.TestCase):
         _, sp_a, entry_a = _make_project(self.tmp, "plan-a")
         _, sp_b, entry_b = _make_project(self.tmp, "plan-b")
         _add_blocker_raw(sp_a)
-        sp_b.unlink()  # delete state file
-        # ENOENT should emit DEBUG only (not WARNING)
+        _drop_plan(sp_b)  # no such plan
+        # "no such plan" should emit DEBUG only (not WARNING)
         with self.assertLogs("end_of_line.state_locator", level=logging.DEBUG) as cm:
             result = find_blocker_for_reply([entry_a, entry_b], "plan-a 1")
         self.assertEqual(result.variant, "FOUND")
@@ -169,7 +185,7 @@ class StateLocatorTestCase(unittest.TestCase):
         _, sp_a, entry_a = _make_project(self.tmp, "plan-a")
         _, sp_b, entry_b = _make_project(self.tmp, "plan-b")
         _add_blocker_raw(sp_a)
-        sp_b.unlink()  # missing state file — should NOT warn, but should DEBUG
+        _drop_plan(sp_b)  # no such plan — should NOT warn, but should DEBUG
         with self.assertLogs("end_of_line.state_locator", level=logging.DEBUG) as cm:
             result = find_blocker_for_reply([entry_a, entry_b], "plan-a 1")
         self.assertEqual(result.variant, "FOUND")
@@ -184,7 +200,7 @@ class StateLocatorTestCase(unittest.TestCase):
         _, sp_a, entry_a = _make_project(self.tmp, "plan-a")
         _, sp_b, entry_b = _make_project(self.tmp, "plan-b")
         _add_blocker_raw(sp_a)
-        sp_b.write_bytes(b"not valid json{{{")  # corrupt JSON → still WARNING
+        _corrupt_store(sp_b)  # unreadable store → still WARNING
         with self.assertLogs("end_of_line.state_locator", level=logging.WARNING) as cm:
             result = find_blocker_for_reply([entry_a, entry_b], "plan-a 1")
         self.assertEqual(result.variant, "FOUND")

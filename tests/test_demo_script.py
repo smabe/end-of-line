@@ -18,6 +18,14 @@ of the lifecycle's own lines is asserted directly.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+from pathlib import Path
+
+from end_of_line import db
+from end_of_line import state as st
+from end_of_line.cli import main as cli_main
 from tests import CluTestCase, demo_script
 
 
@@ -63,6 +71,50 @@ class GoldenTest(CluTestCase):
             "the golden records no blocker answer",
         )
         self.assertIn(f"{slug}: PLAN DONE", lines)  # plan_completed
+
+
+class StorageCutoverTest(CluTestCase):
+    """What a full fleet run leaves behind, now that the engine is the database.
+
+    The golden proves the OUTPUT is unchanged; this proves the STORAGE moved.
+    Both matter: an engine swap that silently kept writing JSON files would pass
+    every golden diff in the plan.
+    """
+
+    def _run(self) -> Path:
+        project_root = demo_script.scaffold_project(self.tmp_path / "run")
+        demo_script.run_sequence(project_root, projects_root=self.tmp_path / "proj")
+        return project_root
+
+    def test_no_state_files_survive_a_full_run(self) -> None:
+        project_root = self._run()
+        orch = demo_script.state_path_for(project_root).parent
+        self.assertEqual(sorted(p.name for p in orch.glob("*.state.json")), [])
+        self.assertEqual(sorted(p.name for p in orch.glob("*.state.json.lock")), [])
+        self.assertTrue(db.project_db_path(orch).exists(), "no clu.db in the orchestrator dir")
+
+    def test_state_dump_prints_the_plan(self) -> None:
+        project_root = self._run()
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            rc = cli_main(
+                ["state", "dump", "--project", str(project_root), "--plan", demo_script.SLUG]
+            )
+        self.assertEqual(rc, 0)
+        dumped = json.loads(sink.getvalue())
+        self.assertEqual(dumped["status"], st.STATUS_DONE)
+        self.assertIn("current_claim", dumped)
+        self.assertTrue(dumped["blockers"], "the demo plan's blocker is missing from the dump")
+        self.assertTrue(dumped["events"], "the demo plan's events are missing from the dump")
+
+    def test_state_dump_without_a_plan_covers_every_plan(self) -> None:
+        project_root = self._run()
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            rc = cli_main(["state", "dump", "--project", str(project_root)])
+        self.assertEqual(rc, 0)
+        dumped = json.loads(sink.getvalue())
+        self.assertEqual(list(dumped), [demo_script.SLUG])
 
 
 if __name__ == "__main__":

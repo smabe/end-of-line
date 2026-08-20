@@ -15,7 +15,8 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from end_of_line import dispatch
+from end_of_line import db, dispatch
+from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
 from tests import isolate_registry
@@ -218,16 +219,27 @@ class DoctorCommandTestCase(_DoctorProjectTestCase):
         self.assertNotIn("Worktrees:", stdout)
 
     def test_doctor_does_not_touch_state(self) -> None:
-        # Initialize a plan, snapshot state.json mtime, run doctor, confirm
-        # mtime unchanged.  Guarantees the command is pure read.
+        # Initialize a plan, snapshot its stored document, run doctor, confirm
+        # nothing moved. Guarantees the command is a pure read. The plan's
+        # `version` column is part of the comparison: every writer bumps it, so
+        # a doctor that wrote anything at all would show up here even if the
+        # document it wrote back was identical.
         (self.project / "plans" / "t.md").write_text(PLAN)
         self._write_cfg(path=os.environ["PATH"])
         main(["init", "--project", str(self.project), "--plan", "t"])
         state_path = self.project / "plans" / ".orchestrator" / "t.state.json"
-        before = state_path.stat().st_mtime_ns
+
+        def stored() -> tuple[dict, int]:
+            conn = db.connect(db.project_db_path(state_path.parent), readonly=True)
+            try:
+                row = conn.execute("SELECT version FROM plans WHERE slug = 't'").fetchone()
+            finally:
+                conn.close()
+            return st.load(state_path), int(row[0])
+
+        before = stored()
         self._run_doctor()
-        after = state_path.stat().st_mtime_ns
-        self.assertEqual(before, after)
+        self.assertEqual(before, stored())
 
     # ---- demo sweep section ---------------------------------------------------
 

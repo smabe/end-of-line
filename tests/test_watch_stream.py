@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from unittest import mock
 
+from end_of_line import db
 from end_of_line import state as st
 from end_of_line.watch import stream_loop
 from tests import CluTestCase
@@ -54,13 +55,13 @@ def _make_state(
         "events": events or [],
         "created_at": TS,
     }
-    path.write_text(json.dumps(data))
+    # Through the store: `path` is the key to a row in the project database.
+    st.save_atomic(path, data)
 
 
 def _append_event(path: Path, event: dict) -> None:
-    data = json.loads(path.read_text())
-    data["events"].append(event)
-    path.write_text(json.dumps(data))
+    with st.mutate(path) as data:
+        data["events"].append(event)
 
 
 class StreamLoopSnapshotTest(CluTestCase):
@@ -278,13 +279,14 @@ class StreamLoopMissingFileTest(CluTestCase):
         )
         self.assertEqual(sink.getvalue(), "")
 
-    def test_state_file_deleted_mid_watch(self) -> None:
+    def test_state_deleted_mid_watch(self) -> None:
         project = self.tmp_path / "project"
         state_path = project / "plans" / ".orchestrator" / "gone.state.json"
         _make_state(state_path, "gone")
 
         def delete_it():
-            state_path.unlink()
+            # The store's equivalent of the state file vanishing mid-stream.
+            db.project_db_path(state_path.parent).unlink()
 
         sink = io.StringIO()
         stream_loop(

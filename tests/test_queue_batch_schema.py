@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import queue, registry
+from end_of_line import plan_store, queue, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig, load_project_config
@@ -144,7 +144,7 @@ class QueueBatchSchemaTestCase(CluTestCase):
             result = queue_advancement_rule(self.project, [])
 
         self.assertIsNotNone(result)
-        self.assertTrue(state_path.exists())
+        self.assertTrue(plan_store.exists_for_path(state_path))
         state = st.load(state_path)
         self.assertEqual(state.get("batch_id"), "my-batch")
 

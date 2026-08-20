@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
 import unittest
 from contextlib import redirect_stdout
 
@@ -34,7 +33,7 @@ class LifecycleTestCase(CluTestCase):
         self.assertEqual(rc, 0)
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        return st.load(self.state_path)
 
     def _write(self, mut) -> None:
         with st.locked(self.state_path):

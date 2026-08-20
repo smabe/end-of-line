@@ -79,7 +79,7 @@ class VerifyOptOutTestCase(unittest.TestCase):
             return token
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        return st.load(self.state_path)
 
     def _events_of_type(self, type_: str) -> list[dict]:
         return [e for e in self._read()["events"] if e["type"] == type_]

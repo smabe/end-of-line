@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import db, notify_discord_http
+from . import db, notify_discord_http, plan_store
 from . import state as st
 
 if TYPE_CHECKING:
@@ -101,8 +101,10 @@ class DiscordNotifier:
     ) -> None:
         if self._state_root is None:
             return
-        state_path = self._state_root / f"{plan_slug}.state.json"
-        if not state_path.exists():
+        # The path is the store's KEY, not a file — keep building it so the
+        # no-op-when-the-plan-is-absent contract stays exactly as it was.
+        state_path = self._state_root / f"{plan_slug}{st.STATE_SUFFIX}"
+        if not plan_store.exists_for_path(state_path):
             return
         with st.mutate(state_path) as data:
             for b in data.get("blockers", []):

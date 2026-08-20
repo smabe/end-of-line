@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from end_of_line import dry_merge, notify, queue, registry
+from end_of_line import dry_merge, notify, plan_store, queue, registry
 from end_of_line import state as st
 from end_of_line.config import ProjectConfig, load_project_config
 
@@ -61,8 +61,8 @@ def load_plans_for_project(project_root: Path, cfg: ProjectConfig) -> list[Proje
     plans: list[ProjectPlan] = []
     for entry in registry.entries_for_project(project_root):
         state_path = cfg.state_path(entry.plan_slug)
-        if not state_path.exists():
-            log.warning("cross_plan_rules: skipping %s — state file missing", entry.plan_slug)
+        if not plan_store.exists_for_path(state_path):
+            log.warning("cross_plan_rules: skipping %s — no such plan", entry.plan_slug)
             continue
         try:
             data = st.load(state_path)
@@ -146,7 +146,7 @@ def queue_advancement_rule(
 
     state_path = cfg.state_path(slug)
     existing_status: str | None = None
-    if state_path.exists():
+    if plan_store.exists_for_path(state_path):
         try:
             existing_status = st.load(state_path).get("status")
         except (OSError, ValueError, st.SchemaVersionMismatch):
@@ -201,20 +201,23 @@ def queue_advancement_rule(
     with queue.mutate(queue_path) as data:
         if not data["queue"] or data["queue"][0]["slug"] != slug:
             return None
-        with st.locked(state_path):
-            if not state_path.exists():
-                fresh = st.empty_state(slug, cfg.plan_dir)
-                if head.get("batch_id"):
-                    fresh["batch_id"] = head["batch_id"]
-                st.append_event(
-                    fresh,
-                    st.EVENT_QUEUE_POPPED,
-                    slug=slug,
-                    added_at=head.get("added_at"),
-                    added_by=head.get("added_by", "operator"),
-                    position=1,
-                )
-                st.save_atomic(state_path, fresh)
+        if not plan_store.exists_for_path(state_path):
+            fresh = st.empty_state(slug, cfg.plan_dir)
+            if head.get("batch_id"):
+                fresh["batch_id"] = head["batch_id"]
+            st.append_event(
+                fresh,
+                st.EVENT_QUEUE_POPPED,
+                slug=slug,
+                added_at=head.get("added_at"),
+                added_by=head.get("added_by", "operator"),
+                position=1,
+            )
+            # The queue flock is held OUTSIDE the store's write lock and no
+            # store lock is held while waiting on the flock, so the two cannot
+            # deadlock against each other. (The queue itself becomes a table in
+            # a later phase, at which point the pop is one transaction.)
+            plan_store.create(state_path.parent, fresh)
         registry.register(cfg.project_root, slug)
         data["queue"].pop(0)
 

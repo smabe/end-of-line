@@ -19,7 +19,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import coolant, notify, quota
+from . import coolant, notify, plan_store, quota
 from . import state as st
 from .config import ProjectConfig
 from .supervisor import TickResult
@@ -67,7 +67,10 @@ _REPAIR_SCHEMA_HINT = json.dumps(
 )
 
 # Exceptions that are recoverable in dispatch fallback paths.
-_DISPATCH_FALLBACK_ERRORS = (OSError, json.JSONDecodeError, st.SchemaVersionMismatch)
+# `ValueError` rather than `json.JSONDecodeError`: a store that cannot be read
+# used to be a JSON parse error (a ValueError) and now arrives as one from the
+# store's own translation, so the narrower name would let it through.
+_DISPATCH_FALLBACK_ERRORS = (OSError, ValueError, st.SchemaVersionMismatch)
 
 # Hard-coded signature list. Grows via PR only; no config field. Order
 # matters — first match wins, so put the most specific (rc-gated) one
@@ -609,7 +612,7 @@ def _maybe_write_attempt_context(
 ) -> None:
     """Write or delete the prior-attempt context sidecar based on attempt count."""
     try:
-        state_data = json.loads(state_file.read_text())
+        state_data = plan_store.snapshot(*st.key_for(state_file))
     except _DISPATCH_FALLBACK_ERRORS:
         return
     claim = state_data.get("current_claim") or {}

@@ -186,11 +186,11 @@ class InitWorktreeTestCase(unittest.TestCase):
 
     # --- rollback ------------------------------------------------------
 
-    def test_rollback_on_state_save_failure(self) -> None:
-        # Force `save_atomic` to raise after the worktree is materialized;
+    def test_rollback_on_state_create_failure(self) -> None:
+        # Force the state create to raise after the worktree is materialized;
         # init must tear the worktree + branch back down.
         with mock.patch(
-            "end_of_line.cli.st.save_atomic",
+            "end_of_line.cli.plan_store.create",
             side_effect=OSError("disk full"),
         ):
             with self.assertRaises(OSError):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -67,7 +66,7 @@ class DispatchTestCase(CluTestCase):
         cfg = self._cfg("")
         ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertFalse(ok)
-        data = json.loads(self.state_path.read_text())
+        data = st.load(self.state_path)
         self.assertIsNone(data["current_claim"])
         types = [e["type"] for e in data["events"]]
         self.assertIn("dispatch_failed", types)
@@ -88,7 +87,7 @@ class DispatchTestCase(CluTestCase):
         ):
             ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertFalse(ok)
-        data = json.loads(self.state_path.read_text())
+        data = st.load(self.state_path)
         self.assertIsNone(data["current_claim"])
         events = [e for e in data["events"] if e["type"] == "dispatch_failed"]
         self.assertEqual(len(events), 1)
@@ -100,7 +99,7 @@ class DispatchTestCase(CluTestCase):
         cfg = self._cfg("exit 42")
         ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertFalse(ok)
-        data = json.loads(self.state_path.read_text())
+        data = st.load(self.state_path)
         self.assertIsNone(data["current_claim"])
         events = [e for e in data["events"] if e["type"] == "dispatch_failed"]
         self.assertEqual(len(events), 1)
@@ -246,7 +245,7 @@ class DispatchTestCase(CluTestCase):
         )
         ok = dispatch_for_tick(result, cfg, "t", self.state_path)
         self.assertFalse(ok)
-        data = json.loads(self.state_path.read_text())
+        data = st.load(self.state_path)
         self.assertIsNone(data["current_claim"])
         self.assertEqual(data["status"], "paused")
         evts = [e for e in data["events"] if e["type"] == "worktree_missing"]
@@ -271,7 +270,7 @@ class DispatchTestCase(CluTestCase):
             )
             ok = dispatch_for_tick(result, cfg, "t", self.state_path)
             self.assertFalse(ok)
-            data = json.loads(self.state_path.read_text())
+            data = st.load(self.state_path)
             self.assertEqual(data["status"], "paused")
             self.assertIn(
                 "worktree_missing",
@@ -285,7 +284,7 @@ class DispatchTestCase(CluTestCase):
         cfg = self._cfg("sleep 3")
         ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertTrue(ok)
-        data = json.loads(self.state_path.read_text())
+        data = st.load(self.state_path)
         # No worktree_missing event should appear.
         self.assertNotIn(
             "worktree_missing",
@@ -297,7 +296,7 @@ class DispatchTestCase(CluTestCase):
         cfg = self._cfg("sleep 3")
         ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertTrue(ok)
-        data = json.loads(self.state_path.read_text())
+        data = st.load(self.state_path)
         claim = data["current_claim"]
         self.assertIsNotNone(claim)
         self.assertIn("pid", claim)
@@ -316,7 +315,7 @@ class DispatchTestCase(CluTestCase):
         cfg = self._cfg(f"sh -c 'printf \"%s\" {{session_id}} > {sentinel}'")
         ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertTrue(ok)
-        claim = json.loads(self.state_path.read_text())["current_claim"]
+        claim = st.load(self.state_path)["current_claim"]
         sid = claim["session_id"]
         uuid.UUID(sid)  # raises if not a valid uuid
         deadline = time.time() + 5.0
@@ -332,7 +331,7 @@ class DispatchTestCase(CluTestCase):
         cfg = self._cfg("sleep 3")
         ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertTrue(ok)
-        claim = json.loads(self.state_path.read_text())["current_claim"]
+        claim = st.load(self.state_path)["current_claim"]
         self.assertIsNone(claim.get("session_id"))
 
     def test_escaped_session_id_braces_do_not_stamp(self) -> None:
@@ -342,7 +341,7 @@ class DispatchTestCase(CluTestCase):
         cfg = self._cfg("sh -c 'echo {{session_id}} && sleep 3'")
         ok = dispatch_for_tick(self._result(), cfg, "t", self.state_path)
         self.assertTrue(ok)
-        claim = json.loads(self.state_path.read_text())["current_claim"]
+        claim = st.load(self.state_path)["current_claim"]
         self.assertIsNone(claim.get("session_id"))
 
     def test_healthy_spawn_emits_coolant_start(self) -> None:

@@ -288,7 +288,10 @@ class GitProjectTestCase(CluTestCase):
             return st.claim_phase(data, phase, lease_minutes=30)
 
     def _read(self) -> dict:
-        return json.loads(self.state_path.read_text())
+        # Through the store, not the filesystem: `state_path` is the KEY to a
+        # row in the project database now, and this one seam carries every
+        # `_read` call site in the suite across the engine swap.
+        return st.load(self.state_path)
 
 
 def isolate_monitor_marker(testcase: unittest.TestCase, tmp_path: Path) -> None:

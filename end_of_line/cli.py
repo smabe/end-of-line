@@ -49,6 +49,7 @@ from . import (
     inbox,
     monitor,
     notify,
+    plan_store,
     queue,
     quota,
     registry,
@@ -64,7 +65,13 @@ from . import (
     state as st,
 )
 from ._xdg_guard import assert_xdg_safe, clu_config_dir
-from .config import CONFIG_FILENAME, ProjectConfig, load_project_config, load_session_dirs
+from .config import (
+    CONFIG_FILENAME,
+    ORCHESTRATOR_DIR,
+    ProjectConfig,
+    load_project_config,
+    load_session_dirs,
+)
 from .plan_parser import parse_effort_minutes, parse_sessions_index
 from .supervisor import ACTION_NOTIFY_KIND, tick
 
@@ -687,6 +694,29 @@ def main(argv: list[str] | None = None) -> int:
         "hook, if installed) from ~/.claude/settings.json, "
         "leaving the operator's other hooks intact. Clears the "
         "monitor marker.",
+    )
+
+    p_state = sub.add_parser(
+        "state",
+        help="Inspect raw plan state (the operator's read-the-state-file hatch)",
+    )
+    state_subs = p_state.add_subparsers(dest="state_cmd")
+    p_state_dump = state_subs.add_parser(
+        "dump",
+        help="Print a plan's state as JSON. Omit --plan to dump every "
+        "plan in the project, keyed by slug.",
+    )
+    p_state_dump.add_argument(
+        "--project",
+        type=Path,
+        default=None,
+        help="Project root (contains .orchestrator.json). "
+        "Defaults to the current working directory.",
+    )
+    p_state_dump.add_argument(
+        "--plan",
+        default=None,
+        help="Plan slug. Omit to dump every plan in the project.",
     )
 
     p_blockers = sub.add_parser(
@@ -1466,6 +1496,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_migrate_archive(args)
     if args.cmd == "blockers":
         return cmd_blockers(args)
+    if args.cmd == "state":
+        return cmd_state(args)
     if args.cmd == "watch":
         return cmd_watch(args)
     if args.cmd == "top":
@@ -1983,45 +2015,45 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with st.locked(state_path):
-            # Re-check existence INSIDE the lock to defeat concurrent inits.
-            if state_path.exists():
-                print(f"State already exists: {state_path}", file=sys.stderr)
-                if worktree_record is not None:
-                    _rollback_worktree(cfg.project_root, worktree_record)
-                return 1
-            data = st.empty_state(args.plan, cfg.plan_dir)
-            for key in (
-                "lease_ttl_minutes",
-                "stalled_heartbeat_minutes",
-                "max_attempts_per_phase",
-            ):
-                val = getattr(args, key, None)
-                if val is not None:
-                    data["config"][key] = val
-            plan_path = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
-            try:
-                phases = parse_sessions_index(plan_path)
-            except FileNotFoundError:
-                phases = []
-            if phases:
-                global_default = data["config"]["lease_ttl_minutes"]
-                scale = cfg.lease_ttl_scale
-                phase_records = []
-                for phase in phases:
-                    record: dict = {"id": phase.id}
-                    effort_minutes = parse_effort_minutes(phase.effort)
-                    if effort_minutes is not None:
-                        record["lease_ttl_minutes"] = max(
-                            global_default, round(effort_minutes * scale)
-                        )
-                    phase_records.append(record)
-                data["phases"] = phase_records
+        data = st.empty_state(args.plan, cfg.plan_dir)
+        for key in (
+            "lease_ttl_minutes",
+            "stalled_heartbeat_minutes",
+            "max_attempts_per_phase",
+        ):
+            val = getattr(args, key, None)
+            if val is not None:
+                data["config"][key] = val
+        plan_path = cfg.project_root / cfg.plan_dir / f"{args.plan}.md"
+        try:
+            phases = parse_sessions_index(plan_path)
+        except FileNotFoundError:
+            phases = []
+        if phases:
+            global_default = data["config"]["lease_ttl_minutes"]
+            scale = cfg.lease_ttl_scale
+            phase_records = []
+            for phase in phases:
+                record: dict = {"id": phase.id}
+                effort_minutes = parse_effort_minutes(phase.effort)
+                if effort_minutes is not None:
+                    record["lease_ttl_minutes"] = max(global_default, round(effort_minutes * scale))
+                phase_records.append(record)
+            data["phases"] = phase_records
+        if worktree_record is not None:
+            data["worktree"] = worktree_record
+        # The duplicate check IS the insert: `plans.slug` is the primary key, so
+        # two concurrent inits cannot both see "absent" first. That is what the
+        # re-check-inside-the-lock used to buy.
+        try:
+            plan_store.create(state_path.parent, data)
+        except FileExistsError:
+            print(f"State already exists: {state_path}", file=sys.stderr)
             if worktree_record is not None:
-                data["worktree"] = worktree_record
-            st.save_atomic(state_path, data)
+                _rollback_worktree(cfg.project_root, worktree_record)
+            return 1
     except Exception:
-        # save_atomic / lock failure → tear down the worktree we just made.
+        # Store failure → tear down the worktree we just made.
         # WORKTREE_SETUP_FAILED is the operator-facing receipt; the raised
         # exception's traceback still surfaces for debugging.
         if worktree_record is not None:
@@ -2078,7 +2110,7 @@ def cmd_unregister_one(args) -> int:
         return _die(ExitCode.INVALID_SLUG, str(exc))
     cfg = load_project_config(args.project)
     state_path = cfg.state_path(args.plan)
-    if state_path.exists():
+    if plan_store.exists_for_path(state_path):
         try:
             with st.mutate(state_path) as data:
                 if data["status"] not in st.TERMINAL_STATUSES:
@@ -3257,7 +3289,7 @@ def _cmd_queue_add_worker(args) -> int:
 
     cfg = load_project_config(_resolve_project_arg(args))
     source_state_path = cfg.state_path(args.source_plan)
-    if not source_state_path.exists():
+    if not plan_store.exists_for_path(source_state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state for plan {args.source_plan!r}")
 
     plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
@@ -3714,7 +3746,7 @@ def cmd_worktree_reattach(args) -> int:
         return _die(ExitCode.INVALID_SLUG, str(exc))
     cfg = load_project_config(args.project.resolve())
     state_path = cfg.state_path(args.plan)
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return _die(
             ExitCode.UNKNOWN_TASK,
             f"no state at {state_path}",
@@ -3783,7 +3815,7 @@ def cmd_worktree_attach(args) -> int:
         return _die(ExitCode.INVALID_SLUG, str(exc))
     cfg = load_project_config(args.project.resolve())
     state_path = cfg.state_path(args.plan)
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return _die(
             ExitCode.UNKNOWN_TASK,
             f"no state at {state_path}",
@@ -3883,7 +3915,7 @@ def cmd_worktree_gc(args) -> int:
         state_path = cfg.state_path(slug)
         # Re-check status at action time so a `clu retry` that landed
         # between list and confirm doesn't lose its worktree.
-        if state_path.exists():
+        if plan_store.exists_for_path(state_path):
             try:
                 fresh = st.load(state_path)
             except (OSError, ValueError, st.SchemaVersionMismatch):
@@ -4228,7 +4260,7 @@ def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:
         st.validate_slug(args.phase, kind="phase id")
     except st.InvalidSlug as exc:
         return _die(ExitCode.INVALID_SLUG, str(exc))
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
     data = st.load(state_path)
     answered = [
@@ -4247,7 +4279,7 @@ def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:
 
 def _resolve_log_path(state_path: Path, cfg: ProjectConfig) -> Path | None:
     """Active claim's log_path wins; otherwise newest file in the logs dir."""
-    if state_path.exists():
+    if plan_store.exists_for_path(state_path):
         claim = st.load(state_path).get("current_claim") or {}
         if log_path := claim.get("log_path"):
             return Path(log_path)
@@ -4490,7 +4522,7 @@ def cmd_logs(args, cfg: ProjectConfig, state_path: Path) -> int:
 
 
 def cmd_status(args, cfg: ProjectConfig, state_path: Path) -> int:
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         print(f"No state at {state_path}", file=sys.stderr)
         return 1
     data = st.load(state_path)
@@ -5235,7 +5267,7 @@ def _cmd_ship_direct_plan(args) -> int:
         return _die(ExitCode.GENERIC, f"project not found: {project_root}")
     cfg = load_project_config(project_root)
     state_path = cfg.state_path(args.plan)
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
     data = st.load(state_path)
 
@@ -5649,7 +5681,7 @@ def _cmd_ship_as_pr_plan(args) -> int:
         return _die(ExitCode.GENERIC, f"project not found: {project_root}")
     cfg = load_project_config(project_root)
     state_path = cfg.state_path(args.plan)
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
     data = st.load(state_path)
 
@@ -5950,7 +5982,7 @@ def cmd_archive(args) -> int:
         return _die(ExitCode.INVALID_SLUG, str(exc))
     cfg = load_project_config(args.project.resolve())
     state_path = cfg.state_path(args.plan)
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
     data = st.load(state_path)
     if data["status"] == st.STATUS_RUNNING:
@@ -6501,6 +6533,53 @@ def cmd_attest(args, cfg: ProjectConfig, state_path: Path) -> int:
     return ExitCode.OK
 
 
+def cmd_state(args) -> int:
+    if args.state_cmd == "dump":
+        return cmd_state_dump(args)
+    print(
+        "usage: clu state dump [--project PATH] [--plan SLUG]",
+        file=sys.stderr,
+    )
+    return _die(ExitCode.GENERIC, f"unknown state subcommand {args.state_cmd!r}")
+
+
+def cmd_state_dump(args) -> int:
+    """Print plan state as JSON — the replacement for opening the state file.
+
+    Cold-context workers and operators were told to read
+    `plans/.orchestrator/<slug>.state.json` when they needed the raw truth.
+    That file no longer exists, so the affordance moves here rather than
+    disappearing. With `--plan` the output IS the plan's state document; without
+    it, an object keyed by slug, which is the same thing for every plan in the
+    project.
+    """
+    project_root = _resolve_project_arg(args)
+    if not project_root.is_dir():
+        return _die(ExitCode.GENERIC, f"project not found: {project_root}")
+    cfg = load_project_config(project_root)
+    orch_dir = cfg.project_root / cfg.plan_dir / ORCHESTRATOR_DIR
+    if args.plan is not None:
+        try:
+            st.validate_slug(args.plan, kind="plan slug")
+            state_path = cfg.state_path(args.plan)
+        except st.InvalidSlug as exc:
+            return _die(ExitCode.INVALID_SLUG, str(exc))
+        if not plan_store.exists_for_path(state_path):
+            return _die(ExitCode.UNKNOWN_TASK, f"no state for plan {args.plan!r}")
+        print(plan_store.dump_json(*st.key_for(state_path)))
+        return ExitCode.OK
+    slugs = plan_store.plan_slugs(orch_dir)
+    if not slugs:
+        return _die(ExitCode.UNKNOWN_TASK, f"no plans in {orch_dir}")
+    print(
+        json.dumps(
+            {slug: plan_store.snapshot(orch_dir, slug) for slug in slugs},
+            indent=2,
+        )
+    )
+    return ExitCode.OK
+
+
 def cmd_blockers(args) -> int:
     if args.blockers_cmd == "list":
         return cmd_blockers_list(args)
@@ -6520,7 +6599,7 @@ def cmd_blockers_list(args) -> int:
         return _die(ExitCode.GENERIC, f"project not found: {project_root}")
     cfg = load_project_config(project_root)
     state_path = cfg.state_path(args.plan)
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
     data = st.load(state_path, expected_version=st.SCHEMA_VERSION)
     open_blockers = [b for b in data.get("blockers", []) if b.get("answer") is None]
@@ -6545,7 +6624,7 @@ def cmd_blockers_show(args) -> int:
         return _die(ExitCode.GENERIC, f"project not found: {project_root}")
     cfg = load_project_config(project_root)
     state_path = cfg.state_path(args.plan)
-    if not state_path.exists():
+    if not plan_store.exists_for_path(state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
     data = st.load(state_path, expected_version=st.SCHEMA_VERSION)
     blocker = next(
