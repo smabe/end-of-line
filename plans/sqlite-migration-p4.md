@@ -55,6 +55,32 @@ See the master `plans/sqlite-migration.md`. The decisions binding this phase:
 - **Alternatives considered:** keep emit-inside (violates the no-subprocess-in-txn rule this migration exists to establish).
 - **Evidence:** state.py:842-877; supervisor.py:731-752.
 
+### Finding: `st.utcnow()` is SECOND-resolution, and it made this phase's headline test unable to fail  *(empirical, this phase — binds p5, p6, p7)*
+Three consecutive calls return the identical string. `claim_phase` stamps `last_heartbeat_at` with it, and the test then asserted `claim["last_heartbeat_at"] == op_heartbeat(...)` — comparing a value to itself, true before the op ran at all. **Demonstrated, not theorised:** mutating `op_heartbeat` to write `started_at` instead — breaking the heartbeat outright — left all 53 tests in its own file green and the full 2307-test suite green. The two-process test had the same hole at its exit assertion (`assertIsNotNone` on a value that was already non-null, so a write-back clobbering every beat would have passed). Both now backdate the claim's timestamps first, assert the value ADVANCED, and assert the neighbouring column a wrong-column UPDATE would land in is untouched. **Any later phase asserting that a timestamp column equals a just-computed value must backdate first, or it is writing a test that cannot fail.**
+
+### Finding: the worker-death dedup marker has no reader anywhere  *(empirical, this phase — NOT fixed)*
+`st.worker_death_reported()` exists, is documented as "the dedup marker the supervisor consults before firing its own operator notification — without it a single death pings the operator twice (daemon + tick)", and has **zero callers outside `state.py`**; the supervisor consults neither the claim field nor the corresponding event. So the second ping has always fired. The write could not have persisted either: `cmd_notify_worker_dead` stamped the marker onto the claim and released that claim in the same window, deleting the row before commit. Pre-existing and latent. Not fixed here — making the dedup work changes notification behaviour, which is beyond a storage migration whose premise is that behaviour is unchanged. The pointless write is gone; parked in the master.
+
+### Finding: git subprocesses still run inside the project-wide write lock  *(empirical, this phase — p6/p7 own the fix)*
+`_maybe_cleanup_worktree` shells out to git several times from inside a `st.mutate` window, reached from both `cmd_complete` and `_perform_archive`. That is p2's lock-consolidation shape, and no phase owns it. This phase moved `cmd_complete`'s copy to AFTER the completion commits and gated it on a worktree existing, but did not restructure the archive path — doing so needs a plan-field op this phase does not name.
+
+### Finding: after archival, `snapshot` returns no events, by design  *(empirical, this phase)*
+`clu archive` empties the hot table for that plan. Anything reading a plan's history afterwards must go through `dump_json`, which reads both tables. One existing test asserted on a post-archive audit event and now reads it through the dump path. This is upstream decision #4's intended contract, not a regression — but it is invisible until something reads an archived plan and sees nothing.
+
+### Finding: five state.py helpers are now test-only  *(empirical, this phase — p7 decides)*
+`record_heartbeat`, `mark_active_tool_start`, `clear_active_tool`, `mark_worker_death_reported`, `mark_heartbeat_loop_failing_notified` have no production callers left. This phase was told to keep them for facade callers; p7's deletion sweep should decide whether they follow the facade out.
+
+### Finding: this shard's `state.py` line citations are pre-p3 and have drifted  *(empirical, this phase)*
+`assert_claim_match` is at 844-856 (cited 770-783), `release_claim` at 895-913, `record_heartbeat` at 859-868, `stamp_activity_marker` at 1164; `heartbeat_daemon._ping` at 63-71. Symbol names all resolved; only the line hints rotted, exactly as the anchor-on-symbols rule predicts.
+
+### Finding: spawn is ~28ms on this host, fast enough to hide contention  *(empirical, this phase — binds p6)*
+An unsynchronised two-process test would have had the second process start after the first finished, so the two write patterns never overlapped and the test proved nothing. The two-process test uses a barrier. **p6's tick tests need the same treatment.**
+
+### Decision: nine of twelve declared op signatures shipped different  *(status: active — INTERFACE DEVIATION, surfaced to the operator)*
+- **What shipped:** `op_answer_blocker` and `op_spawn_task` return `str` where the sketch declared `None` (the id and the resolved text are minted inside the transaction, so the caller cannot know them otherwise); `op_stamp_claim_fields` returns `bool` where `None` was declared; seven ops gained OPTIONAL keywords (`events=`/`event=`, `release_token=`/`release_phase=`, `token=`/`phase=`, `if_unset=`, `timeout_s=`); and one undeclared public symbol shipped, `op_stamp_blocker_metadata` (Task 2 asks for "a blocker-metadata op" by description only).
+- **Rationale:** each added keyword exists so a multi-write call site stays ONE transaction. Without them `clu block`, `clu complete`, both daemon reports and all three dispatch failure paths would each need two or three transactions and LOSE atomicity they have today — so the alternative is a correctness regression, not a smaller diff.
+- **Why recorded rather than absorbed:** approved interface lines are contract, and the fix for a divergence is never to edit the plan to match what shipped. An independent reviewer checked the five symbols p5, p6 and p7 name on their `Consumes` lines one by one: a call written to the declared signature still works for every one, so no downstream phase is invalidated. The one live trap is `op_stamp_claim_fields`'s silent `None`→`bool`.
+
 ## Failure modes to anticipate
 - An op that forgets to bump `plans.version` makes a changing plan look static to the dashboards' change detection — the op layer routes every write through one internal `_plan_txn(orch_dir, slug)` helper that bumps it, so forgetting is structural, not per-op.
 - `cmd_complete` reads gates from a snapshot then writes — between the two, a concurrent release could swap the claim; the completion write is CAS-guarded on `claimed_by` so the stale path surfaces as `ClaimMismatch` exactly like today's re-load-under-lock would.
