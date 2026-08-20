@@ -35,6 +35,34 @@ See the master `plans/sqlite-migration.md`. The decisions binding this phase:
 - **Alternatives considered:** port `validate_repair` to dump-edit-reimport (machinery without a failure mode to serve).
 - **Evidence:** queue.py:1-18 (the module's own framing), B1/A2 research findings (master Background findings).
 
+### Decision: nested `write_txn` on the same database JOINS the open transaction  *(status: active — a SEMANTIC change to p1's core, made in a file this phase does not name)*
+- **The problem, measured not assumed:** three supervisor call sites consult the quota gate from INSIDE the tick's `st.mutate` window (`supervisor.py:639`, `:717` via `record_quota_death`, `:882` via `gate_decision`). SQLite's write lock is per-CONNECTION, so once plan state and the quota row share one database the second `BEGIN IMMEDIATE` waits for a lock only the waiter can release. Reproduced independently at review: `DbBusy` after 1.10s at a 1s budget, matching the worker's 1.07s.
+- **Why the fix landed in `db.py` rather than at the call sites:** p4 had already hoisted the same call out of `dispatch.py` and `cli.py`; the supervisor's gate is the one that genuinely cannot be hoisted without p6's tick restructure, because consulting it earlier stamps the canary for a plan that may never dispatch — which is exactly what its own comment says must not happen. The alternatives were editing p6's file mid-plan or weakening the gate's atomicity, both worse.
+- **Semantics, verified in all four directions at review rather than trusted:** an exception inside the inner block rolls back BOTH; an outer failure after a clean inner discards the inner too; neither connection is left in a transaction; the thread-local registry empties. Keyed by database file and thread-local, because two THREADS writing one database is genuine contention and two tests measure exactly that.
+- **What it costs, and what p6 must decide:** `with db.write_txn(...)` no longer guarantees a commit at block exit, and a future accidental nesting joins silently instead of failing loudly. The quota write's atomicity is now coupled to the tick's — stronger than two separate files gave, but a coupling nobody chose. **p6 carries a Done criterion to decide whether the join stays once the tick stops nesting.**
+
+### Decision: the queue DDL gained an `extra` column without a schema-version bump  *(status: active — carries a HARD precondition)*
+- **Rationale:** p1's `queue` table has four columns; a real entry has carried `source_plan`, `source_phase`, `source_token_fp`, `reason` and `position_at_add` since the worker-enqueue feature, and both the cap counter and `clu queue list` read them. Four columns would have silently dropped every one. `extra TEXT` mirrors the `plans.extra` seam so an entry dict round-trips whole.
+- **The precondition:** editing `_PROJECT_DDL` without bumping `PROJECT_SCHEMA_VERSION` is safe ONLY while no project database exists to be stranded — an existing one keeps its old table, and every insert naming `extra` fails. Verified independently at review, not accepted on assertion: no `clu.db` exists under either registered project's orchestrator directory, and the fleet has been quiet with the tick agent unloaded since p1. **If any host has run a p1–p4 clu against a real project, that database must be deleted before this phase lands there.**
+
+### Finding: `gate_decision` now IDLES on a busy store rather than dispatching  *(empirical, this phase — a deliberate new branch)*
+Unreadable or too-new still dispatches with a stderr note, preserving "no malformed store freezes the fleet". But `db.DbBusy` is caught separately and idles: a busy store is not a broken one, and dispatching into a pause we could not read costs a worker and a quota hit, where idling costs one tick.
+
+### Finding: `_cmd_queue_add_worker` queried the HOST database from inside the project's write window  *(empirical, this phase)*
+`_slug_is_running` calls `registry.entries()` plus per-plan state reads, and it sat inside `st.mutate`. Pre-existing, and the same shape as p2's `drain_outbound_marks` finding — a lock held across a query of another database. Hoisted ahead of the queue transaction.
+
+### Finding: the token-not-in-queue test was measuring the wrong thing after the move  *(empirical, this phase)*
+It scanned the queue FILE's raw bytes for the worker token. The claim row legitimately holds that token and now shares the same file, so a byte scan of the database passes or fails for reasons unrelated to the queue. Rewritten to scan every column of both queue tables.
+
+### Finding: front-insert ordering, probed  *(empirical, this phase)*
+Explicit rowids — including negative ones — are legal alongside `AUTOINCREMENT`, which only ever tracks the maximum; `ORDER BY id` sorts them ahead and later auto-assignment continues from the max. Confirmed on 3.14.3 / SQLite 3.53.4. A front-loaded BATCH is inserted back-to-front so the caller's order survives at the head.
+
+### Finding: the demo really does not seed a queue, so the zero-file criterion would have passed vacuously  *(empirical, this phase)*
+The shard's note is right — `demo.py` writes config, plan markdown and state only. So the new test WRITES a queue entry and a quota pause into the demo's orchestrator dir and reads both back before asserting the directory is clean. Verified at review by running it: after a full lifecycle the directory contains `clu.db` and nothing ending in `.json` or containing `.lock`.
+
+### Finding: symbols and deletions beyond what the phase named  *(empirical, this phase)*
+Beyond `Produces`: `queue.add_many`, `queue.AlreadyQueued`, five `*_in_txn` primitives, the `OUTCOME_*` constants, `quota.read_pause`, `quota.clear_pause`, `db.project_conn`, `ProjectConfig.orchestrator_dir`; and `queue.add` returns its position rather than `None`, because the worker path prints it and `len(pending())` afterwards would be a second, racy transaction. Deletions the phase did not name: `queue.SCHEMA_VERSION` and `queue._empty`, `quota.QUOTA_FILE_NAME` and `QUOTA_SCHEMA_VERSION` (the files they versioned are gone), and `render_quota_stuck`'s `quota_file` parameter (the phase directs the body to carry no file path, which leaves the parameter dead — 4 call sites updated).
+
 ## Failure modes to anticipate
 - The busy-gate reads plan snapshots gathered OUTSIDE the pop txn (`load_plans_for_project`) — same TOCTOU as today (A3 #3); unchanged risk, cron remains the sole ticker. Do not try to fix it here (parked scope).
 - `queue add --batch` (`cli.py:3192`) writes several entries + a batch dry-merge gate interaction — keep the batch insert one txn so a half-added batch can't exist.
