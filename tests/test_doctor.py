@@ -457,16 +457,17 @@ class DispatchPermissionHealthTestCase(_DoctorProjectTestCase):
         self.assertIn(_BYPASS_WARNING, stdout)
         self.assertIn("dispatch.command", stdout)
 
-    def test_warns_on_dangerously_skip_in_repair_command(self) -> None:
+    def test_quiet_on_deprecated_repair_command(self) -> None:
+        # `repair_command` is parsed and inert — clu never runs it, so a
+        # permission flag in it is not a finding. Warning about it would point
+        # the operator at a setting that does nothing.
         self._write_cfg(
             command=HARDENED_COMMAND,
             repair_command="claude --print --dangerously-skip-permissions 'fix {corrupt_path}'",
         )
         rc, stdout, _ = self._run_doctor()
         self.assertEqual(rc, 0)
-        self.assertIn(_BYPASS_WARNING, stdout)
-        self.assertIn("dispatch.repair_command", stdout)
-        self.assertNotIn("dispatch.command —", stdout)
+        self.assertNotIn(_BYPASS_WARNING, stdout)
 
     def test_quiet_on_hardened_recipe(self) -> None:
         self._write_cfg(command=HARDENED_COMMAND)
@@ -475,8 +476,8 @@ class DispatchPermissionHealthTestCase(_DoctorProjectTestCase):
         self.assertNotIn(_BYPASS_WARNING, stdout)
 
     def test_quiet_on_empty_command(self) -> None:
-        # DispatchSpec defaults command to "" and repair_command to None;
-        # neither must trip the tokenizer or the warning.
+        # DispatchSpec defaults command to "" — an empty template must not
+        # trip the tokenizer or the warning.
         self._write_cfg(command="")
         rc, stdout, _ = self._run_doctor()
         self.assertEqual(rc, 0)

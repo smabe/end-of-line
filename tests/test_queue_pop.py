@@ -15,11 +15,11 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import notify, queue, registry
+from end_of_line import db, notify, queue, registry
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import ProjectConfig
-from tests import isolate_registry
+from tests import isolate_registry, stamp_future_schema
 
 _PLAN_BODY = """\
 # Test plan
@@ -72,8 +72,8 @@ class _Base(unittest.TestCase):
         path.write_text(_plan_body(slug))
         return path
 
-    def _queue_path(self, project: Path) -> Path:
-        return ProjectConfig(project_root=project).queue_path()
+    def _orch(self, project: Path) -> Path:
+        return ProjectConfig(project_root=project).orchestrator_dir()
 
     def _enqueue(
         self,
@@ -84,15 +84,15 @@ class _Base(unittest.TestCase):
     ) -> None:
         if write_plan:
             self._write_plan_file(project, slug)
-        with queue.mutate(self._queue_path(project)) as data:
-            data["queue"].append(
-                {
-                    "slug": slug,
-                    "added_at": st.utcnow(),
-                    "added_by": "operator",
-                    "position_at_add": "tail",
-                }
-            )
+        queue.add(
+            self._orch(project),
+            {
+                "slug": slug,
+                "added_at": st.utcnow(),
+                "added_by": "operator",
+                "position_at_add": "tail",
+            },
+        )
 
     def _set_status(self, project: Path, slug: str, status: str) -> None:
         cfg = ProjectConfig(project_root=project)
@@ -103,7 +103,8 @@ class _Base(unittest.TestCase):
         return st.load(ProjectConfig(project_root=project).state_path(slug))
 
     def _queue_data(self, project: Path) -> dict:
-        return queue.load(self._queue_path(project))
+        orch = self._orch(project)
+        return {"queue": queue.pending(orch), "history": queue.history(orch)}
 
     def _run(self) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -289,15 +290,15 @@ class QueuePopTestCase(_Base):
     def test_pop_abandons_missing_plan_file(self) -> None:
         project = self._make_project("alpha")
         # Queue contains slug whose plan file does NOT exist.
-        with queue.mutate(self._queue_path(project)) as data:
-            data["queue"].append(
-                {
-                    "slug": "ghost",
-                    "added_at": st.utcnow(),
-                    "added_by": "operator",
-                    "position_at_add": "tail",
-                }
-            )
+        queue.add(
+            self._orch(project),
+            {
+                "slug": "ghost",
+                "added_at": st.utcnow(),
+                "added_by": "operator",
+                "position_at_add": "tail",
+            },
+        )
         sent: list[tuple[str, str]] = []
 
         def fake_send(spec, kind, body, **kw):  # signature: (spec, kind, body)
@@ -392,12 +393,11 @@ class QueuePopTestCase(_Base):
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")
 
-    def test_pop_does_not_block_other_projects_if_one_queue_corrupt(self) -> None:
+    def test_pop_does_not_block_other_projects_if_one_queue_unreadable(self) -> None:
         a = self._make_project("alpha")
-        # Corrupt A's queue.json on disk.
-        qa = self._queue_path(a)
-        qa.parent.mkdir(parents=True, exist_ok=True)
-        qa.write_text("{ not valid json")
+        # A's database is from a newer clu — the reachable unreadable case now
+        # that a torn write cannot happen.
+        stamp_future_schema(db.project_db_path(self._orch(a)))
         b = self._make_project("beta")
         self._enqueue(b, "foo")
 
@@ -405,8 +405,9 @@ class QueuePopTestCase(_Base):
         self.assertEqual(rc, 0)
         # B still drained.
         self.assertEqual(self._queue_data(b)["queue"], [])
-        # Error mentions the corruption so the operator can find it.
-        self.assertIn("alpha", err.lower() if "alpha" in err else err + "alpha")
+        # The walk says which project it skipped and why.
+        self.assertIn("queue unreadable", err)
+        self.assertIn(str(a), err)
 
 
 if __name__ == "__main__":

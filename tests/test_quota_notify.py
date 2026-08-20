@@ -16,7 +16,6 @@ from end_of_line import notify
 
 PLAN = "quota-plan"
 LINE = "You've hit your session limit · resets 1:50am (America/New_York)"
-QUOTA_FILE = "/proj/plans/.orchestrator/quota.json"
 PAUSED_UNTIL = dt.datetime(2026, 6, 12, 5, 52, tzinfo=dt.UTC)
 
 
@@ -34,12 +33,14 @@ class RenderQuotaTests(unittest.TestCase):
         self.assertIn(_local_resume(PAUSED_UNTIL), body)
 
     def test_stuck_includes_plan_and_escape_hatch(self) -> None:
-        body = notify.render_quota_stuck(PLAN, LINE, QUOTA_FILE)
+        body = notify.render_quota_stuck(PLAN, LINE)
         self.assertIn(PLAN, body)
         self.assertIn(LINE, body)
-        # The operator's one-line recovery: delete the pause file.
-        self.assertIn(QUOTA_FILE, body)
-        self.assertIn("rm", body)
+        # The operator's one-line recovery is a COMMAND now: the pause is a
+        # row in the project database, so there is no file to `rm`.
+        self.assertIn("clu quota clear", body)
+        self.assertNotIn("rm ", body)
+        self.assertNotIn(".json", body)
 
     def test_resumed_includes_plan(self) -> None:
         body = notify.render_quota_resumed(PLAN)
@@ -51,17 +52,15 @@ class QuotaPauseNotificationTests(unittest.TestCase):
     both supervisor death sites and the dispatch fast-fail."""
 
     def test_parseable_reset_routes_to_paused(self) -> None:
-        kind, body = notify.quota_pause_notification(
-            PLAN, LINE, PAUSED_UNTIL, QUOTA_FILE
-        )
+        kind, body = notify.quota_pause_notification(PLAN, LINE, PAUSED_UNTIL)
         self.assertEqual(kind, notify.KIND_QUOTA_PAUSED)
         self.assertIn(PLAN, body)
         self.assertIn(_local_resume(PAUSED_UNTIL), body)
 
     def test_unparseable_reset_routes_to_stuck(self) -> None:
-        kind, body = notify.quota_pause_notification(PLAN, LINE, None, QUOTA_FILE)
+        kind, body = notify.quota_pause_notification(PLAN, LINE, None)
         self.assertEqual(kind, notify.KIND_QUOTA_STUCK)
-        self.assertIn(QUOTA_FILE, body)
+        self.assertIn("clu quota clear", body)
 
 
 class QuotaQuietHoursPlacementTests(unittest.TestCase):

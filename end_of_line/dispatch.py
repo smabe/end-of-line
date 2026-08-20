@@ -9,7 +9,6 @@ waiting 30 minutes for the lease to expire silently.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shlex
@@ -30,41 +29,6 @@ from .supervisor import TickResult
 # of headroom for fork+exec; longer than this and we'd be re-implementing
 # the lease.
 _FAST_FAIL_WAIT_SEC = 0.5
-
-# Synchronous: the cron tick blocks waiting on the repair worker, so a
-# hung worker can't stall the queue indefinitely. 60s is plenty for a
-# small JSON repair; if the cron cadence is faster than this, the next
-# tick will still wait for the lock the previous one is holding.
-DEFAULT_REPAIR_TIMEOUT_SEC = 60
-
-# Sentinel rc returned by dispatch_repair_worker when the worker hung
-# past the timeout and was killed. Distinct from any rc the worker
-# itself could plausibly emit.
-REPAIR_RC_TIMEOUT = -1
-
-# Suggested schema_json bundle to pass into the repair worker prompt.
-# Stays here (not config) because it has to track queue.SCHEMA_VERSION.
-_REPAIR_SCHEMA_HINT = json.dumps(
-    {
-        "schema_version": 1,
-        "queue": [
-            {
-                "slug": "<plan-slug>",
-                "added_at": "<iso8601-utc>",
-                "added_by": "operator",
-                "position_at_add": "tail|front",
-            }
-        ],
-        "history": [
-            {
-                "slug": "<plan-slug>",
-                "added_at": "<iso8601-utc>",
-                "ended_at": "<iso8601-utc>",
-                "outcome": "abandoned|removed|absorbed",
-            }
-        ],
-    }
-)
 
 # Exceptions that are recoverable in dispatch fallback paths.
 # What a dispatch-time state write degrades on rather than crashing the tick
@@ -150,11 +114,9 @@ def build_worker_env(
     worker — specifically Claude Code hooks, which inherit the worker's
     env — know the claim identity. Worker-side `export` can't do this:
     env doesn't persist across Bash tool calls in headless `--print`
-    sessions (#91). Repair workers pass no kwargs on purpose: they carry
-    no claim or token, and the activity hook's empty-token short-circuit
-    is the correct behavior for them. Cfg-only calls with no PATH
-    override keep returning None (inherit) — cmd_doctor's
-    "(source: inherited)" display depends on it.
+    sessions (#91). Cfg-only calls with no PATH override keep returning
+    None (inherit) — cmd_doctor's "(source: inherited)" display depends
+    on it.
 
     Also raises the Bash-tool timeout ceiling (BASH_MAX_TIMEOUT_MS) so a
     long test gate runs in the foreground rather than being auto-
@@ -166,12 +128,9 @@ def build_worker_env(
         clu's own claim identity and not the operator's to override; the
         Bash ceiling is a host knob clu shouldn't clobber.
       - INSIDE the inject branch, never on the unconditional path. The
-        None-vs-dict return is load-bearing in opposite directions for
-        cmd_doctor ("(source: inherited)") and dispatch_repair_worker
-        (None => inherit, not a frozen os.environ copy). Setting it
-        unconditionally would flip both silently.
-      - Consequence, accepted: repair workers pass no claim kwargs, so
-        they get no ceiling — they don't run test gates.
+        None-vs-dict return is load-bearing for cmd_doctor, whose
+        "(source: inherited)" line reads it; setting the ceiling
+        unconditionally would flip that silently.
     """
     inject = plan_slug is not None or phase_id is not None or token is not None
     if not cfg.dispatch.path and not inject:
@@ -436,64 +395,6 @@ def dispatch_for_tick(
         file=sys.stderr,
     )
     return True
-
-
-def dispatch_repair_worker(
-    cfg: ProjectConfig,
-    corrupt_path: Path,
-    backup_path: Path,
-    diagnosis: str,
-    log_path: Path,
-    *,
-    timeout_sec: float = DEFAULT_REPAIR_TIMEOUT_SEC,
-) -> int:
-    """Spawn the configured repair_command and wait synchronously for it.
-
-    Returns the worker's rc, or `REPAIR_RC_TIMEOUT` if we had to kill it.
-    Caller is responsible for running `queue.validate_repair` against
-    the corrupt_path bytes regardless of rc — a worker that ignores its
-    prompt and writes garbage is what the validation exists to catch.
-
-    Stays separate from `dispatch_for_tick` because the contracts differ:
-    repair is synchronous + worker-style logs but no claim/token to stamp.
-    """
-    cmd_tmpl = cfg.dispatch.repair_command or ""
-    if not cmd_tmpl:
-        raise ValueError("dispatch_repair_worker called without repair_command")
-    cmd = cmd_tmpl.format(
-        corrupt_path=shlex.quote(str(corrupt_path)),
-        backup_path=shlex.quote(str(backup_path)),
-        diagnosis=shlex.quote(diagnosis),
-        schema_json=shlex.quote(_REPAIR_SCHEMA_HINT),
-        log_path=shlex.quote(str(log_path)),
-    )
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    popen_kwargs: dict = dict(
-        shell=True,
-        cwd=str(cfg.project_root),
-        start_new_session=True,
-    )
-    if (worker_env := build_worker_env(cfg)) is not None:
-        popen_kwargs["env"] = worker_env
-
-    with open(log_path, "ab") as log_fh:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            **popen_kwargs,
-        )
-
-    try:
-        return proc.wait(timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-            proc.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        return REPAIR_RC_TIMEOUT
 
 
 _PREV_ATTEMPT_TIMEOUT_SEC = 5
@@ -786,7 +687,6 @@ def _record_quota_fast_fail(
         plan_slug,
         match.line,
         paused_until,
-        str(state_file.parent / quota.QUOTA_FILE_NAME),
     )
     notify.notify(cfg.notify, kind, body)
     return True

@@ -12,16 +12,16 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import io
-import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from end_of_line import quota
+from end_of_line import db, quota
 from end_of_line import state as st
-from tests import must
+from end_of_line.cli import main as cli_main
+from tests import CluTestCase, must, seed_quota_pause, stamp_future_schema
 
 NY = ZoneInfo("America/New_York")
 LA = ZoneInfo("America/Los_Angeles")
@@ -211,9 +211,9 @@ class ReadLogTailTests(unittest.TestCase):
         self.assertEqual(len(tail.splitlines()), 50)
 
 
-class QuotaPauseFileTests(unittest.TestCase):
-    """`record_quota_pause` owns the quota.json schema — single writer,
-    under locked_json, always clearing the canary slot."""
+class QuotaPauseRowTests(unittest.TestCase):
+    """`record_quota_pause` owns the quota row — single writer, one
+    transaction, always clearing the canary slot."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -223,7 +223,9 @@ class QuotaPauseFileTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _read(self) -> dict:
-        return json.loads((self.orch_dir / quota.QUOTA_FILE_NAME).read_text())
+        row = quota.read_pause(self.orch_dir)
+        assert row is not None
+        return row
 
     def test_parseable_reset_writes_auto_resume_pause(self) -> None:
         now = dt.datetime(2026, 6, 11, 23, 0, tzinfo=NY)
@@ -232,7 +234,6 @@ class QuotaPauseFileTests(unittest.TestCase):
         # reset = 2026-06-12T05:50Z (1:50am EDT), +120s buffer.
         self.assertEqual(paused_until, dt.datetime(2026, 6, 12, 5, 52, tzinfo=dt.UTC))
         data = self._read()
-        self.assertEqual(data["schema_version"], 1)
         self.assertEqual(data["signature"], "session_limit")
         self.assertEqual(data["line"], SESSION_LINE)
         self.assertEqual(st.parse_iso(data["paused_until"]), paused_until)
@@ -253,18 +254,11 @@ class QuotaPauseFileTests(unittest.TestCase):
     def test_re_pause_clears_canary_fields(self) -> None:
         # A re-pause during a canary window is exactly the canary-failed
         # case — the fresh write must clear the canary slot.
-        (self.orch_dir / quota.QUOTA_FILE_NAME).write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "paused_until": "2026-06-12T05:52:00Z",
-                    "signature": "session_limit",
-                    "line": SESSION_LINE,
-                    "canary_plan": "some-plan",
-                    "canary_deadline": "2026-06-12T05:55:00Z",
-                    "created_at": "2026-06-12T03:00:00Z",
-                }
-            )
+        seed_quota_pause(
+            self.orch_dir,
+            paused_until="2026-06-12T05:52:00Z",
+            canary_plan="some-plan",
+            canary_deadline="2026-06-12T05:55:00Z",
         )
         match = must(quota.classify_quota(CREDITS_LINE))
         quota.record_quota_pause(self.orch_dir, match, dt.datetime(2026, 6, 12, 9, 0, tzinfo=NY))
@@ -276,36 +270,27 @@ class QuotaPauseFileTests(unittest.TestCase):
 
 class GateDecisionTests(unittest.TestCase):
     """The dispatch gate state machine (#94, phase gate). Four outcomes
-    decided under one lock: idle while paused, the first plan past reset
+    decided in one transaction: idle while paused, the first plan past reset
     becomes the canary and dispatches, others idle during its window, and
-    the fleet resumes (file cleared) when the canary survives."""
+    the fleet resumes (row deleted) when the canary survives."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.orch_dir = Path(self._tmp.name)
-        self.quota_path = self.orch_dir / quota.QUOTA_FILE_NAME
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
     def _write(self, **over: object) -> None:
-        base = {
-            "schema_version": 1,
-            "paused_until": "2026-06-12T05:52:00Z",
-            "signature": "session_limit",
-            "line": SESSION_LINE,
-            "canary_plan": None,
-            "canary_deadline": None,
-            "created_at": "2026-06-12T03:00:00Z",
-        }
-        base.update(over)
-        self.quota_path.write_text(json.dumps(base))
+        seed_quota_pause(self.orch_dir, **over)
 
     def _read(self) -> dict:
-        return json.loads(self.quota_path.read_text())
+        row = quota.read_pause(self.orch_dir)
+        assert row is not None
+        return row
 
-    def test_no_file_dispatches(self) -> None:
-        # Hot path: no quota.json → dispatch, no lock taken.
+    def test_no_row_dispatches(self) -> None:
+        # Hot path: no pause row → dispatch, no write lock taken.
         d = quota.gate_decision(
             self.orch_dir, "plan-a", dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
         )
@@ -376,7 +361,7 @@ class GateDecisionTests(unittest.TestCase):
         d = quota.gate_decision(self.orch_dir, "plan-b", now)
         self.assertTrue(d.dispatch)
         self.assertTrue(d.resumed)
-        self.assertFalse(self.quota_path.exists())  # file == "not paused"
+        self.assertIsNone(quota.read_pause(self.orch_dir))  # no row == not paused
 
     def test_two_plans_race_only_first_stamps_canary(self) -> None:
         # Sequential gate calls model two plans ticking the same cron pass:
@@ -405,26 +390,40 @@ class GateDecisionTests(unittest.TestCase):
         self.assertFalse(d.resumed)
         self.assertIn("quota_paused", d.detail)
 
-    def test_corrupt_file_treated_as_absent(self) -> None:
-        self.quota_path.write_text("{not valid json")
+    def test_database_from_a_newer_clu_treated_as_absent(self) -> None:
+        # The corrupt-file case, in the only form still reachable: a store a
+        # transaction cannot have half-written, but this clu is too old to
+        # read. The contract is unchanged — an unreadable pause must not
+        # freeze the fleet, and it says so on stderr.
+        stamp_future_schema(db.project_db_path(self.orch_dir))
         now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
         with contextlib.redirect_stderr(io.StringIO()) as err:
             d = quota.gate_decision(self.orch_dir, "plan-a", now)
         self.assertTrue(d.dispatch)
         self.assertFalse(d.resumed)
-        self.assertIn(quota.QUOTA_FILE_NAME, err.getvalue())
+        self.assertIn("ignoring unreadable quota pause", err.getvalue())
+
+    def test_contention_idles_rather_than_dispatching(self) -> None:
+        # A busy store is not a broken one. Dispatching into a pause we could
+        # not read costs a worker and a quota hit; idling costs one tick.
+        self._write(paused_until="2026-06-12T05:52:00Z")
+        now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
+        with mock.patch.object(db, "write_txn", side_effect=db.DbBusy("locked")):
+            d = quota.gate_decision(self.orch_dir, "plan-a", now)
+        self.assertFalse(d.dispatch)
+        self.assertIn("quota_gate_busy", d.detail)
 
     def test_malformed_paused_until_dispatches_not_freezes(self) -> None:
-        # Valid JSON, garbage timestamp field: the "malformed file must
+        # Readable row, garbage timestamp field: the "malformed store must
         # not freeze the fleet" contract covers field-level corruption too,
-        # not only unparseable JSON. A hand-edited paused_until must not
+        # not only an unreadable store. A hand-edited paused_until must not
         # crash every tick.
         self._write(paused_until="not-a-timestamp")
         now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
         with contextlib.redirect_stderr(io.StringIO()) as err:
             d = quota.gate_decision(self.orch_dir, "plan-a", now)
         self.assertTrue(d.dispatch)
-        self.assertIn(quota.QUOTA_FILE_NAME, err.getvalue())
+        self.assertIn("unreadable quota pause fields", err.getvalue())
 
     def test_canary_without_deadline_resumes(self) -> None:
         # canary_plan set but canary_deadline null (malformed pairing) must
@@ -438,22 +437,74 @@ class GateDecisionTests(unittest.TestCase):
         d = quota.gate_decision(self.orch_dir, "plan-b", now)
         self.assertTrue(d.dispatch)
         self.assertTrue(d.resumed)
-        self.assertFalse(self.quota_path.exists())
+        self.assertIsNone(quota.read_pause(self.orch_dir))
 
-    def test_concurrent_resume_unlink_is_silent(self) -> None:
-        # Benign race: another tick process unlinked the file in the window
-        # between exists() and the lock. load → FileNotFoundError must NOT
-        # log "ignoring unreadable" (that wording implies corruption).
+    def test_row_cleared_between_the_two_reads_dispatches_silently(self) -> None:
+        # The gate reads the pause twice: once cheaply, once inside the
+        # transaction that may write. A resume committed by another tick in
+        # between leaves the second read empty, and "no row == not paused"
+        # means dispatch — silently, because nothing is wrong.
         self._write(paused_until="2026-06-12T05:52:00Z")
         now = dt.datetime(2026, 6, 12, 6, 0, tzinfo=dt.UTC)
-        with mock.patch(
-            "end_of_line.state.load", side_effect=FileNotFoundError()
-        ):
+        real_read = quota.read_pause
+
+        def _clear_then_read(orch_dir):
+            row = real_read(orch_dir)
+            quota.clear_pause(orch_dir)
+            return row
+
+        with mock.patch.object(quota, "read_pause", side_effect=_clear_then_read):
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 d = quota.gate_decision(self.orch_dir, "plan-a", now)
         self.assertTrue(d.dispatch)
         self.assertFalse(d.resumed)
         self.assertEqual(err.getvalue(), "")
+
+
+class QuotaClearCommandTests(CluTestCase):
+    """`clu quota clear` — the operator escape hatch that replaced `rm quota.json`.
+
+    A stuck pause has no auto-resume by design, so ending it is a deliberate
+    operator act; the command has to say WHICH pause it removed, and dispatch
+    has to be unblocked immediately afterwards.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.tmp_path / "repo"
+        (self.project / "plans").mkdir(parents=True)
+        self.orch = self.project / "plans" / ".orchestrator"
+        self.orch.mkdir()
+
+    def _run(self) -> tuple[int, str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli_main(["quota", "clear", "--project", str(self.project)])
+        return rc, out.getvalue()
+
+    def test_clear_reports_the_stuck_pause_and_unblocks_dispatch(self) -> None:
+        seed_quota_pause(self.orch, paused_until=None, signature="weekly_limit")
+        now = dt.datetime(2026, 6, 20, 0, 0, tzinfo=dt.UTC)
+        blocked = quota.gate_decision(self.orch, "plan-a", now)
+        self.assertFalse(blocked.dispatch, "fixture did not actually pause the project")
+
+        rc, out = self._run()
+        self.assertEqual(rc, 0)
+        self.assertIn("weekly_limit", out)
+        self.assertIn("stuck", out)
+        self.assertTrue(quota.gate_decision(self.orch, "plan-a", now).dispatch)
+
+    def test_clear_reports_the_resume_time_of_a_timed_pause(self) -> None:
+        seed_quota_pause(self.orch, paused_until="2026-06-12T05:52:00Z")
+        rc, out = self._run()
+        self.assertEqual(rc, 0)
+        self.assertIn("session_limit", out)
+        self.assertIn("2026-06-12T05:52:00Z", out)
+
+    def test_clear_with_nothing_paused_says_so(self) -> None:
+        rc, out = self._run()
+        self.assertEqual(rc, 0)
+        self.assertIn("no quota pause recorded", out)
 
 
 class ConstantsTests(unittest.TestCase):
@@ -463,7 +514,6 @@ class ConstantsTests(unittest.TestCase):
     def test_pause_constants(self) -> None:
         self.assertEqual(quota.PAUSE_BUFFER_SEC, 120)
         self.assertEqual(quota.CANARY_WINDOW_SEC, 180)
-        self.assertEqual(quota.QUOTA_FILE_NAME, "quota.json")
 
 
 if __name__ == "__main__":

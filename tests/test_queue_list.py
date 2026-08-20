@@ -14,11 +14,11 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from end_of_line import queue, registry
+from end_of_line import db, queue, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig
-from tests import isolate_queue
+from tests import isolate_queue, stamp_future_schema
 
 _PLAN_BODY = "# placeholder plan\n"
 
@@ -46,7 +46,8 @@ class QueueListTestCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.project = Path(self._tmp.name).resolve()
         isolate_queue(self, self.project)
-        self.queue_path = ProjectConfig(project_root=self.project).queue_path()
+        self.orch = ProjectConfig(project_root=self.project).orchestrator_dir()
+        self.db_path = db.project_db_path(self.orch)
 
     def _run(self, argv: list[str]) -> tuple[int, str]:
         buf = io.StringIO()
@@ -147,22 +148,11 @@ class QueueListTestCase(unittest.TestCase):
 
     def test_list_renders_failure_history_when_present(self) -> None:
         _bootstrap(self.project)
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        with queue.mutate(self.queue_path) as data:
-            data["history"].append(
-                {
-                    "slug": "alpha",
-                    "outcome": "abandoned",
-                    "ended_at": st.utcnow(),
-                }
-            )
-            data["history"].append(
-                {
-                    "slug": "beta",
-                    "outcome": "removed",
-                    "ended_at": st.utcnow(),
-                }
-            )
+        # History rows only exist by having left the pending queue.
+        queue.add(self.orch, {"slug": "alpha", "added_at": st.utcnow()})
+        queue.pop_head_if(self.orch, "alpha", queue.OUTCOME_ABANDONED)
+        queue.add(self.orch, {"slug": "beta", "added_at": st.utcnow()})
+        queue.remove(self.orch, "beta")
         rc, out = self._run(["queue", "list", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("Recent failures:", out)
@@ -194,9 +184,11 @@ class QueueListTestCase(unittest.TestCase):
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("(queue is empty)", out)
 
-    def test_list_refuses_on_corrupt_queue(self) -> None:
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        self.queue_path.write_text("{not valid json")
+    def test_list_refuses_on_a_database_from_a_newer_clu(self) -> None:
+        # A half-written queue is not reachable through a transaction; a
+        # database this clu is too old to read is, and the operator-facing
+        # contract is unchanged — refuse, and name the store.
+        stamp_future_schema(self.db_path)
         from contextlib import redirect_stderr
 
         err = io.StringIO()
@@ -204,41 +196,17 @@ class QueueListTestCase(unittest.TestCase):
             rc = main(["queue", "list", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.GENERIC)
         diagnosis = err.getvalue()
-        self.assertIn("queue.json corrupt", diagnosis)
-        self.assertIn(str(self.queue_path), diagnosis)
-        self.assertIn("Open Claude in this project to repair", diagnosis)
+        self.assertIn("queue unreadable", diagnosis)
+        self.assertIn(str(self.db_path), diagnosis)
+        self.assertIn("SchemaTooNew", diagnosis)
 
-    def test_list_diagnosis_mentions_backup_paths(self) -> None:
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        self.queue_path.write_text("garbage")
-        backup = self.queue_path.with_name(self.queue_path.name + ".corrupt-20260101T000000Z")
-        backup.write_text("{}")
-        from contextlib import redirect_stderr
-
-        err = io.StringIO()
-        with redirect_stderr(err):
-            rc = main(["queue", "list", "--project", str(self.project)])
-        self.assertEqual(rc, ExitCode.GENERIC)
-        self.assertIn(backup.name, err.getvalue())
-
-    def test_list_diagnosis_when_no_backup_present(self) -> None:
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        self.queue_path.write_text("garbage")
-        from contextlib import redirect_stderr
-
-        err = io.StringIO()
-        with redirect_stderr(err):
-            rc = main(["queue", "list", "--project", str(self.project)])
-        self.assertEqual(rc, ExitCode.GENERIC)
-        self.assertIn("No backup files found", err.getvalue())
-
-    def test_list_handles_missing_queue_file(self) -> None:
-        self.assertFalse(self.queue_path.exists())
+    def test_list_handles_missing_database(self) -> None:
+        self.assertFalse(self.db_path.exists())
         rc, out = self._run(["queue", "list", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("(queue is empty)", out)
-        # List must NOT create the queue file as a side effect.
-        self.assertFalse(self.queue_path.exists())
+        # List must NOT create the database as a side effect.
+        self.assertFalse(self.db_path.exists())
 
     # --- in-flight footer ---
 

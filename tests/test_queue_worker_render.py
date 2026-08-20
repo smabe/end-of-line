@@ -60,16 +60,9 @@ def _worker_entry(
 
 def _seed_queue(project: Path, entries: list[dict]) -> None:
     cfg = ProjectConfig(project_root=project)
-    queue_path = cfg.queue_path()
-    queue_path.parent.mkdir(parents=True, exist_ok=True)
-    queue.save_atomic(
-        queue_path,
-        {
-            "schema_version": queue.SCHEMA_VERSION,
-            "queue": entries,
-            "history": [],
-        },
-    )
+    orch = cfg.orchestrator_dir()
+    orch.mkdir(parents=True, exist_ok=True)
+    queue.add_many(orch, entries)
 
 
 class WorkerRenderTestCase(unittest.TestCase):

@@ -97,6 +97,18 @@ def _source_tagged_entry(slug: str, phase: str = _SOURCE_PHASE) -> dict:
     }
 
 
+def _seed_history(orch: Path, entry: dict, outcome: str = queue.OUTCOME_REMOVED) -> None:
+    """Put an entry straight into history — queue it, then pop it.
+
+    History rows only come into being by leaving the pending queue, so a test
+    that needs one gets it the way production does rather than by writing the
+    row itself. Requires an empty pending queue: the entry has to BE the head
+    to be popped.
+    """
+    queue.add(orch, entry)
+    assert queue.pop_head_if(orch, entry["slug"], outcome)
+
+
 class WorkerGatesTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -104,7 +116,7 @@ class WorkerGatesTestCase(unittest.TestCase):
         self.project = Path(self._tmp.name).resolve()
         isolate_queue(self, self.project)
         self.cfg = ProjectConfig(project_root=self.project)
-        self.queue_path = self.cfg.queue_path()
+        self.orch = self.cfg.orchestrator_dir()
         _seed_source_plan(self.project, _SOURCE_PLAN, _SOURCE_PHASE, _TOKEN)
 
     def _rejected_events(self) -> list[dict]:
@@ -127,14 +139,14 @@ class WorkerGatesTestCase(unittest.TestCase):
         # 1 history entry + 2 pending = 3 total; next add (4th) hits cap.
         for slug in ("hist-target", "q-target-1", "q-target-2", "q-target-3"):
             _write_plan(self.project, slug)
-        with queue.mutate(self.queue_path) as qdata:
-            qdata["history"].append(_source_tagged_entry("hist-target"))
-            qdata["queue"].extend(
-                [
-                    _source_tagged_entry("q-target-1"),
-                    _source_tagged_entry("q-target-2"),
-                ]
-            )
+        _seed_history(self.orch, _source_tagged_entry("hist-target"))
+        queue.add_many(
+            self.orch,
+            [
+                _source_tagged_entry("q-target-1"),
+                _source_tagged_entry("q-target-2"),
+            ],
+        )
         rc, _, _ = _worker_add(self.project, "q-target-3")
         self.assertEqual(rc, ExitCode.QUEUE_CAP)
         rejected = self._rejected_events()
@@ -163,20 +175,22 @@ class WorkerGatesTestCase(unittest.TestCase):
         # Operator adds 5 entries (source_phase=None).
         for i in range(1, 6):
             _write_plan(self.project, f"op-target-{i}")
-        with queue.mutate(self.queue_path) as qdata:
-            for i in range(1, 6):
-                qdata["queue"].append(
-                    {
-                        "slug": f"op-target-{i}",
-                        "added_at": st.utcnow(),
-                        "added_by": "operator",
-                        "position_at_add": "tail",
-                        "source_plan": None,
-                        "source_phase": None,
-                        "source_token_fp": None,
-                        "reason": None,
-                    }
-                )
+        queue.add_many(
+            self.orch,
+            [
+                {
+                    "slug": f"op-target-{i}",
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                    "source_plan": None,
+                    "source_phase": None,
+                    "source_token_fp": None,
+                    "reason": None,
+                }
+                for i in range(1, 6)
+            ],
+        )
         # Worker cap counter is still 0; all 3 adds should succeed.
         for i in range(1, 4):
             _write_plan(self.project, f"worker-target-{i}")
@@ -193,8 +207,7 @@ class WorkerGatesTestCase(unittest.TestCase):
         self.assertIn("already queued", out2)
 
         # Still exactly one queue entry.
-        data = queue.load(self.queue_path)
-        self.assertEqual(len(data["queue"]), 1)
+        self.assertEqual(len(queue.pending(self.orch)), 1)
 
         # No second EVENT_QUEUE_APPENDED.
         state_data = st.load(self.cfg.state_path(_SOURCE_PLAN))
@@ -217,15 +230,11 @@ class WorkerGatesTestCase(unittest.TestCase):
         self.assertIn("already queued", out)
 
         # Target was not added to the pending queue.
-        if self.queue_path.exists():
-            data = queue.load(self.queue_path)
-            pending_slugs = {e["slug"] for e in data["queue"]}
-            self.assertNotIn("target", pending_slugs)
+        self.assertNotIn("target", {e["slug"] for e in queue.pending(self.orch)})
 
     def test_done_slug_rejected_worker(self) -> None:
         _write_plan(self.project, "foo")
-        with queue.mutate(self.queue_path) as qdata:
-            qdata["history"].append(_source_tagged_entry("foo"))
+        _seed_history(self.orch, _source_tagged_entry("foo"))
 
         rc, _, err = _worker_add(self.project, "foo")
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)

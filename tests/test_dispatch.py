@@ -18,7 +18,6 @@ from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.dispatch import (
     build_worker_env,
     dispatch_for_tick,
-    dispatch_repair_worker,
     resolved_model,
 )
 from end_of_line.supervisor import TickResult
@@ -427,38 +426,6 @@ class DispatchTestCase(CluTestCase):
         self.assertEqual(len(argv), 4)
         self.assertNotEqual(kwargs.get("shell"), True)
 
-    def test_repair_dispatch_not_wrapped_through_shim(self) -> None:
-        """Repair workers stay on the direct `shell=True` Popen path.
-
-        Regression pin: repair is synchronous + short-lived, carries no
-        claim/pid, and is not wedge-prone — it must NOT route through the shim.
-        """
-        from unittest import mock
-
-        cmd = "repair-cmd {corrupt_path}"
-        cfg = ProjectConfig(
-            project_root=self.project,
-            dispatch=DispatchSpec(kind="shell", command="ignored", repair_command=cmd),
-        )
-        fake = mock.MagicMock()
-        fake.wait.return_value = 0
-        with mock.patch(
-            "end_of_line.dispatch.subprocess.Popen", return_value=fake
-        ) as popen:
-            dispatch_repair_worker(
-                cfg,
-                self.project / "corrupt.json",
-                self.project / "backup.json",
-                "diag",
-                self.project / "repair.log",
-            )
-        args, kwargs = popen.call_args
-        self.assertEqual(kwargs.get("shell"), True)
-        self.assertIsInstance(args[0], str)
-        self.assertIn("repair-cmd", args[0])
-        self.assertNotIn("_pty_spawn_shim", args[0])
-
-
 class ResolvedModelTestCase(unittest.TestCase):
     """Unit tests for `dispatch.resolved_model` — pure parser, no I/O."""
 
@@ -530,40 +497,9 @@ class BuildWorkerEnvBashTimeoutTestCase(CluTestCase):
     def test_cfg_only_call_with_no_override_returns_none(self) -> None:
         # Regression pin: the setdefault must stay INSIDE the inject branch.
         # No path override and no claim kwargs => inherit (None), which
-        # cmd_doctor and dispatch_repair_worker both depend on.
+        # cmd_doctor's "(source: inherited)" line depends on.
         cfg = self._cfg(bash_max_timeout_ms=600_000)
         self.assertIsNone(build_worker_env(cfg))
-
-
-class RepairWorkerEnvTestCase(CluTestCase):
-    """Repair workers carry no claim — no CLU_* identity injection (#91)."""
-
-    def test_repair_worker_env_has_no_claim_identity(self) -> None:
-        from unittest import mock
-
-        sentinel = self.tmp_path / "repair_env.captured"
-        # Doubled braces survive the repair-template .format() as literals,
-        # so the worker shell sees ${CLU_TOKEN-unset}.
-        cmd = 'sh -c \'printf "%s" "${{CLU_TOKEN-unset}}" > ' + str(sentinel) + "'"
-        cfg = ProjectConfig(
-            project_root=self.tmp_path,
-            dispatch=DispatchSpec(kind="shell", command="ignored", repair_command=cmd),
-        )
-        # Deterministic regardless of how THIS test process was launched:
-        # a clu-dispatched worker running the suite has CLU_TOKEN set, and
-        # env=None inheritance would leak it into the child.
-        with mock.patch.dict(os.environ):
-            for key in ("CLU_PLAN", "CLU_PHASE", "CLU_TOKEN", "CLU_PROJECT"):
-                os.environ.pop(key, None)
-            rc = dispatch_repair_worker(
-                cfg,
-                self.tmp_path / "corrupt.json",
-                self.tmp_path / "backup.json",
-                "diag",
-                self.tmp_path / "repair.log",
-            )
-        self.assertEqual(rc, 0)
-        self.assertEqual(sentinel.read_text(), "unset")
 
 
 if __name__ == "__main__":

@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import db, notify
+from end_of_line import db, notify, quota
 from end_of_line import state as st
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import CluTestCase, must
+from tests import CluTestCase, must, seed_quota_pause
 from tests.test_quota import SESSION_LINE as QUOTA_LINE
 
 PLAN_BODY = """\
@@ -497,14 +496,14 @@ class SupervisorTestCase(CluTestCase):
         self.assertIsNone(result.notify_body)
         kinds = [k for k, _ in result.side_notifies]
         self.assertIn(notify.KIND_QUOTA_PAUSED, kinds)
-        qdata = json.loads((self.state_path.parent / "quota.json").read_text())
+        qdata = must(quota.read_pause(self.state_path.parent))
         self.assertEqual(qdata["signature"], "session_limit")
         self.assertIsNotNone(qdata["paused_until"])
 
     def test_dead_pid_quota_stuck_reset_writes_null_pause(self) -> None:
         self._claim_with_log("You've hit your weekly limit · resets Mon 12:00am\n")
         result = self._tick_worker_dead()
-        qdata = json.loads((self.state_path.parent / "quota.json").read_text())
+        qdata = must(quota.read_pause(self.state_path.parent))
         self.assertIsNone(qdata["paused_until"])
         paused = self._event(self._read(), st.EVENT_QUOTA_PAUSED)
         self.assertIsNone(paused["paused_until"])
@@ -522,7 +521,7 @@ class SupervisorTestCase(CluTestCase):
         self.assertNotIn(st.EVENT_QUOTA_DEATH, types)
         self.assertEqual(st.attempts_for_phase(data, "a"), 1)
         self.assertIn("99999", must(result.notify_body))
-        self.assertFalse((self.state_path.parent / "quota.json").exists())
+        self.assertIsNone(quota.read_pause(self.state_path.parent))
 
     def test_lease_expired_quota_log_classifies_and_forgives(self) -> None:
         token = self._claim_with_log(QUOTA_LINE + "\n", lease_expires="2020-01-01T00:00:00Z")
@@ -536,7 +535,7 @@ class SupervisorTestCase(CluTestCase):
         death = self._event(data, st.EVENT_QUOTA_DEATH)
         self.assertEqual(death["token"], token)
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
-        self.assertTrue((self.state_path.parent / "quota.json").exists())
+        self.assertIsNotNone(quota.read_pause(self.state_path.parent))
         # The straggler-path death also surfaces the pause to the operator.
         kinds = [k for k, _ in result.side_notifies]
         self.assertIn(notify.KIND_QUOTA_PAUSED, kinds)
@@ -558,14 +557,13 @@ class SupervisorTestCase(CluTestCase):
         # Acceptance (#94): 3 consecutive quota deaths never reach the
         # max-attempts halt — the 4th tick still dispatches phase a. Each
         # death writes a project pause (phase gate), which blocks redispatch
-        # until the reset; clearing quota.json between deaths models the
+        # until the reset; clearing the pause between deaths models the
         # reset elapsing + the canary redispatching only to die on quota
         # again. Forgiveness holds across all three.
-        quota_file = self.state_path.parent / "quota.json"
         for _ in range(3):
             self._claim_with_log(QUOTA_LINE + "\n")
             self._tick_worker_dead()
-            quota_file.unlink(missing_ok=True)
+            quota.clear_pause(self.state_path.parent)
         data = self._read()
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
         result = tick(self.state_path, self.cfg)
@@ -622,10 +620,15 @@ def _one_phase_plan(slug: str) -> str:
 class QuotaGateSupervisorTests(CluTestCase):
     """The dispatch gate + canary auto-resume, end-to-end through tick().
 
-    Two single-phase plans share one orchestrator dir (and thus one
-    quota.json). The gate must idle every plan while paused, let exactly
-    ONE dispatch as the canary past reset, and resume the fleet (clearing
-    the file + emitting EVENT_QUOTA_RESUMED) once the canary survives.
+    Two single-phase plans share one orchestrator dir (and thus one pause
+    row). The gate must idle every plan while paused, let exactly ONE
+    dispatch as the canary past reset, and resume the fleet (deleting the
+    row + emitting EVENT_QUOTA_RESUMED) once the canary survives.
+
+    These also stand as the coverage for a hazard the storage move created:
+    the gate is consulted from INSIDE the tick's state write window, and
+    both stores now live in one database — so the gate's canary stamp is a
+    write taken while the tick already holds that database's write lock.
     """
 
     NOW = _dt.datetime(2026, 6, 12, 6, 0, tzinfo=_dt.UTC)
@@ -648,26 +651,15 @@ class QuotaGateSupervisorTests(CluTestCase):
             with st.locked(sp):
                 st.save_atomic(sp, st.empty_state(slug, "plans"))
             self.paths[slug] = sp
-        self.quota_path = self.orch / "quota.json"
 
     def _write_pause(self, **over: object) -> None:
-        base = {
-            "schema_version": 1,
-            "paused_until": "2026-06-12T05:52:00Z",
-            "signature": "session_limit",
-            "line": QUOTA_LINE,
-            "canary_plan": None,
-            "canary_deadline": None,
-            "created_at": "2026-06-12T03:00:00Z",
-        }
-        base.update(over)
-        self.quota_path.write_text(json.dumps(base))
+        seed_quota_pause(self.orch, line=QUOTA_LINE, **over)
 
     def _read(self, slug: str) -> dict:
         return st.load(self.paths[slug])
 
     def _read_quota(self) -> dict:
-        return json.loads(self.quota_path.read_text())
+        return must(quota.read_pause(self.orch))
 
     def test_active_pause_idles_every_plan(self) -> None:
         self._write_pause(paused_until="2026-06-12T07:00:00Z")  # future reset
@@ -687,7 +679,7 @@ class QuotaGateSupervisorTests(CluTestCase):
             b = tick(self.paths["plan-b"], self.cfg)  # gated by canary window
         self.assertEqual(a.action, "dispatch")
         self.assertEqual(b.action, "idle")
-        # quota.json now names plan-a the canary with a +180s deadline.
+        # The pause row now names plan-a the canary with a +180s deadline.
         q = self._read_quota()
         self.assertEqual(q["canary_plan"], "plan-a")
         self.assertEqual(
@@ -701,7 +693,7 @@ class QuotaGateSupervisorTests(CluTestCase):
         self.assertEqual(claims.count(True), 1)
         self.assertIsNotNone(self._read("plan-a")["current_claim"])
 
-    def test_past_deadline_resumes_and_clears_file(self) -> None:
+    def test_past_deadline_resumes_and_clears_the_row(self) -> None:
         self._write_pause(
             paused_until="2026-06-12T05:52:00Z",
             canary_plan="plan-a",
@@ -710,7 +702,7 @@ class QuotaGateSupervisorTests(CluTestCase):
         with mock.patch("end_of_line.state._now_utc", return_value=self.NOW):
             b = tick(self.paths["plan-b"], self.cfg)
         self.assertEqual(b.action, "dispatch")
-        self.assertFalse(self.quota_path.exists())  # cleared on resume
+        self.assertIsNone(quota.read_pause(self.orch))  # cleared on resume
         events = [e["type"] for e in self._read("plan-b")["events"]]
         self.assertIn(st.EVENT_QUOTA_RESUMED, events)
         # Resume pings the operator (defers in quiet hours; inbox/watch
@@ -725,7 +717,7 @@ class QuotaGateSupervisorTests(CluTestCase):
         self.assertEqual(a.action, "idle")
         self.assertIn("quota_stuck", a.detail)
         self.assertIsNone(self._read("plan-a")["current_claim"])
-        self.assertTrue(self.quota_path.exists())  # only the operator clears it
+        self.assertIsNotNone(quota.read_pause(self.orch))  # only the operator clears it
 
 
 if __name__ == "__main__":

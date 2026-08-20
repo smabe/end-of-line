@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -184,6 +185,28 @@ def host_conn(
         conn.close()
 
 
+@contextmanager
+def project_conn(
+    orchestrator_dir: Path,
+    *,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> Iterator[sqlite3.Connection]:
+    """`host_conn`'s twin for a project database, rows as `sqlite3.Row`.
+
+    Exists for the stores that live beside plan state but are not plan state —
+    the queue and the quota pause — and for the queue POP, which has to open
+    ONE transaction spanning two of them (create the plan, move the queue head)
+    and therefore cannot borrow a connection from either.
+    """
+    conn = connect(project_db_path(Path(orchestrator_dir)), timeout_s=timeout_s)
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_project_schema(conn)
+        yield conn
+    finally:
+        conn.close()
+
+
 # What a caller catches when it would rather DEGRADE than fail — a read that
 # returns empty (registry, marker, cursor, inbox) or a best-effort write that
 # is skipped (the inbox notes beside a durable state change). Both used to be
@@ -231,6 +254,51 @@ def _require_wal(conn: sqlite3.Connection, path: Path) -> None:
 # --- transactions -----------------------------------------------------------
 
 
+# Write transactions currently open in THIS thread, keyed by database file.
+#
+# SQLite's write lock is per-connection, not per-process: a second connection
+# asking for `BEGIN IMMEDIATE` while this thread already holds one on the same
+# file waits for a lock that only the waiter can release, and gets `DbBusy`
+# when the budget runs out (measured: 1.07s at a 1s budget, on the exact
+# `st.mutate` → quota-row shape below). That never came up while every store
+# was its own file with its own flock, and it arrives the moment plan state,
+# the queue and the quota pause share one database — the supervisor's tick
+# consults the quota gate from INSIDE its state window, and the two queue
+# stores likewise sit under callers that may already be writing plan rows.
+#
+# So a nested `write_txn` on the same database JOINS the transaction already
+# open instead of asking for a lock it cannot get. Two consequences worth
+# naming: the inner work commits with the outer one (an all-or-nothing that is
+# stronger than the two separate files gave), and an exception inside it aborts
+# the whole outer transaction, which is what "one transaction" has to mean.
+#
+# Thread-local because two THREADS holding write transactions on one database
+# are genuine contention, and two of this project's tests measure exactly that.
+_ACTIVE = threading.local()
+
+
+def _active_writes() -> dict[str, sqlite3.Connection]:
+    writes = getattr(_ACTIVE, "writes", None)
+    if writes is None:
+        writes = {}
+        _ACTIVE.writes = writes
+    return writes
+
+
+def _main_db_file(conn: sqlite3.Connection) -> str:
+    """The filename behind this connection's `main` schema, "" for in-memory.
+
+    In-memory databases all report an empty filename and are never shared, so
+    an empty key opts out of the join-the-open-transaction path entirely
+    rather than making every in-memory connection look like the same store.
+    """
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row[2]) if row and row[2] else ""
+
+
 def _set_busy_timeout(conn: sqlite3.Connection, ms: int) -> None:
     conn.execute(f"PRAGMA busy_timeout = {ms}")
 
@@ -253,7 +321,22 @@ def write_txn(
     change how patient the next one is. Contention that outlives the budget
     raises `DbBusy` rather than SQLite's generic `OperationalError`, which is
     what makes drop-on-contention a decision a caller can express.
+
+    When this thread ALREADY has a write transaction open on the same database
+    file, the cursor yielded belongs to that transaction and this block neither
+    begins nor commits — see `_ACTIVE` for why that is the only thing it can
+    safely do.
     """
+    key = _main_db_file(conn)
+    active = _active_writes()
+    if key and key in active:
+        cur = active[key].cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
+        return
+
     restore: int | None = None
     if timeout_s is not None:
         restore = _current_busy_timeout(conn)
@@ -265,6 +348,8 @@ def write_txn(
             if _busy_error(exc):
                 raise DbBusy(str(exc)) from exc
             raise
+        if key:
+            active[key] = conn
         cur = conn.cursor()
         try:
             yield cur
@@ -273,6 +358,7 @@ def write_txn(
             raise
         finally:
             cur.close()
+            active.pop(key, None)
         try:
             conn.execute("COMMIT")
         except sqlite3.OperationalError as exc:
@@ -422,13 +508,22 @@ _PROJECT_DDL: tuple[str, ...] = (
         archived_at TEXT
     )
     """,
+    # `id` is the queue ORDER, not just an identity: the head is the smallest
+    # id. `clu queue add --front` inserts below the current minimum (explicit,
+    # possibly negative, rowids — legal alongside AUTOINCREMENT, which only
+    # ever tracks the maximum), so a front-insert reorders nothing already
+    # queued. `extra` carries the entry fields that are not columns — the
+    # worker-mode provenance (`source_plan`, `source_phase`, `source_token_fp`,
+    # `reason`) and `position_at_add` — the same JSON-tail seam `plans.extra`
+    # uses, so an entry dict round-trips whole.
     """
     CREATE TABLE IF NOT EXISTS queue (
         id       INTEGER PRIMARY KEY AUTOINCREMENT,
         slug     TEXT,
         added_at TEXT,
         added_by TEXT,
-        batch_id TEXT
+        batch_id TEXT,
+        extra    TEXT    -- JSON
     )
     """,
     """
@@ -438,6 +533,7 @@ _PROJECT_DDL: tuple[str, ...] = (
         added_at TEXT,
         added_by TEXT,
         batch_id TEXT,
+        extra    TEXT,   -- JSON
         ended_at TEXT,
         outcome  TEXT
     )

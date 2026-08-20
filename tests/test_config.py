@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import unittest
@@ -30,6 +32,34 @@ class _ConfigTestBase(unittest.TestCase):
 
     def _write(self, raw: dict) -> None:
         (self.root / CONFIG_FILENAME).write_text(json.dumps(raw))
+
+
+class RepairCommandDeprecationTests(_ConfigTestBase):
+    """`dispatch.repair_command` is parsed and inert.
+
+    The queue's corruption-repair subsystem is gone — a transaction cannot
+    leave the half-written JSON it existed to rescue. Config parsing still has
+    to ACCEPT the field, because an `.orchestrator.json` that names it must not
+    start failing on upgrade; setting it earns one line on stderr and nothing
+    else.
+    """
+
+    def test_setting_it_still_parses_and_warns(self) -> None:
+        self._write({"dispatch": {"command": "x", "repair_command": "claude --print fix"}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = load_project_config(self.root)
+        self.assertEqual(cfg.dispatch.command, "x")
+        self.assertEqual(cfg.dispatch.repair_command, "claude --print fix")
+        self.assertIn("repair_command is deprecated", err.getvalue())
+
+    def test_omitting_it_says_nothing(self) -> None:
+        self._write({"dispatch": {"command": "x"}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = load_project_config(self.root)
+        self.assertIsNone(cfg.dispatch.repair_command)
+        self.assertEqual(err.getvalue(), "")
 
 
 class LoadProjectConfigTests(_ConfigTestBase):

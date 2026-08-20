@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from end_of_line import queue, registry
+from end_of_line import db, queue, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig
@@ -51,7 +52,7 @@ class WorkerDispatchTestCase(unittest.TestCase):
         self.project = Path(self._tmp.name).resolve()
         isolate_queue(self, self.project)
         self.cfg = ProjectConfig(project_root=self.project)
-        self.queue_path = self.cfg.queue_path()
+        self.orch = self.cfg.orchestrator_dir()
 
     def _run(self, args: list[str]) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -84,9 +85,9 @@ class WorkerDispatchTestCase(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, ExitCode.OK)
-        data = queue.load(self.queue_path)
-        self.assertEqual(len(data["queue"]), 1)
-        entry = data["queue"][0]
+        pending = queue.pending(self.orch)
+        self.assertEqual(len(pending), 1)
+        entry = pending[0]
         self.assertEqual(entry["slug"], "feature-c")
         self.assertEqual(entry["added_by"], "worker")
         self.assertEqual(entry["source_plan"], "feature-b")
@@ -120,7 +121,7 @@ class WorkerDispatchTestCase(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, ExitCode.OK)
-        entry = queue.load(self.queue_path)["queue"][0]
+        entry = queue.pending(self.orch)[0]
         self.assertIsNone(entry["reason"])
         state_data = st.load(self.cfg.state_path("feature-b"))
         evt = next(e for e in state_data["events"] if e["type"] == st.EVENT_QUEUE_APPENDED)
@@ -145,7 +146,7 @@ class WorkerDispatchTestCase(unittest.TestCase):
                 str(self.project),
             ]
         )
-        entry = queue.load(self.queue_path)["queue"][0]
+        entry = queue.pending(self.orch)[0]
         expected_fp = hashlib.sha256(_TOKEN.encode()).hexdigest()[:8]
         self.assertEqual(entry["source_token_fp"], expected_fp)
 
@@ -168,7 +169,7 @@ class WorkerDispatchTestCase(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
-        self.assertFalse(self.queue_path.exists())
+        self.assertEqual(queue.pending(self.orch), [])
         state_data = st.load(self.cfg.state_path("feature-b"))
         appended = [e for e in state_data["events"] if e["type"] == st.EVENT_QUEUE_APPENDED]
         self.assertEqual(appended, [])
@@ -192,7 +193,7 @@ class WorkerDispatchTestCase(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
-        self.assertFalse(self.queue_path.exists())
+        self.assertEqual(queue.pending(self.orch), [])
         state_data = st.load(self.cfg.state_path("feature-b"))
         appended = [e for e in state_data["events"] if e["type"] == st.EVENT_QUEUE_APPENDED]
         self.assertEqual(appended, [])
@@ -221,7 +222,7 @@ class WorkerDispatchTestCase(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, ExitCode.CLAIM_MISMATCH)
-        self.assertFalse(self.queue_path.exists())
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_worker_add_unknown_source_plan(self) -> None:
         _write_plan(self.project, "feature-c")
@@ -242,7 +243,7 @@ class WorkerDispatchTestCase(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
-        self.assertFalse(self.queue_path.exists())
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_worker_add_raw_token_not_in_queue(self) -> None:
         _seed_source_plan(self.project, "feature-b", "c-extract", _TOKEN)
@@ -262,5 +263,18 @@ class WorkerDispatchTestCase(unittest.TestCase):
                 str(self.project),
             ]
         )
-        raw_bytes = self.queue_path.read_bytes()
-        self.assertNotIn(_TOKEN.encode(), raw_bytes)
+        # The queue keeps a FINGERPRINT of the token, never the token itself.
+        # Checked over every COLUMN of both queue tables rather than the whole
+        # database file: the plan's claim row legitimately holds the token (it
+        # always did, in the state file), and they share one database now — so
+        # a file-wide byte scan would pass or fail for the wrong reason.
+        conn = sqlite3.connect(str(db.project_db_path(self.orch)))
+        try:
+            rows = conn.execute("SELECT * FROM queue").fetchall()
+            rows += conn.execute("SELECT * FROM queue_history").fetchall()
+        finally:
+            conn.close()
+        self.assertTrue(rows, "no queue rows to check")
+        for row in rows:
+            for value in row:
+                self.assertNotIn(_TOKEN, str(value))

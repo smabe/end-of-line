@@ -42,7 +42,7 @@ class QueueBatchSchemaTestCase(CluTestCase):
         self.project = self.tmp_path / "repo"
         self.project.mkdir()
         isolate_queue(self, self.project)
-        self.queue_path = ProjectConfig(project_root=self.project).queue_path()
+        self.orch = ProjectConfig(project_root=self.project).orchestrator_dir()
 
     def test_queue_add_stamps_batch_id_uniformly(self) -> None:
         _bootstrap(self.project)
@@ -63,7 +63,7 @@ class QueueBatchSchemaTestCase(CluTestCase):
             ]
         )
         self.assertEqual(rc, ExitCode.OK)
-        entries = queue.load(self.queue_path)["queue"]
+        entries = queue.pending(self.orch)
         self.assertEqual(len(entries), 3)
         for entry in entries:
             self.assertEqual(entry["batch_id"], "my-batch")
@@ -73,7 +73,7 @@ class QueueBatchSchemaTestCase(CluTestCase):
         _write_plan(self.project, "plan-a")
         rc = main(["queue", "add", "plan-a", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        entry = queue.load(self.queue_path)["queue"][0]
+        entry = queue.pending(self.orch)[0]
         self.assertIsNone(entry.get("batch_id"))
 
     def test_queue_add_invalid_batch_slug_rejects(self) -> None:
@@ -115,27 +115,26 @@ class QueueBatchSchemaTestCase(CluTestCase):
         )
         self.assertEqual(rc, ExitCode.GENERIC)
         # Queue must be unchanged — no entries added before the rejection.
-        if self.queue_path.exists():
-            self.assertEqual(queue.load(self.queue_path)["queue"], [])
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_queue_pop_propagates_batch_id_to_plan_state(self) -> None:
         _bootstrap(self.project, "seed")
         _write_plan(self.project, "batched-plan")
 
-        with queue.mutate(self.queue_path) as data:
-            data["queue"].append(
-                {
-                    "slug": "batched-plan",
-                    "added_at": st.utcnow(),
-                    "added_by": "operator",
-                    "position_at_add": "tail",
-                    "source_plan": None,
-                    "source_phase": None,
-                    "source_token_fp": None,
-                    "reason": None,
-                    "batch_id": "my-batch",
-                }
-            )
+        queue.add(
+            self.orch,
+            {
+                "slug": "batched-plan",
+                "added_at": st.utcnow(),
+                "added_by": "operator",
+                "position_at_add": "tail",
+                "source_plan": None,
+                "source_phase": None,
+                "source_token_fp": None,
+                "reason": None,
+                "batch_id": "my-batch",
+            },
+        )
 
         cfg = load_project_config(self.project)
         state_path = cfg.state_path("batched-plan")
@@ -158,20 +157,20 @@ class QueueBatchSchemaTestCase(CluTestCase):
         fresh["status"] = st.STATUS_DONE
         st.save_atomic(state_path, fresh)
 
-        with queue.mutate(self.queue_path) as data:
-            data["queue"].append(
-                {
-                    "slug": "absorbed-plan",
-                    "added_at": st.utcnow(),
-                    "added_by": "operator",
-                    "position_at_add": "tail",
-                    "source_plan": None,
-                    "source_phase": None,
-                    "source_token_fp": None,
-                    "reason": None,
-                    "batch_id": "absorbed-batch",
-                }
-            )
+        queue.add(
+            self.orch,
+            {
+                "slug": "absorbed-plan",
+                "added_at": st.utcnow(),
+                "added_by": "operator",
+                "position_at_add": "tail",
+                "source_plan": None,
+                "source_phase": None,
+                "source_token_fp": None,
+                "reason": None,
+                "batch_id": "absorbed-batch",
+            },
+        )
 
         plans = [
             ProjectPlan(
@@ -182,9 +181,9 @@ class QueueBatchSchemaTestCase(CluTestCase):
         ]
         result = queue_advancement_rule(self.project, plans)
         self.assertIsNotNone(result)
-        data = queue.load(self.queue_path)
-        self.assertEqual(len(data["history"]), 1)
-        self.assertEqual(data["history"][0]["batch_id"], "absorbed-batch")
+        hist = queue.history(self.orch)
+        self.assertEqual(len(hist), 1)
+        self.assertEqual(hist[0]["batch_id"], "absorbed-batch")
 
     def test_empty_state_has_null_batch_id(self) -> None:
         state = st.empty_state("my-plan", "plans")

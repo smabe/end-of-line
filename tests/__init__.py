@@ -190,14 +190,64 @@ def isolate_registry(
 
 
 def isolate_queue(testcase: unittest.TestCase, tmp_path: Path) -> None:
-    """Isolate registry + queue file paths for a queue test.
+    """Isolate registry + queue paths for a queue test.
 
-    queue.json lives under each project's `.orchestrator/` — so per-test
+    The queue lives in each project's `.orchestrator/clu.db` — so per-test
     isolation falls out naturally as long as the project root is itself
     tmp-scoped. The only shared sink that needs patching is the host
     registry, since `clu queue add`'s bootstrap check reads it.
     """
     isolate_registry(testcase, tmp_path)
+
+
+QUOTA_PAUSE_DEFAULTS: dict = {
+    "paused_until": "2026-06-12T05:52:00Z",
+    "signature": "session_limit",
+    "line": "You've hit your session limit · resets 1:50am (America/New_York)",
+    "canary_plan": None,
+    "canary_deadline": None,
+    "created_at": "2026-06-12T03:00:00Z",
+}
+
+
+def seed_quota_pause(orch_dir: Path, **over) -> None:
+    """Write the project's quota pause row — the fixture that wrote a file.
+
+    Goes through the store's own column tuple so a schema change breaks the
+    seeder loudly rather than seeding a row the gate cannot read.
+    """
+    from end_of_line import db as _db
+    from end_of_line import quota as _quota
+
+    row = {**QUOTA_PAUSE_DEFAULTS, **over}
+    with _db.project_conn(orch_dir) as conn, _db.write_txn(conn) as cur:
+        cur.execute(
+            "INSERT OR REPLACE INTO quota (id, paused_until, signature, line, "
+            "canary_plan, canary_deadline, created_at) VALUES (1, ?, ?, ?, ?, ?, ?)",
+            tuple(row[c] for c in _quota._QUOTA_COLUMNS),
+        )
+
+
+def stamp_future_schema(db_path: Path) -> None:
+    """Make a clu database read as written by a NEWER clu than this one.
+
+    The replacement for tests that wrote garbage into a JSON store to prove
+    the tolerant-read path. A transaction cannot leave a half-written
+    database, so the reachable "cannot read this store" case is a schema
+    from the future, which upstream decision #6 says to skip rather than
+    interpret. Creates the file if it is not there yet — an empty database
+    at a future `user_version` refuses exactly the same way.
+    """
+    import sqlite3
+
+    from end_of_line import db as _db
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    try:
+        conn.execute(f"PRAGMA user_version = {_db.PROJECT_SCHEMA_VERSION + 1}")
+    finally:
+        conn.close()
 
 
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:

@@ -1,190 +1,276 @@
-"""Per-project plan queue.
+"""Per-project plan queue — two tables in the project database.
 
 clu's cron tick advances *phases within* a plan, but inter-plan
 transitions need someone to invoke `clu init` for the next plan. The
 queue holds that list so an operator can scribble plans, queue them,
 walk away, and wake up to a drained chain.
 
-Storage lives next to per-plan state files at
-`<plan_dir>/.orchestrator/queue.json`. See `docs/contract.md` for the
-schema and `.claude/plans/plan-queue-master.md` for the design pass.
+`queue` holds what is pending, `queue_history` what has left it, both in
+`<plan_dir>/.orchestrator/clu.db` beside plan state. `id` is the ORDER:
+the head is the smallest id, a tail-add takes the next autoincrement, and
+`--front` inserts below the current minimum so nothing already queued is
+renumbered.
 
-Auto-repair: when load() raises (catastrophic JSON / schema corruption),
-the supervisor backs up the original bytes and optionally dispatches a
-headless Claude repair worker. The worker's output runs through
-`validate_repair`, which is the load-bearing safety boundary —
-slug-preservation is verified by clu's regex-extracted backup slugs,
-NOT by trusting the worker's prompt.
+There is no repair machinery here any more, and its absence is the point.
+The old module spent most of itself rescuing slugs out of a half-written
+`queue.json` with a regex over raw bytes, because a JSON file interrupted
+mid-write is recoverable text. A WAL database never hands a reader a
+half-written store: the pop is one transaction that either committed or
+did not. What is left — a genuinely corrupt database file — is not
+something a headless worker edits back to health, so it surfaces to the
+operator instead of being handed to one.
 """
 
 from __future__ import annotations
 
 import json
-import re
-from dataclasses import dataclass
+import sqlite3
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+from . import db
 from . import state as st
 
-SCHEMA_VERSION = 1
+# Columns of their own; everything else on an entry rides in `extra`.
+_ENTRY_COLUMNS = ("slug", "added_at", "added_by", "batch_id")
 
-# Regex over raw bytes so we can extract slug data from a backup whose
-# JSON is otherwise unparseable (a truncated string is enough to break
-# json.loads but the earlier slug values usually survive intact).
-_SLUG_RE = re.compile(rb'"slug"\s*:\s*"([^"]+)"')
-_HISTORY_RE = re.compile(rb'"history"\s*:\s*\[', re.DOTALL)
-
-
-def _empty() -> dict:
-    return {"schema_version": SCHEMA_VERSION, "queue": [], "history": []}
+# What leaving the pending queue is called, in the events and in
+# `clu queue list`'s "Recent failures" block.
+OUTCOME_POPPED = "popped"
+OUTCOME_ABSORBED = "absorbed"
+OUTCOME_ABANDONED = "abandoned"
+OUTCOME_REMOVED = "removed"
 
 
-def load(path: Path) -> dict:
-    return st.load(path, expected_version=SCHEMA_VERSION)
+class AlreadyQueued(Exception):
+    """An add would duplicate a slug already pending. Carries its position.
 
-
-def save_atomic(path: Path, data: dict) -> None:
-    st.save_atomic(path, data)
-
-
-def mutate(path: Path):
-    """lock + load + yield-for-mutation + atomic write. Tolerates a missing
-    file (first `queue add` creates it) via `state.locked_json`."""
-    return st.locked_json(path, expected_version=SCHEMA_VERSION, empty=_empty)
-
-
-def best_effort_extract_slugs(data: bytes) -> set[str]:
-    """All `"slug": "..."` matches in the raw bytes (pending + history).
-
-    Best-effort: the regex is double-quote / case-sensitive and won't
-    detect slugs whose preceding string was truncated mid-byte. Catches
-    catastrophic loss, not surgical corruption. Use the difference
-    against `best_effort_extract_history_slugs` to isolate the pending
-    queue's slugs.
+    Raised INSIDE the insert transaction so the check and the insert cannot
+    be separated by another writer — the reason it is an exception rather
+    than a return value the caller checks first.
     """
-    return {m.decode("utf-8", errors="replace") for m in _SLUG_RE.findall(data)}
+
+    def __init__(self, slug: str, position: int) -> None:
+        super().__init__(f"{slug!r} already queued at position {position}")
+        self.slug = slug
+        self.position = position
 
 
-def best_effort_extract_history_slugs(data: bytes) -> set[str]:
-    """Slugs appearing inside the `"history": [ ... ]` array of the bytes.
+# --- row <-> entry ------------------------------------------------------------
 
-    Locates the substring starting after `"history": [` and scans to a
-    matching `]` (bracket-count over JSON-escaped strings — good enough
-    for the well-formed-prefix-then-garbage failure mode the worker most
-    commonly produces). Returns an empty set when the history block
-    can't be found.
+
+def _row_to_entry(row: sqlite3.Row) -> dict[str, Any]:
+    """One queue row back into the entry dict its writer handed in.
+
+    A column that is NULL is left OUT rather than emitted as None, matching
+    how the plan store projects its own optional columns: absent and None
+    read the same through `.get`, and re-emitting every column would grow
+    keys on entries that never carried them.
     """
-    m = _HISTORY_RE.search(data)
-    if not m:
-        return set()
-    start = m.end()
-    depth = 1
-    i = start
-    in_str = False
-    escape = False
-    while i < len(data) and depth > 0:
-        c = data[i : i + 1]
-        if escape:
-            escape = False
-        elif in_str:
-            if c == b"\\":
-                escape = True
-            elif c == b'"':
-                in_str = False
-        else:
-            if c == b'"':
-                in_str = True
-            elif c == b"[":
-                depth += 1
-            elif c == b"]":
-                depth -= 1
-        i += 1
-    history_bytes = data[start : i - 1]
-    return {m.decode("utf-8", errors="replace") for m in _SLUG_RE.findall(history_bytes)}
+    entry: dict[str, Any] = {"slug": row["slug"]}
+    for col in _ENTRY_COLUMNS[1:]:
+        if row[col] is not None:
+            entry[col] = row[col]
+    if row["extra"] is not None:
+        entry.update(json.loads(row["extra"]))
+    return entry
 
 
-@dataclass
-class ValidationResult:
-    ok: bool
-    reason: str | None = None
+def _entry_values(entry: dict) -> tuple:
+    extra = {k: v for k, v in entry.items() if k not in _ENTRY_COLUMNS}
+    return (
+        *(entry.get(col) for col in _ENTRY_COLUMNS),
+        json.dumps(extra) if extra else None,
+    )
 
 
-def validate_repair(backup_bytes: bytes, repaired_path: Path) -> ValidationResult:
-    """Run the hard slug-preservation rules. ok=False ⇒ caller MUST revert.
+# --- cursor-level primitives --------------------------------------------------
+#
+# The queue's two multi-step callers — the worker-mode `queue add` (cap count,
+# three idempotency checks, then the insert) and the tick's pop (head check,
+# plan create, move to history) — need their steps in ONE transaction, and the
+# pop's middle step writes a table this module does not own. So the primitives
+# take a cursor and the convenience wrappers below open a transaction around
+# one of them.
 
-    Checks (in order):
-      1. Repaired file re-loads cleanly. Otherwise the worker handed us
-         more garbage.
-      2. Every pending slug we could regex out of the backup is present
-         in the repaired queue. The set diff is the user-visible reason.
-      3. Every history slug from the backup is still in history. History
-         is append-only — the worker may add but never remove.
 
-    The "empty queue when original non-empty" case is subsumed by (2) —
-    the missing-slugs set will be non-empty.
+def pending_in_txn(cur: sqlite3.Cursor) -> list[dict]:
+    rows = cur.execute(
+        f"SELECT id, {', '.join(_ENTRY_COLUMNS)}, extra FROM queue ORDER BY id"
+    ).fetchall()
+    return [_row_to_entry(r) for r in rows]
+
+
+def history_in_txn(cur: sqlite3.Cursor) -> list[dict]:
+    rows = cur.execute(
+        f"SELECT id, {', '.join(_ENTRY_COLUMNS)}, extra, ended_at, outcome "
+        f"FROM queue_history ORDER BY id"
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        entry = _row_to_entry(row)
+        entry["ended_at"] = row["ended_at"]
+        entry["outcome"] = row["outcome"]
+        out.append(entry)
+    return out
+
+
+def insert_in_txn(cur: sqlite3.Cursor, entry: dict, *, front: bool = False) -> int:
+    """Insert one entry; return its 1-based position. Raises `AlreadyQueued`.
+
+    A tail insert lets AUTOINCREMENT pick the id. A front insert takes
+    `MIN(id) - 1`, which is legal alongside AUTOINCREMENT (the sequence only
+    ever tracks the maximum) and goes negative once the queue has been
+    front-loaded past zero — deliberately, because renumbering the entries
+    already queued is the alternative and it would move rows a concurrent
+    reader is looking at.
     """
-    try:
-        repaired = load(repaired_path)
-    except (FileNotFoundError, OSError) as exc:
-        return ValidationResult(False, f"still unparseable: {exc}")
-    except (json.JSONDecodeError, st.SchemaVersionMismatch) as exc:
-        return ValidationResult(False, f"still unparseable: {exc}")
-
-    if not isinstance(repaired.get("queue"), list) or not isinstance(repaired.get("history"), list):
-        return ValidationResult(False, "repaired file missing queue/history arrays")
-
-    backup_all = best_effort_extract_slugs(backup_bytes)
-    backup_history = best_effort_extract_history_slugs(backup_bytes)
-    backup_pending = backup_all - backup_history
-
-    repaired_queue_slugs = {e.get("slug") for e in repaired["queue"]}
-    missing_pending = backup_pending - repaired_queue_slugs
-    if missing_pending:
-        return ValidationResult(False, f"would drop slugs: {sorted(missing_pending)}")
-
-    repaired_history_slugs = {e.get("slug") for e in repaired["history"]}
-    missing_history = backup_history - repaired_history_slugs
-    if missing_history:
-        return ValidationResult(False, f"history entries removed: {sorted(missing_history)}")
-
-    return ValidationResult(True)
+    slug = entry["slug"]
+    st.validate_slug(slug, kind="plan slug")
+    existing = [e["slug"] for e in pending_in_txn(cur)]
+    if slug in existing:
+        raise AlreadyQueued(slug, existing.index(slug) + 1)
+    columns = f"{', '.join(_ENTRY_COLUMNS)}, extra"
+    values = _entry_values(entry)
+    if front:
+        low = cur.execute("SELECT MIN(id) FROM queue").fetchone()[0]
+        new_id = 1 if low is None else int(low) - 1
+        cur.execute(
+            f"INSERT INTO queue (id, {columns}) VALUES ({', '.join('?' * (len(values) + 1))})",
+            (new_id, *values),
+        )
+        return 1
+    cur.execute(
+        f"INSERT INTO queue ({columns}) VALUES ({', '.join('?' * len(values))})",
+        values,
+    )
+    return len(existing) + 1
 
 
-def read_throttle(throttle_path: Path, diagnosis_hash: str) -> int:
-    """Attempts recorded for `diagnosis_hash`. 0 on any read failure.
+def pop_head_in_txn(
+    cur: sqlite3.Cursor,
+    slug: str,
+    outcome: str,
+    extra: dict | None = None,
+) -> bool:
+    """Move the head to history IF the head is still `slug`. False = it moved.
 
-    A corrupt or mismatched-hash throttle file resets to 0 — we don't
-    want a "repair-the-throttle" sub-failure mode. The cost of an extra
-    repair attempt is far less than the cost of getting stuck because a
-    counter file went bad.
+    The head re-check that the file-backed pop did by hand after taking the
+    lock happens inside the write transaction here, which is what makes two
+    ticks racing the same pop safe: the loser reads a head that is no longer
+    `slug`, returns False before deleting anything, and repeats none of the
+    work the winner already did.
     """
+    row = cur.execute(
+        f"SELECT id, {', '.join(_ENTRY_COLUMNS)}, extra FROM queue ORDER BY id LIMIT 1"
+    ).fetchone()
+    if row is None or row["slug"] != slug:
+        return False
+    cur.execute("DELETE FROM queue WHERE id = ?", (row["id"],))
+    entry = {**_row_to_entry(row), **(extra or {})}
+    values = _entry_values(entry)
+    cur.execute(
+        f"INSERT INTO queue_history ({', '.join(_ENTRY_COLUMNS)}, extra, ended_at, outcome) "
+        f"VALUES ({', '.join('?' * (len(values) + 2))})",
+        (*values, st.utcnow(), outcome),
+    )
+    return True
+
+
+def remove_in_txn(cur: sqlite3.Cursor, slug: str) -> bool:
+    """Drop `slug` from pending into history with outcome `removed`."""
+    row = cur.execute(
+        f"SELECT id, {', '.join(_ENTRY_COLUMNS)}, extra FROM queue "
+        f"WHERE slug = ? ORDER BY id LIMIT 1",
+        (slug,),
+    ).fetchone()
+    if row is None:
+        return False
+    cur.execute("DELETE FROM queue WHERE id = ?", (row["id"],))
+    values = _entry_values(_row_to_entry(row))
+    cur.execute(
+        f"INSERT INTO queue_history ({', '.join(_ENTRY_COLUMNS)}, extra, ended_at, outcome) "
+        f"VALUES ({', '.join('?' * (len(values) + 2))})",
+        (*values, st.utcnow(), OUTCOME_REMOVED),
+    )
+    return True
+
+
+# --- whole-operation API ------------------------------------------------------
+
+
+def _read(orch_dir: Path, fn: Callable[[sqlite3.Cursor], list[dict]]) -> list[dict]:
+    """Run a cursor-level read, or return [] when the database does not exist.
+
+    Absent database == empty queue, the direct heir of "no queue.json means
+    nothing is queued". Read-only so a read never brings the database into
+    being. Everything else — a schema from a newer clu, a corrupt file,
+    contention — is raised for the caller to decide about, because silently
+    reading an unreadable queue as empty is how a chain drains itself.
+    """
+    path = db.project_db_path(Path(orch_dir))
+    if not path.exists():
+        return []
+    conn = db.connect(path, readonly=True)
+    conn.row_factory = sqlite3.Row
     try:
-        data = json.loads(throttle_path.read_text())
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return 0
-    if data.get("diagnosis_hash") != diagnosis_hash:
-        return 0
-    try:
-        return int(data.get("attempts", 0))
-    except (TypeError, ValueError):
-        return 0
+        db.ensure_project_schema(conn)
+        with db.read_txn(conn) as cur:
+            return fn(cur)
+    finally:
+        conn.close()
 
 
-def increment_throttle(throttle_path: Path, diagnosis_hash: str) -> None:
-    """Bump (or initialize) the per-hash attempt counter."""
-    attempts = read_throttle(throttle_path, diagnosis_hash) + 1
-    payload = {
-        "attempts": attempts,
-        "last_at": st.utcnow(),
-        "diagnosis_hash": diagnosis_hash,
-    }
-    throttle_path.parent.mkdir(parents=True, exist_ok=True)
-    throttle_path.write_text(json.dumps(payload))
+def pending(orch_dir: Path) -> list[dict]:
+    """Entries waiting, head first."""
+    return _read(orch_dir, pending_in_txn)
 
 
-def reset_throttle(throttle_path: Path) -> None:
-    """Drop the throttle file. Successful repair → next failure starts fresh."""
-    try:
-        throttle_path.unlink()
-    except FileNotFoundError:
-        pass
+def history(orch_dir: Path) -> list[dict]:
+    """Entries that have left the queue, oldest first, with outcome."""
+    return _read(orch_dir, history_in_txn)
+
+
+def add(orch_dir: Path, entry: dict) -> int:
+    """Append one entry to the tail; return its 1-based position."""
+    return add_many(orch_dir, [entry])[0]
+
+
+def add_many(orch_dir: Path, entries: list[dict], *, front: bool = False) -> list[int]:
+    """Insert several entries in ONE transaction; return their positions.
+
+    One transaction because a half-added batch is a state the dry-merge gate
+    would see and act on: `queue add --batch` names a set of plans that are
+    meant to run as siblings, and two of three is not a smaller version of
+    that, it is a different plan.
+
+    A front-loaded batch is inserted BACK to FRONT, because each front insert
+    lands below the previous minimum — so walking the batch in reverse is what
+    leaves the caller's order intact at the head, which is what splicing the
+    list at index 0 used to do in one step.
+    """
+    with db.project_conn(Path(orch_dir)) as conn, db.write_txn(conn) as cur:
+        if front:
+            for entry in reversed(entries):
+                insert_in_txn(cur, entry, front=True)
+            return list(range(1, len(entries) + 1))
+        return [insert_in_txn(cur, entry) for entry in entries]
+
+
+def remove(orch_dir: Path, slug: str) -> bool:
+    """Remove `slug` from pending, recording it in history. False = absent."""
+    with db.project_conn(Path(orch_dir)) as conn, db.write_txn(conn) as cur:
+        return remove_in_txn(cur, slug)
+
+
+def pop_head_if(
+    orch_dir: Path,
+    slug: str,
+    outcome: str,
+    extra: dict | None = None,
+) -> bool:
+    """`pop_head_in_txn` in a transaction of its own, for the pops that
+    have nothing else to do in the same breath (absorb, abandon)."""
+    with db.project_conn(Path(orch_dir)) as conn, db.write_txn(conn) as cur:
+        return pop_head_in_txn(cur, slug, outcome, extra)

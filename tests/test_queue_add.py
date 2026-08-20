@@ -12,10 +12,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from end_of_line import queue, registry
+from end_of_line import db, queue, registry
+from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig
-from tests import isolate_queue
+from tests import isolate_queue, stamp_future_schema
 
 _PLAN_BODY = "# placeholder plan\n"
 
@@ -46,7 +47,8 @@ class QueueAddTestCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.project = Path(self._tmp.name).resolve()
         isolate_queue(self, self.project)
-        self.queue_path = ProjectConfig(project_root=self.project).queue_path()
+        self.orch = ProjectConfig(project_root=self.project).orchestrator_dir()
+        self.db_path = db.project_db_path(self.orch)
 
     # --- happy paths ---
 
@@ -55,8 +57,7 @@ class QueueAddTestCase(unittest.TestCase):
         _write_plan(self.project, "new-plan")
         rc = main(["queue", "add", "new-plan", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        data = queue.load(self.queue_path)
-        slugs = [e["slug"] for e in data["queue"]]
+        slugs = [e["slug"] for e in queue.pending(self.orch)]
         self.assertEqual(slugs, ["new-plan"])
 
     def test_add_front_inserts_at_position_0(self) -> None:
@@ -68,7 +69,7 @@ class QueueAddTestCase(unittest.TestCase):
         main(["queue", "add", "b", "--project", str(self.project)])
         rc = main(["queue", "add", "c", "--front", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
+        slugs = [e["slug"] for e in queue.pending(self.orch)]
         self.assertEqual(slugs, ["c", "a", "b"])
 
     def test_add_appends_when_queue_nonempty(self) -> None:
@@ -78,7 +79,7 @@ class QueueAddTestCase(unittest.TestCase):
         main(["queue", "add", "a", "--project", str(self.project)])
         rc = main(["queue", "add", "b", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
+        slugs = [e["slug"] for e in queue.pending(self.orch)]
         self.assertEqual(slugs, ["a", "b"])
 
     # --- rejection paths (the four documented exit codes besides OK) ---
@@ -87,20 +88,20 @@ class QueueAddTestCase(unittest.TestCase):
         _bootstrap(self.project)
         rc = main(["queue", "add", "Bad Slug!", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.INVALID_SLUG)
-        self.assertFalse(self.queue_path.exists())
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_add_rejects_unknown_project(self) -> None:
         # No bootstrap: registry is empty for this project.
         _write_plan(self.project, "foo")  # plan file exists; bootstrap check fires first.
         rc = main(["queue", "add", "foo", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.GENERIC)
-        self.assertFalse(self.queue_path.exists())
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_add_rejects_missing_plan_file(self) -> None:
         _bootstrap(self.project)
         rc = main(["queue", "add", "nonexistent", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
-        self.assertFalse(self.queue_path.exists())
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_add_rejects_duplicate_pending(self) -> None:
         _bootstrap(self.project)
@@ -108,7 +109,7 @@ class QueueAddTestCase(unittest.TestCase):
         main(["queue", "add", "foo", "--project", str(self.project)])
         rc = main(["queue", "add", "foo", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
-        slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
+        slugs = [e["slug"] for e in queue.pending(self.orch)]
         self.assertEqual(slugs, ["foo"])
 
     # --- re-add edge cases ---
@@ -116,15 +117,14 @@ class QueueAddTestCase(unittest.TestCase):
     def test_add_allows_re_add_of_history_only_slug(self) -> None:
         _bootstrap(self.project)
         _write_plan(self.project, "foo")
-        # Seed history entry (without a pending row).
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        with queue.mutate(self.queue_path) as data:
-            data["history"].append({"slug": "foo", "outcome": "removed"})
+        # Seed a history row (without a pending row) by queueing then removing.
+        queue.add(self.orch, {"slug": "foo", "added_at": st.utcnow(), "added_by": "operator"})
+        queue.remove(self.orch, "foo")
         rc = main(["queue", "add", "foo", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        data = queue.load(self.queue_path)
-        self.assertEqual([e["slug"] for e in data["queue"]], ["foo"])
-        self.assertEqual(data["history"], [{"slug": "foo", "outcome": "removed"}])
+        self.assertEqual([e["slug"] for e in queue.pending(self.orch)], ["foo"])
+        hist = queue.history(self.orch)
+        self.assertEqual([(e["slug"], e["outcome"]) for e in hist], [("foo", "removed")])
 
     def test_add_idempotency_on_currently_running_slug(self) -> None:
         # Slug is registered (treated as currently running in production) but
@@ -132,7 +132,7 @@ class QueueAddTestCase(unittest.TestCase):
         _bootstrap(self.project, slug="foo")
         rc = main(["queue", "add", "foo", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
+        slugs = [e["slug"] for e in queue.pending(self.orch)]
         self.assertEqual(slugs, ["foo"])
 
     # --- shape + path resolution ---
@@ -141,7 +141,7 @@ class QueueAddTestCase(unittest.TestCase):
         _bootstrap(self.project)
         _write_plan(self.project, "shape")
         main(["queue", "add", "shape", "--project", str(self.project)])
-        entry = queue.load(self.queue_path)["queue"][0]
+        entry = queue.pending(self.orch)[0]
         self.assertEqual(entry["slug"], "shape")
         self.assertEqual(entry["added_by"], "operator")
         self.assertEqual(entry["position_at_add"], "tail")
@@ -153,14 +153,17 @@ class QueueAddTestCase(unittest.TestCase):
         _bootstrap(self.project)
         _write_plan(self.project, "head")
         main(["queue", "add", "head", "--front", "--project", str(self.project)])
-        entry = queue.load(self.queue_path)["queue"][0]
+        entry = queue.pending(self.orch)[0]
         self.assertEqual(entry["position_at_add"], "front")
 
-    def test_add_refuses_on_corrupt_queue(self) -> None:
+    def test_add_refuses_on_a_database_from_a_newer_clu(self) -> None:
+        # The corrupt-file case it replaces cannot happen any more — a
+        # transaction never leaves a half-written queue. What CAN arrive is a
+        # database this clu is too old to read, and the operator-at-keyboard
+        # contract is the same: refuse, name it, change nothing.
         _bootstrap(self.project)
         _write_plan(self.project, "foo")
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        self.queue_path.write_text("{not valid json")
+        stamp_future_schema(self.db_path)
         import io
         from contextlib import redirect_stderr
 
@@ -168,10 +171,8 @@ class QueueAddTestCase(unittest.TestCase):
         with redirect_stderr(err):
             rc = main(["queue", "add", "foo", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.GENERIC)
-        self.assertIn("queue.json corrupt", err.getvalue())
-        self.assertIn("Open Claude in this project to repair", err.getvalue())
-        # File is NOT touched by the refusal path.
-        self.assertEqual(self.queue_path.read_text(), "{not valid json")
+        self.assertIn("queue unreadable", err.getvalue())
+        self.assertIn(str(self.db_path), err.getvalue())
 
     def test_add_uses_resolved_path_for_bootstrap(self) -> None:
         # Symlinked project root: `clu queue add` should accept the symlink as
@@ -203,7 +204,7 @@ class QueueAddTestCase(unittest.TestCase):
             _write_plan(self.project, s)
         rc, out, _ = self._run(["queue", "add", "a", "b", "c", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
+        slugs = [e["slug"] for e in queue.pending(self.orch)]
         self.assertEqual(slugs, ["a", "b", "c"])
         self.assertIn("queued at position 1", out)
         self.assertIn("queued at position 2", out)
@@ -230,8 +231,7 @@ class QueueAddTestCase(unittest.TestCase):
         self.assertEqual(rc, ExitCode.INVALID_SLUG)
         self.assertIn("INVALID-SLUG", err)
         # Queue file may not even exist; if it does, must be empty.
-        if self.queue_path.exists():
-            self.assertEqual(queue.load(self.queue_path)["queue"], [])
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_add_multiple_atomic_on_missing_plan_file(self) -> None:
         _bootstrap(self.project)
@@ -242,8 +242,7 @@ class QueueAddTestCase(unittest.TestCase):
         )
         self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
         self.assertIn("missing", err)
-        if self.queue_path.exists():
-            self.assertEqual(queue.load(self.queue_path)["queue"], [])
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_add_multiple_atomic_on_within_batch_dupe(self) -> None:
         _bootstrap(self.project)
@@ -252,8 +251,7 @@ class QueueAddTestCase(unittest.TestCase):
         rc, _, err = self._run(["queue", "add", "a", "b", "a", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
         self.assertIn("duplicate slug 'a' in batch", err)
-        if self.queue_path.exists():
-            self.assertEqual(queue.load(self.queue_path)["queue"], [])
+        self.assertEqual(queue.pending(self.orch), [])
 
     def test_add_multiple_atomic_on_pre_existing_dupe(self) -> None:
         _bootstrap(self.project)
@@ -266,7 +264,7 @@ class QueueAddTestCase(unittest.TestCase):
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
         self.assertIn("'foo'", err)
         self.assertIn("already queued at position 1", err)
-        slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
+        slugs = [e["slug"] for e in queue.pending(self.orch)]
         self.assertEqual(slugs, ["foo"])
 
     def test_add_multiple_front_preserves_arg_order(self) -> None:
@@ -279,20 +277,20 @@ class QueueAddTestCase(unittest.TestCase):
             ["queue", "add", "a", "b", "c", "--front", "--project", str(self.project)]
         )
         self.assertEqual(rc, ExitCode.OK)
-        slugs = [e["slug"] for e in queue.load(self.queue_path)["queue"]]
+        slugs = [e["slug"] for e in queue.pending(self.orch)]
         self.assertEqual(slugs, ["a", "b", "c", "x", "y"])
 
-    def test_add_multiple_dispatched_under_single_lock(self) -> None:
+    def test_add_multiple_dispatched_in_one_transaction(self) -> None:
         from unittest import mock
 
         _bootstrap(self.project)
         for s in ("a", "b", "c"):
             _write_plan(self.project, s)
-        real_mutate = queue.mutate
-        with mock.patch.object(queue, "mutate", wraps=real_mutate) as spy:
+        real = queue.add_many
+        with mock.patch.object(queue, "add_many", wraps=real) as spy:
             rc = main(["queue", "add", "a", "b", "c", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        # One mutate call covers the whole batch.
+        # One insert transaction covers the whole batch.
         self.assertEqual(spy.call_count, 1)
 
 

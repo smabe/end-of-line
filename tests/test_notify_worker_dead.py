@@ -22,7 +22,6 @@ death-recovery (this phase, #104):
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest import mock
 
 from end_of_line import config, inbox, notify, quota
@@ -72,8 +71,8 @@ class NotifyWorkerDeadTestCase(CluTestCase):
             ]
         )
 
-    def _quota_path(self) -> Path:
-        return self.state_path.parent / quota.QUOTA_FILE_NAME
+    def _pause_row(self) -> dict | None:
+        return quota.read_pause(self.state_path.parent)
 
     # --- death-report contract -------------------------------------------
 
@@ -185,8 +184,9 @@ class NotifyWorkerDeadTestCase(CluTestCase):
         death = next(e for e in data["events"] if e["type"] == st.EVENT_QUOTA_DEATH)
         self.assertEqual(death["phase"], "a")
         self.assertEqual(death["token"], self.token)
-        # The pause file is written with the parsed reset (non-null paused_until).
-        pause = json.loads(self._quota_path().read_text())
+        # The pause row is written with the parsed reset (non-null paused_until).
+        pause = self._pause_row()
+        assert pause is not None
         self.assertEqual(pause["signature"], "session_limit")
         self.assertIsNotNone(pause["paused_until"])
         # Claim released despite the quota branch.

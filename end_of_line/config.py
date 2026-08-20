@@ -38,10 +38,13 @@ class DispatchSpec:
     kind: str = "shell"
     command: str = ""
     path: str = ""
-    # Optional. When set, a corrupt queue.json triggers a synchronous
-    # repair worker via this template (substitutes {corrupt_path},
-    # {backup_path}, {diagnosis}, {schema_json}, {log_path}). Unset →
-    # auto-repair disabled; clu falls back to a plain corrupt notification.
+    # DEPRECATED and inert. It used to name a headless worker that repaired a
+    # half-written `queue.json`; the queue is a table in a transactional
+    # database now, so the torn write it repaired cannot occur and the
+    # subsystem is gone. Still PARSED, because config loading has to stay
+    # tolerant of a `.orchestrator.json` an operator has not cleaned up yet —
+    # a file that named it must not start failing. Setting it prints a
+    # one-line deprecation note to stderr and changes nothing.
     repair_command: str | None = None
     # Project-default ship mode for `clu ship` when neither --direct
     # nor --as-pr is passed. "direct" = local merge + push to main;
@@ -147,10 +150,19 @@ class ProjectConfig:
     stuck_tool_threshold_seconds: int = 300
     stuck_tool_cpu_threshold_seconds: int = 5
 
+    def orchestrator_dir(self) -> Path:
+        """The project's `.orchestrator/` directory — the key every store takes.
+
+        Plan state, the queue and the quota pause are all rows in the database
+        inside this directory, and every store function is keyed by the DIR
+        rather than a file, so one place knows the filename.
+        """
+        return self.project_root / self.plan_dir / ORCHESTRATOR_DIR
+
     def queue_path(self) -> Path:
         """Per-project queue file. Lives in the same `.orchestrator/` dir as
         state files. No slug → no path-traversal validation needed."""
-        return self.project_root / self.plan_dir / ORCHESTRATOR_DIR / "queue.json"
+        return self.orchestrator_dir() / "queue.json"
 
     def master_plan_path(self, plan_slug: str) -> Path:
         """The plan's `<slug>.md` master file under `plan_dir/`.
@@ -403,6 +415,13 @@ def load_project_config(project_root: Path) -> ProjectConfig:
     channels = tuple(g for g in global_channels if g.kind not in local_kinds) + local_channels
     local_quiet = _parse_quiet_hours(quiet)
     notify_quiet = local_quiet if local_quiet is not None else global_quiet
+    repair_command = disp.get("repair_command") or None
+    if repair_command:
+        print(
+            "clu: dispatch.repair_command is deprecated and ignored — the queue "
+            "lives in a transactional database, so there is nothing to repair.",
+            file=sys.stderr,
+        )
     return ProjectConfig(
         project_root=project_root,
         plan_dir=raw.get("plan_dir", "plans"),
@@ -410,7 +429,7 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             kind=disp.get("kind", "shell"),
             command=disp.get("command", ""),
             path=raw_path,
-            repair_command=disp.get("repair_command") or None,
+            repair_command=repair_command,
             ship_mode=_validate_ship_mode(disp),
             bash_max_timeout_ms=_validate_non_negative_int(
                 disp,

@@ -3,7 +3,7 @@
 Bare `clu` renders the fleet view (PLAN/STATUS/PHASE table) and now
 appends a one-line footer summarizing pending queue work across all
 registered projects. The footer is hidden when no project has a
-non-empty queue, and surfaces unreadable queue files inline as a
+non-empty queue, and surfaces unreadable queues inline as a
 prompt for the operator to investigate.
 """
 
@@ -15,11 +15,11 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from end_of_line import queue, registry
+from end_of_line import db, queue, registry
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import ProjectConfig
-from tests import isolate_registry
+from tests import isolate_registry, stamp_future_schema
 
 _PLAN_BODY = "# placeholder plan\n"
 
@@ -43,27 +43,22 @@ class FleetFooterTestCase(unittest.TestCase):
         self,
         project: Path,
         slugs: list[str],
-        history: list[dict] | None = None,
     ) -> Path:
-        queue_path = ProjectConfig(project_root=project).queue_path()
-        queue_path.parent.mkdir(parents=True, exist_ok=True)
-        queue.save_atomic(
-            queue_path,
-            {
-                "schema_version": queue.SCHEMA_VERSION,
-                "queue": [
-                    {
-                        "slug": s,
-                        "added_at": st.utcnow(),
-                        "added_by": "operator",
-                        "position_at_add": "tail",
-                    }
-                    for s in slugs
-                ],
-                "history": history or [],
-            },
+        orch = ProjectConfig(project_root=project).orchestrator_dir()
+        orch.mkdir(parents=True, exist_ok=True)
+        queue.add_many(
+            orch,
+            [
+                {
+                    "slug": s,
+                    "added_at": st.utcnow(),
+                    "added_by": "operator",
+                    "position_at_add": "tail",
+                }
+                for s in slugs
+            ],
         )
-        return queue_path
+        return orch
 
     def _run(self, argv: list[str]) -> str:
         buf = io.StringIO()
@@ -129,23 +124,22 @@ class FleetFooterTestCase(unittest.TestCase):
 
     def test_fleet_view_footer_skips_unreadable_queue(self) -> None:
         project = self._seed_project("alpha")
-        queue_path = ProjectConfig(project_root=project).queue_path()
-        queue_path.parent.mkdir(parents=True, exist_ok=True)
-        queue_path.write_text("{not valid json")
+        orch = ProjectConfig(project_root=project).orchestrator_dir()
+        stamp_future_schema(db.project_db_path(orch))
         out = self._run([])
         self.assertIn("unreadable", out)
         # Footer still renders even when a queue is unparseable.
         self.assertIn("(", out)
 
     def test_fleet_view_footer_unreadable_does_not_break_counts(self) -> None:
-        # One readable + one corrupt → readable count surfaces; corrupt is
-        # mentioned separately.
+        # One readable + one unreadable → readable count surfaces; the
+        # unreadable one is mentioned separately.
         a = self._seed_project("alpha")
         b = self._seed_project("beta")
         self._write_queue(a, slugs=["a1", "a2"])
-        corrupt_path = ProjectConfig(project_root=b).queue_path()
-        corrupt_path.parent.mkdir(parents=True, exist_ok=True)
-        corrupt_path.write_text("garbage")
+        stamp_future_schema(
+            db.project_db_path(ProjectConfig(project_root=b).orchestrator_dir())
+        )
         out = self._run([])
         self.assertIn("2 pending", out)
         self.assertIn("unreadable", out)

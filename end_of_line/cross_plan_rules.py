@@ -7,7 +7,6 @@ across plans, paralleling supervisor.tick's per-plan chain.
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import sys
@@ -17,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from end_of_line import dry_merge, notify, plan_store, queue, registry
+from end_of_line import db, dry_merge, notify, plan_store, queue, registry
 from end_of_line import state as st
 from end_of_line.config import ProjectConfig, load_project_config
 
@@ -66,7 +65,7 @@ def load_plans_for_project(project_root: Path, cfg: ProjectConfig) -> list[Proje
             continue
         try:
             data = st.load(state_path)
-        except (OSError, st.SchemaVersionMismatch) as exc:
+        except _STATE_READ_ERRORS as exc:
             log.warning("cross_plan_rules: skipping %s — %s", entry.plan_slug, exc)
             continue
         plans.append(ProjectPlan(entry.plan_slug, data, state_path))
@@ -81,7 +80,27 @@ _FREEZE_STATUSES: frozenset[str] = frozenset(
     }
 )
 
-_QUEUE_LOAD_ERRORS = (json.JSONDecodeError, st.SchemaVersionMismatch, KeyError, OSError)
+# What reading the queue degrades on rather than crashing the fleet walk. The
+# file-era list (`json.JSONDecodeError`, `OSError`) is not enough for a
+# database: a broken store arrives as `sqlite3.Error`, contention as `db.DbBusy`
+# (a RuntimeError, which no OSError clause catches), and a store from a newer
+# clu as `db.SchemaTooNew` — all three inside `db.DEGRADABLE_ERRORS`.
+# `st.SchemaVersionMismatch` stays because the store translates a too-new schema
+# into it on the way out of some paths, and `ValueError` is what an unreadable
+# database is re-raised as by the store's tolerant read.
+_QUEUE_READ_ERRORS = (
+    *db.DEGRADABLE_ERRORS,
+    st.SchemaVersionMismatch,
+    ValueError,
+)
+
+# Reading ONE plan's state, same vocabulary. Separately named because the two
+# reads degrade for different reasons — an unreadable queue skips the project's
+# advancement, an unreadable plan skips that plan — but they were both written
+# as `except OSError` for files and are both incomplete for a database. The
+# fleet walk is the reason this matters: one project's tick holding the write
+# lock past the budget must not take the walk down with it.
+_STATE_READ_ERRORS = _QUEUE_READ_ERRORS
 
 
 def _is_plan_active(state: dict) -> bool:
@@ -106,21 +125,21 @@ def queue_advancement_rule(
 ) -> RuleResult | None:
     """Busy-gate / freeze / absorb / abandon / pop chain for the project queue.
 
-    Owns queue.mutate itself (queue-lock outer) because the pop sequence
-    (state-create → registry.register → queue.pop) must be atomic.
-    The runner's _apply is a no-op for this rule (state-create happens
-    inside the queue lock; no events_per_plan entries are returned).
+    The pop is TWO coordinated transactions, in this order: one on the project
+    database creating the plan's rows and moving the queue head into history,
+    then one on the host database registering the plan. They cannot be one —
+    two databases, two write-ahead logs, no atomicity across the pair whatever
+    the syntax — and the crash window between them is the one that already
+    existed under the nested flocks: a created-but-unregistered plan, healed by
+    re-running the pop (`registry.register` is idempotent) or by the zombie
+    sweep. The runner's `_apply` is a no-op for this rule; every write it makes
+    it makes itself.
     """
     # Deferred to avoid circular import — cli imports cross_plan_rules.
-    from end_of_line.cli import (  # noqa: PLC0415
-        _handle_corrupt_queue,
-        _tick_one_plan,
-    )
+    from end_of_line.cli import _tick_one_plan  # noqa: PLC0415
 
     cfg = load_project_config(project_root)
-    queue_path = cfg.queue_path()
-    if not queue_path.exists():
-        return None
+    orch_dir = cfg.orchestrator_dir()
 
     # Busy gate: any live claim in the project freezes advancement.
     for p in plans:
@@ -128,15 +147,18 @@ def queue_advancement_rule(
             return None
 
     try:
-        queue_data = queue.load(queue_path)
-    except _QUEUE_LOAD_ERRORS as exc:
-        _handle_corrupt_queue(cfg, exc, queue_path)
-        return RuleResult(events_per_plan={}, rule_name="queue_advancement")
-
-    if not queue_data["queue"]:
+        entries = queue.pending(orch_dir)
+    except _QUEUE_READ_ERRORS as exc:
+        # Tolerant read: an unreadable queue (corrupt database, or one written
+        # by a newer clu) skips this project's advancement and says so, rather
+        # than taking the whole tick-all walk down.
+        print(f"queue unreadable @ {project_root}: {exc}", file=sys.stderr)
         return None
 
-    head = queue_data["queue"][0]
+    if not entries:
+        return None
+
+    head = entries[0]
     slug = head["slug"]
     try:
         st.validate_slug(slug, kind="plan slug")
@@ -149,7 +171,7 @@ def queue_advancement_rule(
     if plan_store.exists_for_path(state_path):
         try:
             existing_status = st.load(state_path).get("status")
-        except (OSError, ValueError, st.SchemaVersionMismatch):
+        except _STATE_READ_ERRORS:
             existing_status = None
 
     project_slugs = {p.slug for p in plans}
@@ -159,32 +181,14 @@ def queue_advancement_rule(
         return None
 
     if registered and existing_status in {st.STATUS_DONE, st.STATUS_RUNNING}:
-        with queue.mutate(queue_path) as data:
-            if not data["queue"] or data["queue"][0]["slug"] != slug:
-                return None
-            entry = data["queue"].pop(0)
-            data["history"].append(
-                {
-                    **entry,
-                    "ended_at": st.utcnow(),
-                    "outcome": "absorbed",
-                }
-            )
+        if not queue.pop_head_if(orch_dir, slug, queue.OUTCOME_ABSORBED):
+            return None
         return RuleResult(events_per_plan={}, rule_name="queue_advancement")
 
     plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
     if not plan_file.exists():
-        with queue.mutate(queue_path) as data:
-            if not data["queue"] or data["queue"][0]["slug"] != slug:
-                return None
-            entry = data["queue"].pop(0)
-            data["history"].append(
-                {
-                    **entry,
-                    "ended_at": st.utcnow(),
-                    "outcome": "abandoned",
-                }
-            )
+        if not queue.pop_head_if(orch_dir, slug, queue.OUTCOME_ABANDONED):
+            return None
         return RuleResult(
             events_per_plan={},
             rule_name="queue_advancement",
@@ -196,30 +200,37 @@ def queue_advancement_rule(
             ],
         )
 
-    # Normal pop: state-create → registry.register → queue.pop, all under
-    # the queue lock so a crashed run can be replayed without losing the head.
-    with queue.mutate(queue_path) as data:
-        if not data["queue"] or data["queue"][0]["slug"] != slug:
+    # Normal pop, transaction one: move the head into history and create the
+    # plan's rows together. The head check is the DELETE's own WHERE clause, so
+    # a second tick racing this one writes nothing at all rather than creating
+    # a duplicate plan — and the plan insert is itself the duplicate check
+    # (`plans.slug` is the primary key), which is why an already-created plan
+    # is caught here rather than by an exists() test that could go stale.
+    fresh = st.empty_state(slug, cfg.plan_dir)
+    if head.get("batch_id"):
+        fresh["batch_id"] = head["batch_id"]
+    st.append_event(
+        fresh,
+        st.EVENT_QUEUE_POPPED,
+        slug=slug,
+        added_at=head.get("added_at"),
+        added_by=head.get("added_by", "operator"),
+        position=1,
+    )
+    with db.project_conn(orch_dir) as conn, db.write_txn(conn) as cur:
+        if not queue.pop_head_in_txn(cur, slug, queue.OUTCOME_POPPED):
             return None
-        if not plan_store.exists_for_path(state_path):
-            fresh = st.empty_state(slug, cfg.plan_dir)
-            if head.get("batch_id"):
-                fresh["batch_id"] = head["batch_id"]
-            st.append_event(
-                fresh,
-                st.EVENT_QUEUE_POPPED,
-                slug=slug,
-                added_at=head.get("added_at"),
-                added_by=head.get("added_by", "operator"),
-                position=1,
-            )
-            # The queue flock is held OUTSIDE the store's write lock and no
-            # store lock is held while waiting on the flock, so the two cannot
-            # deadlock against each other. (The queue itself becomes a table in
-            # a later phase, at which point the pop is one transaction.)
-            plan_store.create(state_path.parent, fresh)
-        registry.register(cfg.project_root, slug)
-        data["queue"].pop(0)
+        try:
+            plan_store.create_in_txn(cur, fresh, orch_dir=orch_dir)
+        except FileExistsError:
+            # State already there for an unregistered slug — the replay case.
+            # Constraint violations abort the statement, not the transaction,
+            # so the pop above still commits.
+            pass
+
+    # Transaction two, on the HOST database. Idempotent, so a crash between the
+    # two leaves a plan the next pop (or `clu init`) re-registers.
+    registry.register(cfg.project_root, slug)
 
     result = _tick_one_plan(slug, cfg, state_path, dispatch=True)
     print(f"tick (queue-pop) {slug} @ {cfg.project_root}: {result}")

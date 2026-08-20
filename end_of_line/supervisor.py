@@ -648,7 +648,6 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                             data["plan_slug"],
                             quota_match.line,
                             paused_until,
-                            str(state_path.parent / quota.QUOTA_FILE_NAME),
                         )
                     )
                 if claimed_by and phase_id and config.coolant.enabled:
@@ -726,7 +725,6 @@ def tick(state_path: Path, config: ProjectConfig) -> TickResult:
                             data["plan_slug"],
                             quota_match.line,
                             paused_until,
-                            str(state_path.parent / quota.QUOTA_FILE_NAME),
                         )
                     )
                 # Order matters: durable state first (event + release +

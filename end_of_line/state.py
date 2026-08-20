@@ -3,10 +3,10 @@
 Plan state is the single durable artifact across cold-context phases. It lives
 in the project database (`plans/.orchestrator/clu.db`, see `plan_store`), and
 `load` / `mutate` / `save_atomic` route a plan-state PATH to that store while
-keeping their signatures — the path is the key. The sibling stores still on
-files (`queue.json`, `quota.json`) keep the flock + tmp+fsync+rename engine in
-this module, which is why the routing is a predicate on the path rather than a
-mode on the caller.
+keeping their signatures — the path is the key. The queue and the quota pause
+moved into that same database and no longer come through here at all; what is
+left of the flock + tmp+fsync+rename engine below serves the remaining
+non-plan callers until the file primitives are removed outright.
 
 Everything else here is domain logic over the loaded dict — claims, blockers,
 events, liveness — and is storage-agnostic. The event log is append-only:
@@ -167,7 +167,7 @@ EVENT_SYSTEMIC_FAILURE = "systemic_failure"
 # its phase_started is forgiven in attempts_for_phase, same as systemic
 # failures. QUOTA_PAUSED / QUOTA_RESUMED bracket the project-level
 # dispatch pause on the triggering plan's event log — the pause itself
-# lives in plans/.orchestrator/quota.json, never in plan status.
+# is one row in the project database (`quota`), never in plan status.
 EVENT_QUOTA_DEATH = "quota_death"
 EVENT_QUOTA_PAUSED = "quota_paused"
 EVENT_QUOTA_RESUMED = "quota_resumed"
@@ -605,9 +605,10 @@ def locked_json(
 def _routes_to_store(path: Path) -> bool:
     """True for a plan-state path — the key of a row in the project database.
 
-    Plan state lives in `plans/.orchestrator/clu.db`; the sibling stores in the
-    same directory (`queue.json`, `quota.json`) are still files, so the three
-    primitives below switch on the path they are given rather than on a flag.
+    Plan state lives in `plans/.orchestrator/clu.db`, and so do the queue and
+    the quota pause — but those two are reached through their own modules, not
+    through here, so the three primitives below still switch on the path they
+    are given rather than on a flag.
     """
     return Path(path).name.endswith(STATE_SUFFIX)
 
@@ -661,8 +662,8 @@ def mutate(
 
 
 def load(state_path: Path, *, expected_version: int = SCHEMA_VERSION) -> dict:
-    """Read + schema-check a clu store. `expected_version` lets sibling
-    schemas (e.g. queue.json) reuse the same loader.
+    """Read + schema-check a clu store. `expected_version` lets a sibling
+    schema reuse the same loader.
 
     A plan-state path routes to the project database and the version check is
     the database's own `user_version` (`plan_store` raises the same

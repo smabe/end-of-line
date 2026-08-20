@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from end_of_line import cross_plan_rules, registry
+from end_of_line import cross_plan_rules, db, registry
 from end_of_line import state as st
 from end_of_line.config import load_project_config
 from end_of_line.cross_plan_rules import (
@@ -194,6 +195,23 @@ class TestLoadPlansForProject(CrossPlanRulesTestCase):
 
         result = load_plans_for_project(self.project, self.cfg)
 
+        self.assertEqual(result, [])
+
+    def test_load_plans_for_project_skips_a_busy_plan(self) -> None:
+        # Contention is not an OSError, and every plan in a project now shares
+        # ONE write lock — so a tick holding it past another reader's budget
+        # would have taken the whole fleet walk down with a traceback.
+        registry.register(self.project, "busy-plan")
+        _make_state_file(self._state_path("busy-plan"), "busy-plan")
+        with mock.patch("end_of_line.state.load", side_effect=db.DbBusy("locked")):
+            result = load_plans_for_project(self.project, self.cfg)
+        self.assertEqual(result, [])
+
+    def test_load_plans_for_project_skips_a_plan_from_a_newer_clu(self) -> None:
+        registry.register(self.project, "future-plan")
+        _make_state_file(self._state_path("future-plan"), "future-plan")
+        with mock.patch("end_of_line.state.load", side_effect=db.SchemaTooNew("v99")):
+            result = load_plans_for_project(self.project, self.cfg)
         self.assertEqual(result, [])
 
 

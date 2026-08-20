@@ -12,30 +12,42 @@ deliberately returns None for anything it can't read confidently
 
 Stdlib-only. The signature table mirrors the systemic table in
 dispatch.py: hard-coded, grows via PR only, first match wins. Besides
-the pure matcher/parser, this module owns the quota.json pause file
-(`record_quota_pause`) and the shared death recorder all three
-worker-death sites call (`record_quota_death`).
+the pure matcher/parser, this module owns the project's pause — one row
+in the project database, `quota` id 1 (`record_quota_pause`) — and the
+shared death recorder all three worker-death sites call
+(`record_quota_death`).
+
+**Row absent == not paused.** That single invariant is why the table is
+single-row by construction (a `CHECK (id = 1)` in the schema): a second
+row would make "absent" ambiguous. The operator escape hatch is
+`clu quota clear`, which deletes the row.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import re
+import sqlite3
 import sys
 from collections import deque
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import db
 from . import state as st
 
-# Pause-file plumbing shared with later phases (P2 writes the pause,
-# P3 gates dispatch on it). Defined here so the schema constants have
-# one home from day one.
 PAUSE_BUFFER_SEC = 120  # paused_until = reset + buffer; absorbs clock skew
 CANARY_WINDOW_SEC = 180  # canary plan must survive this long post-resume
-QUOTA_FILE_NAME = "quota.json"  # lives in plans/.orchestrator/
-QUOTA_SCHEMA_VERSION = 1
+
+_QUOTA_COLUMNS = (
+    "paused_until",
+    "signature",
+    "line",
+    "canary_plan",
+    "canary_deadline",
+    "created_at",
+)
 
 # Worker-log tail discipline shared with the systemic matcher: a 50k-line
 # stack trace shouldn't slow the supervisor, and the relevant signal is
@@ -172,34 +184,76 @@ def record_quota_pause(
     match: QuotaMatch,
     now: dt.datetime,
 ) -> dt.datetime | None:
-    """Write the project-level pause file; return paused_until (None = stuck).
+    """Write the project-level pause row; return paused_until (None = stuck).
 
     `paused_until` = parsed reset + PAUSE_BUFFER_SEC. An unparseable reset
-    writes a stuck pause (`paused_until: null`): no auto-resume, only the
-    operator clears it (delete quota.json). Writing always resets the
+    writes a stuck pause (`paused_until` NULL): no auto-resume, only the
+    operator clears it (`clu quota clear`). Writing always resets the
     canary fields — a re-pause during a canary window is exactly the
     canary-failed case.
     """
     reset = parse_reset(match.line, now)
     paused_until = None if reset is None else reset + dt.timedelta(seconds=PAUSE_BUFFER_SEC)
-    with st.locked_json(
-        orchestrator_dir / QUOTA_FILE_NAME,
-        expected_version=QUOTA_SCHEMA_VERSION,
-        empty=lambda: {"schema_version": QUOTA_SCHEMA_VERSION},
-    ) as data:
-        data.clear()
-        data.update(
-            {
-                "schema_version": QUOTA_SCHEMA_VERSION,
-                "paused_until": _iso_or_none(paused_until),
-                "signature": match.signature,
-                "line": match.line,
-                "canary_plan": None,
-                "canary_deadline": None,
-                "created_at": _iso_or_none(now),
-            }
+    with (
+        db.project_conn(Path(orchestrator_dir)) as conn,
+        db.write_txn(conn) as cur,
+    ):
+        # REPLACE rather than UPDATE: re-pausing must clear the canary fields
+        # wholesale, and the row may not exist yet. One statement, both cases.
+        cur.execute(
+            f"INSERT OR REPLACE INTO quota (id, {', '.join(_QUOTA_COLUMNS)}) "
+            f"VALUES (1, ?, ?, ?, NULL, NULL, ?)",
+            (
+                _iso_or_none(paused_until),
+                match.signature,
+                match.line,
+                _iso_or_none(now),
+            ),
         )
     return paused_until
+
+
+def read_pause(orchestrator_dir: Path) -> dict[str, Any] | None:
+    """The pause row as a dict, or None when nothing is paused.
+
+    Read-only: consulting the pause must never bring a project database into
+    existence, and must never take the write lock — the overwhelmingly common
+    answer is "no row", on a path every tick walks.
+    """
+    path = db.project_db_path(Path(orchestrator_dir))
+    if not path.exists():
+        return None
+    conn = db.connect(path, readonly=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        db.ensure_project_schema(conn)
+        with db.read_txn(conn) as cur:
+            row = cur.execute(
+                f"SELECT {', '.join(_QUOTA_COLUMNS)} FROM quota WHERE id = 1"
+            ).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else {col: row[col] for col in _QUOTA_COLUMNS}
+
+
+def clear_pause(orchestrator_dir: Path) -> dict[str, Any] | None:
+    """Delete the pause row; return what it held, or None if there was none.
+
+    The `rm quota.json` the notify bodies used to print, as a command — see
+    `cli.cmd_quota_clear`. Read and delete in ONE transaction so what is
+    reported is what was removed.
+    """
+    with (
+        db.project_conn(Path(orchestrator_dir)) as conn,
+        db.write_txn(conn) as cur,
+    ):
+        row = cur.execute(
+            f"SELECT {', '.join(_QUOTA_COLUMNS)} FROM quota WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        cur.execute("DELETE FROM quota WHERE id = 1")
+        return {col: row[col] for col in _QUOTA_COLUMNS}
 
 
 class GateDecision(NamedTuple):
@@ -227,10 +281,10 @@ def gate_decision(
 ) -> GateDecision:
     """Decide whether `plan_slug` may dispatch given the project quota pause.
 
-    File-absent is the hot path: one `Path.exists()` and no lock when
-    nothing is paused (the overwhelmingly common tick). When the pause
-    file is present, a single `locked` window reads it and resolves one
-    of four outcomes (see plans/quota-pause.md "Phase 3"):
+    Row-absent is the hot path: one read-only SELECT and no write lock when
+    nothing is paused (the overwhelmingly common tick). When a pause row IS
+    present, one write transaction re-reads it and resolves one of four
+    outcomes (see plans/quota-pause.md "Phase 3"):
 
     1. `paused_until` set, `now` < it → idle.
     2. `now` >= `paused_until`, no canary stamped → this plan stamps
@@ -240,63 +294,81 @@ def gate_decision(
        another plan; dispatch if it's this plan (a non-quota fast-fail
        re-reaching the gate must retry, not idle against itself).
     4. `now` >= the canary deadline → the canary survived (no re-pause
-       overwrote the file), so clear the pause (unlink, keeping
-       "file absent == not paused" the single invariant) and resume.
+       overwrote the row), so clear the pause (delete, keeping
+       "row absent == not paused" the single invariant) and resume.
 
-    A stuck pause (`paused_until: null`) always idles — only operator file
-    removal clears it. A corrupt/unreadable file is treated as absent (a
-    malformed file must not freeze the fleet) with a stderr note.
+    The pause is read twice — once cheaply, once inside the transaction that
+    may write — and the second read is the authoritative one. The old code
+    needed a branch for the file vanishing between `exists()` and the lock;
+    here the re-read inside the transaction IS that branch, and it cannot
+    race, which is why the benign-unlink case no longer has code of its own.
+
+    A stuck pause (`paused_until` NULL) always idles — only `clu quota clear`
+    ends it. Degradation is deliberately split two ways: an unreadable store
+    (corrupt database, or one written by a newer clu) dispatches with a stderr
+    note, because no malformed store may freeze the fleet; CONTENTION idles
+    instead, because a busy database is not a broken one and dispatching into
+    a pause we simply could not read costs a worker and a quota hit, where
+    idling costs one tick.
     """
-    quota_path = orchestrator_dir / QUOTA_FILE_NAME
-    if not quota_path.exists():
+    orch_dir = Path(orchestrator_dir)
+    try:
+        if read_pause(orch_dir) is None:
+            return _DISPATCH
+        with (
+            db.project_conn(orch_dir) as conn,
+            db.write_txn(conn) as cur,
+        ):
+            return _decide_in_txn(cur, plan_slug, now)
+    except db.DbBusy as exc:
+        return GateDecision(dispatch=False, detail=f"quota_gate_busy {exc}")
+    except (db.SchemaTooNew, sqlite3.Error, OSError, st.SchemaVersionMismatch) as exc:
+        print(f"clu: ignoring unreadable quota pause in {orchestrator_dir}: {exc}", file=sys.stderr)
         return _DISPATCH
-    with st.locked(quota_path):
-        # Read + decode the file's fields inside one guard: field-level
-        # corruption (a hand-edited timestamp, an unpaired canary_deadline)
-        # must degrade to "dispatch", same as JSON/schema corruption — the
-        # contract is that no malformed file ever freezes the fleet. The
-        # decision branches below stay outside the guard so a genuine logic
-        # error isn't silently swallowed as "unreadable".
-        try:
-            data = st.load(quota_path, expected_version=QUOTA_SCHEMA_VERSION)
-            paused_until_s = data.get("paused_until")
-            paused_until = (
-                None if paused_until_s is None else st.parse_iso(paused_until_s)
-            )
-            canary_deadline_s = data.get("canary_deadline")
-            canary_deadline = (
-                None if canary_deadline_s is None else st.parse_iso(canary_deadline_s)
-            )
-        except FileNotFoundError:
-            # Benign race: a concurrent resume tick unlinked the file in the
-            # window between exists() and the lock. "file absent == not
-            # paused" — dispatch, and stay silent (not a corruption note).
-            return _DISPATCH
-        except (OSError, ValueError, TypeError, AttributeError, st.SchemaVersionMismatch):
-            print(f"clu: ignoring unreadable {quota_path}", file=sys.stderr)
-            return _DISPATCH
-        if paused_until is None:
-            return GateDecision(dispatch=False, detail="quota_stuck")
-        if now < paused_until:
-            return GateDecision(
-                dispatch=False, detail=f"quota_paused until={paused_until_s}"
-            )
-        # now >= paused_until — the resume phase.
-        canary_plan = data.get("canary_plan")
-        if canary_plan is None:
-            deadline = now + dt.timedelta(seconds=CANARY_WINDOW_SEC)
-            data["canary_plan"] = plan_slug
-            data["canary_deadline"] = _iso_or_none(deadline)
-            st.save_atomic(quota_path, data)
-            return _DISPATCH
-        # A canary with no deadline is malformed; resuming clears the bad
-        # state rather than freezing — self-healing past the same invariant.
-        if canary_deadline is None or now >= canary_deadline:
-            quota_path.unlink(missing_ok=True)
-            return GateDecision(dispatch=True, resumed=True)
-        if canary_plan == plan_slug:
-            return _DISPATCH
-        return GateDecision(dispatch=False, detail=f"quota_canary plan={canary_plan}")
+
+
+def _decide_in_txn(cur: sqlite3.Cursor, plan_slug: str, now: dt.datetime) -> GateDecision:
+    row = cur.execute(
+        f"SELECT {', '.join(_QUOTA_COLUMNS)} FROM quota WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return _DISPATCH
+    paused_until_s = row["paused_until"]
+    canary_deadline_s = row["canary_deadline"]
+    # Field-level corruption (a hand-edited timestamp, an unpaired deadline)
+    # degrades to "dispatch" exactly as an unreadable store does — the contract
+    # is that no malformed pause freezes the fleet. Only the decoding is
+    # guarded, so a genuine logic error below is not swallowed as "unreadable".
+    try:
+        paused_until = None if paused_until_s is None else st.parse_iso(paused_until_s)
+        canary_deadline = (
+            None if canary_deadline_s is None else st.parse_iso(canary_deadline_s)
+        )
+    except (ValueError, TypeError, AttributeError):
+        print("clu: ignoring unreadable quota pause fields", file=sys.stderr)
+        return _DISPATCH
+
+    if paused_until is None:
+        return GateDecision(dispatch=False, detail="quota_stuck")
+    if now < paused_until:
+        return GateDecision(dispatch=False, detail=f"quota_paused until={paused_until_s}")
+    # now >= paused_until — the resume phase.
+    canary_plan = row["canary_plan"]
+    if canary_plan is None:
+        deadline = now + dt.timedelta(seconds=CANARY_WINDOW_SEC)
+        cur.execute(
+            "UPDATE quota SET canary_plan = ?, canary_deadline = ? WHERE id = 1",
+            (plan_slug, _iso_or_none(deadline)),
+        )
+        return _DISPATCH
+    # A canary with no deadline is malformed; resuming clears the bad
+    # state rather than freezing — self-healing past the same invariant.
+    if canary_deadline is None or now >= canary_deadline:
+        cur.execute("DELETE FROM quota WHERE id = 1")
+        return GateDecision(dispatch=True, resumed=True)
+    if canary_plan == plan_slug:
+        return _DISPATCH
+    return GateDecision(dispatch=False, detail=f"quota_canary plan={canary_plan}")
 
 
 def record_quota_death(
@@ -307,7 +379,7 @@ def record_quota_death(
     token: str | None,
     orchestrator_dir: Path,
 ) -> dt.datetime | None:
-    """Record a classified quota death: pause file + the two plan events.
+    """Record a classified quota death: pause row + the two plan events.
 
     Shared by all three death sites (supervisor dead-PID, supervisor
     lease-expiry, dispatch fast-fail). The `phase`/`token` kwargs on

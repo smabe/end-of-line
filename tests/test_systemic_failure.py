@@ -9,13 +9,12 @@ counted against the phase — the phase isn't at fault.
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import notify_imessage
+from end_of_line import notify_imessage, quota
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
@@ -279,7 +278,7 @@ class QuotaFastFailTestCase(_SystemicFixture):
 
     A quota death is a project-level pause, not a plan-level one: the plan
     stays RUNNING, the attempt is forgiven via EVENT_QUOTA_DEATH, and the
-    pause lives in quota.json (gated in phase `gate`).
+    pause lives in the project's quota row (gated in phase `gate`).
     """
 
     def test_quota_line_takes_quota_path(self) -> None:
@@ -299,7 +298,8 @@ class QuotaFastFailTestCase(_SystemicFixture):
         # Release WITHOUT dispatch_failed — the quota events are the record.
         self.assertNotIn(st.EVENT_DISPATCH_FAILED, types)
         self.assertEqual(st.attempts_for_phase(data, "a"), 0)
-        qdata = json.loads((self.state_path.parent / "quota.json").read_text())
+        qdata = quota.read_pause(self.state_path.parent)
+        assert qdata is not None
         self.assertEqual(qdata["signature"], "session_limit")
         self.assertIsNotNone(qdata["paused_until"])
         # Parseable reset → one KIND_QUOTA_PAUSED iMessage carrying the

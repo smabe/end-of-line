@@ -465,15 +465,30 @@ def create(orch_dir: Path, data: dict) -> None:
     concurrent inits (or a tick racing a queue pop) cannot both see "absent"
     first. That replaces today's re-check-inside-the-lock.
     """
+    with _write_conn(orch_dir) as conn, db.write_txn(conn) as cur:
+        create_in_txn(cur, data, orch_dir=orch_dir)
+
+
+def create_in_txn(cur: sqlite3.Cursor, data: dict, *, orch_dir: Path | None = None) -> None:
+    """`create`, on a transaction somebody else opened.
+
+    The queue pop needs the plan's rows and the queue head's move to be one
+    transaction, and it cannot get that by calling `create` — that would be a
+    second connection asking for the write lock this one already holds, on the
+    same database, which is a deadlock rather than a wait.
+
+    `orch_dir` only shapes the path in the `FileExistsError`, which is the
+    contract `create` has always raised on a taken slug and which the pop
+    relies on: the insert IS the duplicate check, so a racing tick that
+    already created the plan loses here rather than writing a second copy.
+    """
     slug = data["plan_slug"]
     st.validate_slug(slug, kind="plan slug")
-    with _write_conn(orch_dir) as conn, db.write_txn(conn) as cur:
-        try:
-            _insert_plan(cur, slug, data)
-        except sqlite3.IntegrityError as exc:
-            raise FileExistsError(
-                errno.EEXIST, "plan already exists", str(_state_path_for(orch_dir, slug))
-            ) from exc
+    try:
+        _insert_plan(cur, slug, data)
+    except sqlite3.IntegrityError as exc:
+        path = _state_path_for(orch_dir, slug) if orch_dir is not None else slug
+        raise FileExistsError(errno.EEXIST, "plan already exists", str(path)) from exc
 
 
 def write_full(orch_dir: Path, slug: str, data: dict) -> None:
@@ -920,10 +935,30 @@ def op_append_events(
     slug: str,
     events: list[dict],
     *,
+    token: str | None = None,
+    phase: str | None = None,
     timeout_s: float | None = None,
 ) -> None:
-    """Append events and nothing else. Ids are stamped back onto the dicts."""
+    """Append events and nothing else. Ids are stamped back onto the dicts.
+
+    `token`/`phase` add the claim compare-and-set the other worker-facing ops
+    carry, for the callbacks whose whole effect IS an event: the worker-mode
+    `queue add` records its append or its rejection on the SOURCE plan, and a
+    caller with a stale token must be refused there exactly as it is on a
+    complete or a spawn.
+    """
     with _plan_txn(orch_dir, slug, timeout_s=timeout_s) as cur:
+        if token is not None:
+            row = cur.execute(
+                "SELECT claimed_by, phase_id FROM claims WHERE plan_slug = ?",
+                (slug,),
+            ).fetchone()
+            if (
+                row is None
+                or row["claimed_by"] != token
+                or (phase is not None and row["phase_id"] != phase)
+            ):
+                raise _claim_mismatch(cur, slug, token, phase)
         _insert_events(cur, slug, events)
 
 

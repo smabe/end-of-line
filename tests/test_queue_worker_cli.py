@@ -168,8 +168,7 @@ class WorkerModeGateTestCase(unittest.TestCase):
         )
         self.assertEqual(rc, ExitCode.OK)
         cfg = ProjectConfig(project_root=self.project)
-        data = queue.load(cfg.queue_path())
-        entry = data["queue"][0]
+        entry = queue.pending(cfg.orchestrator_dir())[0]
         self.assertEqual(entry["reason"], "follow-up")
 
     def test_plan_phase_without_token_rejected(self) -> None:

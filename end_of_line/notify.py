@@ -51,9 +51,6 @@ KIND_HALTED = "halted"
 # Queue-pop skipped a head (plan file missing). Defers during quiet hours
 # — the operator finds out next loud window, no 3am ping.
 KIND_QUEUE_SKIPPED = "queue_skipped"
-KIND_QUEUE_REPAIRED = "queue_repaired"
-KIND_QUEUE_REPAIR_FAILED = "queue_repair_failed"
-KIND_QUEUE_CORRUPT = "queue_corrupt"
 # Gap-fill kinds — escalations, not emergencies, so NOT in
 # QUIET_HOURS_BYPASS_KINDS. The inbox path surfaces them on next Claude
 # turn regardless of quiet hours.
@@ -88,8 +85,6 @@ KIND_WORKER_DEAD_REPORTED = "phase_worker_dead_reported"
 QUIET_HOURS_BYPASS_KINDS: frozenset[str] = frozenset(
     {
         KIND_HALTED,
-        KIND_QUEUE_REPAIR_FAILED,
-        KIND_QUEUE_CORRUPT,
         KIND_QUOTA_STUCK,
     }
 )
@@ -215,19 +210,6 @@ def render_queue_skipped(slug: str, reason: str) -> str:
     return f"⏭️  queue skipped {slug} — {reason}."
 
 
-def render_queue_corrupt(diagnosis: str, backup_path) -> str:
-    return f"💀 queue corrupt: {diagnosis}. backup at {backup_path}."
-
-
-def render_queue_repaired(slug_count: int, backup_path) -> str:
-    entries = "entry" if slug_count == 1 else "entries"
-    return f"🔧 queue repaired — {slug_count} {entries} preserved. backup at {backup_path}."
-
-
-def render_queue_repair_failed(reason: str, backup_path) -> str:
-    return f"💥 queue repair failed: {reason}. reverted from backup at {backup_path}."
-
-
 def render_stalled_claim(plan_slug: str, phase: str, age_min: int) -> str:
     return (
         f"🐌 {plan_slug}/{phase} claim stalled ({age_min}min past lease).\n"
@@ -332,15 +314,17 @@ def render_quota_paused(plan_slug: str, line: str, paused_until: _dt.datetime) -
     )
 
 
-def render_quota_stuck(plan_slug: str, line: str, quota_file: str) -> str:
+def render_quota_stuck(plan_slug: str, line: str) -> str:
     """Body for a quota pause whose reset didn't parse — no auto-resume.
 
-    The fleet idles indefinitely until the operator clears the file, so the
-    body carries the one-line escape hatch (`rm <quota_file>`)."""
+    The fleet idles indefinitely until the operator clears the pause, so the
+    body carries the one-line escape hatch. It names the COMMAND rather than a
+    file, because the pause is a row in the project database now and there is
+    nothing left to `rm`."""
     return (
         f"🚫 Quota pause STUCK — {plan_slug}: {line}\n"
         f"Reset time didn't parse — no auto-resume. "
-        f"Clear it once quota returns: rm {quota_file}"
+        f"Clear it once quota returns: clu quota clear"
     )
 
 
@@ -352,7 +336,6 @@ def quota_pause_notification(
     plan_slug: str,
     line: str,
     paused_until: _dt.datetime | None,
-    quota_file: str,
 ) -> tuple[str, str]:
     """`(kind, body)` for a classified quota death — the single source of
     truth for the paused-vs-stuck routing the three death sites share.
@@ -361,7 +344,7 @@ def quota_pause_notification(
     reset (`None`) → KIND_QUOTA_STUCK with the escape hatch.
     """
     if paused_until is None:
-        return KIND_QUOTA_STUCK, render_quota_stuck(plan_slug, line, quota_file)
+        return KIND_QUOTA_STUCK, render_quota_stuck(plan_slug, line)
     return KIND_QUOTA_PAUSED, render_quota_paused(plan_slug, line, paused_until)
 
 

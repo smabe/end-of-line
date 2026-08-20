@@ -836,6 +836,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Project root (defaults to CWD).",
     )
 
+    p_quota = sub.add_parser(
+        "quota",
+        help="Inspect or clear the project's quota pause.",
+    )
+    quota_subs = p_quota.add_subparsers(dest="quota_cmd")
+    p_quota_clear = quota_subs.add_parser(
+        "clear",
+        help="Clear a quota pause so plans can dispatch again.",
+    )
+    p_quota_clear.add_argument(
+        "--project",
+        type=Path,
+        default=None,
+        help="Project root (defaults to CWD).",
+    )
+
     p_worktree = sub.add_parser(
         "worktree",
         help="Manage per-plan git worktrees (subcommands: gc, reattach, attach).",
@@ -1505,6 +1521,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_uninstall_hook(args)
     if args.cmd == "queue":
         return cmd_queue(args)
+    if args.cmd == "quota":
+        return cmd_quota(args)
     if args.cmd == "worktree":
         return cmd_worktree(args)
     # `unregister` needs to handle --all-archived (no single project/plan)
@@ -2262,11 +2280,16 @@ def cmd_fleet(args) -> int:
     return 0
 
 
-_QUEUE_LOAD_ERRORS = (
-    json.JSONDecodeError,
+# What reading the queue degrades on rather than crashing the command. The
+# file-era list was `json.JSONDecodeError` + `OSError`; against a database a
+# broken store is `sqlite3.Error`, contention is `db.DbBusy` (a RuntimeError,
+# so no OSError clause sees it) and a newer schema is `db.SchemaTooNew` — the
+# three inside `db.DEGRADABLE_ERRORS`. `ValueError` covers the store's own
+# translation of an unreadable database.
+_QUEUE_READ_ERRORS = (
+    *db.DEGRADABLE_ERRORS,
     st.SchemaVersionMismatch,
-    KeyError,
-    OSError,
+    ValueError,
 )
 
 
@@ -2274,7 +2297,7 @@ def _queue_footer(entries) -> str | None:
     """One-line summary of pending queue work across all distinct projects.
 
     Iterates distinct project_roots (registry.entries() may yield multiple
-    rows per project), loads each queue.json best-effort, and renders a
+    rows per project), reads each project's queue best-effort, and renders a
     single line. Returns None when no project has pending work and no queue
     is unreadable — keeps the fleet view quiet in the steady state.
     """
@@ -2293,16 +2316,13 @@ def _queue_footer(entries) -> str | None:
             cfg = load_project_config(root)
         except (OSError, ValueError):
             continue
-        qp = cfg.queue_path()
-        if not qp.exists():
-            continue
         try:
-            data = queue.load(qp)
-        except _QUEUE_LOAD_ERRORS:
+            entries_pending = queue.pending(cfg.orchestrator_dir())
+        except _QUEUE_READ_ERRORS:
             unreadable.append(root)
             continue
-        if data.get("queue"):
-            counts.append((root, len(data["queue"])))
+        if entries_pending:
+            counts.append((root, len(entries_pending)))
 
     if not counts and not unreadable:
         return None
@@ -2319,31 +2339,25 @@ def _queue_footer(entries) -> str | None:
         )
     if unreadable:
         suffix = "s" if len(unreadable) > 1 else ""
-        parts.append(f"{len(unreadable)} queue file{suffix} unreadable")
+        parts.append(f"{len(unreadable)} queue{suffix} unreadable")
     return "(" + "; ".join(parts) + ")"
 
 
-def _refuse_on_corrupt_queue(queue_path: Path, exc: Exception) -> int:
-    """Operator-at-keyboard refusal path. Surfaces backup paths and a
-    paste-into-Claude instruction; the auto-repair pipeline only runs
-    from cmd_tick_all (phase `repair`), never from the CLI."""
-    backups = sorted(
-        queue_path.parent.glob(f"{queue_path.name}.corrupt-*"),
-        reverse=True,
-    )
-    lines = [
-        f"queue.json corrupt at {queue_path}:",
+def _refuse_on_unreadable_queue(orch_dir: Path, exc: BaseException) -> int:
+    """Operator-at-keyboard refusal path when the queue cannot be read.
+
+    It reports rather than repairs, and that is the whole change: the queue
+    used to be a JSON file that could arrive half-written, so this printed the
+    backups an auto-repair worker would have worked from. A transaction cannot
+    leave a half-written queue, so what reaches here is a database that is
+    genuinely broken or written by a newer clu — neither of which a worker
+    edits back to health.
+    """
+    return _die(
+        ExitCode.GENERIC,
+        f"queue unreadable in {db.project_db_path(orch_dir)}:\n"
         f"  {type(exc).__name__}: {exc}",
-    ]
-    if backups:
-        head = f"Backup at {backups[0]}"
-        if len(backups) > 1:
-            head += f" (and {len(backups) - 1} older)"
-        lines.append(head + ".")
-    else:
-        lines.append("No backup files found.")
-    lines.append("Open Claude in this project to repair.")
-    return _die(ExitCode.GENERIC, "\n".join(lines))
+    )
 
 
 BUNDLED_SKILLS = (
@@ -2882,16 +2896,14 @@ def _bypass_flag_in_template(cmd_tmpl: str) -> str | None:
 def _print_dispatch_permission_health(cfg: ProjectConfig) -> None:
     """Warn when dispatch templates run workers with permission checks off (#90).
 
-    Quiet when clean — matches the other doctor printers. Checks both
-    `dispatch.command` and `dispatch.repair_command` (the repair worker
-    runs the same headless way and deserves the same scrutiny).
+    Quiet when clean — matches the other doctor printers. `dispatch.command`
+    is the only template left to check: `repair_command` is parsed but inert,
+    and warning about a permission flag in a command clu will never run would
+    point the operator at a setting that does nothing.
     """
     findings = [
         (label, flag)
-        for label, tmpl in (
-            ("dispatch.command", cfg.dispatch.command),
-            ("dispatch.repair_command", cfg.dispatch.repair_command or ""),
-        )
+        for label, tmpl in (("dispatch.command", cfg.dispatch.command),)
         if (flag := _bypass_flag_in_template(tmpl))
     ]
     if not findings:
@@ -2916,8 +2928,6 @@ def _print_dispatch_marker_health(cfg: ProjectConfig) -> None:
     (`x{plan_slug}y`). Either blinds the PID-reuse liveness guards
     (`claim_worker_alive` / `reap_orphan_pgroup`), which match a claim's
     plan slug against the live process cmdline.
-    `dispatch.repair_command` is excluded on purpose: marker checks only
-    run against phase-worker claims, and repair workers carry no claim.
     Quiet when clean — matches the other doctor printers; a template that
     won't render (unknown placeholders, stray braces, attribute/index
     tricks) is a quiet skip, same tolerance class as
@@ -3301,6 +3311,39 @@ def cmd_queue(args) -> int:
     return _die(ExitCode.GENERIC, f"unknown queue subcommand {args.queue_cmd!r}")
 
 
+def cmd_quota(args) -> int:
+    if args.quota_cmd == "clear":
+        return cmd_quota_clear(args)
+    print("usage: clu quota clear [--project PATH]", file=sys.stderr)
+    return _die(ExitCode.GENERIC, f"unknown quota subcommand {args.quota_cmd!r}")
+
+
+def cmd_quota_clear(args) -> int:
+    """Clear the project's quota pause — the escape hatch `rm quota.json` was.
+
+    A stuck pause (one whose reset time did not parse) has no auto-resume, so
+    an operator has to end it by hand; the pause is a row now, so the hatch is
+    a command. Prints what it removed rather than a bare "done", because the
+    thing worth confirming is WHICH pause went — a re-pause under a different
+    signature between the ping and the clear is the case that would otherwise
+    look identical.
+    """
+    cfg = load_project_config(_resolve_project_arg(args))
+    orch_dir = cfg.orchestrator_dir()
+    try:
+        cleared = quota.clear_pause(orch_dir)
+    except _QUEUE_READ_ERRORS as exc:
+        return _die(ExitCode.GENERIC, f"quota pause unreadable in {orch_dir}: {exc}")
+    if cleared is None:
+        print("no quota pause recorded")
+        return ExitCode.OK
+    until = cleared.get("paused_until") or "stuck (reset time did not parse)"
+    print(f"cleared quota pause: signature={cleared.get('signature')} paused_until={until}")
+    if cleared.get("canary_plan"):
+        print(f"  canary was {cleared['canary_plan']} (deadline {cleared.get('canary_deadline')})")
+    return ExitCode.OK
+
+
 def _slug_is_running(slug: str, cfg: ProjectConfig) -> bool:
     """True when slug has a live current_claim in the project registry."""
     project_str = str(cfg.project_root)
@@ -3314,6 +3357,18 @@ def _slug_is_running(slug: str, cfg: ProjectConfig) -> bool:
 
 @_translate_claim_mismatch
 def _cmd_queue_add_worker(args) -> int:
+    """`clu queue add --token` — a worker chaining the next plan.
+
+    The steps are now three transactions rather than two nested locks, and the
+    nesting is what had to go: plan state and the queue are tables in ONE
+    database, so a queue write taken while the state window was open would be a
+    second connection asking for the write lock the first already holds — a
+    wait only the waiter could end. So the claim is checked against a snapshot,
+    the queue's cap + idempotency + insert run in a transaction of their own,
+    and the event that records the outcome lands through a plan-store op that
+    re-checks the claim as its own WHERE clause. The token stays the boundary;
+    what changed is where the compare happens.
+    """
     slug = args.slugs[0]
     try:
         st.validate_slug(slug, kind="plan slug")
@@ -3327,91 +3382,117 @@ def _cmd_queue_add_worker(args) -> int:
     if not plan_store.exists_for_path(source_state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state for plan {args.source_plan!r}")
 
+    orch_dir = cfg.orchestrator_dir()
     plan_file = cfg.project_root / cfg.plan_dir / f"{slug}.md"
     token_fp = hashlib.sha256(args.token.encode()).hexdigest()[:8]
-    queue_path = cfg.queue_path()
 
-    # Lock order: state lock outer, queue lock inner.
-    with st.mutate(source_state_path) as state_data:
-        st.assert_claim_match(state_data, args.token, args.source_phase)
+    state_data = st.load(source_state_path)
+    st.assert_claim_match(state_data, args.token, args.source_phase)
 
-        # Plan-file existence check inside state lock so rejection event is atomic.
-        if not plan_file.exists():
-            st.append_event(
-                state_data,
-                st.EVENT_QUEUE_REJECTED,
-                slug=slug,
-                source_phase=args.source_phase,
-                reason="missing_plan_file",
-            )
-            return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
-
-        cap = state_data["config"].get(
-            "max_queue_adds_per_phase", st.DEFAULT_MAX_QUEUE_ADDS_PER_PHASE
+    def _reject(reason: str) -> None:
+        plan_store.op_append_events(
+            orch_dir,
+            args.source_plan,
+            [
+                {
+                    "ts": st.utcnow(),
+                    "type": st.EVENT_QUEUE_REJECTED,
+                    "slug": slug,
+                    "source_phase": args.source_phase,
+                    "reason": reason,
+                }
+            ],
+            token=args.token,
+            phase=args.source_phase,
         )
 
-        with queue.mutate(queue_path) as qdata:
+    if not plan_file.exists():
+        _reject("missing_plan_file")
+        return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
+
+    cap = state_data["config"].get(
+        "max_queue_adds_per_phase", st.DEFAULT_MAX_QUEUE_ADDS_PER_PHASE
+    )
+
+    # Read the registry BEFORE the queue transaction, never inside it: it is a
+    # different database, and a query of one store while holding another's
+    # write lock is the shape this migration keeps finding.
+    running = _slug_is_running(slug, cfg)
+
+    entry = {
+        "slug": slug,
+        "added_at": st.utcnow(),
+        "added_by": "worker",
+        "position_at_add": "tail",
+        "source_plan": args.source_plan,
+        "source_phase": args.source_phase,
+        "source_token_fp": token_fp,
+        "reason": args.reason,
+    }
+
+    try:
+        with db.project_conn(orch_dir) as conn, db.write_txn(conn) as cur:
+            pending_entries = queue.pending_in_txn(cur)
+            history_entries = queue.history_in_txn(cur)
+
             # Cap: count source-tagged entries across pending + history.
             existing_count = sum(
                 1
-                for e in qdata["queue"] + qdata["history"]
+                for e in pending_entries + history_entries
                 if e.get("source_plan") == args.source_plan
                 and e.get("source_phase") == args.source_phase
             )
             if existing_count >= cap:
-                st.append_event(
-                    state_data,
-                    st.EVENT_QUEUE_REJECTED,
-                    slug=slug,
-                    source_phase=args.source_phase,
-                    reason="cap",
-                )
-                return _die(
-                    ExitCode.QUEUE_CAP,
-                    f"phase {args.source_phase!r} hit queue cap of {cap}",
-                )
+                outcome = "cap"
+            elif slug in {e["slug"] for e in pending_entries}:
+                # Idempotency: pending slug — active intent wins over history.
+                outcome = "pending"
+            elif running:
+                # Idempotency: running slug (popped, in-flight).
+                outcome = "running"
+            elif slug in {e["slug"] for e in history_entries}:
+                # Idempotency: done slug (in history → error).
+                outcome = "history"
+            else:
+                outcome = "queued"
+                pos = queue.insert_in_txn(cur, entry)
+    except _QUEUE_READ_ERRORS as exc:
+        return _refuse_on_unreadable_queue(orch_dir, exc)
 
-            # Idempotency: pending slug (check first — active intent wins over history).
-            pending = {e["slug"]: i + 1 for i, e in enumerate(qdata["queue"])}
-            if slug in pending:
-                print(f"already queued: {slug} (position {pending[slug]})")
-                return ExitCode.OK
+    if outcome == "cap":
+        _reject("cap")
+        return _die(
+            ExitCode.QUEUE_CAP,
+            f"phase {args.source_phase!r} hit queue cap of {cap}",
+        )
+    if outcome == "pending":
+        position = [e["slug"] for e in pending_entries].index(slug) + 1
+        print(f"already queued: {slug} (position {position})")
+        return ExitCode.OK
+    if outcome == "running":
+        print(f"already queued: {slug} (running)")
+        return ExitCode.OK
+    if outcome == "history":
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"{slug!r} already ran in this queue; "
+            "remove from history or pick a different slug",
+        )
 
-            # Idempotency: running slug (popped, in-flight).
-            if _slug_is_running(slug, cfg):
-                print(f"already queued: {slug} (running)")
-                return ExitCode.OK
-
-            # Idempotency: done slug (in history → error).
-            if slug in {e["slug"] for e in qdata["history"]}:
-                return _die(
-                    ExitCode.STATUS_TRANSITION,
-                    f"{slug!r} already ran in this queue; "
-                    "remove from history or pick a different slug",
-                )
-
-            qdata["queue"].append(
-                {
-                    "slug": slug,
-                    "added_at": st.utcnow(),
-                    "added_by": "worker",
-                    "position_at_add": "tail",
-                    "source_plan": args.source_plan,
-                    "source_phase": args.source_phase,
-                    "source_token_fp": token_fp,
-                    "reason": args.reason,
-                }
-            )
-            pos = len(qdata["queue"])
-
-        event_fields: dict = {
-            "slug": slug,
-            "source_phase": args.source_phase,
-            "token_fp": token_fp,
-        }
-        if args.reason is not None:
-            event_fields["reason"] = args.reason
-        st.append_event(state_data, st.EVENT_QUEUE_APPENDED, **event_fields)
+    event_fields: dict = {
+        "slug": slug,
+        "source_phase": args.source_phase,
+        "token_fp": token_fp,
+    }
+    if args.reason is not None:
+        event_fields["reason"] = args.reason
+    plan_store.op_append_events(
+        orch_dir,
+        args.source_plan,
+        [{"ts": st.utcnow(), "type": st.EVENT_QUEUE_APPENDED, **event_fields}],
+        token=args.token,
+        phase=args.source_phase,
+    )
     print(f"queued at position {pos}")
     return ExitCode.OK
 
@@ -3482,48 +3563,36 @@ def cmd_queue_add(args) -> int:
         if not plan_file.exists():
             return _die(ExitCode.UNKNOWN_TASK, f"no plan file at {plan_file}")
 
-    queue_path = cfg.queue_path()
-    if queue_path.exists():
-        try:
-            queue.load(queue_path)
-        except _QUEUE_LOAD_ERRORS as exc:
-            return _refuse_on_corrupt_queue(queue_path, exc)
-
-    # Single mutation window — atomic from cron's POV. Early-return on a
-    # pre-existing duplicate is safe: data is untouched, so locked_json's
-    # post-yield save_atomic just rewrites the same bytes.
-    positions: list[int] = []
-    with queue.mutate(queue_path) as data:
-        existing_by_slug = {entry["slug"]: i + 1 for i, entry in enumerate(data["queue"])}
-        for slug in slugs:
-            if slug in existing_by_slug:
-                return _die(
-                    ExitCode.STATUS_TRANSITION,
-                    f"{slug!r} already queued at position "
-                    f"{existing_by_slug[slug]}; "
-                    f"`clu queue remove {slug}` first to re-order",
-                )
-        entries = [
-            {
-                "slug": slug,
-                "added_at": st.utcnow(),
-                "added_by": "operator",
-                "position_at_add": "front" if args.front else "tail",
-                "source_plan": None,
-                "source_phase": None,
-                "source_token_fp": None,
-                "reason": args.reason,
-                "batch_id": batch_id,
-            }
-            for slug in slugs
-        ]
-        if args.front:
-            data["queue"][0:0] = entries
-            positions = list(range(1, len(entries) + 1))
-        else:
-            start = len(data["queue"]) + 1
-            data["queue"].extend(entries)
-            positions = list(range(start, start + len(entries)))
+    orch_dir = cfg.orchestrator_dir()
+    entries = [
+        {
+            "slug": slug,
+            "added_at": st.utcnow(),
+            "added_by": "operator",
+            "position_at_add": "front" if args.front else "tail",
+            "source_plan": None,
+            "source_phase": None,
+            "source_token_fp": None,
+            "reason": args.reason,
+            "batch_id": batch_id,
+        }
+        for slug in slugs
+    ]
+    # One transaction for the whole batch — `--batch` names plans meant to run
+    # as siblings, and half of them queued is not a smaller version of that.
+    # The duplicate check lives inside it, so a concurrent add cannot slip
+    # between the check and the insert.
+    try:
+        positions = queue.add_many(orch_dir, entries, front=args.front)
+    except queue.AlreadyQueued as exc:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"{exc.slug!r} already queued at position "
+            f"{exc.position}; "
+            f"`clu queue remove {exc.slug}` first to re-order",
+        )
+    except _QUEUE_READ_ERRORS as exc:
+        return _refuse_on_unreadable_queue(orch_dir, exc)
 
     _spawn_post_action_tick(cfg)
     for pos in positions:
@@ -3619,18 +3688,13 @@ def _format_iso_clock(ts_iso: str | None) -> str:
 
 def cmd_queue_list(args) -> int:
     cfg = load_project_config(_resolve_project_arg(args))
-    queue_path = cfg.queue_path()
+    orch_dir = cfg.orchestrator_dir()
 
-    if not queue_path.exists():
-        pending: list[dict] = []
-        history: list[dict] = []
-    else:
-        try:
-            data = queue.load(queue_path)
-        except _QUEUE_LOAD_ERRORS as exc:
-            return _refuse_on_corrupt_queue(queue_path, exc)
-        pending = data["queue"]
-        history = data["history"]
+    try:
+        pending = queue.pending(orch_dir)
+        history = queue.history(orch_dir)
+    except _QUEUE_READ_ERRORS as exc:
+        return _refuse_on_unreadable_queue(orch_dir, exc)
 
     # Always build reg_states — empty-pending + in-flight is a real case
     # (the only queued plan was just popped, dispatch in flight).
@@ -3708,28 +3772,14 @@ def cmd_queue_remove(args) -> int:
         return _die(ExitCode.INVALID_SLUG, str(exc))
 
     cfg = load_project_config(_resolve_project_arg(args))
-    queue_path = cfg.queue_path()
-
-    if not queue_path.exists():
-        return _die(ExitCode.UNKNOWN_TASK, f"{slug!r} is not in the queue")
+    orch_dir = cfg.orchestrator_dir()
 
     try:
-        queue.load(queue_path)
-    except _QUEUE_LOAD_ERRORS as exc:
-        return _refuse_on_corrupt_queue(queue_path, exc)
-
-    with queue.mutate(queue_path) as data:
-        positions = [i for i, e in enumerate(data["queue"]) if e["slug"] == slug]
-        if not positions:
-            return _die(ExitCode.UNKNOWN_TASK, f"{slug!r} is not in the queue")
-        entry = data["queue"].pop(positions[0])
-        data["history"].append(
-            {
-                **entry,
-                "ended_at": st.utcnow(),
-                "outcome": "removed",
-            }
-        )
+        removed = queue.remove(orch_dir, slug)
+    except _QUEUE_READ_ERRORS as exc:
+        return _refuse_on_unreadable_queue(orch_dir, exc)
+    if not removed:
+        return _die(ExitCode.UNKNOWN_TASK, f"{slug!r} is not in the queue")
 
     print(f"removed {slug} from queue")
     return ExitCode.OK
@@ -4182,116 +4232,6 @@ def cmd_tick_all(args) -> int:
                 file=sys.stderr,
             )
     return ExitCode.OK
-
-
-_REPAIR_MAX_ATTEMPTS = 3
-
-
-def _handle_corrupt_queue(
-    cfg: ProjectConfig,
-    exc: Exception,
-    queue_path: Path,
-) -> None:
-    """Backup-first auto-repair pipeline for an unparseable queue.json.
-
-    Steps (any failure short-circuits to a notification + early return):
-      1. Backup the current bytes to a `corrupt-<utc>` sibling. Always.
-      2. Check the per-diagnosis-hash throttle. ≥ 3 attempts → notify only.
-      3. `repair_command` unset → notify only, increment throttle.
-      4. Spawn the repair worker synchronously, then run
-         `queue.validate_repair` against the worker's output.
-      5. Validation failed → revert bytes from backup, REPAIR_FAILED.
-      6. Validation passed → REPAIRED, reset throttle.
-    """
-    from . import dispatch  # local: dispatch imports supervisor too.
-
-    diagnosis = f"{type(exc).__name__}: {exc}"
-    diagnosis_hash = hashlib.sha256(diagnosis.encode()).hexdigest()[:8]
-    throttle_path = queue_path.with_name(queue_path.name + ".repair-attempts")
-
-    try:
-        original_bytes = queue_path.read_bytes()
-    except OSError as read_exc:
-        print(
-            f"corrupt queue: cannot read {queue_path}: {read_exc}",
-            file=sys.stderr,
-        )
-        return
-    backup_path = queue_path.with_name(f"{queue_path.name}.corrupt-{st.utcnow_compact()}")
-    try:
-        backup_path.write_bytes(original_bytes)
-    except OSError as write_exc:
-        print(
-            f"corrupt queue: cannot write backup {backup_path}: {write_exc}",
-            file=sys.stderr,
-        )
-        return
-
-    attempts = queue.read_throttle(throttle_path, diagnosis_hash)
-    if attempts >= _REPAIR_MAX_ATTEMPTS:
-        notify.notify(
-            cfg.notify,
-            notify.KIND_QUEUE_CORRUPT,
-            notify.render_queue_corrupt(diagnosis, backup_path)
-            + f" (auto-repair gave up after {_REPAIR_MAX_ATTEMPTS} attempts)",
-        )
-        return
-
-    if not cfg.dispatch.repair_command:
-        notify.notify(
-            cfg.notify,
-            notify.KIND_QUEUE_CORRUPT,
-            notify.render_queue_corrupt(diagnosis, backup_path),
-        )
-        queue.increment_throttle(throttle_path, diagnosis_hash)
-        return
-
-    log_path = queue_path.parent / "logs" / f"repair-queue-{st.utcnow_compact()}.log"
-
-    try:
-        dispatch.dispatch_repair_worker(
-            cfg,
-            queue_path,
-            backup_path,
-            diagnosis,
-            log_path,
-        )
-    except (OSError, ValueError) as spawn_exc:
-        notify.notify(
-            cfg.notify,
-            notify.KIND_QUEUE_REPAIR_FAILED,
-            notify.render_queue_repair_failed(
-                f"dispatch failed: {spawn_exc}",
-                backup_path,
-            ),
-        )
-        queue.increment_throttle(throttle_path, diagnosis_hash)
-        return
-
-    result = queue.validate_repair(original_bytes, queue_path)
-    if not result.ok:
-        try:
-            queue_path.write_bytes(original_bytes)
-        except OSError as revert_exc:
-            print(
-                f"corrupt queue: revert failed for {queue_path}: {revert_exc}",
-                file=sys.stderr,
-            )
-        notify.notify(
-            cfg.notify,
-            notify.KIND_QUEUE_REPAIR_FAILED,
-            notify.render_queue_repair_failed(result.reason or "unknown", backup_path),
-        )
-        queue.increment_throttle(throttle_path, diagnosis_hash)
-        return
-
-    repaired = queue.load(queue_path)
-    notify.notify(
-        cfg.notify,
-        notify.KIND_QUEUE_REPAIRED,
-        notify.render_queue_repaired(len(repaired["queue"]), backup_path),
-    )
-    queue.reset_throttle(throttle_path)
 
 
 def cmd_prior_blocker(args, cfg: ProjectConfig, state_path: Path) -> int:
@@ -6448,7 +6388,6 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
                 args.plan,
                 quota_match.line,
                 paused_until,
-                str(state_path.parent / quota.QUOTA_FILE_NAME),
             )
         )
     else:

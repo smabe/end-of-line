@@ -23,10 +23,10 @@ import io
 import json
 from pathlib import Path
 
-from end_of_line import db
+from end_of_line import db, queue, quota
 from end_of_line import state as st
 from end_of_line.cli import main as cli_main
-from tests import CluTestCase, demo_script
+from tests import CluTestCase, demo_script, must
 
 
 class ScriptDeterminismTest(CluTestCase):
@@ -92,6 +92,32 @@ class StorageCutoverTest(CluTestCase):
         self.assertEqual(sorted(p.name for p in orch.glob("*.state.json")), [])
         self.assertEqual(sorted(p.name for p in orch.glob("*.state.json.lock")), [])
         self.assertTrue(db.project_db_path(orch).exists(), "no clu.db in the orchestrator dir")
+
+    def test_no_store_files_survive_a_full_run(self) -> None:
+        # The plan-level cutover criterion, and it only became checkable here:
+        # the demo never touches the queue or the quota pause, so asserting
+        # "no queue.json, no quota.json" after a bare demo run would pass
+        # whether or not those stores still wrote files. So both are EXERCISED
+        # against the same orchestrator dir first, and read back afterwards, to
+        # prove the assertion is about storage rather than about absence of use.
+        project_root = self._run()
+        orch = demo_script.state_path_for(project_root).parent
+
+        queue.add(orch, {"slug": "next-plan", "added_at": st.utcnow(), "added_by": "operator"})
+        match = must(quota.classify_quota("You've hit your weekly limit · resets Mon 12:00am"))
+        quota.record_quota_pause(orch, match, st._now_utc())
+
+        self.assertEqual([e["slug"] for e in queue.pending(orch)], ["next-plan"])
+        self.assertIsNotNone(quota.read_pause(orch))
+
+        entries = sorted(p.name for p in orch.iterdir())
+        self.assertIn(db.DB_FILENAME, entries, f"no database in the orchestrator dir: {entries}")
+        leftovers = [
+            name
+            for name in entries
+            if name.endswith(".json") or ".lock" in name or name.endswith(".state.json")
+        ]
+        self.assertEqual(leftovers, [], f"store files survived the run: {leftovers}")
 
     def test_state_dump_prints_the_plan(self) -> None:
         project_root = self._run()

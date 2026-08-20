@@ -25,6 +25,7 @@ import multiprocessing as mp
 import sqlite3
 import stat
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -322,6 +323,104 @@ class TxnTest(CluTestCase):
         # A reader that keeps its transaction open pins the WAL past the
         # autocheckpoint (probed: 819KB-12.8MB). read_txn always rolls back.
         self.assertFalse(conn.in_transaction)
+
+
+class NestedWriteTxnTest(CluTestCase):
+    """A second write transaction on the same database JOINS the first.
+
+    Not an optimization: SQLite's write lock is per-connection, so a second
+    connection asking for `BEGIN IMMEDIATE` while this thread already holds one
+    waits for a lock only the waiter can release. That shape is unavoidable now
+    that plan state, the queue and the quota pause share one database and the
+    tick consults the quota gate from inside its state window.
+    """
+
+    def test_nested_write_on_the_same_database_does_not_deadlock(self) -> None:
+        path = self.tmp_path / "nested.db"
+        _make_counter_db(path)
+        outer = db.connect(path, timeout_s=1.0)
+        self.addCleanup(outer.close)
+        inner = db.connect(path, timeout_s=1.0)
+        self.addCleanup(inner.close)
+
+        started = time.monotonic()
+        with db.write_txn(outer) as cur:
+            cur.execute("UPDATE counter SET n = 1 WHERE id = 1")
+            with db.write_txn(inner, timeout_s=1.0) as inner_cur:
+                inner_cur.execute("UPDATE counter SET n = n + 1 WHERE id = 1")
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(_read_counter(path), 2)
+        self.assertLess(elapsed, 0.5, f"the nested write waited {elapsed:.2f}s for a lock")
+
+    def test_the_nested_write_commits_with_the_outer_one(self) -> None:
+        # It joined the transaction, so it shares its fate — the whole point of
+        # joining rather than opening a second one that could half-commit.
+        path = self.tmp_path / "nested-rollback.db"
+        _make_counter_db(path)
+        outer = db.connect(path)
+        self.addCleanup(outer.close)
+        inner = db.connect(path)
+        self.addCleanup(inner.close)
+
+        with self.assertRaises(ValueError):
+            with db.write_txn(outer) as cur:
+                cur.execute("UPDATE counter SET n = 5 WHERE id = 1")
+                with db.write_txn(inner) as inner_cur:
+                    inner_cur.execute("UPDATE counter SET n = 9 WHERE id = 1")
+                raise ValueError("outer fails after the nested write committed")
+        self.assertEqual(_read_counter(path), 0)
+
+    def test_two_different_databases_still_take_their_own_locks(self) -> None:
+        # The join is keyed by database FILE — an open transaction on one
+        # project must not silently swallow writes meant for another.
+        a, b = self.tmp_path / "a.db", self.tmp_path / "b.db"
+        _make_counter_db(a)
+        _make_counter_db(b)
+        conn_a = db.connect(a)
+        self.addCleanup(conn_a.close)
+        conn_b = db.connect(b)
+        self.addCleanup(conn_b.close)
+
+        with db.write_txn(conn_a) as cur_a:
+            cur_a.execute("UPDATE counter SET n = 3 WHERE id = 1")
+            with db.write_txn(conn_b) as cur_b:
+                cur_b.execute("UPDATE counter SET n = 4 WHERE id = 1")
+            # B committed on its own, while A is still open.
+            self.assertEqual(_read_counter(b), 4)
+            self.assertEqual(_read_counter(a), 0)
+        self.assertEqual(_read_counter(a), 3)
+
+    def test_a_separate_thread_still_contends(self) -> None:
+        # The registry is thread-local on purpose: two threads holding write
+        # transactions on one database are genuine contention, not nesting.
+        path = self.tmp_path / "threaded.db"
+        _make_counter_db(path)
+        holder = db.connect(path, timeout_s=CHILD_TIMEOUT_S)
+        self.addCleanup(holder.close)
+        outcome: list[str] = []
+        release = threading.Event()
+        acquired = threading.Event()
+
+        def _other() -> None:
+            conn = db.connect(path, timeout_s=CHILD_TIMEOUT_S)
+            try:
+                with db.write_txn(conn, timeout_s=0.2):
+                    outcome.append("acquired")
+            except db.DbBusy:
+                outcome.append("busy")
+            finally:
+                conn.close()
+                acquired.set()
+
+        with db.write_txn(holder) as cur:
+            cur.execute("UPDATE counter SET n = 1 WHERE id = 1")
+            worker = threading.Thread(target=_other)
+            worker.start()
+            acquired.wait(timeout=CHILD_JOIN_S)
+        release.set()
+        worker.join(timeout=CHILD_JOIN_S)
+        self.assertEqual(outcome, ["busy"], "another thread joined this thread's transaction")
 
 
 class SchemaTest(CluTestCase):
