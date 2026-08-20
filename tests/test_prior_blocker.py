@@ -11,7 +11,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import isolate_registry, write_state
 
 PLAN_BODY = """\
 # Test plan
@@ -50,10 +50,9 @@ class PriorBlockerTestCase(unittest.TestCase):
         ]
 
     def _mutate(self, mut) -> None:
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            mut(data)
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        mut(data)
+        write_state(self.state_path, data)
 
     def _run(self, phase: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import isolate_registry, write_state
 
 PLAN_BODY = """\
 # Test plan
@@ -48,10 +48,9 @@ class BlockersTestCase(unittest.TestCase):
         return ["--project", str(self.project), "--plan", "test-plan"]
 
     def _mutate(self, mut) -> None:
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            mut(data)
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        mut(data)
+        write_state(self.state_path, data)
 
     def test_blockers_list_empty(self) -> None:
         rc, out, _ = self._run("list", *self._plan_args())

@@ -12,7 +12,7 @@ from end_of_line import db
 from end_of_line import state as st
 from end_of_line.registry import PlanEntry
 from end_of_line.state_locator import find_blocker_for_reply
-from tests import isolate_registry
+from tests import isolate_registry, write_state
 
 
 def _make_project(tmp: Path, slug: str) -> tuple[Path, Path, PlanEntry]:
@@ -23,7 +23,7 @@ def _make_project(tmp: Path, slug: str) -> tuple[Path, Path, PlanEntry]:
     state_dir.mkdir(parents=True)
     state_path = state_dir / f"{slug}.state.json"
     data = st.empty_state(slug, "plans")
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
     entry = PlanEntry(
         project_root=str(project),
         plan_slug=slug,
@@ -68,7 +68,7 @@ def _add_blocker_raw(state_path: Path, options: list[str] | None = None) -> None
             "answered_at": None,
         }
     )
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
 
 
 class StateLocatorTestCase(unittest.TestCase):
@@ -138,7 +138,7 @@ class StateLocatorTestCase(unittest.TestCase):
         _add_blocker_raw(state_path)
         data = st.load(state_path)
         data["blockers"][0]["answer"] = "1"
-        st.save_atomic(state_path, data)
+        write_state(state_path, data)
         result = find_blocker_for_reply([entry], "1")
         self.assertEqual(result.variant, "NOT_FOUND")
 

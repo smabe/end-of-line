@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from end_of_line import db, plan_store
 from end_of_line import state as st
 from end_of_line.notify_base import REPLY_RE, OpenBlocker, route_reply
 from end_of_line.registry import PlanEntry
@@ -98,11 +99,21 @@ def _load_open_blockers(entry: PlanEntry) -> tuple[Path, list[OpenBlocker]] | No
         log.warning("state_locator: skipping %s — %s", entry.plan_slug, exc)
         return None
     try:
-        data = st.load(state_path)
+        data = plan_store.snapshot(*plan_store.key_for_state_path(state_path))
     except FileNotFoundError:
-        log.debug("state_locator: skipping %s — state file missing", entry.plan_slug)
+        # A plan that simply is not there is routine — a registry entry the
+        # operator has not pruned. DEBUG, not WARNING; anything else is loud
+        # enough to matter and is warned about below.
+        log.debug("state_locator: skipping %s — no such plan", entry.plan_slug)
         return None
-    except (st.SchemaVersionMismatch, ValueError, OSError) as exc:
+    except (*db.DEGRADABLE_ERRORS, st.SchemaVersionMismatch, ValueError) as exc:
+        # `OSError`/`ValueError`/`SchemaVersionMismatch` were the whole story
+        # for a FILE. A database also fails with `sqlite3.Error` when it is
+        # broken, `db.DbBusy` (a RuntimeError, which no OSError clause catches)
+        # when another plan's tick is holding the project's write lock, and
+        # `db.SchemaTooNew` when it came from a newer clu — and this walk runs
+        # from the inbound poller, where an escaping exception means a reply
+        # the operator typed matches nothing and nobody finds out why.
         log.warning("state_locator: skipping %s — %s", entry.plan_slug, exc)
         return None
     return state_path, _hydrate_open_blockers(data, entry)

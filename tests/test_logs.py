@@ -13,7 +13,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, _follow_log, _resolve_log_path, main
 from end_of_line.config import ProjectConfig
-from tests import isolate_registry
+from tests import isolate_registry, write_state
 
 PLAN_BODY = """\
 # Test plan
@@ -58,17 +58,16 @@ class LogsTestCase(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def _stamp_claim(self, log_path: Path) -> None:
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            data["current_claim"] = {
-                "phase_id": "a",
-                "claimed_by": "session-xyz",
-                "claimed_at": st.utcnow(),
-                "lease_expires": st.utcnow(),
-                "attempts": 1,
-                "log_path": str(log_path),
-            }
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        data["current_claim"] = {
+            "phase_id": "a",
+            "claimed_by": "session-xyz",
+            "claimed_at": st.utcnow(),
+            "lease_expires": st.utcnow(),
+            "attempts": 1,
+            "log_path": str(log_path),
+        }
+        write_state(self.state_path, data)
 
     def _write_log(self, name: str, body: str, *, mtime: float | None = None) -> Path:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -115,16 +114,15 @@ class LogsTestCase(unittest.TestCase):
     def test_claim_without_log_path_falls_through(self) -> None:
         # Old state predates the log_path field — must not crash.
         self._write_log("a.tail.log", "fallback-after-no-log-path\n")
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            data["current_claim"] = {
-                "phase_id": "a",
-                "claimed_by": "session-xyz",
-                "claimed_at": st.utcnow(),
-                "lease_expires": st.utcnow(),
-                "attempts": 1,
-            }
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        data["current_claim"] = {
+            "phase_id": "a",
+            "claimed_by": "session-xyz",
+            "claimed_at": st.utcnow(),
+            "lease_expires": st.utcnow(),
+            "attempts": 1,
+        }
+        write_state(self.state_path, data)
 
         rc, out, _ = self._run()
         self.assertEqual(rc, ExitCode.OK)

@@ -22,7 +22,7 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import load_project_config
 from end_of_line.cross_plan_rules import worktree_conflict_rule
-from tests import isolate_registry
+from tests import isolate_registry, mutate_state
 
 PLAN_BODY = """\
 # T
@@ -91,7 +91,7 @@ class ConflictWarningTestCase(unittest.TestCase):
 
     def test_init_no_hint_when_sibling_paused(self) -> None:
         self._init_plan("alpha")
-        with st.mutate(self._state_path("alpha")) as data:
+        with mutate_state(self._state_path("alpha")) as data:
             data["status"] = st.STATUS_PAUSED
         stderr = self._init_plan("beta", capture=True)
         self.assertNotIn("hint:", stderr)
@@ -172,7 +172,7 @@ class ConflictWarningTestCase(unittest.TestCase):
         with mock.patch.object(notify, "notify"):
             self._run_conflict_rule()
         # Pause beta → alpha's conflict resolves.
-        with st.mutate(self._state_path("beta")) as data:
+        with mutate_state(self._state_path("beta")) as data:
             data["status"] = st.STATUS_PAUSED
         with mock.patch.object(notify, "notify"):
             self._run_conflict_rule()
@@ -185,7 +185,7 @@ class ConflictWarningTestCase(unittest.TestCase):
         self._init_plan("alpha")
         self._init_plan("beta")
         # Give alpha a worktree record by hand-editing state.
-        with st.mutate(self._state_path("alpha")) as data:
+        with mutate_state(self._state_path("alpha")) as data:
             data["worktree"] = {
                 "path": "/tmp/fake-wt",
                 "branch": "clu/alpha",
@@ -222,9 +222,9 @@ class ConflictWarningTestCase(unittest.TestCase):
         self._init_plan("alpha")
         self._init_plan("beta")
         # Pre-seed both as already-warned about each other.
-        with st.mutate(self._state_path("alpha")) as data:
+        with mutate_state(self._state_path("alpha")) as data:
             data["in_conflict_with"] = ["beta"]
-        with st.mutate(self._state_path("beta")) as data:
+        with mutate_state(self._state_path("beta")) as data:
             data["in_conflict_with"] = ["alpha"]
         with mock.patch.object(notify, "notify") as notify_mock:
             self._run_conflict_rule()

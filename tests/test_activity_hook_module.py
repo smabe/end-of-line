@@ -14,7 +14,7 @@ import unittest
 
 from end_of_line import state as st
 from end_of_line.cli import main as cli_main
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state
 
 PLAN_BODY = """\
 # Test plan
@@ -36,7 +36,7 @@ class ActivityHookModuleTestCase(CluTestCase):
         subprocess.run(["git", "init", "-q"], cwd=self.project, check=True)
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         cli_main(["init", "--project", str(self.project), "--plan", "test-plan"])
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def _argv(self, *extra: str) -> list[str]:

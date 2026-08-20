@@ -19,7 +19,7 @@ from pathlib import Path
 from end_of_line import registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import GitProjectTestCase
+from tests import GitProjectTestCase, mutate_state
 
 
 def _spawn_marked_group(marker: str) -> subprocess.Popen:
@@ -35,7 +35,7 @@ def _group_alive(pgid: int) -> bool:
 
 class UnregisterTerminalizeTestCase(GitProjectTestCase):
     def _set_running(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["status"] = st.STATUS_RUNNING
 
     def _registered(self) -> bool:
@@ -63,7 +63,7 @@ class UnregisterTerminalizeTestCase(GitProjectTestCase):
         self._claim("a")
         leader = _spawn_marked_group("/clu-phase test-plan a")
         try:
-            with st.mutate(self.state_path) as data:
+            with mutate_state(self.state_path) as data:
                 data["current_claim"]["pgid"] = leader.pid
             _waiter = threading.Thread(target=leader.wait, daemon=True)
             _waiter.start()
@@ -89,7 +89,7 @@ class UnregisterTerminalizeTestCase(GitProjectTestCase):
         self.assertFalse(self._registered(), "row removed despite unreadable state")
 
     def test_already_terminal_plan_not_re_terminalized(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["status"] = st.STATUS_DONE
         rc = main(self._argv("unregister"))
         self.assertEqual(rc, ExitCode.OK)

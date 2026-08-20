@@ -2,36 +2,33 @@
 
 Plan state is the single durable artifact across cold-context phases. It lives
 in the project database (`plans/.orchestrator/clu.db`, see `plan_store`), and
-`load` / `mutate` / `save_atomic` route a plan-state PATH to that store while
-keeping their signatures — the path is the key. The queue and the quota pause
-moved into that same database and no longer come through here at all; what is
-left of the flock + tmp+fsync+rename engine below serves the remaining
-non-plan callers until the file primitives are removed outright.
+this module no longer holds an engine of its own: the flock, the
+tmp+fsync+rename write and the whole-document mutate window are gone, and what
+remains that touches storage is `load` (one read transaction) plus `key_for`,
+which turns the state PATH callers still hold into the store's (dir, slug) key.
+Every write in the package names the rows it changes — `plan_store.op_*` — or
+declares the preconditions its decision rested on.
 
 Everything else here is domain logic over the loaded dict — claims, blockers,
-events, liveness — and is storage-agnostic. The event log is append-only:
+events, liveness — and is storage-agnostic. It reads and edits snapshots; what
+persists an edit is the op the caller picks. The event log is append-only:
 projection from events can rebuild any derived field.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
-import fcntl
-import json
 import os
 import re
 import signal
 import subprocess
-import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import coolant, db
+from . import coolant
 
 # Inner char-class body for a slug token — the single source of the slug
 # alphabet. Composed into `SLUG_PATTERN` below and into the cmdline token
@@ -515,104 +512,6 @@ def empty_state(plan_slug: str, plan_dir: str) -> dict:
     }
 
 
-class LockTimeout(RuntimeError):
-    """`locked(..., timeout_seconds=...)` couldn't acquire within budget.
-
-    Used by callers like the `clu activity` PreToolUse hook that prefer
-    dropping the write over freezing the worker's Bash call. The state
-    path lives on `.path` (also `str(exc)` / `args[0]`) so callers can
-    log which file timed out.
-    """
-
-    def __init__(self, path: Path | str) -> None:
-        super().__init__(str(path))
-        self.path = Path(path) if not isinstance(path, Path) else path
-
-
-@contextmanager
-def locked(
-    state_path: Path,
-    *,
-    timeout_seconds: float | None = None,
-) -> Iterator[None]:
-    """Serialize read-modify-write across processes via a sibling lock file.
-
-    O_NOFOLLOW refuses to open if the lockfile path is a symlink — defeats
-    a pre-seeded symlink attack that would otherwise truncate the target.
-
-    `timeout_seconds=None` (default) blocks indefinitely. A positive value
-    polls with `LOCK_NB`; raises `LockTimeout` if the budget elapses. Used
-    by hot-path hook callbacks that must not hang the worker.
-    """
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = state_path.with_name(state_path.name + ".lock")
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        if timeout_seconds is None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        else:
-            import time as _time
-
-            deadline = _time.monotonic() + timeout_seconds
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if _time.monotonic() >= deadline:
-                        raise LockTimeout(state_path)
-                    _time.sleep(0.05)
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
-
-@contextmanager
-def locked_json(
-    path: Path,
-    *,
-    expected_version: int,
-    empty: Callable[[], dict] | None = None,
-    timeout_seconds: float | None = None,
-) -> Iterator[dict]:
-    """Generic lock + load + yield-for-mutation + atomic write.
-
-    Shared primitive for every clu JSON file (state, registry, queue). The
-    `empty` factory makes the missing-file branch a caller choice: state
-    files always pre-exist (claim path → save_atomic happens first), so
-    state.mutate passes None and lets load() raise FileNotFoundError;
-    registry and queue tolerate missing-on-first-write and pass a real
-    factory.
-
-    `timeout_seconds` is forwarded to `locked`: None (default) blocks
-    indefinitely; a positive value raises `LockTimeout` if the budget
-    elapses. The heartbeat daemon's death report passes a bounded budget so
-    a contended lock on its exit path can't strand a `setsid`-detached,
-    reaper-immune process forever.
-    """
-    with locked(path, timeout_seconds=timeout_seconds):
-        if not path.exists() and empty is not None:
-            data = empty()
-        else:
-            data = load(path, expected_version=expected_version)
-        yield data
-        save_atomic(path, data)
-
-
-def _routes_to_store(path: Path) -> bool:
-    """True for a plan-state path — the key of a row in the project database.
-
-    Plan state lives in `plans/.orchestrator/clu.db`, and so do the queue and
-    the quota pause — but those two are reached through their own modules, not
-    through here, so the three primitives below still switch on the path they
-    are given rather than on a flag.
-    """
-    return Path(path).name.endswith(STATE_SUFFIX)
-
-
 def _plan_store():
     """The store, imported on use.
 
@@ -624,101 +523,23 @@ def _plan_store():
     return plan_store
 
 
-@contextmanager
-def mutate(
-    state_path: Path,
-    *,
-    timeout_seconds: float | None = None,
-) -> Iterator[dict]:
-    """Load, yield data for mutation, write it back — as one transaction.
+def load(state_path: Path) -> dict:
+    """The plan at `state_path`, as a dict — one read transaction on the store.
 
-    Use this for every read-modify-write. Plain `locked()` is for the rare
-    case where multiple FILES need to be coordinated under one lock.
-
-    `timeout_seconds` (default None → wait) bounds the wait for the store's
-    write lock; exceeding it raises `LockTimeout`, exactly as the flock budget
-    did, for callers that must not hang — the activity hook and the heartbeat
-    daemon's death report.
+    The path is the KEY, not a file: `plan_store.snapshot` reads the rows and
+    raises the same `FileNotFoundError` / `ValueError` / `SchemaVersionMismatch`
+    the file era raised, so every tolerant reader in the fleet keeps its
+    `except` clause. The version check is the database's own `user_version`
+    (upstream decision #6: a store from a newer clu is skipped, never
+    downgraded), which is why this no longer takes an expected version — there
+    is no longer a document with a `schema_version` field in it to compare.
     """
-    if not _routes_to_store(state_path):
-        with locked_json(
-            state_path,
-            expected_version=SCHEMA_VERSION,
-            timeout_seconds=timeout_seconds,
-        ) as data:
-            yield data
-        return
-    plan_store = _plan_store()
-    orch_dir, slug = plan_store.key_for_state_path(state_path)
-    try:
-        with plan_store.mutate_compat(orch_dir, slug, timeout_s=timeout_seconds) as data:
-            yield data
-    except db.DbBusy as exc:
-        # The bounded-wait currency callers already speak. `LockTimeout` is
-        # caught by name at the activity hook (2s budget, drop the write rather
-        # than freeze the worker's Bash call) and on the heartbeat daemon's
-        # exit path; the store's `DbBusy` means the same thing.
-        raise LockTimeout(state_path) from exc
-
-
-def load(state_path: Path, *, expected_version: int = SCHEMA_VERSION) -> dict:
-    """Read + schema-check a clu store. `expected_version` lets a sibling
-    schema reuse the same loader.
-
-    A plan-state path routes to the project database and the version check is
-    the database's own `user_version` (`plan_store` raises the same
-    `SchemaVersionMismatch` for a store written by a newer clu).
-    """
-    if _routes_to_store(state_path):
-        return _plan_store().snapshot(*key_for(state_path))
-    data = json.loads(state_path.read_text())
-    actual = data.get("schema_version")
-    if actual != expected_version:
-        raise SchemaVersionMismatch(
-            f"{state_path} has schema_version={actual!r}, clu expects {expected_version}"
-        )
-    return data
+    return _plan_store().snapshot(*key_for(state_path))
 
 
 def key_for(state_path: Path) -> tuple[Path, str]:
     """(orchestrator dir, slug) for a plan-state path — the store's key."""
     return _plan_store().key_for_state_path(state_path)
-
-
-def save_atomic(state_path: Path, data: dict) -> None:
-    """Write a whole document.
-
-    A plan-state path replaces that plan's rows (creating the plan if absent) —
-    the store-side meaning of "the file was overwritten". Nothing in the
-    orchestrator writes plan state this way any more; every writer goes through
-    `mutate`. It routes anyway because the whole-document write is what seeds a
-    plan in a test, and because a primitive that silently wrote a file the
-    engine no longer reads would be worse than one that routes.
-
-    Every other path is the file engine: tmp + fsync + rename, caller holds the
-    lock.
-    """
-    if _routes_to_store(state_path):
-        _plan_store().write_full(*key_for(state_path), data)
-        return
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=state_path.name + ".",
-        suffix=".tmp",
-        dir=str(state_path.parent),
-    )
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, indent=2, sort_keys=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_name, state_path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def append_event(data: dict, event_type: str, **fields: Any) -> None:

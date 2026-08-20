@@ -17,7 +17,7 @@ from end_of_line import monitor, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.hooks import clu_session_start
-from tests import must
+from tests import must, write_state
 
 # ---- hook script unit tests ------------------------------------------------
 
@@ -46,7 +46,7 @@ class SessionStartHookScriptTest(unittest.TestCase):
         state_path = self._project / "plans" / ".orchestrator" / f"{slug}.state.json"
         data = st.empty_state(slug, "plans")
         data["status"] = status
-        st.save_atomic(state_path, data)
+        write_state(state_path, data)
 
     def _run(self) -> tuple[int, str]:
         with (
@@ -268,7 +268,7 @@ class SessionStartActivePlansTest(unittest.TestCase):
         state_path = self._project / "plans" / ".orchestrator" / f"{slug}.state.json"
         data = st.empty_state(slug, "plans")
         data["status"] = status
-        st.save_atomic(state_path, data)
+        write_state(state_path, data)
 
     def _run_hook(self) -> tuple[int, str]:
         """Run the hook with os.getcwd() patched to the test project dir."""
@@ -292,7 +292,7 @@ class SessionStartActivePlansTest(unittest.TestCase):
         (other / "plans" / ".orchestrator").mkdir(parents=True)
         registry.register(other, "elsewhere-plan")
         state_path = other / "plans" / ".orchestrator" / "elsewhere-plan.state.json"
-        st.save_atomic(state_path, st.empty_state("elsewhere-plan", "plans"))
+        write_state(state_path, st.empty_state("elsewhere-plan", "plans"))
         rc, ctx = self._run_hook()
         self.assertEqual(rc, 0)
         self.assertIn("clu watch --all --operator", ctx)
@@ -339,7 +339,7 @@ class SessionStartActivePlansTest(unittest.TestCase):
         (other / "plans" / ".orchestrator").mkdir(parents=True)
         registry.register(other, "other-slug")
         state_path = other / "plans" / ".orchestrator" / "other-slug.state.json"
-        st.save_atomic(state_path, st.empty_state("other-slug", "plans"))
+        write_state(state_path, st.empty_state("other-slug", "plans"))
         rc, ctx = self._run_hook()
         self.assertEqual(rc, 0)
         self.assertNotIn("--task-list", ctx)

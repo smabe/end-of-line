@@ -11,7 +11,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import isolate_registry, mutate_state
 
 PLAN_BODY = """\
 # Test plan
@@ -34,7 +34,7 @@ class AnswerCwdDefaultTestCase(unittest.TestCase):
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
-        with st.mutate(self.state_path) as d:
+        with mutate_state(self.state_path) as d:
             st.add_blocker(d, "a", "Postgres or sqlite?", ["yes", "no"])
 
     def tearDown(self) -> None:

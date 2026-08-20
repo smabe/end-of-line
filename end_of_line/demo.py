@@ -27,7 +27,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from end_of_line import demo_worker, notify, registry, top
+from end_of_line import demo_worker, notify, plan_store, registry, top
 from end_of_line import state as st
 from end_of_line._xdg_guard import clu_config_dir
 from end_of_line.config import CONFIG_FILENAME, load_project_config
@@ -104,9 +104,13 @@ def _prefill_completed(state_path: Path, done_ids) -> None:
     (position 1, e.g. `dead`)."""
     if not done_ids:
         return
-    with st.mutate(state_path) as data:
-        for pid in done_ids:
-            st.append_event(data, st.EVENT_PHASE_COMPLETED, phase=pid)
+    plan_store.op_append_events(
+        *plan_store.key_for_state_path(state_path),
+        [
+            {"ts": st.utcnow(), "type": st.EVENT_PHASE_COMPLETED, "phase": pid}
+            for pid in done_ids
+        ],
+    )
 
 
 def _orchestrator_config(scenario: str) -> dict:

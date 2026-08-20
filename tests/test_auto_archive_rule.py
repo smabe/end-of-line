@@ -19,7 +19,7 @@ from end_of_line.cross_plan_rules import (
     register_rule,
     run_rules,
 )
-from tests import CluTestCase, must
+from tests import CluTestCase, must, write_state
 from tests import git as _git
 from tests import make_git_project as _make_git_project
 
@@ -42,7 +42,7 @@ def _make_done_plan_with_worktree(
         "path": f"/tmp/nonexistent-wt-{slug}",
         "base_ref": "abc123",
     }
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
     return ProjectPlan(slug, dict(data), state_path)
 
 
@@ -102,7 +102,7 @@ class TestAutoArchiveRuleSkipped(_AutoArchiveRuleBase):
                 "path": f"/tmp/nonexistent-wt-{slug}",
                 "base_ref": "abc",
             }
-        st.save_atomic(state_path, data)
+        write_state(state_path, data)
         return ProjectPlan(slug, dict(data), state_path)
 
     def test_skipped_when_status_not_done(self) -> None:

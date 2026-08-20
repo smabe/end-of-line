@@ -8,7 +8,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import isolate_registry
+from tests import isolate_registry, mutate_state
 
 PLAN = """\
 # T
@@ -30,7 +30,7 @@ class SpawnedTaskTestCase(unittest.TestCase):
         (self.project / "plans" / "t.md").write_text(PLAN)
         main(["init", "--project", str(self.project), "--plan", "t"])
         self.state_path = self.project / "plans" / ".orchestrator" / "t.state.json"
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def tearDown(self) -> None:
@@ -76,7 +76,7 @@ class SpawnedTaskTestCase(unittest.TestCase):
     def test_task_done_force_bypasses_token(self) -> None:
         self.assertEqual(self._spawn("manual cleanup"), 0)
         # Release claim so there's no live worker
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             st.release_claim(data, expected_token=self.token, expected_phase="a")
         rc = main(
             [

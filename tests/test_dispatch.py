@@ -21,7 +21,7 @@ from end_of_line.dispatch import (
     resolved_model,
 )
 from end_of_line.supervisor import TickResult
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state
 
 PLAN = """\
 # T
@@ -42,7 +42,7 @@ class DispatchTestCase(CluTestCase):
         (self.project / "plans" / "t.md").write_text(PLAN)
         main(["init", "--project", str(self.project), "--plan", "t"])
         self.state_path = self.project / "plans" / ".orchestrator" / "t.state.json"
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def _cfg(self, cmd: str, path: str = "") -> ProjectConfig:

@@ -23,7 +23,7 @@ from end_of_line.dispatch import (
     dispatch_for_tick,
 )
 from end_of_line.supervisor import TickResult
-from tests import CluTestCase, isolate_registry, must
+from tests import CluTestCase, isolate_registry, must, mutate_state
 from tests.test_quota import SESSION_LINE as QUOTA_LINE
 
 PLAN = """\
@@ -142,7 +142,7 @@ class _SystemicFixture(CluTestCase):
         (self.project / "plans" / "t.md").write_text(PLAN)
         main(["init", "--project", str(self.project), "--plan", "t"])
         self.state_path = self.project / "plans" / ".orchestrator" / "t.state.json"
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
         self.log_dir = self.state_path.parent / "logs"
         self.log_dir.mkdir(exist_ok=True)
@@ -361,7 +361,7 @@ class MultiPlanIndependenceTestCase(CluTestCase):
     def test_two_plans_independently_pause(self) -> None:
         for slug in ("t1", "t2"):
             sp = self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
-            with st.mutate(sp) as data:
+            with mutate_state(sp) as data:
                 token = st.claim_phase(data, "a", lease_minutes=30)
             log = sp.parent / "logs" / f"a.{token}.log"
             log.parent.mkdir(exist_ok=True)

@@ -77,12 +77,16 @@ def register(project_root: Path, plan_slug: str, *, path: Path | None = None) ->
 
 
 def load_entry_state(entry: PlanEntry) -> dict | None:
-    """Project (registry entry → loaded state.json) or None on any failure.
+    """Project (registry entry → the plan's rows) or None on any failure.
 
-    Tolerant by design: a stale registry entry — missing project dir,
-    deleted state file, schema drift — must not take callers that walk
-    every plan (fleet view, inbound poller) down. Returns None on every
-    recoverable failure mode; never raises.
+    THE fleet-read seam: `clu`'s summary, `clu top`, `clu serve`, the blocker
+    locator and the SessionStart hook all reach plan state through here, so the
+    tolerance rules have one definition and one place to be tested.
+
+    Tolerant by design: a stale registry entry — missing project dir, deleted
+    plan, schema drift, a store another process is mid-write on — must not take
+    a caller that walks every plan down. Returns None on every recoverable
+    failure mode; never raises.
     """
     from .config import load_project_config  # local import to avoid cycle
 
@@ -94,8 +98,15 @@ def load_entry_state(entry: PlanEntry) -> dict | None:
     if not plan_store.exists_for_path(state_path):
         return None
     try:
-        return st.load(state_path)
-    except (OSError, ValueError, st.SchemaVersionMismatch):
+        return plan_store.snapshot(*plan_store.key_for_state_path(state_path))
+    except (*db.DEGRADABLE_ERRORS, ValueError, st.SchemaVersionMismatch):
+        # The file-era clause named `OSError`, `ValueError` and
+        # `SchemaVersionMismatch`, and none of those catches what a DATABASE
+        # fails with: `sqlite3.Error` for a broken store, `db.DbBusy` (a
+        # RuntimeError) for one held past the budget, `db.SchemaTooNew` for one
+        # written by a newer clu. Every caller of this function walks the whole
+        # fleet, so any of those escaping would replace a dashboard with a
+        # traceback because one plan's tick happened to hold its project lock.
         return None
 
 

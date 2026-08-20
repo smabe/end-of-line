@@ -8,7 +8,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.config import ProjectConfig
 from end_of_line.watch import stream_loop
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state, write_state
 
 TS = "2026-05-17T10:00:00Z"
 
@@ -46,11 +46,11 @@ def _make_state(
         "created_at": TS,
     }
     # Through the store: `path` is the key to a row in the project database.
-    st.save_atomic(path, data)
+    write_state(path, data)
 
 
 def _append_event(path: Path, event: dict) -> None:
-    with st.mutate(path) as data:
+    with mutate_state(path) as data:
         data["events"].append(event)
 
 

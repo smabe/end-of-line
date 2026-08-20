@@ -59,9 +59,10 @@ DEFAULT_TIMEOUT_S = 5.0
 class DbBusy(RuntimeError):
     """A bounded wait for the write lock expired.
 
-    The direct replacement for `state.LockTimeout`: callers that would rather
-    drop a write than freeze a worker (the activity hook's 2s budget) catch
-    this and move on.
+    The bounded-wait currency the whole package speaks: callers that would
+    rather drop a write than freeze a worker (the activity hook's 2s budget)
+    catch this and move on. It replaced the flock timeout the state files used
+    to raise, which no longer exists.
     """
 
 
@@ -112,8 +113,8 @@ def _ensure_private(path: Path) -> None:
     pre-seeded symlink, matching `state.locked`'s lockfile handling.
 
     The mode is re-established on EVERY open, not only on create. The files
-    this database replaces are 0600 on every write — `save_atomic` mkstemps a
-    fresh file (0600 by construction) and renames it over the old one — so a
+    this database replaces were 0600 on every write — each one was mkstemp'd
+    fresh (0600 by construction) and renamed over the old one — so a
     create-only chmod would silently weaken that guarantee the first time a
     `clu.db` arrives from anywhere else: a restored backup, a `cp`, or an
     operator who opened it with the `sqlite3` CLI. The symlink refusal has to

@@ -3,14 +3,16 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import sqlite3
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
-from . import plan_store
+from . import db, plan_store
 from . import state as st
 from .plan_parser import parse_sessions_index
 
@@ -407,8 +409,13 @@ def bootstrap_task_list(
         if not slug:
             continue
         try:
-            data: dict = st.load(state_path)
+            data: dict = plan_store.snapshot(*plan_store.key_for_state_path(state_path))
         except Exception:
+            # Deliberately the widest clause in this module: the bootstrap's
+            # only job is to name the plan's phases, which comes from the plan
+            # MARKDOWN. The claim it reads here is a nicety — a plan whose
+            # store is missing, busy, broken or too new still gets its task
+            # tree, just without the "already running" reconciliation.
             data = {}
         cfg = cfg_loader(state_path)
         plan_path = cfg.project_root / cfg.plan_dir / f"{slug}.md"
@@ -465,6 +472,97 @@ def _snapshot_line(slug: str, data: dict) -> str:
     return f"[snapshot] {slug}: {data['status']}, {active}"
 
 
+# What a poll degrades on, split by whether waiting helps.
+#
+# Retry: the store is fine, somebody else is writing. `db.DbBusy` is what
+# `db.read_txn` raises when the BEGIN itself is refused; `sqlite3.OperationalError`
+# is what the FIRST statement inside a deferred transaction raises when the
+# refusal lands there instead (WAL's last-connection-close cleanup, which
+# `db.connect` warns readers about). A stream that dropped a plan for either
+# would go quiet for the rest of its life over a lock held for milliseconds.
+_RETRY_PLAN_ERRORS = (db.DbBusy, sqlite3.OperationalError)
+
+# Skip: no database, no such plan, a store this clu must not read, or one that
+# cannot be read at all. The file-era clause named `FileNotFoundError`/`OSError`
+# and `ValueError`; a database adds `sqlite3.Error` for a broken store and
+# `db.SchemaTooNew` for one from a newer clu, neither of which any of those
+# names catches.
+_SKIP_PLAN_ERRORS = (
+    *db.DEGRADABLE_ERRORS,
+    st.SchemaVersionMismatch,
+    st.InvalidSlug,
+    ValueError,
+)
+
+
+class _ProjectReader:
+    """One project database, one connection, held across frames.
+
+    The connection is held so `PRAGMA data_version` means something: it moves
+    only when ANOTHER connection commits, so a poller that reconnects every
+    frame reads a counter with no history and can never gate on it. What it
+    never holds is a TRANSACTION — a reader with one open pins the WAL past its
+    autocheckpoint and the file grows without bound until it lets go — so every
+    read is its own short `read_txn`.
+    """
+
+    def __init__(self, orch_dir: Path) -> None:
+        path = db.project_db_path(orch_dir)
+        if not path.exists():
+            raise FileNotFoundError(errno.ENOENT, "no clu database", str(path))
+        self.conn = db.connect(path, readonly=True)
+        self.conn.row_factory = sqlite3.Row
+        try:
+            db.ensure_project_schema(self.conn)
+            # Primed HERE, before the caller takes its baseline snapshot, so
+            # the first poll is already a real comparison. Priming afterwards
+            # would make every stream's first tick an unconditional query, and
+            # priming lazily on the first poll would risk the opposite: a
+            # commit landing between the baseline and the first reading would
+            # be invisible until the next unrelated write.
+            self._data_version: int | None = self._read_data_version()
+        except BaseException:
+            self.conn.close()
+            raise
+
+    def _read_data_version(self) -> int:
+        return int(self.conn.execute("PRAGMA data_version").fetchone()[0])
+
+    def changed_since_last_frame(self) -> bool:
+        """Has anything committed to this database since the last poll?"""
+        found = self._read_data_version()
+        moved = self._data_version is None or found != self._data_version
+        self._data_version = found
+        return moved
+
+    def invalidate(self) -> None:
+        """Force the next frame to query, whatever `data_version` says.
+
+        For the poll that saw the counter move and then failed to read: the
+        events it was about to fetch are still unread, and the counter will not
+        move again just because this stream missed them.
+        """
+        self._data_version = None
+
+    def events_after(self, slug: str, after_id: int) -> list[dict]:
+        with db.read_txn(self.conn) as cur:
+            return plan_store.events_after(cur, slug, after_id)
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+def _close(reader: _ProjectReader | None) -> None:
+    if reader is None:
+        return
+    try:
+        reader.close()
+    except sqlite3.Error:
+        # A connection that cannot even be closed is one this stream has
+        # already stopped using; the process exit will free the handle.
+        pass
+
+
 def stream_loop(
     state_paths: list[Path],
     *,
@@ -491,19 +589,33 @@ def stream_loop(
     if sink is None:
         sink = sys.stdout
     # Cursor = the highest event id seen, never the list length. Ids are
-    # monotonic and never reused, so a later phase archiving a terminal plan's
-    # events out of the hot table cannot shrink the list under a live cursor —
-    # which a length cursor would read as "rewound", replaying history.
+    # monotonic and never reused, so archiving a terminal plan's events out of
+    # the hot table cannot shrink the list under a live cursor — which a length
+    # cursor would read as "rewound", replaying history.
     cursors: dict[Path, int] = {}
+    keys: dict[Path, tuple[Path, str]] = {}
     baseline: list[tuple[str, dict]] = []
+
+    # One read-only connection per PROJECT database, held for the life of the
+    # stream. Held, because `PRAGMA data_version` only moves for OTHER
+    # connections' commits — a fresh connection each frame would see a fresh
+    # counter and the gate would never fire. Per project rather than per plan,
+    # because plans in a project share one database and N connections would buy
+    # nothing. Opened before the baseline, so the first poll already has a
+    # reading to compare against.
+    readers: dict[Path, _ProjectReader] = {}
 
     for path in list(state_paths):
         try:
-            data = st.load(path)
-        except (FileNotFoundError, OSError, ValueError, st.SchemaVersionMismatch):
+            key = plan_store.key_for_state_path(path)
+            if key[0] not in readers:
+                readers[key[0]] = _ProjectReader(key[0])
+            data = plan_store.snapshot(*key)
+        except (*_RETRY_PLAN_ERRORS, *_SKIP_PLAN_ERRORS):
             continue
         slug = _slug_for_path(path)
         cursors[path] = _max_event_id(data.get("events", []))
+        keys[path] = key
         baseline.append((slug, data))
 
     if task_list_mode:
@@ -530,18 +642,50 @@ def stream_loop(
     ticks = 0
     try:
         while max_ticks is None or ticks < max_ticks:
+            # One `data_version` reading per project per FRAME, not per plan:
+            # plans in a project share a database, and asking twice would have
+            # the second plan compare against the first plan's reading and
+            # conclude nothing had changed.
+            moved: dict[Path, bool] = {}
             for path in list(cursors.keys()):
+                orch_dir, slug_key = keys[path]
                 try:
-                    data = st.load(path)
-                except (FileNotFoundError, OSError, ValueError, st.SchemaVersionMismatch):
-                    cursors.pop(path, None)
+                    reader = readers.get(orch_dir)
+                    if reader is None:
+                        reader = readers[orch_dir] = _ProjectReader(orch_dir)
+                    if orch_dir not in moved:
+                        moved[orch_dir] = reader.changed_since_last_frame()
+                    if not moved[orch_dir]:
+                        # The idle poll, which is the common case by a wide
+                        # margin: one PRAGMA and no query at all.
+                        continue
+                    events = reader.events_after(slug_key, cursors[path])
+                except _RETRY_PLAN_ERRORS:
+                    # Contention, not breakage. Both spellings are here on
+                    # purpose: `read_txn` translates a busy at its own BEGIN
+                    # into `db.DbBusy`, but a deferred BEGIN acquires nothing —
+                    # the read snapshot is taken by the FIRST statement inside
+                    # it, and a busy there arrives as SQLite's own
+                    # `OperationalError`. Keep the connection and the cursor,
+                    # and force the next tick to query: the events this poll
+                    # missed are still unread, and `data_version` will not move
+                    # again just because this stream did not get to them.
+                    if (retryable := readers.get(orch_dir)) is not None:
+                        retryable.invalidate()
+                    moved.pop(orch_dir, None)
                     continue
-                events = data.get("events", [])
+                except _SKIP_PLAN_ERRORS:
+                    # Unreadable for a reason a retry will not fix: no database,
+                    # no such plan, or one written by a newer clu (upstream
+                    # decision #6 — skip, never downgrade).
+                    _close(readers.pop(orch_dir, None))
+                    moved.pop(orch_dir, None)
+                    cursors.pop(path, None)
+                    keys.pop(path, None)
+                    continue
                 slug = _slug_for_path(path)
                 seen = cursors[path]
                 for evt in events:
-                    if _event_id(evt) <= seen:
-                        continue
                     if task_list_mode:
                         line_or_none = project_event_task(evt, slug, verbose=verbose)
                     else:
@@ -562,6 +706,9 @@ def stream_loop(
                 time.sleep(poll_interval)
     except KeyboardInterrupt:
         print("", file=sink, flush=True)
+    finally:
+        for reader in readers.values():
+            _close(reader)
     return 0
 
 

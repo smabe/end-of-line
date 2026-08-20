@@ -31,7 +31,7 @@ from unittest import mock
 from end_of_line import state as st
 from end_of_line.cli import _spawn_post_action_tick, main
 from end_of_line.config import ProjectConfig
-from tests import isolate_registry
+from tests import isolate_registry, mutate_state
 
 PLAN_BODY = """\
 # Test plan
@@ -88,7 +88,7 @@ class _TickOnActionBase(unittest.TestCase):
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         rc = main(["init", "--project", str(self.project), "--plan", "test-plan"])
         self.assertEqual(rc, 0)
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def tearDown(self) -> None:

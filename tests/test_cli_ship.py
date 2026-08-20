@@ -22,7 +22,7 @@ from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry, must
+from tests import isolate_registry, must, mutate_state
 
 PLAN_BODY = """\
 # T
@@ -95,7 +95,7 @@ class ShipBase(unittest.TestCase):
         return self._state_path(slug)
 
     def _set_done(self, slug: str) -> None:
-        with st.mutate(self._state_path(slug)) as data:
+        with mutate_state(self._state_path(slug)) as data:
             data["status"] = st.STATUS_DONE
 
     def _add_worker_commit(self, slug: str, msg: str = "worker work") -> str:

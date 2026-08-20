@@ -18,7 +18,7 @@ from end_of_line import db, queue, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig
-from tests import isolate_queue, stamp_future_schema
+from tests import isolate_queue, mutate_state, stamp_future_schema
 
 _PLAN_BODY = "# placeholder plan\n"
 
@@ -102,7 +102,7 @@ class QueueListTestCase(unittest.TestCase):
         _write_plan(self.project, "foo")
         main(["init", "--project", str(self.project), "--plan", "foo"])
         cfg = ProjectConfig(project_root=self.project)
-        with st.mutate(cfg.state_path("foo")) as data:
+        with mutate_state(cfg.state_path("foo")) as data:
             data["status"] = st.STATUS_HALTED
         _add(self.project, "foo")
         rc, out = self._run(["queue", "list", "--project", str(self.project)])
@@ -114,7 +114,7 @@ class QueueListTestCase(unittest.TestCase):
         _write_plan(self.project, "foo")
         main(["init", "--project", str(self.project), "--plan", "foo"])
         cfg = ProjectConfig(project_root=self.project)
-        with st.mutate(cfg.state_path("foo")) as data:
+        with mutate_state(cfg.state_path("foo")) as data:
             data["status"] = st.STATUS_PAUSED
         _add(self.project, "foo")
         rc, out = self._run(["queue", "list", "--project", str(self.project)])
@@ -128,7 +128,7 @@ class QueueListTestCase(unittest.TestCase):
         _write_plan(self.project, "bar")
         main(["init", "--project", str(self.project), "--plan", "bar"])
         cfg = ProjectConfig(project_root=self.project)
-        with st.mutate(cfg.state_path("bar")) as data:
+        with mutate_state(cfg.state_path("bar")) as data:
             data["status"] = st.STATUS_HALTED
         # Order: foo (head, unregistered, queued), then bar (halted).
         _add(self.project, "foo")
@@ -222,7 +222,7 @@ class QueueListTestCase(unittest.TestCase):
         _write_plan(self.project, slug)
         main(["init", "--project", str(self.project), "--plan", slug])
         cfg = ProjectConfig(project_root=self.project)
-        with st.mutate(cfg.state_path(slug)) as data:
+        with mutate_state(cfg.state_path(slug)) as data:
             data["current_claim"] = {
                 "phase_id": "x",
                 "claimed_by": f"session-{slug}-00000000",

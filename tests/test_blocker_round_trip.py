@@ -9,7 +9,7 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import GitProjectTestCase, plan_body
+from tests import GitProjectTestCase, mutate_state, plan_body
 
 
 class BlockerRoundTripTestCase(GitProjectTestCase):
@@ -22,7 +22,7 @@ class BlockerRoundTripTestCase(GitProjectTestCase):
             plan_dir="plans",
             dispatch=DispatchSpec(kind="shell", command="echo {phase_id}"),
         )
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "foundation", lease_minutes=30)
         notify.set_global_suppress(True)
         self.addCleanup(notify.set_global_suppress, False)

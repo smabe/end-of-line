@@ -13,7 +13,7 @@ import unittest
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state
 
 PLAN_BODY = """\
 # Test plan
@@ -35,7 +35,7 @@ class ActivityCallbackTestCase(CluTestCase):
         subprocess.run(["git", "init", "-q"], cwd=self.project, check=True)
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def _argv(self, *extra: str) -> list[str]:
@@ -163,7 +163,7 @@ class ActivityCallbackTestCase(CluTestCase):
             # A real write transaction on the project database, held open —
             # the direct replacement for the subprocess that used to hold the
             # flock on the state file.
-            with st.mutate(self.state_path):
+            with mutate_state(self.state_path):
                 started.set()
                 release.wait(5)
 

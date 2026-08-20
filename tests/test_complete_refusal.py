@@ -19,7 +19,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import GitProjectTestCase, plan_body, write_config
+from tests import GitProjectTestCase, mutate_state, plan_body, write_config
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -41,7 +41,7 @@ class CompleteRefusalTestCase(GitProjectTestCase):
     # ---- helpers ---------------------------------------------------------------
 
     def _claim(self, phase: str = "phase-a") -> str:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             token = st.claim_phase(data, phase, lease_minutes=30)
             data["current_claim"]["head_sha_at_claim"] = self.sha
             return token
@@ -58,7 +58,7 @@ class CompleteRefusalTestCase(GitProjectTestCase):
         return self._head()
 
     def _stamp(self, kind: str, sha: str | None = None) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             st.stamp_attestation(data, kind, sha or self._head())
 
     def _stamp_verify(self, sha: str | None = None) -> None:
@@ -218,7 +218,7 @@ class CompleteRefusalTestCase(GitProjectTestCase):
             wt_sha = _git("rev-parse", "HEAD", cwd=wt_path)
             self.assertNotEqual(wt_sha, self.sha)
             write_config(self.project, quality={"simplify_threshold": {"files": 0, "lines": 0}})
-            with st.mutate(self.state_path) as data:
+            with mutate_state(self.state_path) as data:
                 data["worktree"] = {
                     "path": str(wt_path),
                     "branch": "clu/p",
@@ -321,7 +321,7 @@ class CompleteRefusalTestCase(GitProjectTestCase):
         self.assertEqual(rc, ExitCode.STATUS_TRANSITION)
         self.assertIn("verify", err.lower())
         # Release and re-claim so we can try --skip-verify.
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             st.release_claim(data)
         token2 = self._claim()
         rc2, _ = self._complete(token2, "--skip-verify")

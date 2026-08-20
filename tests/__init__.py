@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -9,10 +10,12 @@ import pwd
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TypeVar
 from unittest import mock
 
+from end_of_line import db, plan_store
 from end_of_line import state as st
 from end_of_line.cli import main as cli_main
 from end_of_line.config import CONFIG_FILENAME
@@ -250,6 +253,64 @@ def stamp_future_schema(db_path: Path) -> None:
         conn.close()
 
 
+@contextlib.contextmanager
+def mutate_state(state_path: Path, *, timeout_s: float | None = None) -> Iterator[dict]:
+    """Load a plan, yield the whole dict for mutation, write it all back.
+
+    THE TEST-SEEDING SEAM, and deliberately test-only. Production stopped
+    writing plan state this way when the file primitives went: every writer in
+    the package now names the rows it changes (`plan_store.op_*`) or declares
+    the preconditions its decision rested on (`apply_tick_delta`). Neither
+    shape can express "put this plan into an arbitrary state", which is what a
+    fixture needs and only a fixture needs — so the whole-document
+    read-modify-write lives here, where no shipped code path can reach it.
+
+    Same transaction discipline as the ops: one `BEGIN IMMEDIATE`, the version
+    bumped so a poller notices, and the event log treated as append-only (only
+    entries past the loaded length are inserted).
+    """
+    orch_dir, slug = plan_store.key_for_state_path(state_path)
+    with (
+        plan_store._write_conn(orch_dir, timeout_s=timeout_s) as conn,
+        db.write_txn(conn, timeout_s=timeout_s) as cur,
+    ):
+        cur.execute("UPDATE plans SET version = version + 1 WHERE slug = ?", (slug,))
+        if cur.rowcount == 0:
+            raise FileNotFoundError(str(state_path))
+        data = plan_store._snapshot_in_txn(cur, orch_dir, slug)
+        recorded = len(data["events"])
+        yield data
+        plan_store._update_head(cur, slug, data)
+        plan_store._write_claim(cur, slug, data.get("current_claim"))
+        cur.execute("DELETE FROM blockers WHERE plan_slug = ?", (slug,))
+        plan_store._write_blockers(cur, slug, data.get("blockers") or [])
+        cur.execute("DELETE FROM spawned_tasks WHERE plan_slug = ?", (slug,))
+        plan_store._write_tasks(cur, slug, data.get("spawned_tasks") or [])
+        plan_store._insert_events(cur, slug, data["events"][recorded:])
+
+
+def write_state(state_path: Path, data: dict) -> None:
+    """Replace a plan's rows with `data`, creating the plan if it is absent.
+
+    The fixture spelling of "this plan starts out looking exactly like this".
+    Test-only for the same reason `mutate_state` is; events are re-inserted
+    rather than diffed, so their ids are minted fresh — which is what
+    overwriting a whole document always meant.
+    """
+    orch_dir, slug = plan_store.key_for_state_path(state_path)
+    with plan_store._write_conn(orch_dir) as conn, db.write_txn(conn) as cur:
+        if cur.execute("SELECT 1 FROM plans WHERE slug = ?", (slug,)).fetchone() is None:
+            plan_store._insert_plan(cur, slug, data)
+            return
+        for table in ("claims", "blockers", "spawned_tasks", "events"):
+            cur.execute(f"DELETE FROM {table} WHERE plan_slug = ?", (slug,))
+        plan_store._update_head(cur, slug, data)
+        plan_store._write_claim(cur, slug, data.get("current_claim"))
+        plan_store._write_blockers(cur, slug, data.get("blockers") or [])
+        plan_store._write_tasks(cur, slug, data.get("spawned_tasks") or [])
+        plan_store._insert_events(cur, slug, data.get("events") or [])
+
+
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     """Run a git command inside `repo`. Use in tests that need real git repos."""
     return subprocess.run(
@@ -334,7 +395,7 @@ class GitProjectTestCase(CluTestCase):
         ]
 
     def _claim(self, phase: str = "a") -> str:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             return st.claim_phase(data, phase, lease_minutes=30)
 
     def _read(self) -> dict:

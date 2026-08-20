@@ -19,7 +19,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import CONFIG_FILENAME
-from tests import isolate_registry
+from tests import isolate_registry, mutate_state
 
 PLAN_BODY = """\
 # Test plan
@@ -73,7 +73,7 @@ class VerifyOptOutTestCase(unittest.TestCase):
         )
 
     def _claim(self, phase: str = "phase-a") -> str:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             token = st.claim_phase(data, phase, lease_minutes=30)
             data["current_claim"]["head_sha_at_claim"] = self.base_sha
             return token

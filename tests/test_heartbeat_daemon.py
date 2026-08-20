@@ -18,11 +18,11 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
+from end_of_line import db, inbox
 from end_of_line import heartbeat_daemon as hbd
-from end_of_line import inbox
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import CluTestCase, plan_body
+from tests import CluTestCase, mutate_state, plan_body
 
 PLAN_BODY = plan_body("a")
 
@@ -39,7 +39,7 @@ class TickOnceTestCase(CluTestCase):
             self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         )
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def test_worker_dead_returns_exit_action(self) -> None:
@@ -59,7 +59,7 @@ class TickOnceTestCase(CluTestCase):
         self.assertEqual(before, after)
 
     def test_live_worker_pings_heartbeat(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["last_heartbeat_at"] = "2020-01-01T00:00:00Z"
         action = hbd.tick_once(
             self.state_path, "a", self.token, 12345,
@@ -78,7 +78,7 @@ class TickOnceTestCase(CluTestCase):
 
     def test_released_claim_returns_claim_gone(self) -> None:
         """Post-`clu complete` shutdown: claim released → clean exit, not a strike."""
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             st.release_claim(data)
         action = hbd.tick_once(
             self.state_path, "a", self.token, 12345,
@@ -210,7 +210,7 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
             self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         )
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def _argv(self, *, phase: str = "a", token: str | None = None,
@@ -250,7 +250,7 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
         run.assert_not_called()
 
     def test_valid_args_stamp_first_heartbeat_and_dispatch_to_run(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["last_heartbeat_at"] = "2020-01-01T00:00:00Z"
         with mock.patch.object(hbd, "run", return_value=0) as run:
             rc = main(self._argv())
@@ -269,7 +269,7 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
         # The dispatcher stamps the worker PID into the claim; under
         # scoped-permission dispatch `$PPID` doesn't survive the
         # permission matcher, so the flag must be optional (#90 smoke).
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["pid"] = 54321
         with mock.patch.object(hbd, "run", return_value=0) as run:
             rc = main(self._argv(worker_pid=None))
@@ -277,7 +277,7 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
         self.assertEqual(run.call_args.kwargs["worker_pid"], 54321)
 
     def test_omitted_worker_pid_without_claim_pid_rejected(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["pid"] = None
         with mock.patch.object(hbd, "run") as run:
             rc = main(self._argv(worker_pid=None))
@@ -288,7 +288,7 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
         # A non-positive claim pid must not reach the daemon: os.kill(-1, 0)
         # signals every process the user owns, so a corrupt stamp would make
         # the liveness probe always succeed.
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["pid"] = -7
         with mock.patch.object(hbd, "run") as run:
             rc = main(self._argv(worker_pid=None))
@@ -311,7 +311,7 @@ class HeartbeatDaemonCliTestCase(CluTestCase):
         # releases the claim. This exercises the daemon→cli seam that the
         # injected-report_death unit tests stub out.
         log = self.state_path.parent / "logs" / "a.session-x.log"
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["pid"] = 4242
             data["current_claim"]["log_path"] = str(log)
         with (
@@ -360,7 +360,7 @@ class CmdlineProbeTestCase(CluTestCase):
             self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         )
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def test_default_probe_passes_plan_as_cmdline_match(self) -> None:
@@ -383,7 +383,7 @@ class CmdlineProbeTestCase(CluTestCase):
 
 class RunLoopDeathReportTestCase(unittest.TestCase):
     """The death report fires exactly once on worker-dead, never on claim-gone,
-    and a report that raises (LockTimeout included) can't hang or kill the loop."""
+    and a report that raises (`db.DbBusy` included) can't hang or kill the loop."""
 
     def _run(self, actions, *, report=None):
         reports: list[tuple] = []
@@ -417,9 +417,12 @@ class RunLoopDeathReportTestCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(reports, [])
 
-    def test_lock_timeout_in_report_is_swallowed(self) -> None:
+    def test_a_contended_store_in_the_report_is_swallowed(self) -> None:
+        # The death report writes, and the write lock is the whole project's
+        # now — so a busy store on this exit path must not strand a
+        # `setsid`-detached, reaper-immune process.
         def boom(*a):
-            raise st.LockTimeout("/proj/plans/.orchestrator/test-plan.state.json")
+            raise db.DbBusy("project busy")
 
         rc, _ = self._run([hbd.ACTION_EXIT_WORKER_DEAD], report=boom)
         self.assertEqual(rc, 0)

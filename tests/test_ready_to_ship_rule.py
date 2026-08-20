@@ -19,7 +19,7 @@ from pathlib import Path
 from end_of_line import cross_plan_rules, notify, registry
 from end_of_line import state as st
 from end_of_line.cross_plan_rules import ProjectPlan, register_rule, run_rules
-from tests import CluTestCase, must
+from tests import CluTestCase, must, mutate_state, write_state
 from tests import git as _git
 from tests import make_git_project as _make_git_project
 
@@ -68,7 +68,7 @@ def _make_done_plan(
     }
     if extra_state:
         data.update(extra_state)
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
     return ProjectPlan(slug, dict(data), state_path)
 
 
@@ -116,7 +116,7 @@ class ReadyToShipEligibilityTests(_ReadyToShipRuleBase):
         _commit_branch(self.project, "clu/alpha")
         p = _make_done_plan(self.project, "alpha", "clu/alpha")
         # Override status to RUNNING.
-        with st.mutate(p.state_path) as d:
+        with mutate_state(p.state_path) as d:
             d["status"] = st.STATUS_RUNNING
         p = ProjectPlan("alpha", st.load(p.state_path), p.state_path)
         result = run_rules(self.project, [p])
@@ -124,7 +124,7 @@ class ReadyToShipEligibilityTests(_ReadyToShipRuleBase):
 
     def test_no_worktree_skipped(self) -> None:
         p = _make_done_plan(self.project, "alpha", "clu/alpha")
-        with st.mutate(p.state_path) as d:
+        with mutate_state(p.state_path) as d:
             d.pop("worktree", None)
         p = ProjectPlan("alpha", st.load(p.state_path), p.state_path)
         result = run_rules(self.project, [p])

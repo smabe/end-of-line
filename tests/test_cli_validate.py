@@ -19,7 +19,7 @@ from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import CONFIG_FILENAME
 from end_of_line.dry_merge import MergeResult
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state, write_state
 from tests import git as _git
 from tests import make_git_project as _make_git_project
 
@@ -47,7 +47,7 @@ def _register_done_plan(
             "path": str(project.parent / f"wt-{slug}"),
             "base_ref": "main",
         }
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
     return state_path
 
 
@@ -185,7 +185,7 @@ class ValidateBatchResolutionTests(CluTestCase):
 
     def test_batch_skips_nonexistent_branch(self) -> None:
         state_path = self.project / "plans" / ".orchestrator" / "plan-b.state.json"
-        with st.mutate(state_path) as data:
+        with mutate_state(state_path) as data:
             data["worktree"]["branch"] = "clu/nonexistent-branch"
         buf = io.StringIO()
         with redirect_stderr(buf):

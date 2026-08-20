@@ -11,7 +11,7 @@ from end_of_line import db, notify, quota
 from end_of_line import state as st
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import CluTestCase, must, seed_quota_pause
+from tests import CluTestCase, must, seed_quota_pause, write_state
 from tests.test_quota import SESSION_LINE as QUOTA_LINE
 
 PLAN_BODY = """\
@@ -40,8 +40,7 @@ class SupervisorTestCase(CluTestCase):
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         self.state_path.parent.mkdir(parents=True)
         data = st.empty_state("test-plan", "plans")
-        with st.locked(self.state_path):
-            st.save_atomic(self.state_path, data)
+        write_state(self.state_path, data)
 
     def _read(self) -> dict:
         return st.load(self.state_path)
@@ -68,8 +67,7 @@ class SupervisorTestCase(CluTestCase):
         tick(self.state_path, self.cfg)  # claims a
         data = self._read()
         data["current_claim"]["lease_expires"] = "2020-01-01T00:00:00Z"
-        with st.locked(self.state_path):
-            st.save_atomic(self.state_path, data)
+        write_state(self.state_path, data)
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "lease_expired")
         self.assertIsNone(self._read()["current_claim"])
@@ -77,21 +75,19 @@ class SupervisorTestCase(CluTestCase):
     def test_dispatches_b_after_a_completes(self) -> None:
         tick(self.state_path, self.cfg)  # claims a
         # Simulate worker completing a
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            st.append_event(data, "phase_completed", phase="a")
-            data["current_claim"] = None
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        st.append_event(data, "phase_completed", phase="a")
+        data["current_claim"] = None
+        write_state(self.state_path, data)
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "dispatch")
         self.assertEqual(result.phase_id, "b")
 
     def test_marks_plan_done_when_all_phases_complete(self) -> None:
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            st.append_event(data, "phase_completed", phase="a")
-            st.append_event(data, "phase_completed", phase="b")
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        st.append_event(data, "phase_completed", phase="a")
+        st.append_event(data, "phase_completed", phase="b")
+        write_state(self.state_path, data)
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "plan_done")
         self.assertEqual(self._read()["status"], "done")
@@ -103,10 +99,9 @@ class SupervisorTestCase(CluTestCase):
         # dependency that successors should not race past the blocked
         # phase. Lane-pin = "any open blocker on this plan halts
         # dispatch until consumed" (#28).
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
+        write_state(self.state_path, data)
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "idle")
         self.assertIn("blocker", result.detail.lower())
@@ -114,15 +109,13 @@ class SupervisorTestCase(CluTestCase):
     def test_lane_unpins_after_answer_consumed(self) -> None:
         # Open blocker pins; once operator answers AND the consume tick
         # runs (priority 4), the lane reopens and dispatch resumes.
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            bid = st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        bid = st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
+        write_state(self.state_path, data)
         self.assertEqual(tick(self.state_path, self.cfg).action, "idle")
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            st.answer_blocker(data, bid, "X")
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        st.answer_blocker(data, bid, "X")
+        write_state(self.state_path, data)
         # First post-answer tick consumes the blocker (priority 4).
         self.assertEqual(tick(self.state_path, self.cfg).action, "blocker_resumed")
         # Next tick dispatches phase A — successor B is still gated by
@@ -133,14 +126,13 @@ class SupervisorTestCase(CluTestCase):
 
     def _age_blocker_past_sla(self) -> str:
         """Add a blocker on phase 'a' and backdate it past the 24h SLA."""
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            blocker_id = st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
-            stale = (st._now_utc() - _dt.timedelta(hours=25)).strftime(st._ISO_FMT)
-            for b in data["blockers"]:
-                if b["id"] == blocker_id:
-                    b["asked_at"] = stale
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        blocker_id = st.add_blocker(data, "a", "Q?", ["X", "Y"], "ctx")
+        stale = (st._now_utc() - _dt.timedelta(hours=25)).strftime(st._ISO_FMT)
+        for b in data["blockers"]:
+            if b["id"] == blocker_id:
+                b["asked_at"] = stale
+        write_state(self.state_path, data)
         return blocker_id
 
     def test_sla_during_loud_hours_escalates(self) -> None:
@@ -186,14 +178,13 @@ class SupervisorTestCase(CluTestCase):
         self.assertEqual(result.action, "escalate")
 
     def _seed_max_attempts(self) -> None:
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            data["config"]["max_attempts_per_phase"] = 2
-            st.append_event(data, "phase_started", phase="a", claimed_by="x")
-            st.append_event(data, "lease_expired", phase="a")
-            st.append_event(data, "phase_started", phase="a", claimed_by="y")
-            st.append_event(data, "lease_expired", phase="a")
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        data["config"]["max_attempts_per_phase"] = 2
+        st.append_event(data, "phase_started", phase="a", claimed_by="x")
+        st.append_event(data, "lease_expired", phase="a")
+        st.append_event(data, "phase_started", phase="a", claimed_by="y")
+        st.append_event(data, "lease_expired", phase="a")
+        write_state(self.state_path, data)
 
     def test_max_attempts_halts_plan(self) -> None:
         self._seed_max_attempts()
@@ -223,14 +214,13 @@ class SupervisorTestCase(CluTestCase):
 
     def _claim_and_expire(self, pid: int | None = None) -> None:
         tick(self.state_path, self.cfg)  # claims "a"
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            data["current_claim"]["lease_expires"] = "2020-01-01T00:00:00Z"
-            if pid is not None:
-                data["current_claim"]["pid"] = pid
-            else:
-                data["current_claim"].pop("pid", None)
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        data["current_claim"]["lease_expires"] = "2020-01-01T00:00:00Z"
+        if pid is not None:
+            data["current_claim"]["pid"] = pid
+        else:
+            data["current_claim"].pop("pid", None)
+        write_state(self.state_path, data)
 
     def test_lease_expired_reaps_orphan_pid(self) -> None:
         self._claim_and_expire(pid=99999)
@@ -278,15 +268,14 @@ class SupervisorTestCase(CluTestCase):
     ) -> None:
         """Claim phase 'a' and stamp PID; optionally pin lease_expires."""
         tick(self.state_path, self.cfg)
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            if pid is not None:
-                data["current_claim"]["pid"] = pid
-            else:
-                data["current_claim"].pop("pid", None)
-            if lease_expires is not None:
-                data["current_claim"]["lease_expires"] = lease_expires
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        if pid is not None:
+            data["current_claim"]["pid"] = pid
+        else:
+            data["current_claim"].pop("pid", None)
+        if lease_expires is not None:
+            data["current_claim"]["lease_expires"] = lease_expires
+        write_state(self.state_path, data)
 
     def test_dead_pid_fires_releases_claim_and_emits_event(self) -> None:
         # Lease far in the future so lease-expiry (priority 1) doesn't preempt.
@@ -455,14 +444,13 @@ class SupervisorTestCase(CluTestCase):
         tick(self.state_path, self.cfg)
         log_dir = self.state_path.parent / "logs"
         log_dir.mkdir(exist_ok=True)
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            token = data["current_claim"]["claimed_by"]
-            log_path = log_dir / f"a.{token}.log"
-            data["current_claim"]["pid"] = 99999
-            data["current_claim"]["log_path"] = str(log_path)
-            data["current_claim"]["lease_expires"] = lease_expires
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        token = data["current_claim"]["claimed_by"]
+        log_path = log_dir / f"a.{token}.log"
+        data["current_claim"]["pid"] = 99999
+        data["current_claim"]["log_path"] = str(log_path)
+        data["current_claim"]["lease_expires"] = lease_expires
+        write_state(self.state_path, data)
         log_path.write_text(log_body)
         return token
 
@@ -648,8 +636,7 @@ class QuotaGateSupervisorTests(CluTestCase):
         for slug in ("plan-a", "plan-b"):
             (self.project / "plans" / f"{slug}.md").write_text(_one_phase_plan(slug))
             sp = self.orch / f"{slug}.state.json"
-            with st.locked(sp):
-                st.save_atomic(sp, st.empty_state(slug, "plans"))
+            write_state(sp, st.empty_state(slug, "plans"))
             self.paths[slug] = sp
 
     def _write_pause(self, **over: object) -> None:

@@ -13,7 +13,7 @@ from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import GitProjectTestCase, make_worktree, must, plan_body, write_config
+from tests import GitProjectTestCase, make_worktree, must, mutate_state, plan_body, write_config
 
 
 class CmdVerifyTestCase(GitProjectTestCase):
@@ -210,7 +210,7 @@ class CmdVerifyTestCase(GitProjectTestCase):
         wt_tmp, wt_path, wt_sha = make_worktree(self.project)
         try:
             self.assertNotEqual(wt_sha, self.sha)
-            with st.mutate(self.state_path) as data:
+            with mutate_state(self.state_path) as data:
                 data["worktree"] = {
                     "path": str(wt_path),
                     "branch": "clu/p",

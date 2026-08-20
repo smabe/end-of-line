@@ -21,7 +21,7 @@ from tempfile import TemporaryDirectory
 
 from end_of_line import demo_worker, registry, top
 from end_of_line import state as st
-from tests import GitProjectTestCase, utcnow_minus
+from tests import GitProjectTestCase, mutate_state, utcnow_minus
 
 
 class TranscriptPathTest(unittest.TestCase):
@@ -131,7 +131,7 @@ class DemoWorkerLoadTest(GitProjectTestCase):
         # Stamp the session_id the real demo dispatch stamps (dispatch._stamp_pid)
         # so the locator takes its deterministic <session_id>.jsonl fast path —
         # the exact branch the demo relies on — not the cwd-glob fallback.
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["session_id"] = session_id
         ts = utcnow_minus(3)  # 3s ago -> fresh ACT against the real clock
         path = demo_worker.transcript_path(

@@ -9,8 +9,8 @@ Three families, in the order the phase gates them:
    are asserted with the counts in the message rather than as a bare green dot.
 2. **Bounded wait** — a child holds a write transaction open; the parent's
    `write_txn(timeout_s=0.2)` must give up quickly with `DbBusy`. This is the
-   replacement for today's `LockTimeout` drop-on-contention contract
-   (`state.py:1090-1122`, the activity hook's 2s budget).
+   drop-on-contention contract the flock's bounded wait used to provide — the
+   activity hook's 2s budget, which must never freeze a worker's Bash call.
 3. **Schema / versioning** — DDL idempotency, `PRAGMA user_version` stamping,
    the newer-than-me refusal, 0600 file mode, and the "no implicit transaction
    is open after connect" invariant that `isolation_level=None` buys.
@@ -258,8 +258,8 @@ class ConnectTest(CluTestCase):
             db.connect(self.tmp_path / "nope.db", readonly=True)
 
     def test_reopening_a_widened_database_restores_0600(self) -> None:
-        # The files this replaces are 0600 on EVERY write (save_atomic mkstemps
-        # a fresh file and renames it), so create-only enforcement would be a
+        # The files this replaces were 0600 on EVERY write (each was mkstemp'd
+        # fresh and renamed over), so create-only enforcement would be a
         # quiet weakening the first time a clu.db arrives from a backup, a `cp`,
         # or the `sqlite3` CLI. The database holds claim tokens.
         path = self.tmp_path / "widened.db"

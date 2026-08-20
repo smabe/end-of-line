@@ -12,7 +12,7 @@ from end_of_line import state as st
 from end_of_line.config import ChannelSpec
 from end_of_line.notify_base import Notifier
 from end_of_line.notify_discord import DiscordNotifier
-from tests import CluTestCase
+from tests import CluTestCase, write_state
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -172,7 +172,7 @@ class DiscordNotifierSendTestCase(CluTestCase):
         data = st.empty_state("p", "plans")
         st.add_blocker(data, "ph-1", "Which?", ["A", "B"])
         blocker_id = data["blockers"][0]["id"]
-        st.save_atomic(state_path, data)
+        write_state(state_path, data)
 
         def fake_urlopen(req, timeout=None):
             if "/users/@me/channels" in req.full_url:

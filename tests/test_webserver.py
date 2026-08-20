@@ -20,7 +20,7 @@ from unittest import mock
 
 from end_of_line import registry, top, webserver
 from end_of_line.webserver import ServeConfig
-from tests import CluTestCase, GitProjectTestCase, must
+from tests import CluTestCase, GitProjectTestCase, must, mutate_state
 from tests.test_top import _asst, _tool_result, _write_jsonl
 
 
@@ -766,7 +766,7 @@ class ResolveFeedTranscriptTest(GitProjectTestCase):
         root = must(
             next((e.project_root for e in registry.entries() if e.project_root != self.reg_root), None)
         )
-        with st.mutate(sibling / "plans" / ".orchestrator" / "test-plan.state.json") as data:
+        with mutate_state(sibling / "plans" / ".orchestrator" / "test-plan.state.json") as data:
             st.claim_phase(data, "a", lease_minutes=30)
         d = self.projects_root / top.encode_project_dir(root)
         return root, _write_jsonl(d / "sibling.jsonl", [_asst(cwd=root)], mtime=1000)

@@ -25,7 +25,7 @@ from end_of_line.dispatch import (
     dispatch_for_tick,
 )
 from end_of_line.supervisor import TickResult
-from tests import CluTestCase, must
+from tests import CluTestCase, must, mutate_state
 
 PLAN = """\
 # T
@@ -249,7 +249,7 @@ class DispatchIntegrationTestCase(CluTestCase):
         (self.project / "plans" / "t.md").write_text(PLAN)
         main(["init", "--project", str(self.project), "--plan", "t"])
         self.state_path = self.project / "plans" / ".orchestrator" / "t.state.json"
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
         self.log_dir = self.state_path.parent / "logs"
         self.ctx_path = self.log_dir / "attempt-context.t.a.md"
@@ -271,7 +271,7 @@ class DispatchIntegrationTestCase(CluTestCase):
         )
 
     def _bump_attempts_to(self, n: int) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["attempts"] = n
 
     def test_attempt_1_with_worktree_does_not_write_context(self) -> None:

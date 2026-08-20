@@ -21,7 +21,6 @@ from `{token}` in the dispatch command template.
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import functools
 import hashlib
 import json
@@ -33,8 +32,10 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from enum import IntEnum
 from pathlib import Path
+from typing import Any
 
 from . import (
     coolant,
@@ -1828,6 +1829,43 @@ def _maybe_cleanup_worktree(
     data["worktree"] = None
 
 
+def _persist_worktree_cleanup(
+    state_path: Path,
+    data: dict,
+    recorded_events: int,
+    *,
+    remove_fields: Sequence[str] = (),
+) -> None:
+    """Write what `_maybe_cleanup_worktree` did to a SNAPSHOT, in one transaction.
+
+    The cleanup runs several git commands with 30s timeouts and edits the dict
+    in place; it must therefore run against a snapshot with nothing held, and
+    the result written afterwards. What it can produce is exactly two things —
+    events appended past `recorded_events`, and `worktree` set to None — so
+    this reads them back off the dict rather than being told.
+
+    `remove_fields` rides along for the archive path, whose one write window
+    also drops the clu-ship lifecycle markers. One op, one transaction: a
+    reader must never see the cleared worktree without the event that explains
+    it.
+    """
+    new_events = data["events"][recorded_events:]
+    fields: dict[str, Any] = {}
+    if "worktree" in data and data["worktree"] is None:
+        # Present-and-null, not absent: `get_worktree` reads `.get("worktree")`
+        # and the store keeps "had one, cleared it" distinct from "never had
+        # one".
+        fields["worktree"] = None
+    if not fields and not new_events and not remove_fields:
+        return
+    plan_store.op_set_fields(
+        *st.key_for(state_path),
+        fields,
+        remove=remove_fields,
+        events=new_events,
+    )
+
+
 def _rollback_worktree(project_root: Path, record: dict) -> None:
     """Tear down a worktree + branch created by `_setup_worktree`.
 
@@ -2153,33 +2191,52 @@ def cmd_unregister_one(args) -> int:
     state_path = cfg.state_path(args.plan)
     if plan_store.exists_for_path(state_path):
         try:
-            with st.mutate(state_path) as data:
-                if data["status"] not in st.TERMINAL_STATUSES:
-                    # Unregistering a non-terminal plan would otherwise leave a
-                    # zombie state file (status=running, not in registry,
-                    # invisible to tick-all's registry walk). Reap the worker
-                    # group, release any claim, and terminalize so nothing is
-                    # left at running (#75).
-                    st.reap_claim(data)
-                    if data.get("current_claim"):
-                        st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
-                    st.terminalize(data, reason="unregister")
+            # Snapshot, then reap, then one write. Unregistering a non-terminal
+            # plan would otherwise leave a zombie (status=running, not in the
+            # registry, invisible to tick-all's registry walk), so the worker
+            # group is reaped, any claim released, and the plan terminalized
+            # (#75) — but the reap shells out to `ps` and `kill` and must not
+            # happen with the project's write lock held.
+            data = plan_store.snapshot(*st.key_for(state_path))
+            if data["status"] not in st.TERMINAL_STATUSES:
+                st.reap_claim(data)
+                claim = data.get("current_claim") or {}
+                plan_store.op_set_status(
+                    *st.key_for(state_path),
+                    status=st.STATUS_HALTED,
+                    event={
+                        "ts": st.utcnow(),
+                        "type": st.EVENT_PLAN_ABANDONED,
+                        "reason": "unregister",
+                    },
+                    release_token=claim.get("claimed_by"),
+                    release_phase=claim.get("phase_id"),
+                )
+                if claim:
+                    _emit_coolant_stop(
+                        cfg,
+                        args.plan,
+                        claim.get("phase_id") or "",
+                        claim.get("claimed_by") or "",
+                    )
         except (
             *db.DEGRADABLE_ERRORS,
             ValueError,
             st.SchemaVersionMismatch,
-            st.LockTimeout,
+            st.ClaimMismatch,
         ) as exc:
             # A corrupt / stale-schema / busy store must NOT block registry
             # cleanup — unregister is the operator's tool for broken plans.
             # Best-effort terminalize; always fall through to remove the row.
             # The database vocabulary is the whole of `DEGRADABLE_ERRORS` plus
-            # the two translations the store makes on the way out
-            # (`SchemaVersionMismatch`, and `LockTimeout` for a `mutate` that
-            # waited out its budget): `DbBusy` is a RuntimeError and
+            # the translation the store makes on the way out
+            # (`SchemaVersionMismatch`); `DbBusy` is a RuntimeError and
             # `sqlite3.Error` is neither that nor an OSError, so naming OSError
             # alone would turn "the tick holds the project lock right now" into
-            # a crashed unregister.
+            # a crashed unregister. `ClaimMismatch` joins them now that the
+            # release is a compare-and-set against the claim the snapshot saw:
+            # a worker that finished in the gap is not a reason to refuse the
+            # unregister.
             print(
                 f"warning: could not terminalize {args.plan!r} before unregister: {exc}",
                 file=sys.stderr,
@@ -3845,17 +3902,17 @@ def cmd_worktree_reattach(args) -> int:
             f"(refusing to reattach to a non-git path)",
         )
 
-    with st.mutate(state_path) as data:
-        existing = st.get_worktree(data)
-        if existing is None:
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                f"plan {args.plan!r} has no worktree record — use "
-                f"`clu init --worktree` instead of reattach",
-            )
-        old_path = existing["path"]
-        existing["path"] = str(new_path)
-        data["worktree"] = existing
+    data = plan_store.snapshot(*st.key_for(state_path))
+    existing = st.get_worktree(data)
+    if existing is None:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"plan {args.plan!r} has no worktree record — use "
+            f"`clu init --worktree` instead of reattach",
+        )
+    old_path = existing["path"]
+    existing["path"] = str(new_path)
+    plan_store.op_set_worktree(*st.key_for(state_path), existing)
     print(
         f"Reattached {args.plan}: {old_path} → {new_path} (branch: {existing['branch']})",
     )
@@ -3928,25 +3985,26 @@ def cmd_worktree_attach(args) -> int:
             f"{new_path}: could not resolve HEAD commit",
         )
 
-    with st.mutate(state_path) as data:
-        if st.get_worktree(data) is not None:
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                f"plan {args.plan!r} already has a worktree record — "
-                f"use `clu worktree reattach` to repoint it",
-            )
-        data["worktree"] = {
-            "path": str(new_path),
-            "branch": branch,
-            "base_ref": sha,
-        }
-        st.append_event(
-            data,
-            st.EVENT_WORKTREE_ATTACHED,
-            path=str(new_path),
-            branch=branch,
-            base_ref=sha,
+    data = plan_store.snapshot(*st.key_for(state_path))
+    if st.get_worktree(data) is not None:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"plan {args.plan!r} already has a worktree record — "
+            f"use `clu worktree reattach` to repoint it",
         )
+    plan_store.op_set_worktree(
+        *st.key_for(state_path),
+        {"path": str(new_path), "branch": branch, "base_ref": sha},
+        events=[
+            {
+                "ts": st.utcnow(),
+                "type": st.EVENT_WORKTREE_ATTACHED,
+                "path": str(new_path),
+                "branch": branch,
+                "base_ref": sha,
+            }
+        ],
+    )
     print(
         f"Attached {args.plan}: {new_path}\n  Branch: {branch}\n  Base:   {sha}",
     )
@@ -4063,8 +4121,8 @@ def _spawn_post_action_tick(cfg: ProjectConfig) -> None:
     """Fire a detached project-scoped tick after a state-changing action,
     so the next phase dispatches without waiting for the cron interval.
 
-    Must be called AFTER the `st.mutate` block has closed so the spawned
-    tick reads the post-write state. Failure is swallowed — state is
+    Must be called AFTER the state write has COMMITTED so the spawned tick
+    reads the post-write state. Failure is swallowed — state is
     already on disk and the cron path will pick it up.
     """
     if not cfg.tick_on_action:
@@ -4563,53 +4621,61 @@ def _humanize_age(seconds: float) -> str:
 
 
 def cmd_pause(args, cfg: ProjectConfig, state_path: Path) -> int:
-    with st.mutate(state_path) as data:
-        if data["status"] == st.STATUS_DONE:
-            return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to pause")
-        if data["status"] == st.STATUS_PAUSED:
-            print("Already paused.")
-            return ExitCode.OK
-        data["status"] = st.STATUS_PAUSED
-        st.append_event(data, st.EVENT_PAUSED, reason=args.reason)
+    data = plan_store.snapshot(*st.key_for(state_path))
+    if data["status"] == st.STATUS_DONE:
+        return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to pause")
+    if data["status"] == st.STATUS_PAUSED:
+        print("Already paused.")
+        return ExitCode.OK
+    plan_store.op_set_status(
+        *st.key_for(state_path),
+        status=st.STATUS_PAUSED,
+        event={"ts": st.utcnow(), "type": st.EVENT_PAUSED, "reason": args.reason},
+    )
     print(f"Paused {args.plan}.")
     return ExitCode.OK
 
 
 def cmd_resume(args, cfg: ProjectConfig, state_path: Path) -> int:
-    with st.mutate(state_path) as data:
-        status = data["status"]
-        if status == st.STATUS_RUNNING:
-            print("Already running.")
-            return ExitCode.OK
-        if status in (st.STATUS_HALTED, st.STATUS_HALTED_REPLAN):
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                f"plan is {status} — use `clu retry` to clear attempts",
-            )
-        if status == st.STATUS_DONE:
-            return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to resume")
-        data["status"] = st.STATUS_RUNNING
-        st.append_event(data, st.EVENT_RESUMED)
+    status = plan_store.snapshot(*st.key_for(state_path))["status"]
+    if status == st.STATUS_RUNNING:
+        print("Already running.")
+        return ExitCode.OK
+    if status in (st.STATUS_HALTED, st.STATUS_HALTED_REPLAN):
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"plan is {status} — use `clu retry` to clear attempts",
+        )
+    if status == st.STATUS_DONE:
+        return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to resume")
+    plan_store.op_set_status(
+        *st.key_for(state_path),
+        status=st.STATUS_RUNNING,
+        event={"ts": st.utcnow(), "type": st.EVENT_RESUMED},
+    )
     print(f"Resumed {args.plan}.")
     return ExitCode.OK
 
 
 def cmd_retry(args, cfg: ProjectConfig, state_path: Path) -> int:
-    with st.mutate(state_path) as data:
-        if data["status"] == st.STATUS_DONE:
-            return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to retry")
-        phase = args.phase or st.most_recent_halted_phase(data)
-        if phase is None:
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                "no halted phase to retry — pass --phase or use `clu resume`",
-            )
-        try:
-            st.validate_slug(phase, kind="phase id")
-        except st.InvalidSlug as exc:
-            return _die(ExitCode.INVALID_SLUG, str(exc))
-        data["status"] = st.STATUS_RUNNING
-        st.append_event(data, st.EVENT_RETRY_REQUESTED, phase=phase)
+    data = plan_store.snapshot(*st.key_for(state_path))
+    if data["status"] == st.STATUS_DONE:
+        return _die(ExitCode.STATUS_TRANSITION, "plan is done — nothing to retry")
+    phase = args.phase or st.most_recent_halted_phase(data)
+    if phase is None:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            "no halted phase to retry — pass --phase or use `clu resume`",
+        )
+    try:
+        st.validate_slug(phase, kind="phase id")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+    plan_store.op_set_status(
+        *st.key_for(state_path),
+        status=st.STATUS_RUNNING,
+        event={"ts": st.utcnow(), "type": st.EVENT_RETRY_REQUESTED, "phase": phase},
+    )
     print(f"Retrying {args.plan}/{phase}.")
     return ExitCode.OK
 
@@ -4620,82 +4686,96 @@ def cmd_extend_lease(args, cfg: ProjectConfig, state_path: Path) -> int:
             ExitCode.INVALID_VALUE,
             f"minutes must be positive, got {args.minutes}",
         )
-    with st.mutate(state_path) as data:
-        claim = data.get("current_claim")
-        if claim is None:
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                f"no claim to extend on {args.plan}",
-            )
-        current = _dt.datetime.strptime(claim["lease_expires"], "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=_dt.UTC
+    claim = plan_store.snapshot(*st.key_for(state_path)).get("current_claim")
+    if claim is None:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"no claim to extend on {args.plan}",
         )
-        now = _dt.datetime.now(_dt.UTC)
-        baseline = max(current, now)
-        new_expires = (baseline + _dt.timedelta(minutes=args.minutes)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        claim["lease_expires"] = new_expires
-        st.append_event(
-            data,
-            st.EVENT_LEASE_EXTENDED,
+    try:
+        # The arithmetic runs inside the op's transaction, against the expiry
+        # the row holds — so two operators extending at once cannot both
+        # compute from the same baseline and lose one of the extensions.
+        new_expires = plan_store.op_extend_lease(
+            *st.key_for(state_path),
             phase=claim["phase_id"],
-            extended_by_minutes=args.minutes,
-            new_expires=new_expires,
-            operator=True,
+            minutes=args.minutes,
+        )
+    except st.ClaimMismatch:
+        # The claim moved between the snapshot and the write — the phase the
+        # operator was told about is no longer the one holding the plan.
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"no claim to extend on {args.plan}",
         )
     print(f"Extended {args.plan}/{claim['phase_id']} lease by {args.minutes} min → {new_expires}")
     return ExitCode.OK
 
 
 def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
-    with st.mutate(state_path) as data:
-        claim = data.get("current_claim")
-        if claim is None:
-            print(f"no claim to release on {args.plan}", file=sys.stderr)
-            return ExitCode.OK
-        running = data["status"] == st.STATUS_RUNNING
-        fresh = not st.claim_is_stalled(data, claim)
-        if running and fresh and not args.force:
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                f"plan is running with a fresh-heartbeat claim on phase "
-                f"{claim['phase_id']!r} — `clu pause` first or pass `--force`",
-            )
-        phase = claim["phase_id"]
-        token = claim.get("claimed_by")
-        pid = claim.get("pid")
-        fields = {
-            "phase": phase,
-            "token": token,
-            "forced": bool(args.force),
-            "released_by_operator": True,
-        }
-        if args.reason:
-            fields["reason"] = args.reason
-        st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
-        st.append_event(data, st.EVENT_CLAIM_FORCE_RELEASED, **fields)
-        if pid:
-            # Group reap (worker + heartbeat) with the slug marker — same
-            # mechanism as force-complete/unregister/sweep, so the operator's
-            # release-claim path doesn't leave an orphaned heartbeat (#75). The
-            # slug marker also matches non-clu-phase dispatch templates, where
-            # `/clu-phase <plan> <phase>` would be a silent no-op.
-            pgid = claim.get("pgid") or pid
-            reap = st.reap_orphan_pgroup(
-                pgid,
-                cmdline_match=data["plan_slug"],
-            )
-            st.append_event(
-                data,
-                st.EVENT_PHASE_ORPHAN_REAPED,
-                phase=phase,
-                pid=pid,
-                signaled=reap.signaled,
-                cmdline_mismatch=reap.cmdline_mismatch,
-            )
-        if args.reset_attempts:
-            st.append_event(data, st.EVENT_ATTEMPTS_RESET, phase=phase, operator=True)
+    data = plan_store.snapshot(*st.key_for(state_path))
+    claim = data.get("current_claim")
+    if claim is None:
+        print(f"no claim to release on {args.plan}", file=sys.stderr)
+        return ExitCode.OK
+    running = data["status"] == st.STATUS_RUNNING
+    fresh = not st.claim_is_stalled(data, claim)
+    if running and fresh and not args.force:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"plan is running with a fresh-heartbeat claim on phase "
+            f"{claim['phase_id']!r} — `clu pause` first or pass `--force`",
+        )
+    phase = claim["phase_id"]
+    token = claim.get("claimed_by")
+    pid = claim.get("pid")
+    fields = {
+        "phase": phase,
+        "token": token,
+        "forced": bool(args.force),
+        "released_by_operator": True,
+    }
+    if args.reason:
+        fields["reason"] = args.reason
+    events: list[dict] = [
+        {"ts": st.utcnow(), "type": st.EVENT_CLAIM_FORCE_RELEASED, **fields}
+    ]
+    if pid:
+        # Group reap (worker + heartbeat) with the slug marker — same
+        # mechanism as force-complete/unregister/sweep, so the operator's
+        # release-claim path doesn't leave an orphaned heartbeat (#75). The
+        # slug marker also matches non-clu-phase dispatch templates, where
+        # `/clu-phase <plan> <phase>` would be a silent no-op.
+        #
+        # It runs BEFORE the release commits, and outside any transaction: the
+        # reap polls a process group for seconds, and the write lock it used to
+        # hold while doing so is the whole project's now.
+        pgid = claim.get("pgid") or pid
+        reap = st.reap_orphan_pgroup(
+            pgid,
+            cmdline_match=data["plan_slug"],
+        )
+        events.append(
+            {
+                "ts": st.utcnow(),
+                "type": st.EVENT_PHASE_ORPHAN_REAPED,
+                "phase": phase,
+                "pid": pid,
+                "signaled": reap.signaled,
+                "cmdline_mismatch": reap.cmdline_mismatch,
+            }
+        )
+    if args.reset_attempts:
+        events.append(
+            {
+                "ts": st.utcnow(),
+                "type": st.EVENT_ATTEMPTS_RESET,
+                "phase": phase,
+                "operator": True,
+            }
+        )
+    plan_store.op_release_claim(*st.key_for(state_path), events=events)
+    _emit_coolant_stop(cfg, args.plan, phase, token)
     suffix = " Attempts reset." if args.reset_attempts else ""
     print(f"Released claim on {args.plan}/{phase}.{suffix}")
     return ExitCode.OK
@@ -4901,6 +4981,29 @@ def _write_attestation_refused_inbox(
         pass
 
 
+def _emit_attestation_refusal(
+    state_path: Path,
+    *,
+    phase: str,
+    gate: str,
+    head_sha: str,
+) -> tuple[str | None, bool]:
+    """Record an attestation-gate refusal, re-checking the stamp as it writes.
+
+    Returns `(stamped_at_at_emit_time, emitted)`. The re-check is the point: if
+    a concurrent `clu verify` stamped between the caller's snapshot and now,
+    the gate would pass and no refusal belongs in the log — so the read and the
+    append are one transaction, exactly as re-reading under the lock made them
+    one before.
+    """
+    return plan_store.op_refuse_attestation(
+        *st.key_for(state_path),
+        phase=phase,
+        gate=gate,
+        head_sha=head_sha,
+    )
+
+
 @_translate_claim_mismatch
 def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.commits:
@@ -4926,26 +5029,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         if verify_gate_active:
             stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_VERIFY)
             if stamped_at is None or stamped_at != head_sha:
-                emitted_stamped: str | None = None  # set when the under-lock emit fires
-                with st.mutate(state_path) as data:
-                    # Re-read under lock so the event payload reflects the
-                    # state at emit time, not the pre-lock snapshot. If a
-                    # concurrent `clu verify` stamped between the snapshot
-                    # and now, skip the emit — the gate would now pass.
-                    fresh_stamped = st.attestation_commit_sha(data, st.ATTESTATION_VERIFY)
-                    if fresh_stamped is None or fresh_stamped != head_sha:
-                        st.append_event(
-                            data,
-                            st.EVENT_ATTESTATION_REFUSED,
-                            phase=args.phase,
-                            gate=st.ATTESTATION_VERIFY,
-                            stamped_at=fresh_stamped,
-                            head_sha=head_sha,
-                        )
-                        emitted_stamped = fresh_stamped  # may be None (never stamped)
-                        _emitted = True
-                    else:
-                        _emitted = False
+                emitted_stamped, _emitted = _emit_attestation_refusal(
+                    state_path,
+                    phase=args.phase,
+                    gate=st.ATTESTATION_VERIFY,
+                    head_sha=head_sha,
+                )
                 if _emitted:
                     _write_attestation_refused_inbox(
                         cfg,
@@ -4970,22 +5059,12 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                 if files_changed > t_files or lines_changed > t_lines:
                     stamped_at = st.attestation_commit_sha(data_snap, st.ATTESTATION_SIMPLIFY)
                     if stamped_at is None or stamped_at != head_sha:
-                        emitted_stamped_s: str | None = None
-                        with st.mutate(state_path) as data:
-                            fresh_stamped = st.attestation_commit_sha(data, st.ATTESTATION_SIMPLIFY)
-                            if fresh_stamped is None or fresh_stamped != head_sha:
-                                st.append_event(
-                                    data,
-                                    st.EVENT_ATTESTATION_REFUSED,
-                                    phase=args.phase,
-                                    gate=st.ATTESTATION_SIMPLIFY,
-                                    stamped_at=fresh_stamped,
-                                    head_sha=head_sha,
-                                )
-                                emitted_stamped_s = fresh_stamped
-                                _emitted_s = True
-                            else:
-                                _emitted_s = False
+                        emitted_stamped_s, _emitted_s = _emit_attestation_refusal(
+                            state_path,
+                            phase=args.phase,
+                            gate=st.ATTESTATION_SIMPLIFY,
+                            head_sha=head_sha,
+                        )
                         if _emitted_s:
                             _write_attestation_refused_inbox(
                                 cfg,
@@ -5045,17 +5124,21 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
         events=events,
     )
     _emit_coolant_stop(cfg, args.plan, args.phase, args.token)
-    # Worktree cleanup runs git — several subprocesses of it — and stays on the
-    # facade for now. Only after the completion has committed, and only when
-    # there is a worktree to consider, so the common path pays nothing.
+    # Worktree cleanup runs git — several subprocesses of it — so it runs
+    # against a fresh SNAPSHOT with nothing held, and what it produced is
+    # written afterwards in one transaction. Only after the completion has
+    # committed, and only when there is a worktree to consider, so the common
+    # path pays nothing.
     if st.get_worktree(data_snap) is not None:
-        with st.mutate(state_path) as data:
-            _maybe_cleanup_worktree(
-                cfg,
-                data,
-                trigger="complete",
-                require_all_phases_done=True,
-            )
+        data = plan_store.snapshot(*st.key_for(state_path))
+        recorded = len(data["events"])
+        _maybe_cleanup_worktree(
+            cfg,
+            data,
+            trigger="complete",
+            require_all_phases_done=True,
+        )
+        _persist_worktree_cleanup(state_path, data, recorded)
     _spawn_post_action_tick(cfg)
     print(f"Completed phase {args.phase}")
     return ExitCode.OK
@@ -5089,53 +5172,76 @@ def cmd_force_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.commits:
         if err := _verify_commit_shas(cfg.project_root, args.commits):
             return _die(ExitCode.BAD_SHA, err)
-    with st.mutate(state_path) as data:
-        if args.phase in st.completed_phase_ids(data):
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                f"phase {args.phase!r} already completed — see `clu status`",
-            )
-        ever_started = (
-            st.latest_event(
-                data,
-                st.EVENT_PHASE_STARTED,
-                phase=args.phase,
-            )
-            is not None
+    # A SNAPSHOT, not a write window. Everything this command decides on runs
+    # foreign work — a process-group reap that polls `ps` and `kill` for
+    # seconds, a coolant script, and up to four git commands — and the write
+    # lock it used to hold across all of that is the whole project's now.
+    data = plan_store.snapshot(*st.key_for(state_path))
+    if args.phase in st.completed_phase_ids(data):
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"phase {args.phase!r} already completed — see `clu status`",
         )
-        claim = data.get("current_claim")
-        claim_on_phase = claim is not None and claim.get("phase_id") == args.phase
-        if not ever_started and not claim_on_phase and not args.really:
-            return _die(
-                ExitCode.STATUS_TRANSITION,
-                f"phase {args.phase!r} never started — pass `--really` to force-complete anyway",
-            )
-        if claim_on_phase:
-            # The worker died (that's why we're force-completing). Reap its
-            # process group before releasing so a lingering heartbeat loop
-            # can't orphan past the claim (#75); no-op if already gone.
-            st.reap_claim(data)
-            st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
-        st.append_event(
+    ever_started = (
+        st.latest_event(
             data,
-            st.EVENT_OPERATOR_FORCE_COMPLETE,
+            st.EVENT_PHASE_STARTED,
             phase=args.phase,
-            commits=list(args.commits),
-            reason=args.reason,
-            operator=True,
         )
-        st.append_event(
-            data,
-            st.EVENT_PHASE_COMPLETED,
-            phase=args.phase,
-            commits=list(args.commits),
+        is not None
+    )
+    claim = data.get("current_claim")
+    claim_on_phase = claim is not None and claim.get("phase_id") == args.phase
+    if not ever_started and not claim_on_phase and not args.really:
+        return _die(
+            ExitCode.STATUS_TRANSITION,
+            f"phase {args.phase!r} never started — pass `--really` to force-complete anyway",
         )
-        _maybe_cleanup_worktree(
+    if claim_on_phase:
+        # The worker died (that's why we're force-completing). Reap its
+        # process group before releasing so a lingering heartbeat loop
+        # can't orphan past the claim (#75); no-op if already gone.
+        st.reap_claim(data)
+    completion_events = [
+        {
+            "ts": st.utcnow(),
+            "type": st.EVENT_OPERATOR_FORCE_COMPLETE,
+            "phase": args.phase,
+            "commits": list(args.commits),
+            "reason": args.reason,
+            "operator": True,
+        },
+        {
+            "ts": st.utcnow(),
+            "type": st.EVENT_PHASE_COMPLETED,
+            "phase": args.phase,
+            "commits": list(args.commits),
+        },
+    ]
+    if claim_on_phase:
+        # Release + both events in one transaction; the coolant script fires
+        # after it has committed.
+        plan_store.op_release_claim(*st.key_for(state_path), events=completion_events)
+        _emit_coolant_stop(
             cfg,
-            data,
-            trigger="force-complete",
-            require_all_phases_done=True,
+            args.plan,
+            args.phase,
+            (claim or {}).get("claimed_by") or "",
         )
+        data["current_claim"] = None
+    else:
+        plan_store.op_append_events(*st.key_for(state_path), completion_events)
+    # `_maybe_cleanup_worktree` reads `completed_phase_ids`, so the snapshot it
+    # judges has to carry the completion that was just written.
+    data["events"].extend(completion_events)
+    recorded = len(data["events"])
+    _maybe_cleanup_worktree(
+        cfg,
+        data,
+        trigger="force-complete",
+        require_all_phases_done=True,
+    )
+    _persist_worktree_cleanup(state_path, data, recorded)
     _spawn_post_action_tick(cfg)
     print(f"Force-completed phase {args.phase}")
     return ExitCode.OK
@@ -5800,12 +5906,16 @@ def _ship_apply_one_as_pr(
     if not ok:
         return False, url_or_err
 
-    with st.mutate(state_path) as d:
-        d["ship_pending"] = {
-            "mode": "as_pr",
-            "pr_url": url_or_err,
-            "ts": st.utcnow(),
-        }
+    plan_store.op_set_fields(
+        *st.key_for(state_path),
+        {
+            "ship_pending": {
+                "mode": "as_pr",
+                "pr_url": url_or_err,
+                "ts": st.utcnow(),
+            }
+        },
+    )
 
     return True, f"opened PR for {plan_slug!r}: {url_or_err}"
 
@@ -5941,7 +6051,6 @@ def _perform_archive(
         require_all_phases_done=False,
     )
     after = st.get_worktree(data)
-    worktree_cleared = "worktree" in data and data["worktree"] is None
     plan_dir = cfg.project_root / cfg.plan_dir
     plan_md = plan_dir / f"{plan}.md"
     sources: list[Path] = []
@@ -5965,13 +6074,13 @@ def _perform_archive(
             _git_mv_exc = exc
     # Now the write: the cleanup's events, the cleared worktree, and the
     # clu-ship lifecycle markers that must not haunt an archived plan
-    # (clu-ship.md phase 7).
-    with st.mutate(state_path) as live:
-        live["events"].extend(data["events"][recorded_events:])
-        if worktree_cleared:
-            live["worktree"] = None
-        live.pop("ship_pending", None)
-        live.pop("ready_to_ship_announced", None)
+    # (clu-ship.md phase 7). One transaction, no subprocess inside it.
+    _persist_worktree_cleanup(
+        state_path,
+        data,
+        recorded_events,
+        remove_fields=("ship_pending", "ready_to_ship_announced"),
+    )
     # Archival is the ONE moment events leave the hot table. Not a halt and not
     # a pause: both of those can be resumed or retried, and both read their own
     # history to do it. An archived plan cannot, so its history moves to
@@ -6695,7 +6804,7 @@ def cmd_blockers_list(args) -> int:
     state_path = cfg.state_path(args.plan)
     if not plan_store.exists_for_path(state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
-    data = st.load(state_path, expected_version=st.SCHEMA_VERSION)
+    data = st.load(state_path)
     open_blockers = [b for b in data.get("blockers", []) if b.get("answer") is None]
     if not open_blockers:
         print(f"no open blockers on {args.plan}")
@@ -6720,7 +6829,7 @@ def cmd_blockers_show(args) -> int:
     state_path = cfg.state_path(args.plan)
     if not plan_store.exists_for_path(state_path):
         return _die(ExitCode.UNKNOWN_TASK, f"no state at {state_path}")
-    data = st.load(state_path, expected_version=st.SCHEMA_VERSION)
+    data = st.load(state_path)
     blocker = next(
         (b for b in data.get("blockers", []) if b["id"] == args.blocker_id),
         None,

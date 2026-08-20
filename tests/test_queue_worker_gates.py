@@ -23,7 +23,7 @@ from end_of_line import queue, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig
-from tests import isolate_queue
+from tests import isolate_queue, mutate_state, write_state
 
 _PLAN_BODY = "# placeholder plan\n"
 _TOKEN = "session-deadbeef0000"
@@ -48,7 +48,7 @@ def _seed_source_plan(project: Path, slug: str, phase: str, token: str) -> Path:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     data = st.empty_state(slug, "plans")
     st.claim_phase(data, phase, 30, token)
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
     return state_path
 
 
@@ -162,7 +162,7 @@ class WorkerGatesTestCase(unittest.TestCase):
 
         d_token = "session-d-extract-token"
         state_path = self.cfg.state_path(_SOURCE_PLAN)
-        with st.mutate(state_path) as data:
+        with mutate_state(state_path) as data:
             st.release_claim(data)
             st.claim_phase(data, "d-extract", 30, d_token)
 
@@ -223,7 +223,7 @@ class WorkerGatesTestCase(unittest.TestCase):
         target_state_path.parent.mkdir(parents=True, exist_ok=True)
         target_state = st.empty_state("target", "plans")
         st.claim_phase(target_state, "some-phase", 30, "session-running-token")
-        st.save_atomic(target_state_path, target_state)
+        write_state(target_state_path, target_state)
 
         rc, out, _ = _worker_add(self.project, "target")
         self.assertEqual(rc, ExitCode.OK)

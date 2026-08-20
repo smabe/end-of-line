@@ -18,7 +18,7 @@ from end_of_line import inbox, notify
 from end_of_line import state as st
 from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import isolate_registry
+from tests import isolate_registry, mutate_state, write_state
 
 PLAN_BODY = """\
 # Test plan
@@ -47,8 +47,7 @@ class StalledClaimTestCase(unittest.TestCase):
         )
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         self.state_path.parent.mkdir(parents=True)
-        with st.locked(self.state_path):
-            st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))
+        write_state(self.state_path, st.empty_state("test-plan", "plans"))
 
     def _read(self) -> dict:
         return st.load(self.state_path)
@@ -56,7 +55,7 @@ class StalledClaimTestCase(unittest.TestCase):
     def _claim_and_age(self, lease_minutes_past: int) -> None:
         """First tick dispatches phase 'a'; then backdate the lease."""
         tick(self.state_path, self.cfg)
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             past = (st._now_utc() - _dt.timedelta(minutes=lease_minutes_past)).strftime(st._ISO_FMT)
             data["current_claim"]["lease_expires"] = past
 
@@ -85,7 +84,7 @@ class StalledClaimTestCase(unittest.TestCase):
 
     def test_expired_lease_with_status_halted_does_not_fire(self) -> None:
         tick(self.state_path, self.cfg)  # claim phase a
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             past = (st._now_utc() - _dt.timedelta(minutes=10)).strftime(st._ISO_FMT)
             data["current_claim"]["lease_expires"] = past
             data["status"] = st.STATUS_HALTED
@@ -124,7 +123,7 @@ class StalledClaimTestCase(unittest.TestCase):
         second = tick(self.state_path, self.cfg)
         self.assertEqual(second.action, "dispatch")
         # Age the new claim's lease + re-tick.
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             past = (st._now_utc() - _dt.timedelta(minutes=5)).strftime(st._ISO_FMT)
             data["current_claim"]["lease_expires"] = past
         third = tick(self.state_path, self.cfg)

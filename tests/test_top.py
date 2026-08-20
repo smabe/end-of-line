@@ -24,7 +24,7 @@ from typing import cast
 from end_of_line import registry, top
 from end_of_line import state as st
 from end_of_line.cli import main as cli_main
-from tests import GitProjectTestCase, plan_body
+from tests import GitProjectTestCase, mutate_state, plan_body
 
 
 def _now() -> _dt.datetime:
@@ -478,7 +478,7 @@ class SessionRowsTest(GitProjectTestCase):
         # Worker claim (session_id "wsess") + its transcript, plus an unrelated
         # fresh session. Expect 1 worker row + 1 session row — never a dup.
         self._claim("a")
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["session_id"] = "wsess"
         self._sess("wsess")
         self._sess("other")
@@ -517,7 +517,7 @@ class SessionRowsTest(GitProjectTestCase):
         # Worker gets its own (session_id-resolved) transcript so the separate
         # session isn't claimed out; then assert the tier order worker→session.
         self._claim("a")
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["session_id"] = "wsess"
         self._sess("wsess")  # the worker's own transcript
         self._sess("zsess")  # a separate non-clu session
@@ -976,7 +976,7 @@ class GatherRowsWireContractTest(GitProjectTestCase):
         # A blocked row is the SAME flat schema plus three append-only keys
         # (D10) — clu serve's toView reads `blocker_question`/`blocked_seconds`
         # by exact name, so a rename here must scream just like a claim-row one.
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             st.add_blocker(data, "a", "Pick a base branch?", ["x", "y"])
         rows = top.gather_rows(projects_root=self.projects_root)
         self.assertEqual(len(rows), 1)
@@ -1702,7 +1702,7 @@ class BlockedRowGatherTest(GitProjectTestCase):
         return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
 
     def _block(self, slug: str, phase: str, question: str) -> str:
-        with st.mutate(self._state_path(slug)) as data:
+        with mutate_state(self._state_path(slug)) as data:
             return st.add_blocker(data, phase, question, ["yes", "no"])
 
     def _register_plan(self, slug: str, *sessions: str) -> None:
@@ -1728,7 +1728,7 @@ class BlockedRowGatherTest(GitProjectTestCase):
 
     def test_answered_blocker_produces_no_row(self) -> None:
         bid = self._block("test-plan", "a", "q?")
-        with st.mutate(self._state_path("test-plan")) as data:
+        with mutate_state(self._state_path("test-plan")) as data:
             for b in data["blockers"]:
                 if b["id"] == bid:
                     b["answer"] = "yes"

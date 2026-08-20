@@ -17,7 +17,7 @@ from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig, load_project_config
 from end_of_line.cross_plan_rules import ProjectPlan, queue_advancement_rule
-from tests import CluTestCase, isolate_queue
+from tests import CluTestCase, isolate_queue, write_state
 
 _PLAN_BODY = "# placeholder plan\n"
 
@@ -155,7 +155,7 @@ class QueueBatchSchemaTestCase(CluTestCase):
         state_path = cfg.state_path("absorbed-plan")
         fresh = st.empty_state("absorbed-plan", "plans")
         fresh["status"] = st.STATUS_DONE
-        st.save_atomic(state_path, fresh)
+        write_state(state_path, fresh)
 
         queue.add(
             self.orch,

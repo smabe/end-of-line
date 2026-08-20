@@ -43,7 +43,7 @@ from end_of_line.supervisor import (
     _emit_worker_idle,
     tick,
 )
-from tests import CluTestCase, utcnow_minus
+from tests import CluTestCase, mutate_state, utcnow_minus
 
 PLAN_BODY = """\
 # Test plan
@@ -103,7 +103,7 @@ class TickRestructureTestCase(CluTestCase):
             "attempts": 1,
         }
         claim.update(over)
-        with plan_store.mutate_compat(self.orch_dir, "test-plan") as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"] = claim
         return claim
 
@@ -422,7 +422,7 @@ class TickRestructureTestCase(CluTestCase):
         # `claim_phase`'s raw attempt counter, preserved across the restructure:
         # the apply has no history to count, so the tick counts it.
         tick(self.state_path, self.cfg)  # attempt 1 on phase a
-        with plan_store.mutate_compat(self.orch_dir, "test-plan") as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"] = None
         tick(self.state_path, self.cfg)  # attempt 2 on phase a
         self.assertEqual(self._read()["current_claim"]["attempts"], 2)
@@ -523,7 +523,7 @@ class ApplyTickDeltaTestCase(CluTestCase):
     def test_the_claim_field_precondition_advances_the_column_it_names(self) -> None:
         # Backdated first, so "the field moved" is a real observation rather
         # than a comparison of a second-resolution timestamp with itself.
-        with plan_store.mutate_compat(self.orch_dir, "p") as live:
+        with mutate_state(self.orch_dir / "p.state.json") as live:
             live["current_claim"] = {
                 "phase_id": "a",
                 "claimed_by": "tok",

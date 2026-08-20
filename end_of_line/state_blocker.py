@@ -1,8 +1,8 @@
 """Pure blocker state machine.
 
 All functions take `data: dict` (the plan state data dict) and return
-derived values — events, transitions, rendered bodies. No I/O, no
-st.mutate, no notify.send calls.
+derived values — events, transitions, rendered bodies. No I/O, no store
+writes, no notify.send calls.
 """
 
 from __future__ import annotations

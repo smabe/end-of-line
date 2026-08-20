@@ -11,7 +11,7 @@ from unittest import mock
 from end_of_line import registry
 from end_of_line import state as st
 from end_of_line.notify_base import InboundPoller
-from tests import CluTestCase
+from tests import CluTestCase, write_state
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,7 +61,7 @@ def _create_project_with_blocker(
     blocker_id = data["blockers"][0]["id"]
     if notify_metadata:
         data["blockers"][0]["notify_metadata"] = notify_metadata
-    st.save_atomic(orch_dir / f"{plan_slug}.state.json", data)
+    write_state(orch_dir / f"{plan_slug}.state.json", data)
     return project_root, blocker_id
 
 

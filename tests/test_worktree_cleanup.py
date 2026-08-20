@@ -26,7 +26,7 @@ from pathlib import Path
 from end_of_line import db, plan_store
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, _remove_worktree_and_branch, main
-from tests import isolate_registry, must
+from tests import isolate_registry, must, mutate_state
 
 # Plan-file basenames must be `<slug>-<phase>.md` so plan_parser extracts
 # clean phase ids ("a", "b") instead of treating the whole basename as the id.
@@ -117,12 +117,12 @@ class WorktreeCleanupBase(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def _set_status(self, slug: str, status: str) -> None:
-        with st.mutate(self._state_path(slug)) as data:
+        with mutate_state(self._state_path(slug)) as data:
             data["status"] = status
 
     def _claim_phase(self, slug: str, phase: str) -> str:
         state_path = self._state_path(slug)
-        with st.mutate(state_path) as data:
+        with mutate_state(state_path) as data:
             token = st.claim_phase(data, phase, lease_minutes=10)
         return token
 
@@ -548,7 +548,7 @@ class CmdArchiveAtomicCommitTests(WorktreeCleanupBase):
         # don't haunt the orphaned state file post-archive (clu-ship.md
         # phase 7 requirement).
         self._init_plan("alpha", PLAN_BODY_ONE_PHASE_TMPL, worktree=False)
-        with st.mutate(self._state_path("alpha")) as data:
+        with mutate_state(self._state_path("alpha")) as data:
             data["status"] = st.STATUS_DONE
             data["ship_pending"] = {
                 "mode": "as_pr",

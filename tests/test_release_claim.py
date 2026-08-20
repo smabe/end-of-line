@@ -19,7 +19,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import GitProjectTestCase, plan_body
+from tests import GitProjectTestCase, plan_body, write_state
 
 
 def _stamp_claim(
@@ -55,10 +55,9 @@ class ReleaseClaimTestCase(GitProjectTestCase):
     NEEDS_GIT = False  # tests inject claims via _stamp_claim; no git ops needed
 
     def _write(self, mut) -> None:
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            mut(data)
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        mut(data)
+        write_state(self.state_path, data)
 
     def _force_release_events(self) -> list[dict]:
         return [e for e in self._read()["events"] if e["type"] == st.EVENT_CLAIM_FORCE_RELEASED]

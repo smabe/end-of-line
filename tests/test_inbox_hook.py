@@ -23,7 +23,7 @@ from pathlib import Path
 from end_of_line import inbox, registry
 from end_of_line import state as st
 from end_of_line.notify_base import open_blockers_with_details
-from tests import isolate_monitor_marker
+from tests import isolate_monitor_marker, write_state
 
 
 def _hook_env(xdg: Path) -> dict:
@@ -284,10 +284,9 @@ class BlockerSurfacingTests(HookTestBase):
         """Write state file with given blockers and register the plan."""
         sp = project / "plans" / ".orchestrator" / f"{slug}.state.json"
         sp.parent.mkdir(parents=True, exist_ok=True)
-        with st.locked(sp):
-            data = st.empty_state(slug, "plans")
-            data["blockers"] = blockers
-            st.save_atomic(sp, data)
+        data = st.empty_state(slug, "plans")
+        data["blockers"] = blockers
+        write_state(sp, data)
         registry.register(project, slug)
 
     def _open_blocker(

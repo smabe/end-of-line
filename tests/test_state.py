@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json
-import os
 import sqlite3
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from end_of_line import db
 from end_of_line import state as st
+from tests import write_state
 
 
 class TempStateMixin:
@@ -49,21 +47,18 @@ class TestEmptyState(unittest.TestCase):
         self.assertIsNone(data["current_claim"])
 
 
-class TestAtomicWrite(TempStateMixin, unittest.TestCase):
-    def test_save_load_roundtrip(self) -> None:
+class TestStoreRoundTrip(TempStateMixin, unittest.TestCase):
+    def test_seed_load_roundtrip(self) -> None:
         data = st.empty_state("foo", "plans")
-        st.save_atomic(self.state_path, data)
+        write_state(self.state_path, data)
         loaded = st.load(self.state_path)
         self.assertEqual(loaded["plan_slug"], "foo")
 
-    def test_save_atomic_leaves_no_tmp_on_success(self) -> None:
-        # The tmp+fsync+rename engine still serves the stores that are files
-        # (queue.json, quota.json), so this asserts against one of those rather
-        # than a plan-state path, which now routes to the database.
-        path = self.tmp / "plain.json"
-        st.save_atomic(path, {"schema_version": 1, "rows": []})
-        leftover = list(path.parent.glob("plain.json.*.tmp"))
-        self.assertEqual(leftover, [])
+    def test_load_raises_file_not_found_for_a_plan_that_does_not_exist(self) -> None:
+        # The contract every tolerant reader in the fleet catches by name: a
+        # path that names no row answers the same way a missing file did.
+        with self.assertRaises(FileNotFoundError):
+            st.load(self.state_path)
 
 
 class TestClaim(TempStateMixin, unittest.TestCase):
@@ -232,115 +227,28 @@ class TestBlockers(TempStateMixin, unittest.TestCase):
         self.assertEqual(event["question"], "")
 
 
-class TestLockfileSymlink(TempStateMixin, unittest.TestCase):
-    def test_refuses_symlink_lockfile(self) -> None:
-        victim = self.tmp / "victim.txt"
-        victim.write_text("don't truncate me")
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
-        os.symlink(victim, lock_path)
-        with self.assertRaises(OSError):
-            with st.locked(self.state_path):
-                pass
-        self.assertEqual(victim.read_text(), "don't truncate me")
-
-    def test_lockfile_created_with_600_mode(self) -> None:
-        with st.locked(self.state_path):
-            pass
-        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
-        mode = lock_path.stat().st_mode & 0o777
-        self.assertEqual(mode, 0o600)
-
-
 class TestSchemaVersion(TempStateMixin, unittest.TestCase):
-    """Two loaders, two version checks.
+    """One loader, one version check — the database's own `user_version`.
 
-    A plan-state path is versioned by the database's `user_version`; the stores
-    still on files carry `schema_version` in the document. Both raise the same
-    `SchemaVersionMismatch`, which is what every tolerant reader catches.
+    There is no longer a document with a `schema_version` field to compare, so
+    `load` takes no expected version: a store written by a newer clu is refused
+    by the store itself, and it still arrives as the `SchemaVersionMismatch`
+    every tolerant reader catches (upstream decision #6 — skip, never
+    downgrade).
     """
 
     def test_load_rejects_a_store_from_a_newer_clu(self) -> None:
-        st.save_atomic(self.state_path, st.empty_state("foo", "plans"))
+        write_state(self.state_path, st.empty_state("foo", "plans"))
         conn = sqlite3.connect(str(db.project_db_path(self.state_path.parent)))
         conn.execute(f"PRAGMA user_version = {db.PROJECT_SCHEMA_VERSION + 1}")
         conn.close()
         with self.assertRaises(st.SchemaVersionMismatch):
             st.load(self.state_path)
 
-    def test_file_loader_rejects_future_version(self) -> None:
-        path = self.tmp / "plain.json"
-        path.write_text('{"schema_version": 999, "rows": []}')
-        with self.assertRaises(st.SchemaVersionMismatch):
-            st.load(path, expected_version=1)
-
-    def test_file_loader_rejects_missing_version(self) -> None:
-        path = self.tmp / "plain.json"
-        path.write_text('{"rows": []}')
-        with self.assertRaises(st.SchemaVersionMismatch):
-            st.load(path, expected_version=1)
-
-    def test_load_accepts_current_version(self) -> None:
-        st.save_atomic(self.state_path, st.empty_state("foo", "plans"))
+    def test_load_accepts_the_current_version(self) -> None:
+        write_state(self.state_path, st.empty_state("foo", "plans"))
         loaded = st.load(self.state_path)
         self.assertEqual(loaded["plan_slug"], "foo")
-
-
-class TestLockedJson(TempStateMixin, unittest.TestCase):
-    """The generic lock+load+yield+save primitive behind `state.mutate` and the
-    other JSON stores that still use it."""
-
-    def test_works_with_custom_empty_factory(self) -> None:
-        path = self.tmp / "custom.json"
-        with st.locked_json(
-            path,
-            expected_version=1,
-            empty=lambda: {"schema_version": 1, "payload": "fresh"},
-        ) as data:
-            self.assertEqual(data["payload"], "fresh")
-            data["payload"] = "modified"
-        reloaded = json.loads(path.read_text())
-        self.assertEqual(reloaded["payload"], "modified")
-
-    def test_raises_schema_mismatch(self) -> None:
-        path = self.tmp / "wrong.json"
-        path.write_text('{"schema_version": 7, "payload": "x"}')
-        with self.assertRaises(st.SchemaVersionMismatch):
-            with st.locked_json(
-                path,
-                expected_version=1,
-                empty=lambda: {"schema_version": 1},
-            ):
-                pass
-
-    def test_missing_file_without_empty_factory_raises(self) -> None:
-        # Preserves state.mutate's pre-extraction behavior: callers that
-        # don't pass an empty factory want FileNotFoundError on missing.
-        path = self.tmp / "missing.json"
-        with self.assertRaises(FileNotFoundError):
-            with st.locked_json(path, expected_version=1):
-                pass
-
-    def test_atomic_rename_leaves_no_tmp_on_success(self) -> None:
-        path = self.tmp / "atomic.json"
-        with st.locked_json(
-            path,
-            expected_version=1,
-            empty=lambda: {"schema_version": 1, "rows": []},
-        ) as data:
-            data["rows"].append("x")
-        leftover = list(path.parent.glob("atomic.json.*.tmp"))
-        self.assertEqual(leftover, [])
-
-    def test_creates_parent_dir(self) -> None:
-        path = self.tmp / "nested" / "deep" / "file.json"
-        with st.locked_json(
-            path,
-            expected_version=1,
-            empty=lambda: {"schema_version": 1},
-        ):
-            pass
-        self.assertTrue(path.exists())
 
 
 class TestEvents(unittest.TestCase):
@@ -566,42 +474,6 @@ class WorkerIdleWindowSatisfiedTestCase(unittest.TestCase):
         claim = {"cpu_samples": self._samples(6, 12.0, cpu=1.01)}
         now = self._now(12.0)
         self.assertFalse(st.worker_idle_window_satisfied(claim, now))
-
-
-class TestMutateTimeout(TempStateMixin, unittest.TestCase):
-    """`mutate(path, timeout_seconds=...)` bounds its wait for the store's write
-    lock — the activity hook and the daemon's death report both need to give up
-    rather than hang, and both catch `LockTimeout` by name."""
-
-    def _seed(self) -> None:
-        st.save_atomic(self.state_path, st.empty_state("foo", "plans"))
-
-    def test_timeout_raises_when_another_writer_holds_the_lock(self) -> None:
-        self._seed()
-        started = threading.Event()
-        release = threading.Event()
-
-        def hold() -> None:
-            with st.mutate(self.state_path):
-                started.set()
-                release.wait(5)
-
-        holder = threading.Thread(target=hold)
-        holder.start()
-        try:
-            self.assertTrue(started.wait(5))
-            with self.assertRaises(st.LockTimeout):
-                with st.mutate(self.state_path, timeout_seconds=0.1):
-                    pass  # pragma: no cover — the lock is held, never entered
-        finally:
-            release.set()
-            holder.join(5)
-
-    def test_no_timeout_round_trips_normally(self) -> None:
-        self._seed()
-        with st.mutate(self.state_path) as data:
-            data["status"] = st.STATUS_PAUSED
-        self.assertEqual(st.load(self.state_path)["status"], st.STATUS_PAUSED)
 
 
 class TestWorkerDeathMarker(unittest.TestCase):

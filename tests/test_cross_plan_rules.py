@@ -16,13 +16,13 @@ from end_of_line.cross_plan_rules import (
     register_rule,
     run_rules,
 )
-from tests import CluTestCase
+from tests import CluTestCase, write_state
 
 
 def _make_state_file(state_path: Path, slug: str, plan_dir: str = "plans") -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     data = st.empty_state(slug, plan_dir)
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
 
 
 class CrossPlanRulesTestCase(CluTestCase):

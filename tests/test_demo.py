@@ -13,10 +13,9 @@ from pathlib import Path
 from unittest import mock
 
 from end_of_line import demo, notify, plan_store, registry, top
-from end_of_line import state as st
 from end_of_line.config import CONFIG_FILENAME, load_project_config
 from end_of_line.plan_parser import parse_sessions_index
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state
 
 
 class ScaffoldTest(CluTestCase):
@@ -151,7 +150,7 @@ class DownTest(CluTestCase):
     def _claim_with_worker(self, plan, *, pgid: int, session_id: str) -> Path:
         """Stamp a live-looking claim (pgid + session_id) onto a demo plan's state."""
         state = plan.project_root / "plans" / ".orchestrator" / f"{plan.slug}.state.json"
-        with st.mutate(state) as data:
+        with mutate_state(state) as data:
             data["current_claim"] = {
                 "phase_id": "a",
                 "token": "tok",

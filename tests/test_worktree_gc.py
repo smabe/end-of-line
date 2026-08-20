@@ -16,7 +16,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import isolate_registry
+from tests import isolate_registry, mutate_state
 
 PLAN_BODY = """\
 # T
@@ -74,7 +74,7 @@ class WorktreeGcTestCase(unittest.TestCase):
         return self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
 
     def _set_status(self, slug: str, status: str) -> None:
-        with st.mutate(self._state_path(slug)) as data:
+        with mutate_state(self._state_path(slug)) as data:
             data["status"] = status
 
     def _gc(self, *extra: str) -> tuple[int, str, str]:

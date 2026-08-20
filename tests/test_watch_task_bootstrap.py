@@ -8,6 +8,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.config import ProjectConfig
 from end_of_line.watch import bootstrap_task_list
+from tests import mutate_state, write_state
 
 
 def _make_cfg_loader(project_root: Path):
@@ -31,7 +32,7 @@ class BootstrapEmissionTest(unittest.TestCase):
         data = st.empty_state(slug, "plans")
         if claim is not None:
             data["current_claim"] = claim
-        st.save_atomic(p, data)
+        write_state(p, data)
         return p
 
     def _plan_path(self, slug: str) -> Path:
@@ -127,7 +128,7 @@ class BootstrapEmissionTest(unittest.TestCase):
         self, slug: str, phase_id: str, *, plan_status: str = "running"
     ) -> Path:
         path = self._state_path(slug, claim={"phase_id": phase_id})
-        with st.mutate(path) as data:
+        with mutate_state(path) as data:
             data["status"] = plan_status
         return path
 

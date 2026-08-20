@@ -20,7 +20,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry, must
+from tests import isolate_registry, must, mutate_state
 
 PLAN_BODY = """\
 # T
@@ -182,7 +182,7 @@ class WorktreeAttachTestCase(unittest.TestCase):
 
     def test_does_not_change_status(self) -> None:
         state_path = self._init_plan_no_worktree("alpha")
-        with st.mutate(state_path) as data:
+        with mutate_state(state_path) as data:
             data["status"] = st.STATUS_PAUSED
         wt_path = self._make_worktree("myrepo-alpha-wt", "feature/alpha")
         rc, _stdout, _stderr = self._attach(

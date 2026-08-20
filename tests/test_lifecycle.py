@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import CluTestCase
+from tests import CluTestCase, write_state
 
 PLAN_BODY = """\
 # Test plan
@@ -36,10 +36,9 @@ class LifecycleTestCase(CluTestCase):
         return st.load(self.state_path)
 
     def _write(self, mut) -> None:
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            mut(data)
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        mut(data)
+        write_state(self.state_path, data)
 
     def _argv(self, cmd: str, *extra: str) -> list[str]:
         return [cmd, "--project", str(self.project), "--plan", "test-plan", *extra]

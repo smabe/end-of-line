@@ -144,7 +144,8 @@ def _write_secret(path: Path, text: str) -> None:
     """Write a secret atomically and at mode 0600 from birth — `mkstemp` creates
     the temp at 0600, and `os.replace` swaps it in without ever exposing the
     final path at a wider mode (the create-then-chmod pattern leaves a
-    world-readable window). Mirrors `state.save_atomic`."""
+    world-readable window). The same shape every clu store file was written
+    with before the database replaced them."""
     fd, tmp = tempfile.mkstemp(dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

@@ -101,9 +101,9 @@ def _report_death(project_root, plan: str, phase: str, token: str, state_path) -
 
     In-process `cli.main` call (lazy import — cli.py imports this module),
     mirroring `_notify_failure`. The command is idempotent per claim and
-    bounds its own lock, so a contended state file can't hang this exit path;
-    `run_loop` wraps the call anyway so nothing — LockTimeout included — can
-    stop the loop from returning 0.
+    bounds its own wait for the write lock, so a contended store can't hang
+    this exit path; `run_loop` wraps the call anyway so nothing — `db.DbBusy`
+    included — can stop the loop from returning 0.
     """
     from end_of_line.cli import main as cli_main
 
@@ -173,7 +173,7 @@ def run_loop(
 
     On worker-dead exit the loop fires the `report_death` callback so the
     detection turns into an operator-visible event/inbox/notify (#104); the
-    call is wrapped so no exception — LockTimeout included — can stop the
+    call is wrapped so no exception — `db.DbBusy` included — can stop the
     loop returning 0. Claim-gone (a `clu complete`/`block` release) is a
     normal finish, NOT a death, so it never reports.
     """

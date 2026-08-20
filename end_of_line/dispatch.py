@@ -39,13 +39,11 @@ _FAST_FAIL_WAIT_SEC = 0.5
 # `sqlite3.Error` for a broken store and `DbBusy` for one held past the budget,
 # neither of which is an `OSError`; without them a busy project (any other
 # plan's tick holds the same write lock now) would take the whole dispatch down
-# with a traceback where a stderr line belongs. `st.LockTimeout` covers the
-# facade paths dispatch still reaches through `st.mutate`.
+# with a traceback where a stderr line belongs.
 _DISPATCH_FALLBACK_ERRORS = (
     *db.DEGRADABLE_ERRORS,
     ValueError,
     st.SchemaVersionMismatch,
-    st.LockTimeout,
 )
 
 # Hard-coded signature list. Grows via PR only; no config field. Order

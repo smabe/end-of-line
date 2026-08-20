@@ -17,7 +17,7 @@ from unittest import mock
 from end_of_line import db, plan_store, registry, supervisor
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import GitProjectTestCase, write_config
+from tests import GitProjectTestCase, mutate_state, write_config, write_state
 
 
 def _group_alive(pgid: int) -> bool:
@@ -68,7 +68,7 @@ class SweepZombieStatesTest(GitProjectTestCase):
         base["status"] = status
         base["current_claim"] = claim
         base["events"] = []
-        st.save_atomic(self.state_path.parent / f"{slug}.state.json", base)
+        write_state(self.state_path.parent / f"{slug}.state.json", base)
 
     def _read_slug(self, slug: str) -> dict:
 
@@ -90,6 +90,39 @@ class SweepZombieStatesTest(GitProjectTestCase):
             [st.EVENT_PLAN_ABANDONED],
         )
 
+    def test_a_plan_revived_between_the_scan_and_the_write_is_left_alone(self):
+        # The guard the write window used to provide by re-reading inside its
+        # own transaction. It is a PRECONDITION now — status and claim, the two
+        # facts `is_zombie_state` reads — re-asserted inside the apply. The
+        # revival is injected at `reap_claim`, which runs between the snapshot
+        # and the apply precisely because it shells out.
+        self._write_state("fm-docs", status=st.STATUS_RUNNING, claim=None)
+        sp = self.state_path.parent / "fm-docs.state.json"
+
+        def revive(_data):
+            plan_store.op_set_status(*st.key_for(sp), status=st.STATUS_DONE)
+            return None
+
+        with mock.patch.object(st, "reap_claim", side_effect=revive):
+            out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
+        self.assertEqual(out, [], "a revived plan was reported as swept")
+        data = self._read_slug("fm-docs")
+        self.assertEqual(data["status"], st.STATUS_DONE, "the revived plan was terminalized")
+        self.assertEqual(
+            [e for e in data["events"] if e["type"] == st.EVENT_PLAN_ABANDONED],
+            [],
+            "the abandoned event was written despite the conflict",
+        )
+
+    def test_the_revival_guard_is_selective(self):
+        # The other direction, so the test above cannot pass by the sweep
+        # simply never writing: with nothing revived, the same path terminalizes.
+        self._write_state("fm-docs", status=st.STATUS_RUNNING, claim=None)
+        with mock.patch.object(st, "reap_claim", return_value=None):
+            out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
+        self.assertEqual([z.plan_slug for z in out], ["fm-docs"])
+        self.assertEqual(self._read_slug("fm-docs")["status"], st.STATUS_HALTED)
+
     def test_a_contended_plan_is_skipped_not_raised(self):
         # Reading a state FILE could not be "busy", so contention is a failure
         # mode the store introduced — and the write lock is the whole PROJECT's
@@ -97,7 +130,9 @@ class SweepZombieStatesTest(GitProjectTestCase):
         # The sweep is a backstop that runs every tick; skipping one plan is
         # right, taking down the caller (`clu doctor` prints this inline) is not.
         self._write_state("fm-docs", status=st.STATUS_RUNNING, claim=None)
-        with mock.patch.object(plan_store, "snapshot", side_effect=db.DbBusy("project busy")):
+        with mock.patch.object(
+            plan_store, "snapshot_with_preconditions", side_effect=db.DbBusy("project busy")
+        ):
             out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
         self.assertEqual(out, [])
         # And the plan is untouched — a skip, not a silent terminalize.
@@ -107,14 +142,16 @@ class SweepZombieStatesTest(GitProjectTestCase):
         # Same for the second window: the re-check happens inside the write
         # transaction, so the budget can expire there too.
         self._write_state("fm-docs", status=st.STATUS_RUNNING, claim=None)
-        with mock.patch.object(plan_store, "mutate_compat", side_effect=db.DbBusy("project busy")):
+        with mock.patch.object(
+            plan_store, "apply_tick_delta", side_effect=db.DbBusy("project busy")
+        ):
             out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
         self.assertEqual(out, [])
         self.assertEqual(self._read_slug("fm-docs")["status"], st.STATUS_RUNNING)
 
     def test_registered_plan_skipped(self):
         # test-plan is registered by setUp; even if running it must be skipped.
-        with st.mutate(self.state_path) as d:
+        with mutate_state(self.state_path) as d:
             d["status"] = st.STATUS_RUNNING
         out = supervisor.sweep_zombie_states(self.cfg(), self._registered_slugs())
         self.assertEqual(out, [])
@@ -203,12 +240,12 @@ class SweepIntegrationTest(GitProjectTestCase):
         base["status"] = st.STATUS_RUNNING
         base["current_claim"] = None
         base["events"] = []
-        st.save_atomic(self.state_path.parent / f"{slug}.state.json", base)
+        write_state(self.state_path.parent / f"{slug}.state.json", base)
 
     def test_tick_all_auto_sweeps_zombie(self):
         # Park the registered plan in a terminal status so tick-all doesn't try
         # to dispatch a real worker; the sweep still runs in the post-loop.
-        with st.mutate(self.state_path) as d:
+        with mutate_state(self.state_path) as d:
             d["status"] = st.STATUS_DONE
         self._write_zombie("fm-docs")
         rc = main(["tick-all"])

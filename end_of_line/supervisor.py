@@ -1274,16 +1274,6 @@ def _started_count(data: dict, phase_id: str) -> int:
     )
 
 
-class _PlanRevived(Exception):
-    """A plan stopped looking like a zombie between the scan and the write.
-
-    Raised to leave `mutate_compat`'s transaction WITHOUT writing: exiting the
-    window normally would commit an unchanged document (and bump the plan's
-    version), which is the churn the old code avoided by saving only on the act
-    path.
-    """
-
-
 @dataclass
 class ZombieSweepResult:
     """One state file the registry-independent sweep terminalized (or, in
@@ -1334,7 +1324,11 @@ def sweep_zombie_states(
         if slug in registered_slugs:
             continue
         try:
-            data = plan_store.snapshot(orch_dir, slug)
+            # One read, and it carries the facts the decision rests on: the
+            # apply below re-asserts them rather than re-reading, so nothing
+            # can move between "this looks like a zombie" and "this was
+            # observed to look like a zombie".
+            data, observed = plan_store.snapshot_with_preconditions(orch_dir, slug)
         except (*db.DEGRADABLE_ERRORS, ValueError, st.SchemaVersionMismatch):
             # `db.DbBusy` is the one this list did not used to need: reading a
             # state FILE could not be "busy", so a contended plan is a failure
@@ -1346,27 +1340,54 @@ def sweep_zombie_states(
         if dry_run:
             results.append(ZombieSweepResult(slug, reaped=False, terminalized=False))
             continue
-        # Re-check inside the write transaction so a concurrent tick that just
-        # revived this plan isn't terminalized — and leave the transaction by
-        # raising on the revived branch, so nothing is written when there is
-        # nothing to do.
+        # The reap shells out to `ps` and `kill` and polls for seconds, so it
+        # runs here — against the snapshot, with nothing held.
+        reap = st.reap_claim(data)
+        claim = data.get("current_claim") or {}
+        # The re-check that used to happen inside the write window is now a
+        # PRECONDITION: `is_zombie_state` reads the status and the claim, and
+        # both are re-asserted inside the apply's transaction. A concurrent
+        # tick that revived this plan between the scan and the write aborts the
+        # apply with `TickConflict` and nothing is written — including the
+        # version bump, which is the churn the old code avoided by saving only
+        # on the act path.
+        pre = plan_store.TickPreconditions(
+            expect_claim=observed.expect_claim,
+            expect_status=observed.expect_status,
+        )
+        delta = TickDelta(
+            release_claim=bool(claim),
+            status=st.STATUS_HALTED,
+            events=[
+                {
+                    "ts": st.utcnow(),
+                    "type": st.EVENT_PLAN_ABANDONED,
+                    "reason": "zombie_sweep",
+                }
+            ],
+        )
         try:
-            with plan_store.mutate_compat(orch_dir, slug) as live:
-                if not st.is_zombie_state(live):
-                    raise _PlanRevived
-                reap = st.reap_claim(live)
-                if live.get("current_claim"):
-                    st.release_claim_and_emit(live, **cfg.coolant.release_kwargs())
-                st.terminalize(live, reason="zombie_sweep")
-        except _PlanRevived:
+            plan_store.apply_tick_delta(orch_dir, slug, pre, delta)
+        except plan_store.TickConflict:
             continue
-        except db.DbBusy:
+        except (*db.DEGRADABLE_ERRORS, ValueError, st.SchemaVersionMismatch):
             # Same reason as the read above: the write lock is the project's
             # now, so a tick working any plan in this project can hold it past
             # the budget. Taking down the sweep — and, from `clu doctor`, the
             # health report around it — over a plan the next tick will re-scan
-            # is the wrong trade.
+            # is the wrong trade. `DbBusy` is the contended case; the rest of
+            # the family covers a store that broke between the read and the
+            # write.
             continue
+        # After the commit: coolant shells out to a script, and the write lock
+        # it used to be emitted under is the whole project's now.
+        if claim and cfg.coolant.enabled and claim.get("claimed_by") and claim.get("phase_id"):
+            coolant.emit_stop(
+                session_id=claim["claimed_by"],
+                agent_id=coolant.format_agent_id(slug, claim["phase_id"]),
+                agent_type=coolant.AGENT_TYPE,
+                script_override=cfg.coolant.script_dir,
+            )
         results.append(
             ZombieSweepResult(slug, reaped=bool(reap and reap.signaled), terminalized=True)
         )

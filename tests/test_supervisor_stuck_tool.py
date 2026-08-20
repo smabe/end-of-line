@@ -21,7 +21,7 @@ from end_of_line.supervisor import (
     _parse_ps_output,
     walk_worker_tree,
 )
-from tests import CluTestCase, utcnow_minus
+from tests import CluTestCase, utcnow_minus, write_state
 
 
 class ParseDurationTestCase(unittest.TestCase):
@@ -425,7 +425,7 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
             "pid": worker_pid,
             "active_tool_started_at": utcnow_minus(720),
         }
-        st.save_atomic(state_path, data)
+        write_state(state_path, data)
         return state_path
 
     def _register(self, project: Path, slug: str = "plan-x") -> None:
@@ -535,7 +535,7 @@ class DoctorStuckToolHealthTestCase(CluTestCase):
         orch = project / "plans" / ".orchestrator"
         orch.mkdir(parents=True, exist_ok=True)
         data = st.empty_state("plan-x", str(project / "plans"))
-        st.save_atomic(orch / "plan-x.state.json", data)
+        write_state(orch / "plan-x.state.json", data)
         cfg = load_project_config(project)
         buf = io.StringIO()
         with redirect_stdout(buf):

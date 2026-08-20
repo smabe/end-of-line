@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
-from end_of_line import fleet, registry
+from end_of_line import db, fleet, plan_store, registry
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import isolate_registry, must
+from tests import isolate_registry, must, write_state
 
 
 class SummarizePlanTestCase(unittest.TestCase):
@@ -29,16 +31,50 @@ class SummarizePlanTestCase(unittest.TestCase):
     def _seed(self, slug: str, mutate=None) -> registry.PlanEntry:
         sp = self.project / "plans" / ".orchestrator" / f"{slug}.state.json"
         sp.parent.mkdir(parents=True, exist_ok=True)
-        with st.locked(sp):
-            data = st.empty_state(slug, "plans")
-            if mutate:
-                mutate(data)
-            st.save_atomic(sp, data)
+        data = st.empty_state(slug, "plans")
+        if mutate:
+            mutate(data)
+        write_state(sp, data)
         return registry.PlanEntry(
             project_root=str(self.project),
             plan_slug=slug,
             registered_at=st.utcnow(),
         )
+
+    def test_a_contended_store_reads_as_missing_rather_than_crashing(self) -> None:
+        # `load_entry_state` is THE fleet-read seam: `clu`'s summary, `clu top`,
+        # `clu serve`, the blocker locator and the SessionStart hook all walk
+        # every registered plan through it. `db.DbBusy` is a RuntimeError, so
+        # the file-era `except (OSError, ValueError, SchemaVersionMismatch)`
+        # would have let it through — and a dashboard would show a traceback
+        # because one plan's tick happened to be holding its project's write
+        # lock at that instant.
+        entry = self._seed("plan-a")
+        with mock.patch.object(plan_store, "snapshot", side_effect=db.DbBusy("project busy")):
+            self.assertIsNone(registry.load_entry_state(entry))
+            self.assertIsNone(fleet.summarize_plan(entry))
+
+    def test_a_broken_store_reads_as_missing_rather_than_crashing(self) -> None:
+        entry = self._seed("plan-a")
+        db.project_db_path(self.project / "plans" / ".orchestrator").write_bytes(b"not a database")
+        self.assertIsNone(registry.load_entry_state(entry))
+        self.assertIsNone(fleet.summarize_plan(entry))
+
+    def test_a_store_from_a_newer_clu_reads_as_missing(self) -> None:
+        entry = self._seed("plan-a")
+        conn = sqlite3.connect(
+            str(db.project_db_path(self.project / "plans" / ".orchestrator"))
+        )
+        conn.execute(f"PRAGMA user_version = {db.PROJECT_SCHEMA_VERSION + 1}")
+        conn.close()
+        self.assertIsNone(registry.load_entry_state(entry))
+        self.assertIsNone(fleet.summarize_plan(entry))
+
+    def test_a_readable_plan_still_summarizes(self) -> None:
+        # The other direction: the three assertions above must not be passing
+        # because the seam returns None for everything.
+        entry = self._seed("plan-a")
+        self.assertIsNotNone(registry.load_entry_state(entry))
 
     def test_fresh_plan_running_no_phase(self) -> None:
         entry = self._seed("plan-a")
@@ -142,11 +178,10 @@ class FleetCommandTestCase(unittest.TestCase):
         (project / "plans").mkdir()
         sp = project / "plans" / ".orchestrator" / f"{slug}.state.json"
         sp.parent.mkdir(parents=True, exist_ok=True)
-        with st.locked(sp):
-            data = st.empty_state(slug, "plans")
-            if mutate:
-                mutate(data)
-            st.save_atomic(sp, data)
+        data = st.empty_state(slug, "plans")
+        if mutate:
+            mutate(data)
+        write_state(sp, data)
         registry.register(project, slug)
         return project
 

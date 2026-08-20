@@ -13,6 +13,7 @@ from unittest import mock
 
 from end_of_line import state as st
 from end_of_line.supervisor import tick
+from tests import write_state
 from tests.test_supervisor import SupervisorTestCase
 
 
@@ -20,15 +21,14 @@ class WorkerDeadDedupTestCase(SupervisorTestCase):
     def _claim_dead(self, *, mark: bool) -> None:
         """Dispatch phase 'a', stamp a dead-looking PID, optionally pre-mark."""
         tick(self.state_path, self.cfg)  # dispatch phase a
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            claim = data["current_claim"]
-            claim["pid"] = 99999
-            # Lease far out so lease-expiry (priority 1) doesn't preempt.
-            claim["lease_expires"] = "2099-01-01T00:00:00Z"
-            if mark:
-                st.mark_worker_death_reported(claim, st._now_utc())
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        claim = data["current_claim"]
+        claim["pid"] = 99999
+        # Lease far out so lease-expiry (priority 1) doesn't preempt.
+        claim["lease_expires"] = "2099-01-01T00:00:00Z"
+        if mark:
+            st.mark_worker_death_reported(claim, st._now_utc())
+        write_state(self.state_path, data)
 
     def _tick_dead(self):
         with (
@@ -67,24 +67,23 @@ class WorkerDeadDedupTestCase(SupervisorTestCase):
         """Simulate the death-recovery daemon: report + release the claim, as
         cmd_notify_worker_dead now does. Leaves no current_claim behind."""
         tick(self.state_path, self.cfg)  # dispatch phase a
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            claim = data["current_claim"]
-            token = claim["claimed_by"]
-            st.mark_worker_death_reported(claim, st._now_utc())
-            st.append_event(
-                data,
-                st.EVENT_PHASE_WORKER_DEAD_REPORTED,
-                phase="a",
-                pid=claim.get("pid"),
-            )
-            st.release_claim_and_emit(
-                data,
-                expected_token=token,
-                expected_phase="a",
-                coolant_enabled=False,
-            )
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        claim = data["current_claim"]
+        token = claim["claimed_by"]
+        st.mark_worker_death_reported(claim, st._now_utc())
+        st.append_event(
+            data,
+            st.EVENT_PHASE_WORKER_DEAD_REPORTED,
+            phase="a",
+            pid=claim.get("pid"),
+        )
+        st.release_claim_and_emit(
+            data,
+            expected_token=token,
+            expected_phase="a",
+            coolant_enabled=False,
+        )
+        write_state(self.state_path, data)
 
     def test_tick_after_daemon_release_takes_no_worker_dead_action(self) -> None:
         # The daemon already released — a tick five seconds later finds no

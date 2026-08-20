@@ -11,7 +11,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
-from tests import isolate_registry
+from tests import isolate_registry, write_state
 
 PLAN_BODY = """\
 # Test plan
@@ -68,10 +68,9 @@ class ExtendLeaseTestCase(unittest.TestCase):
         return st.load(self.state_path)
 
     def _write(self, mut) -> None:
-        with st.locked(self.state_path):
-            data = st.load(self.state_path)
-            mut(data)
-            st.save_atomic(self.state_path, data)
+        data = st.load(self.state_path)
+        mut(data)
+        write_state(self.state_path, data)
 
     def _argv(self, minutes: str, *extra: str) -> list[str]:
         return [

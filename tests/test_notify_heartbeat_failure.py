@@ -12,7 +12,7 @@ from __future__ import annotations
 from end_of_line import inbox
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state
 
 PLAN_BODY = """\
 # Test plan
@@ -35,7 +35,7 @@ class NotifyHeartbeatFailureTestCase(CluTestCase):
             self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         )
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
         logs_dir = self.project / "plans" / ".orchestrator" / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)

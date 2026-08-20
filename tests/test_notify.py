@@ -15,7 +15,14 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, NotifySpec, ProjectConfig
 from end_of_line.supervisor import tick
-from tests import CluTestCase, capture_inbox_writer, isolate_registry, must
+from tests import (
+    CluTestCase,
+    capture_inbox_writer,
+    isolate_registry,
+    must,
+    mutate_state,
+    write_state,
+)
 
 PLAN_BODY = """\
 # Test plan
@@ -459,7 +466,7 @@ class NotifyIntegrationTestCase(CluTestCase):
         self._tmp.cleanup()
 
     def test_cmd_block_sends_blocker_notification(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             token = st.claim_phase(data, "a", lease_minutes=30)
         rc = main(
             [
@@ -489,7 +496,7 @@ class NotifyIntegrationTestCase(CluTestCase):
         self.assertIn("[1] Flask", body)
 
     def test_cmd_tick_sends_plan_completed(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             st.append_event(
                 data,
                 st.EVENT_PHASE_COMPLETED,
@@ -512,7 +519,7 @@ class NotifyIntegrationTestCase(CluTestCase):
         self.assertIn("1 commit", body)
 
     def test_cmd_tick_sends_halt_notification(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["config"]["max_attempts_per_phase"] = 2
             st.append_event(data, "phase_started", phase="a", claimed_by="x")
             st.append_event(data, "lease_expired", phase="a")
@@ -550,15 +557,14 @@ class StalledNotifyTestCase(unittest.TestCase):
         )
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         self.state_path.parent.mkdir(parents=True)
-        with st.locked(self.state_path):
-            st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))
+        write_state(self.state_path, st.empty_state("test-plan", "plans"))
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
     def test_stalled_tick_carries_notify_payload(self) -> None:
         tick(self.state_path, self.cfg)  # claim phase a
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["last_heartbeat_at"] = "2020-01-01T00:00:00Z"
         result = tick(self.state_path, self.cfg)
         self.assertEqual(result.action, "stalled")

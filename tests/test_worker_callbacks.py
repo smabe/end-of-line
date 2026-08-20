@@ -9,7 +9,7 @@ from pathlib import Path
 
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import isolate_registry
+from tests import isolate_registry, mutate_state
 
 PLAN_BODY = """\
 # Test plan
@@ -47,7 +47,7 @@ class WorkerCallbackTestCase(unittest.TestCase):
         # Init clu state + claim phase a
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def tearDown(self) -> None:

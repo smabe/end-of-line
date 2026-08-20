@@ -11,7 +11,7 @@ from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
 from end_of_line.supervisor import TickDelta, _detect_stalled, tick
-from tests import CluTestCase, must
+from tests import CluTestCase, must, mutate_state, write_state
 
 PLAN_BODY = """\
 # Test plan
@@ -29,7 +29,7 @@ def _backdate_claim(state_path: Path, *, minutes: int) -> None:
     """Pretend the worker last heartbeat-ed `minutes` ago."""
     past = _dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=minutes)
     stamp = past.strftime("%Y-%m-%dT%H:%M:%SZ")
-    with st.mutate(state_path) as data:
+    with mutate_state(state_path) as data:
         data["current_claim"]["last_heartbeat_at"] = stamp
 
 
@@ -165,7 +165,7 @@ class HeartbeatCliTestCase(CluTestCase):
         subprocess.run(["git", "init", "-q"], cwd=self.project, check=True)
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         main(["init", "--project", str(self.project), "--plan", "test-plan"])
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
 
     def test_heartbeat_cli_succeeds_with_matching_token(self) -> None:
@@ -221,8 +221,7 @@ class StalledSupervisorTestCase(CluTestCase):
         )
         self.state_path = self.project / "plans" / ".orchestrator" / "test-plan.state.json"
         self.state_path.parent.mkdir(parents=True)
-        with st.locked(self.state_path):
-            st.save_atomic(self.state_path, st.empty_state("test-plan", "plans"))
+        write_state(self.state_path, st.empty_state("test-plan", "plans"))
 
     def _read(self) -> dict:
         return st.load(self.state_path)
@@ -261,7 +260,7 @@ class StalledSupervisorTestCase(CluTestCase):
     def test_lease_expiry_takes_priority_over_stalled(self) -> None:
         """If the lease is past, the lease-expiry path fires — not stalled."""
         tick(self.state_path, self.cfg)
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["lease_expires"] = "2020-01-01T00:00:00Z"
         _backdate_claim(self.state_path, minutes=99)
         result = tick(self.state_path, self.cfg)

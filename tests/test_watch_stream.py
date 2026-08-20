@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from end_of_line import db
+from end_of_line import db, plan_store
 from end_of_line import state as st
 from end_of_line.watch import stream_loop
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state, write_state
 
 TS = "2026-05-17T10:00:00Z"
 
@@ -56,11 +58,15 @@ def _make_state(
         "created_at": TS,
     }
     # Through the store: `path` is the key to a row in the project database.
-    st.save_atomic(path, data)
+    write_state(path, data)
+
+
+def _archive(orch: Path, slug: str) -> None:
+    plan_store.op_archive_events(orch, slug)
 
 
 def _append_event(path: Path, event: dict) -> None:
-    with st.mutate(path) as data:
+    with mutate_state(path) as data:
         data["events"].append(event)
 
 
@@ -333,6 +339,144 @@ class StreamLoopMultiPlanTest(CluTestCase):
         self.assertIn("beta", out)
         self.assertIn("started", out)
         self.assertIn("PLAN DONE", out)
+
+
+class StreamLoopNativeReadTest(CluTestCase):
+    """How the poll reads, not what it prints.
+
+    The stream holds ONE read-only connection per project database for its
+    whole life and asks `PRAGMA data_version` before querying anything: the
+    counter moves only when another connection commits, which is exactly the
+    question "did anything happen since my last poll".
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.tmp_path / "project"
+        self.orch = self.project / "plans" / ".orchestrator"
+        self.state_path = self.orch / "my-plan.state.json"
+        _make_state(self.state_path, "my-plan")
+
+    @contextmanager
+    def _sql_trace(self):
+        """Every SQL statement the stream's own connections execute, in order."""
+        log: list[str] = []
+        real_connect = db.connect
+
+        def _traced(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            conn.set_trace_callback(lambda sql: log.append(" ".join(sql.split())))
+            return conn
+
+        with mock.patch.object(db, "connect", _traced):
+            yield log
+
+    def test_an_idle_poll_runs_no_query_at_all(self) -> None:
+        # The whole performance argument for the migration's read side: a
+        # stream watching a quiet plan costs one PRAGMA per tick, where it used
+        # to parse the plan's entire event history off disk every second.
+        sink = io.StringIO()
+        with self._sql_trace() as log:
+            # Nothing commits between the baseline and the polls, so the polls
+            # have nothing to find.
+            stream_loop([self.state_path], sink=sink, poll_interval=0, max_ticks=3)
+        polls = [sql for sql in log if "data_version" in sql]
+        selects = [
+            sql
+            for sql in log
+            if sql.upper().startswith("SELECT") and "FROM events" in sql and "id >" in sql
+        ]
+        self.assertEqual(
+            len(polls),
+            4,
+            f"expected one reading at open plus one per tick, got {polls}",
+        )
+        self.assertEqual(
+            selects,
+            [],
+            f"an idle poll queried the events table: {selects}",
+        )
+
+    def test_a_poll_that_finds_a_commit_does_query(self) -> None:
+        # The other direction, so the assertion above cannot pass by the loop
+        # simply never reading anything.
+        sink = io.StringIO()
+        with self._sql_trace() as log:
+            stream_loop(
+                [self.state_path],
+                sink=sink,
+                poll_interval=0,
+                max_ticks=1,
+                _before_first_tick=lambda: _append_event(
+                    self.state_path, _evt(st.EVENT_PLAN_COMPLETED)
+                ),
+            )
+        selects = [
+            sql
+            for sql in log
+            if sql.upper().startswith("SELECT") and "FROM events" in sql and "id >" in sql
+        ]
+        self.assertTrue(selects, f"the poll never queried the events table: {log}")
+        self.assertIn("PLAN DONE", sink.getvalue())
+
+    def test_archival_mid_stream_emits_nothing_and_never_rewinds(self) -> None:
+        # Archival moves a plan's events out of the hot table, so the events a
+        # cursor was counting go to zero. A LENGTH cursor would read that as
+        # "rewound" and replay the whole history; a max-id cursor cannot,
+        # because ids are monotonic and never reused.
+        _append_event(self.state_path, _evt(st.EVENT_PHASE_STARTED, phase="a", attempts=1))
+        sink = io.StringIO()
+        stream_loop(
+            [self.state_path],
+            sink=sink,
+            poll_interval=0,
+            max_ticks=2,
+            _before_first_tick=lambda: _archive(self.orch, "my-plan"),
+        )
+        emitted = [
+            line for line in sink.getvalue().splitlines() if not line.startswith("[snapshot]")
+        ]
+        self.assertEqual(emitted, [], f"archival replayed history: {emitted}")
+
+    def test_a_busy_on_the_first_statement_degrades_rather_than_raising(self) -> None:
+        # `read_txn` translates a busy at its own BEGIN into `db.DbBusy` — but a
+        # deferred BEGIN acquires nothing, so the snapshot is taken by the FIRST
+        # statement inside it and a busy there arrives as SQLite's own
+        # `OperationalError`, which `read_txn` never sees. Every reader this
+        # stream uses is a poller, so it has to survive both spellings.
+        calls: list[int] = []
+        real = plan_store.events_after
+
+        def flaky(cur, slug, after_id):
+            calls.append(after_id)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real(cur, slug, after_id)
+
+        sink = io.StringIO()
+        with mock.patch.object(plan_store, "events_after", flaky):
+            stream_loop(
+                [self.state_path],
+                sink=sink,
+                poll_interval=0,
+                max_ticks=2,
+                _before_first_tick=lambda: _append_event(
+                    self.state_path, _evt(st.EVENT_PLAN_COMPLETED)
+                ),
+            )
+        # It kept the plan and tried again, rather than dropping it and going
+        # quiet for the rest of the stream's life.
+        self.assertEqual(len(calls), 2, f"the busy poll was not retried: {calls}")
+        self.assertIn("PLAN DONE", sink.getvalue())
+
+    def test_a_store_from_a_newer_clu_is_dropped_not_raised(self) -> None:
+        conn = sqlite3.connect(str(db.project_db_path(self.orch)))
+        conn.execute(f"PRAGMA user_version = {db.PROJECT_SCHEMA_VERSION + 1}")
+        conn.close()
+        sink = io.StringIO()
+        rc = stream_loop([self.state_path], sink=sink, poll_interval=0, max_ticks=2)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sink.getvalue(), "")
 
 
 class StreamLoopSigintTest(CluTestCase):

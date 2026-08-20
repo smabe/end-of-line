@@ -27,7 +27,7 @@ from unittest import mock
 from end_of_line import config, inbox, notify, quota
 from end_of_line import state as st
 from end_of_line.cli import main
-from tests import CluTestCase, plan_body
+from tests import CluTestCase, mutate_state, plan_body
 
 PLAN_BODY = plan_body("a")
 
@@ -51,7 +51,7 @@ class NotifyWorkerDeadTestCase(CluTestCase):
             self.project / "plans" / ".orchestrator" / "logs" / "a.session-x.log"
         )
         self.attempt_log.parent.mkdir(parents=True, exist_ok=True)
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             self.token = st.claim_phase(data, "a", lease_minutes=30)
             data["current_claim"]["pid"] = 4242
             data["current_claim"]["log_path"] = str(self.attempt_log)
@@ -113,7 +113,7 @@ class NotifyWorkerDeadTestCase(CluTestCase):
         # reported (e.g. by a prior daemon fire) short-circuits without
         # releasing, or a second invocation would release a newly dispatched
         # worker's claim.
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             st.mark_worker_death_reported(data["current_claim"], st._now_utc())
         with mock.patch.object(notify, "notify") as m_notify:
             rc = self._call()
@@ -213,7 +213,7 @@ class NotifyWorkerDeadTestCase(CluTestCase):
         self.assertEqual(reap.call_args.kwargs["cmdline_match"], "test-plan")
 
     def test_reap_prefers_explicit_pgid(self) -> None:
-        with st.mutate(self.state_path) as data:
+        with mutate_state(self.state_path) as data:
             data["current_claim"]["pgid"] = 7777
         with mock.patch("end_of_line.state.reap_orphan_pgroup") as reap:
             self._call()

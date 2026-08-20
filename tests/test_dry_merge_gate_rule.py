@@ -19,7 +19,7 @@ from end_of_line.cross_plan_rules import (
     run_rules,
 )
 from end_of_line.dry_merge import MergeResult
-from tests import CluTestCase
+from tests import CluTestCase, write_state
 from tests import git as _git
 from tests import make_git_project as _make_git_project
 
@@ -62,7 +62,7 @@ def _make_done_plan(
             "path": f"/tmp/wt-{slug}",
             "base_ref": "main",
         }
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
     return ProjectPlan(slug, dict(data), state_path)
 
 

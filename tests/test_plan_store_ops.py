@@ -1,10 +1,10 @@
 """Contract tests for the native write ops — the row-level half of the store.
 
-`mutate_compat` reads a whole plan and writes a whole plan back. These ops do
-one thing each, inside one `BEGIN IMMEDIATE`, touching only the rows that
-change. What they pin: the token check is the WHERE clause (so a stale worker
-loses the race instead of winning it), every op bumps `plans.version` (the hint
-dashboards poll on), and a heartbeat never reads or rewrites the event log.
+The write half of the store: one op, one purpose, one `BEGIN IMMEDIATE`,
+touching only the rows that change. What they pin: the token check is the WHERE
+clause (so a stale worker loses the race instead of winning it), every op bumps
+`plans.version` (the hint dashboards poll on), and a heartbeat never reads or
+rewrites the event log.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from end_of_line import db, plan_store
 from end_of_line import state as st
-from tests import CluTestCase
+from tests import CluTestCase, mutate_state
 
 
 def _seed(orch_dir: Path, slug: str = "p1") -> dict:
@@ -27,7 +27,7 @@ def _seed(orch_dir: Path, slug: str = "p1") -> dict:
 
 
 def _claim(orch_dir: Path, slug: str = "p1", phase: str = "a") -> str:
-    with plan_store.mutate_compat(orch_dir, slug) as data:
+    with mutate_state(orch_dir / f"{slug}{plan_store.STATE_SUFFIX}") as data:
         return st.claim_phase(data, phase, lease_minutes=30)
 
 
@@ -52,6 +52,25 @@ def _age_claim(orch_dir: Path, slug: str = "p1") -> None:
             cur.execute(
                 "UPDATE claims SET last_heartbeat_at = ?, started_at = ? WHERE plan_slug = ?",
                 (AGED, AGED, slug),
+            )
+    finally:
+        conn.close()
+
+
+def _set_claim_field(orch_dir: Path, column: str, value: object, slug: str = "p1") -> None:
+    """Backdate (or otherwise pin) one claim column so a later write is visible.
+
+    Same reason as `_age_claim`: `st.utcnow()` is second-resolution, so a test
+    that asserts on a freshly-written timestamp has to start from a value the
+    op could not have produced.
+    """
+    assert column in ("lease_expires", "started_at", "last_heartbeat_at")
+    conn = db.connect(db.project_db_path(orch_dir))
+    try:
+        with db.write_txn(conn) as cur:
+            cur.execute(
+                f"UPDATE claims SET {column} = ? WHERE plan_slug = ?",
+                (value, slug),
             )
     finally:
         conn.close()
@@ -181,26 +200,31 @@ def _heartbeat_worker(orch: str, token: str, count: int, out, gate) -> None:
     out.put(f"ok:{ok}")
 
 
-def _mutate_worker(orch: str, count: int, out, gate) -> None:
-    """Child process: N whole-state compat cycles, the facade's shape."""
+def _tick_worker(orch: str, count: int, out, gate) -> None:
+    """Child process: N tick applies — the other big writer in the fleet."""
     from end_of_line import plan_store as ps
     from end_of_line import state as _st
+    from end_of_line.supervisor import TickDelta
 
     gate.wait(30)
     try:
         for _ in range(count):
-            with ps.mutate_compat(Path(orch), "p1") as data:
-                _st.append_event(data, "probe_tick")
+            ps.apply_tick_delta(
+                Path(orch),
+                "p1",
+                ps.TickPreconditions(),
+                TickDelta(events=[{"ts": _st.utcnow(), "type": "probe_tick"}]),
+            )
         out.put("ok")
     except BaseException as exc:  # pragma: no cover - reported below
         out.put(f"{type(exc).__name__}: {exc}")
 
 
-class OpsVersusFacadeTests(OpsTestCase):
-    """Two PROCESSES, not two threads — the ops must survive a concurrent
-    whole-state write from another clu (a tick) without losing a beat."""
+class OpsVersusTickTests(OpsTestCase):
+    """Two PROCESSES, not two threads — the ops must survive a concurrent tick
+    apply from another clu without losing a beat."""
 
-    def test_heartbeats_are_not_lost_under_a_concurrent_mutate_compat(self):
+    def test_heartbeats_are_not_lost_under_a_concurrent_tick_apply(self):
         token = _claim(self.orch)
         # Backdate before the run. Without this the final assertion cannot
         # fail: `last_heartbeat_at` is already non-null and already carries
@@ -216,21 +240,21 @@ class OpsVersusFacadeTests(OpsTestCase):
         # process startup is fast enough here to hide the contention otherwise.
         gate = ctx.Barrier(2)
         a = ctx.Process(target=_heartbeat_worker, args=(str(self.orch), token, beats, out, gate))
-        b = ctx.Process(target=_mutate_worker, args=(str(self.orch), cycles, out, gate))
+        b = ctx.Process(target=_tick_worker, args=(str(self.orch), cycles, out, gate))
         a.start()
         b.start()
         a.join(120)
         b.join(120)
         results = [out.get(timeout=10) for _ in range(2)]
         self.assertEqual(sorted(results), sorted([f"ok:{beats}", "ok"]))
-        # No heartbeat was lost: the facade's write-back rebuilt the claim from
-        # a snapshot taken inside its own transaction, so the last beat stands.
+        # Nothing was lost in either direction: every tick's event landed, and
+        # the claim still carries a beat rather than the backdated value.
         self.assertEqual(_count(self.orch, "events"), 1 + cycles)
         claim = plan_store.snapshot(self.orch, "p1")["current_claim"]
         self.assertNotEqual(
             claim["last_heartbeat_at"],
             AGED,
-            "every beat was clobbered by the concurrent whole-state write-back",
+            "every beat was clobbered by the concurrent tick apply",
         )
 
 
@@ -259,9 +283,14 @@ class ActivityOpTests(OpsTestCase):
         release = threading.Event()
 
         def hold() -> None:
-            with plan_store.mutate_compat(self.orch, "p1"):
-                started.set()
-                release.wait(5)
+            conn = db.connect(db.project_db_path(self.orch))
+            try:
+                with db.write_txn(conn) as cur:
+                    cur.execute("UPDATE plans SET version = version + 1 WHERE slug = 'p1'")
+                    started.set()
+                    release.wait(5)
+            finally:
+                conn.close()
 
         holder = threading.Thread(target=hold)
         holder.start()
@@ -834,6 +863,150 @@ class SchemaGuardTests(OpsTestCase):
             plan_store.op_append_events(
                 self.orch, "p1", [{"ts": st.utcnow(), "type": st.EVENT_PAUSED}]
             )
+
+
+class SetFieldsOpTests(OpsTestCase):
+    """`op_set_fields` — the plan-head writer the operator commands need.
+
+    Three destinations, one call: a scalar column, a JSON column, and the
+    `extra` catch-all every field clu never gave a column to lands in.
+    """
+
+    def test_writes_a_scalar_column(self):
+        plan_store.op_set_fields(self.orch, "p1", {"batch_id": "b-7"})
+        self.assertEqual(plan_store.snapshot(self.orch, "p1")["batch_id"], "b-7")
+
+    def test_writes_an_unknown_field_into_the_catch_all_and_reads_it_back(self):
+        plan_store.op_set_fields(self.orch, "p1", {"ship_pending": {"mode": "as_pr"}})
+        self.assertEqual(
+            plan_store.snapshot(self.orch, "p1")["ship_pending"], {"mode": "as_pr"}
+        )
+
+    def test_a_second_write_does_not_erase_the_first_catch_all_field(self):
+        plan_store.op_set_fields(self.orch, "p1", {"ship_pending": {"mode": "as_pr"}})
+        plan_store.op_set_fields(self.orch, "p1", {"in_conflict_with": ["other"]})
+        data = plan_store.snapshot(self.orch, "p1")
+        self.assertEqual(data["ship_pending"], {"mode": "as_pr"})
+        self.assertEqual(data["in_conflict_with"], ["other"])
+
+    def test_remove_drops_a_catch_all_field(self):
+        plan_store.op_set_fields(self.orch, "p1", {"ship_pending": {"m": 1}, "keep": 2})
+        plan_store.op_set_fields(self.orch, "p1", {}, remove=["ship_pending"])
+        data = plan_store.snapshot(self.orch, "p1")
+        self.assertNotIn("ship_pending", data)
+        self.assertEqual(data["keep"], 2)
+
+    def test_removing_a_field_that_was_never_there_is_a_no_op(self):
+        plan_store.op_set_fields(self.orch, "p1", {}, remove=["never_set"])
+        self.assertNotIn("never_set", plan_store.snapshot(self.orch, "p1"))
+
+    def test_events_land_in_the_same_transaction(self):
+        plan_store.op_set_fields(
+            self.orch,
+            "p1",
+            {"batch_id": "b-1"},
+            events=[{"ts": st.utcnow(), "type": st.EVENT_PAUSED, "reason": "x"}],
+        )
+        data = plan_store.snapshot(self.orch, "p1")
+        self.assertEqual(data["batch_id"], "b-1")
+        self.assertEqual([e["type"] for e in data["events"]], [st.EVENT_PAUSED])
+
+    def test_refuses_a_derived_key(self):
+        # `events`/`blockers`/`current_claim` are OTHER TABLES. Accepting them
+        # here would silently drop the write.
+        for key in ("events", "blockers", "current_claim", "plan_slug", "schema_version"):
+            with self.assertRaises(ValueError, msg=key):
+                plan_store.op_set_fields(self.orch, "p1", {key: []})
+
+    def test_missing_plan_raises_file_not_found(self):
+        with self.assertRaises(FileNotFoundError):
+            plan_store.op_set_fields(self.orch, "absent", {"batch_id": "x"})
+
+    def test_bumps_the_version(self):
+        before = _version(self.orch)
+        plan_store.op_set_fields(self.orch, "p1", {"batch_id": "b"})
+        self.assertEqual(_version(self.orch), before + 1)
+
+
+class SetWorktreeOpTests(OpsTestCase):
+    """A cleared worktree and an absent one are DIFFERENT states.
+
+    `cmd_complete` and the archive path set `worktree` to None explicitly;
+    `get_worktree` reads `data.get("worktree")`. A clear that removed the key
+    would be indistinguishable from a plan that never had one — which is fine
+    for `get_worktree` and wrong for anything that asks whether the key is
+    present, so the store keeps the two apart and this pins it.
+    """
+
+    def test_sets_a_record(self):
+        record = {"path": "/tmp/wt", "branch": "clu/p1", "base_ref": "abc"}
+        plan_store.op_set_worktree(self.orch, "p1", record)
+        self.assertEqual(plan_store.snapshot(self.orch, "p1")["worktree"], record)
+
+    def test_clearing_leaves_the_key_present_and_null(self):
+        plan_store.op_set_worktree(self.orch, "p1", {"path": "/tmp/wt", "branch": "b"})
+        plan_store.op_set_worktree(self.orch, "p1", None)
+        data = plan_store.snapshot(self.orch, "p1")
+        self.assertIn("worktree", data)
+        self.assertIsNone(data["worktree"])
+
+    def test_a_plan_that_never_had_one_has_no_key(self):
+        self.assertNotIn("worktree", plan_store.snapshot(self.orch, "p1"))
+
+    def test_carries_its_events(self):
+        plan_store.op_set_worktree(
+            self.orch,
+            "p1",
+            None,
+            events=[{"ts": st.utcnow(), "type": st.EVENT_WORKTREE_CLEANED, "path": "/tmp/wt"}],
+        )
+        data = plan_store.snapshot(self.orch, "p1")
+        self.assertIsNone(data["worktree"])
+        self.assertEqual([e["type"] for e in data["events"]], [st.EVENT_WORKTREE_CLEANED])
+
+
+class ExtendLeaseOpTests(OpsTestCase):
+    def test_extends_from_the_current_expiry_and_leaves_the_neighbour_alone(self):
+        token = _claim(self.orch)
+        _age_claim(self.orch)
+        # Backdate the lease too — and to a value in the PAST, so the op's
+        # `max(current, now)` baseline is `now` and the result is
+        # distinguishable from what was there.
+        _set_claim_field(self.orch, "lease_expires", AGED)
+        new_expires = plan_store.op_extend_lease(self.orch, "p1", phase="a", minutes=30)
+        claim = plan_store.snapshot(self.orch, "p1")["current_claim"]
+        self.assertNotEqual(claim["lease_expires"], AGED, "the lease was not extended")
+        self.assertEqual(claim["lease_expires"], new_expires)
+        self.assertGreater(new_expires, AGED)
+        # `started_at` is the neighbouring timestamp column a wrong-column
+        # UPDATE would land in.
+        self.assertEqual(claim["started_at"], AGED)
+        self.assertEqual(claim["claimed_by"], token)
+
+    def test_extends_from_a_future_expiry_rather_than_from_now(self):
+        _claim(self.orch)
+        far = "2999-01-01T00:00:00Z"
+        _set_claim_field(self.orch, "lease_expires", far)
+        new_expires = plan_store.op_extend_lease(self.orch, "p1", phase="a", minutes=60)
+        self.assertEqual(new_expires, "2999-01-01T01:00:00Z")
+
+    def test_appends_the_lease_extended_event(self):
+        _claim(self.orch)
+        plan_store.op_extend_lease(self.orch, "p1", phase="a", minutes=15)
+        events = plan_store.snapshot(self.orch, "p1")["events"]
+        extended = [e for e in events if e["type"] == st.EVENT_LEASE_EXTENDED]
+        self.assertEqual(len(extended), 1)
+        self.assertEqual(extended[0]["extended_by_minutes"], 15)
+        self.assertTrue(extended[0]["operator"])
+
+    def test_no_claim_raises_claim_mismatch(self):
+        with self.assertRaises(st.ClaimMismatch):
+            plan_store.op_extend_lease(self.orch, "p1", phase="a", minutes=10)
+
+    def test_a_claim_on_another_phase_raises(self):
+        _claim(self.orch, phase="a")
+        with self.assertRaises(st.ClaimMismatch):
+            plan_store.op_extend_lease(self.orch, "p1", phase="b", minutes=10)
 
 
 class InvalidSlugTests(OpsTestCase):

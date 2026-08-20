@@ -110,13 +110,26 @@ def _is_plan_active(state: dict) -> bool:
 
 
 def _apply(result: RuleResult) -> None:
+    """Write one rule's decision — per plan, one transaction each.
+
+    Fields and events for a given plan go in TOGETHER: every rule that stamps a
+    field also records why (`in_conflict_with` beside its warning event), and a
+    dashboard must never see the dedup marker without the event that earned it.
+    Across plans it is one transaction per plan, exactly as it was one `mutate`
+    per plan before — the rules that touch several plans set the same field on
+    each, and a partial application is re-derived by the next tick.
+    """
     all_paths = set(result.events_per_plan) | set(result.field_updates_per_plan)
     for state_path in all_paths:
-        with st.mutate(state_path) as data:
-            for event in result.events_per_plan.get(state_path, []):
-                st.append_event(data, event["type"], **event.get("kwargs", {}))
-            for fld, val in result.field_updates_per_plan.get(state_path, {}).items():
-                data[fld] = val
+        events = [
+            {"ts": st.utcnow(), "type": event["type"], **event.get("kwargs", {})}
+            for event in result.events_per_plan.get(state_path, [])
+        ]
+        plan_store.op_set_fields(
+            *plan_store.key_for_state_path(state_path),
+            dict(result.field_updates_per_plan.get(state_path, {})),
+            events=events,
+        )
 
 
 def queue_advancement_rule(

@@ -19,7 +19,7 @@ from end_of_line import db, notify, queue, registry
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import ProjectConfig
-from tests import isolate_registry, stamp_future_schema
+from tests import isolate_registry, mutate_state, stamp_future_schema, write_state
 
 _PLAN_BODY = """\
 # Test plan
@@ -61,7 +61,7 @@ class _Base(unittest.TestCase):
         self.assertEqual(rc, 0)
         if parked_seed:
             cfg = ProjectConfig(project_root=project)
-            with st.mutate(cfg.state_path("seed")) as data:
+            with mutate_state(cfg.state_path("seed")) as data:
                 data["status"] = st.STATUS_DONE
         return project
 
@@ -96,7 +96,7 @@ class _Base(unittest.TestCase):
 
     def _set_status(self, project: Path, slug: str, status: str) -> None:
         cfg = ProjectConfig(project_root=project)
-        with st.mutate(cfg.state_path(slug)) as data:
+        with mutate_state(cfg.state_path(slug)) as data:
             data["status"] = status
 
     def _state(self, project: Path, slug: str) -> dict:
@@ -140,7 +140,7 @@ class QueuePopTestCase(_Base):
         project = self._make_project("alpha", parked_seed=False)
         # Plant a current_claim on seed so the busy gate fires.
         cfg = ProjectConfig(project_root=project)
-        with st.mutate(cfg.state_path("seed")) as data:
+        with mutate_state(cfg.state_path("seed")) as data:
             data["current_claim"] = {
                 "phase_id": "only",
                 "claimed_by": "session-busy",
@@ -168,7 +168,7 @@ class QueuePopTestCase(_Base):
         a = self._make_project("alpha", parked_seed=False)
         # busy A
         cfg_a = ProjectConfig(project_root=a)
-        with st.mutate(cfg_a.state_path("seed")) as data:
+        with mutate_state(cfg_a.state_path("seed")) as data:
             data["current_claim"] = {
                 "phase_id": "only",
                 "claimed_by": "session-busy",
@@ -207,7 +207,7 @@ class QueuePopTestCase(_Base):
         # tick-all doesn't immediately re-claim phase `only`. With a parked,
         # the busy gate lifts and b finally pops.
         cfg = ProjectConfig(project_root=project)
-        with st.mutate(cfg.state_path("a")) as data:
+        with mutate_state(cfg.state_path("a")) as data:
             data["current_claim"] = None
             data["status"] = st.STATUS_DONE
         rc, _, _ = self._run()
@@ -220,8 +220,8 @@ class QueuePopTestCase(_Base):
         # Pre-register foo + set its status to the freeze status.
         registry.register(project, "foo")
         cfg = ProjectConfig(project_root=project)
-        st.save_atomic(cfg.state_path("foo"), st.empty_state("foo", cfg.plan_dir))
-        with st.mutate(cfg.state_path("foo")) as data:
+        write_state(cfg.state_path("foo"), st.empty_state("foo", cfg.plan_dir))
+        with mutate_state(cfg.state_path("foo")) as data:
             data["status"] = freeze_status
         self._enqueue(project, "foo", write_plan=False)
         self._enqueue(project, "bar")
@@ -245,8 +245,8 @@ class QueuePopTestCase(_Base):
         self._write_plan_file(project, "foo")
         registry.register(project, "foo")
         cfg = ProjectConfig(project_root=project)
-        st.save_atomic(cfg.state_path("foo"), st.empty_state("foo", cfg.plan_dir))
-        with st.mutate(cfg.state_path("foo")) as data:
+        write_state(cfg.state_path("foo"), st.empty_state("foo", cfg.plan_dir))
+        with mutate_state(cfg.state_path("foo")) as data:
             data["status"] = st.STATUS_DONE
         self._enqueue(project, "foo", write_plan=False)
 
@@ -272,7 +272,7 @@ class QueuePopTestCase(_Base):
         (project / "plans" / "foo.md").write_text("# foo\n(no sessions)\n")
         registry.register(project, "foo")
         cfg = ProjectConfig(project_root=project)
-        st.save_atomic(cfg.state_path("foo"), st.empty_state("foo", cfg.plan_dir))
+        write_state(cfg.state_path("foo"), st.empty_state("foo", cfg.plan_dir))
         # Status stays at RUNNING (the default).
         self._enqueue(project, "foo", write_plan=False)
 
@@ -341,7 +341,7 @@ class QueuePopTestCase(_Base):
             added_by="operator",
             position=1,
         )
-        st.save_atomic(cfg.state_path("foo"), state)
+        write_state(cfg.state_path("foo"), state)
         self._enqueue(project, "foo", write_plan=False)
 
         rc, _, _ = self._run()

@@ -18,7 +18,7 @@ from end_of_line import db, queue, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, main
 from end_of_line.config import ProjectConfig
-from tests import isolate_queue
+from tests import isolate_queue, write_state
 
 _PLAN_BODY = "# placeholder plan\n"
 _TOKEN = "session-deadbeef0000"
@@ -41,7 +41,7 @@ def _seed_source_plan(project: Path, slug: str, phase: str, token: str) -> Path:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     data = st.empty_state(slug, "plans")
     st.claim_phase(data, phase, 30, token)
-    st.save_atomic(state_path, data)
+    write_state(state_path, data)
     return state_path
 
 
@@ -204,7 +204,7 @@ class WorkerDispatchTestCase(unittest.TestCase):
         state_path = self.cfg.state_path("feature-b")
         state_path.parent.mkdir(parents=True, exist_ok=True)
         data = st.empty_state("feature-b", "plans")
-        st.save_atomic(state_path, data)
+        write_state(state_path, data)
         _write_plan(self.project, "feature-c")
         rc, _, _ = self._run(
             [

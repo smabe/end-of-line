@@ -1,25 +1,22 @@
-"""Per-plan state in the project database, behind today's dict-shaped API.
+"""Per-plan state in the project database.
 
 Plan state used to be one JSON document per plan under
 `plans/.orchestrator/<slug>.state.json`, mutated under a sibling flock. It now
 lives in the project database (`plans/.orchestrator/clu.db`) as normalized rows
-— a `plans` head row plus `claims`, `blockers`, `spawned_tasks` and `events` —
-while every consumer keeps calling `st.load` / `st.mutate` and keeps getting the
-same dict back.
+— a `plans` head row plus `claims`, `blockers`, `spawned_tasks` and `events`.
 
-`mutate_compat` is what makes that true, and it is deliberately temporary. It
-loads the whole plan into today's dict shape, hands the caller that dict, and
-writes the WHOLE thing back inside one `BEGIN IMMEDIATE` transaction — the same
-information a JSON rewrite carried, so it is correctness-equivalent to what it
-replaces. The facade exists so the backend swap and the call-site migration are
-separate, reviewable commits, and it is deleted once no caller needs it.
+Reads still hand back the dict every consumer has always projected from:
+`snapshot` assembles one, inside ONE read transaction, so a writer committing
+halfway through cannot produce a claim from before it and events from after it.
 
-The `op_*` functions at the bottom are the other half, and the destination: one
-purpose, one transaction, only the rows that change. Every path that fires
-constantly is on them — heartbeats, activity stamps, the worker callbacks, the
-dispatcher's pid stamp — so a ping no longer rewrites a plan's whole event
-history to record one timestamp. The facade still carries the operator commands
-and the tick until later phases move them.
+Writes are the `op_*` functions: one purpose, one `BEGIN IMMEDIATE`
+transaction, only the rows that change. Nothing here reads a plan, hands the
+whole document to a caller and writes all of it back — that facade existed to
+carry the call sites across the engine swap and is gone, which is why a
+heartbeat no longer rewrites a plan's entire event history to record one
+timestamp. The tick is the one decision too big for a single op, and it has its
+own shape at the bottom of this file: snapshot, decide holding nothing, then
+apply under re-asserted preconditions.
 
 Two seams, not one. The `Path` a caller already holds is the KEY:
 `<orch_dir>/<slug>.state.json` names (the database in `<orch_dir>`, plan
@@ -42,10 +39,11 @@ corrupt JSON document raised.
 from __future__ import annotations
 
 import copy
+import datetime as _dt
 import errno
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,17 +59,16 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     # annotations` above keeps every annotation a string.
     from .supervisor import TickDelta
 
-# Re-exported from `state`, which owns the definition because its three
-# primitives route on it. Named here too so the store's own callers do not have
-# to know which module holds the constant.
+# Re-exported from `state`, which owns the definition because `key_for` routes
+# on it. Named here too so the store's own callers do not have to know which
+# module holds the constant.
 STATE_SUFFIX = st.STATE_SUFFIX
 
-# What `mutate_compat` waits when the caller names no budget. Today's
-# `st.mutate` blocks on the flock indefinitely, and the closest safe stand-in is
-# a wait long enough that every real contender finishes first: the supervisor's
-# tick holds its window across a `reap_orphan_pgroup` that polls for up to 5s,
-# and heartbeats/dispatch stamps are milliseconds. Bounded rather than infinite
-# so a genuinely wedged holder surfaces as an error instead of a hung fleet.
+# What a write waits for the project's lock when the caller names no budget.
+# The flock it replaced blocked indefinitely, and the closest safe stand-in is a
+# wait long enough that every real contender finishes first — every op is now a
+# handful of statements, so the only way to spend this is a wedged holder, and
+# bounded means that surfaces as an error instead of a hung fleet.
 BLOCKING_TIMEOUT_S = 60.0
 
 # --- column maps -------------------------------------------------------------
@@ -455,16 +452,37 @@ def _read_events(cur: sqlite3.Cursor, slug: str) -> list[dict]:
         "SELECT id, ts, type, payload FROM events WHERE plan_slug = ? ORDER BY id",
         (slug,),
     ).fetchall()
-    events: list[dict] = []
-    for row in rows:
-        event: dict[str, Any] = {"ts": row["ts"], "type": row["type"]}
-        if row["payload"] is not None:
-            event.update(json.loads(row["payload"]))
-        # Last so it reads like today's `{ts, type, ...fields}` with the row id
-        # appended — and so a payload field can never shadow it.
-        event["id"] = row["id"]
-        events.append(event)
-    return events
+    return [_event_from_row(row) for row in rows]
+
+
+def events_after(cur: sqlite3.Cursor, slug: str, after_id: int) -> list[dict]:
+    """This plan's events past `after_id`, oldest first — `clu watch`'s poll.
+
+    The cursor is a row ID, and IDs are monotonic and never reused: archival
+    empties the hot table without ever moving one backwards, so a stream
+    watching a plan that gets archived mid-flight sees nothing new rather than
+    replaying its whole history (which a length cursor would).
+
+    Takes a CURSOR rather than a directory because the caller holds its own
+    read-only connection across frames — that is what makes `PRAGMA
+    data_version` mean anything — and opening a second one per poll would
+    defeat the point.
+    """
+    rows = cur.execute(
+        "SELECT id, ts, type, payload FROM events WHERE plan_slug = ? AND id > ? ORDER BY id",
+        (slug, after_id),
+    ).fetchall()
+    return [_event_from_row(row) for row in rows]
+
+
+def _event_from_row(row: sqlite3.Row) -> dict:
+    event: dict[str, Any] = {"ts": row["ts"], "type": row["type"]}
+    if row["payload"] is not None:
+        event.update(json.loads(row["payload"]))
+    # Last so it reads like today's `{ts, type, ...fields}` with the row id
+    # appended — and so a payload field can never shadow it.
+    event["id"] = row["id"]
+    return event
 
 
 # --- writes ------------------------------------------------------------------
@@ -501,99 +519,6 @@ def create_in_txn(cur: sqlite3.Cursor, data: dict, *, orch_dir: Path | None = No
     except sqlite3.IntegrityError as exc:
         path = _state_path_for(orch_dir, slug) if orch_dir is not None else slug
         raise FileExistsError(errno.EEXIST, "plan already exists", str(path)) from exc
-
-
-def write_full(orch_dir: Path, slug: str, data: dict) -> None:
-    """Replace this plan's rows with `data`, creating the plan if absent.
-
-    The store-side meaning of `save_atomic(state_path, data)`: the document is
-    replaced wholesale. Events are re-inserted rather than diffed, so ids are
-    minted fresh — which is what "the file was overwritten" always meant, and
-    why no production writer takes this path after the engine swap.
-    """
-    st.validate_slug(slug, kind="plan slug")
-    with _write_conn(orch_dir) as conn, db.write_txn(conn) as cur:
-        exists_row = cur.execute("SELECT 1 FROM plans WHERE slug = ?", (slug,)).fetchone()
-        if exists_row is None:
-            _insert_plan(cur, slug, data)
-            return
-        for table in ("claims", "blockers", "spawned_tasks", "events"):
-            cur.execute(f"DELETE FROM {table} WHERE plan_slug = ?", (slug,))
-        _update_head(cur, slug, data)
-        _write_claim(cur, slug, data.get("current_claim"))
-        _write_blockers(cur, slug, data.get("blockers") or [])
-        _write_tasks(cur, slug, data.get("spawned_tasks") or [])
-        _insert_events(cur, slug, data.get("events") or [])
-
-
-@contextmanager
-def mutate_compat(
-    orch_dir: Path,
-    slug: str,
-    *,
-    timeout_s: float | None = None,
-) -> Iterator[dict]:
-    """Load → yield the dict → write the whole thing back, in ONE transaction.
-
-    The dict handed out is the one serialized on the way out — never a copy
-    taken before the yield — because callers keep references into it
-    (`claim = data["current_claim"]; claim["pid"] = ...`) and mutate those
-    after the store has already seen the top level.
-
-    `timeout_s` bounds the wait for the write lock; exceeding it raises
-    `db.DbBusy`, which `state.mutate` re-raises as `LockTimeout` so the
-    activity hook's drop-on-contention contract survives verbatim.
-
-    One consequence worth naming: the lock this takes is the PROJECT's, not one
-    plan's file. Work done inside the window — a `ps`, a reap poll, a coolant
-    subprocess — now blocks every plan in the project rather than one. That is
-    inherent to running the whole read-modify-write in one transaction, and it
-    is what the tick restructure exists to remove.
-    """
-    st.validate_slug(slug, kind="plan slug")
-    with _write_conn(orch_dir, timeout_s=timeout_s) as conn:
-        with db.write_txn(conn, timeout_s=timeout_s) as cur:
-            data = _snapshot_in_txn(cur, orch_dir, slug)
-            event_ids = [evt.get("id") for evt in data["events"]]
-            yield data
-            _write_back(cur, slug, data, event_ids)
-
-
-def _write_back(cur: sqlite3.Cursor, slug: str, data: dict, event_ids: list[Any]) -> None:
-    events = data.get("events") or []
-    _assert_history_intact(slug, events, event_ids)
-    _update_head(cur, slug, data)
-    _write_claim(cur, slug, data.get("current_claim"))
-    # Blockers and tasks are small, bounded lists that callers reorder and
-    # restamp in place; replacing them wholesale is what keeps `rowid` order
-    # equal to list order, which is what makes `q-{n}` ids and the snapshot
-    # agree.
-    cur.execute("DELETE FROM blockers WHERE plan_slug = ?", (slug,))
-    _write_blockers(cur, slug, data.get("blockers") or [])
-    cur.execute("DELETE FROM spawned_tasks WHERE plan_slug = ?", (slug,))
-    _write_tasks(cur, slug, data.get("spawned_tasks") or [])
-    _insert_events(cur, slug, events[len(event_ids) :])
-
-
-def _assert_history_intact(slug: str, events: list[dict], event_ids: list[Any]) -> None:
-    """The event log is append-only; anything else is a caller bug.
-
-    Only entries past the original length are written back, so a caller that
-    replaced or truncated history would have its edit silently ignored — which
-    is worse than the loud failure, and is a bug against the JSON engine too
-    (projection rebuilds every derived field from this log).
-    """
-    if len(events) < len(event_ids):
-        raise RuntimeError(
-            f"{slug}: events were truncated inside a mutate window "
-            f"({len(event_ids)} → {len(events)}); the event log is append-only"
-        )
-    for i, prior in enumerate(event_ids):
-        if events[i].get("id") != prior:
-            raise RuntimeError(
-                f"{slug}: event {i} was rewritten inside a mutate window; "
-                f"the event log is append-only"
-            )
 
 
 def _insert_plan(cur: sqlite3.Cursor, slug: str, data: dict) -> None:
@@ -704,9 +629,9 @@ def _insert_events(cur: sqlite3.Cursor, slug: str, events: list[dict] | None) ->
 # --- native ops ---------------------------------------------------------------
 #
 # One op = one purpose = one `BEGIN IMMEDIATE` transaction touching only the
-# rows that change. This is what `mutate_compat` is not: a heartbeat here is a
-# single-row UPDATE, where the facade read the whole plan (events included) and
-# wrote the whole plan back — so every ~2min ping rewrote the entire history.
+# rows that change. A heartbeat here is a single-row UPDATE; the whole-document
+# write it replaced read the entire plan, events included, and wrote all of it
+# back — so every ~2min ping rewrote the whole history to stamp one timestamp.
 #
 # Three rules hold across the whole layer:
 #
@@ -1318,6 +1243,214 @@ def op_set_status(
             _release_in_txn(cur, orch_dir, slug, release_token, release_phase)
         cur.execute("UPDATE plans SET status = ? WHERE slug = ?", (status, slug))
         _insert_events(cur, slug, [event] if event is not None else None)
+
+
+def op_refuse_attestation(
+    orch_dir: Path,
+    slug: str,
+    *,
+    phase: str,
+    gate: str,
+    head_sha: str,
+) -> tuple[str | None, bool]:
+    """Record an attestation-gate refusal — unless the stamp landed meanwhile.
+
+    Returns `(the sha stamped at emit time, whether an event was written)`.
+    The re-check and the append are one transaction because that is what makes
+    the refusal honest: a `clu verify` that stamped between the caller's gate
+    snapshot and this write means the gate now PASSES, and a refusal event
+    recorded after it would tell the operator a lie about a worker that did
+    everything right.
+    """
+    with _plan_txn(orch_dir, slug) as cur:
+        row = cur.execute(
+            "SELECT attestations FROM claims WHERE plan_slug = ?",
+            (slug,),
+        ).fetchone()
+        raw = None if row is None else row["attestations"]
+        attestations = json.loads(raw) if raw is not None else {}
+        entry = attestations.get(gate)
+        fresh = entry.get("commit_sha") if entry else None
+        if fresh is not None and fresh == head_sha:
+            return None, False
+        _insert_events(
+            cur,
+            slug,
+            [
+                {
+                    "ts": st.utcnow(),
+                    "type": st.EVENT_ATTESTATION_REFUSED,
+                    "phase": phase,
+                    "gate": gate,
+                    "stamped_at": fresh,
+                    "head_sha": head_sha,
+                }
+            ],
+        )
+    return fresh, True
+
+
+def op_set_fields(
+    orch_dir: Path,
+    slug: str,
+    fields: dict[str, Any],
+    *,
+    remove: Sequence[str] = (),
+    events: list[dict] | None = None,
+) -> None:
+    """Write plan-HEAD fields, with the events that explain them.
+
+    Three destinations, chosen by the same column map `_head_values` uses on
+    the way in: a scalar column, a JSON column, or the `extra` catch-all. The
+    catch-all is MERGED rather than replaced, because two rules write two
+    different keys into it (`in_conflict_with`, `ready_to_ship_announced`) and
+    the second must not erase the first.
+
+    `remove` is what `dict.pop` used to be inside a mutate window: the archive
+    path drops `ship_pending` and `ready_to_ship_announced` so a shipped plan's
+    markers do not haunt it. A JSON column named there goes to SQL NULL, which
+    is the store's spelling of "the key was absent".
+
+    `events` ride the same transaction on purpose: a rule that sets a field AND
+    records why did both under one lock before, and a reader must not be able
+    to see one without the other.
+
+    Keys with a table of their own (`events`, `blockers`, `current_claim`,
+    `spawned_tasks`) are refused rather than routed into `extra` — accepting
+    them would write a shadow copy that no reader would ever return.
+    """
+    with _plan_txn(orch_dir, slug) as cur:
+        _set_head_fields(cur, slug, fields, remove)
+        _insert_events(cur, slug, events)
+
+
+def _set_head_fields(
+    cur: sqlite3.Cursor,
+    slug: str,
+    fields: dict[str, Any],
+    remove: Sequence[str] = (),
+) -> None:
+    columns: list[str] = []
+    values: list[Any] = []
+    extra_writes: dict[str, Any] = {}
+    extra_drops: list[str] = []
+    for key, value in fields.items():
+        if key in _PLAN_DERIVED:
+            raise ValueError(
+                f"{slug}: {key!r} is derived from another table — "
+                f"use the op that owns it, not op_set_fields"
+            )
+        if key in _PLAN_SCALARS:
+            columns.append(key)
+            values.append(value)
+        elif key in _PLAN_JSON:
+            columns.append(key)
+            values.append(json.dumps(value))
+        else:
+            extra_writes[key] = value
+    for key in remove:
+        if key in _PLAN_DERIVED or key in _PLAN_SCALARS:
+            raise ValueError(f"{slug}: {key!r} has a column of its own and cannot be removed")
+        if key in _PLAN_JSON:
+            columns.append(key)
+            values.append(None)
+        else:
+            extra_drops.append(key)
+    if extra_writes or extra_drops:
+        row = cur.execute("SELECT extra FROM plans WHERE slug = ?", (slug,)).fetchone()
+        raw = None if row is None else row["extra"]
+        extra = json.loads(raw) if raw is not None else {}
+        extra.update(extra_writes)
+        for key in extra_drops:
+            extra.pop(key, None)
+        columns.append("extra")
+        values.append(json.dumps(extra) if extra else None)
+    if not columns:
+        return
+    # Column names come from the frozen maps at the top of this module, never
+    # from caller text.
+    assignments = ", ".join(f"{col} = ?" for col in columns)
+    cur.execute(f"UPDATE plans SET {assignments} WHERE slug = ?", (*values, slug))
+
+
+def op_set_worktree(
+    orch_dir: Path,
+    slug: str,
+    worktree: dict | None,
+    *,
+    events: list[dict] | None = None,
+) -> None:
+    """Set — or explicitly CLEAR — the plan's worktree record.
+
+    A separate entry point from `op_set_fields` because clearing is not
+    removing: `cmd_complete` and the archive path write `None` and mean "this
+    plan HAD a worktree and no longer does", which the store keeps distinct
+    from a plan that never had one (`json.dumps(None)` is the text `null`;
+    absence is SQL NULL).
+    """
+    op_set_fields(orch_dir, slug, {"worktree": worktree}, events=events)
+
+
+def op_extend_lease(
+    orch_dir: Path,
+    slug: str,
+    *,
+    phase: str,
+    minutes: int,
+) -> str:
+    """Push the live claim's lease out by `minutes`. Returns the new expiry.
+
+    The baseline is `max(current expiry, now)` — extending a lease that already
+    expired must not hand back a deadline in the past, and extending a live one
+    must not shorten it. Read and write are one transaction, so two operators
+    running `clu extend-lease` at once cannot both extend from the same
+    baseline.
+
+    Compare-and-set on the PHASE (there is no worker token on this path — it is
+    an operator command): a claim that moved to another phase between the
+    caller's snapshot and this write raises `ClaimMismatch` rather than
+    extending a lease the operator never looked at.
+    """
+    with _plan_txn(orch_dir, slug) as cur:
+        row = cur.execute(
+            "SELECT claimed_by, phase_id, lease_expires FROM claims WHERE plan_slug = ?",
+            (slug,),
+        ).fetchone()
+        if row is None or row["phase_id"] != phase:
+            raise _claim_mismatch(cur, slug, None if row is None else row["claimed_by"], phase)
+        new_expires = _extended_expiry(row["lease_expires"], minutes)
+        cur.execute(
+            "UPDATE claims SET lease_expires = ? WHERE plan_slug = ?",
+            (new_expires, slug),
+        )
+        _insert_events(
+            cur,
+            slug,
+            [
+                {
+                    "ts": st.utcnow(),
+                    "type": st.EVENT_LEASE_EXTENDED,
+                    "phase": phase,
+                    "extended_by_minutes": minutes,
+                    "new_expires": new_expires,
+                    "operator": True,
+                }
+            ],
+        )
+    return new_expires
+
+
+def _extended_expiry(current: str | None, minutes: int) -> str:
+    now = st._now_utc()
+    baseline = now
+    if current:
+        try:
+            baseline = max(st.parse_iso(current), now)
+        except ValueError:
+            # An unparseable expiry is not a reason to refuse an extension —
+            # `clu extend-lease` is the operator's tool for a claim in trouble.
+            baseline = now
+    return (baseline + _dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def op_archive_events(orch_dir: Path, slug: str) -> int:
