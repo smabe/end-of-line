@@ -67,6 +67,35 @@ See the master `plans/sqlite-migration.md`. The decisions binding this phase:
 - **Alternatives considered:** send-then-mark (double-ping risk), mark-in-separate-txn (a marker without its event lies).
 - **Evidence:** marker fields and their dedup contracts, `state.py:983-1031`.
 
+### Decision: p5's nested-transaction join is REMOVED  *(status: active — the first Done criterion, discharged)*
+- **How it was decided, evidence before argument:** the join branch was removed and the full suite run. Exactly two tests failed, both in `test_db.py`, both testing the join itself. All 30 `write_txn` call sites were then walked by hand: the queue pop and the worker `queue add` pass cursors (`create_in_txn`, `pop_head_in_txn`) or close one transaction before opening the next, so nothing else in the package nests.
+- **Conclusion:** the join had exactly one caller-shape — the tick consulting the quota gate from inside its own state window — and this phase deleted that caller. Keeping it as a safety net would have cost both things the criterion names (`with write_txn(...)` no longer meaning "committed at block exit"; accidental nesting joining silently instead of failing loudly) for zero remaining benefit. `_active_writes`, `_main_db_file`, the thread-local registry and the `threading` import are gone; the rationale is written into `db.py` where the registry used to be.
+- **Replacement coverage:** two tests replace the removed pair (nesting now raises `DbBusy`; a block commits at its own exit), and `test_the_tick_never_nests_a_write_transaction` counts every `write_txn` in a quota-paused dispatch tick and asserts depth never exceeds 1.
+- **Correction to p5's finding:** "three supervisor call sites consulting the gate" is two SHAPES, not three — `gate_decision` has one call site; `record_quota_death` has two (lease-expiry, dead-PID) and nests one level deeper, through `record_quota_pause`. Both shapes are removed.
+
+### Finding: a shallow claim copy would have silently defeated every precondition  *(empirical, this phase — a live trap for whoever adds one)*
+`append_cpu_sample` and `mark_tool_stuck_emitted` mutate nested containers on the snapshot's claim IN PLACE. A shallow `dict(claim)` in `expect_claim_fields` shares those containers, so the emitter would edit the very value the precondition compares against — and the guard would always pass, silently. `snapshot_with_preconditions` deep-copies. **This is invisible to any test that does not declare `cpu_samples` or `stuck_tool_emitted_at` as a precondition**, so the next person to add one is the person it would have caught.
+
+### Finding: inbox events had to move behind the commit, and the phase named only `side_notifies`  *(empirical, this phase)*
+`inbox.write_event` mints a random id with no content dedup, so a conflicted tick that wrote its inbox note during detection would write a second one on the retry — the exact double-ping the "stay quiet on conflict" decision exists to prevent. They now ride `delta.inbox_events` and flush after the apply. Cost: two test edits.
+
+### Finding: a tick that decides nothing now opens no transaction at all  *(empirical, this phase)*
+`mutate_compat` committed unconditionally, so every 30s visit to a plan with a healthy worker rewrote the document and bumped its version. Now it is a pure read. Fewer spurious version bumps means fewer redundant dashboard wakeups — the harmless direction, and one `_plan_txn`'s docstring already anticipated.
+
+### Finding: the quota canary write is no longer atomic with the tick's state write  *(empirical, this phase — intended, with one log-only loss)*
+That is the point of consulting the gate during unlocked detection. If a dispatch conflicts after the gate stamped the canary, the canary names a plan that never dispatched — self-healing, because `_decide_in_txn` case 3 dispatches when `canary_plan == plan_slug`, a branch that already existed for the non-quota fast-fail. If a RESUME conflicts, the pause row is cleared (correct — the canary survived) but `quota_resumed` is not logged. Log-only loss, named here so nobody rediscovers it.
+
+### Finding: the lease-expiry reap's exception is unguarded, and that is now strictly safer  *(empirical, this phase)*
+Previously an exception there aborted the whole write window and the claim stayed claimed. Now the release has already committed and the exception escapes into `cmd_tick_all`'s per-plan catch. No `try` was added — that would be a behaviour change the phase does not name.
+
+### Finding: `ReapResult` takes three fields, and `signaled` is a signal NAME  *(empirical, this phase)*
+`escalated_kill` was added by the PID-liveness work, so a fixture built from the two-field docstring fails on construction. And `signaled: str | None` carries `SIGTERM` / `SIGTERM_THEN_KILL`, not a bool — the phase shipped with two bools there, which typechecked red and made the reap-ordering fixture exercise a shape the real code never produces. Caught at review, fixed to `None` and `st.SIGNAL_TERM`.
+
+### Decision: `TickDelta` and `TickPreconditions` shipped wider than the sketch  *(status: active — INTERFACE DEVIATION, surfaced to the operator)*
+- **What shipped beyond the sketch:** `TickDelta` gained `claim_token`, `blocker_updates`, `claim_attempts` and `inbox_events`; `TickPreconditions.expect_claim` gained an `UNCHECKED` sentinel default.
+- **Why each is a gap in the sketch rather than widened scope:** the sketch mandates "CAS on claimed_by" but hands the CAS no token to compare against; it declares `expect_blocker_state` as a precondition while giving the delta no way to WRITE a blocker field, which the re-ping (`last_repinged_at`) and answered-blocker (`consumed`) paths both need; `claim_phase` counts attempts off the event log and the apply holds no history; and inbox events must not be written during detection, per the finding above. The sentinel is needed because the sketch spends `None` on "assert no claim row exists", leaving no way to say "this tick judged nothing about the claim" — without it every tick asserts something about the claim, which is a version counter by another name.
+- **Downstream:** nothing consumes these types. p7's `Consumes` names only p3 and p4 symbols.
+
 ## Failure modes to anticipate
 - A detection helper that still mutates the snapshot dict in place (today all four emitters do; `_detect_stalled` mutates the claim then returns a TickResult) and whose mutation silently never reaches the delta — the restructure must convert all five; grep for `data[`/`claim[` writes in supervisor.py afterwards as a mechanical check.
 - `attempts_for_phase` and `completed_phase_ids` are O(events) scans over the snapshot — unchanged behavior; do NOT convert them to SQL here (p7/parked; correctness first).
