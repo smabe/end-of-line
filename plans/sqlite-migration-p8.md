@@ -32,6 +32,27 @@ See the master `plans/sqlite-migration.md`. The decisions binding this phase:
 - **Alternatives considered:** `clu migrate quarantine` (rejected as above); deleting legacy files (rejected — they are the only record of pre-migration history; archived plans remain readable JSON by decision).
 - **Evidence:** upstream #6; master Non-goals.
 
+### Finding: the plan's own quarantine one-liner would have silently done nothing  *(empirical, this phase)*
+The recipe as drafted used a bare `mv -- *.state.json ... legacy/`. In zsh — the operator's shell — a glob matching nothing aborts the whole command line, so on a directory holding `queue.json` but no state files, `queue.json` was NOT moved and the only output was `no matches found`. Reproduced on a partial tree before the fix. The shipped recipe hands the matching to `find -maxdepth 1` with quoted patterns, verified on full and partial trees and proven idempotent.
+
+### Finding: the recipe was still wrong, and only EXECUTING it found out  *(empirical, this phase)*
+The fixed recipe enumerated `*.state.json.lock` and `queue.json.lock` and missed `quota.json.lock`, which survived the sweep on a real project. Every lockfile in that directory belongs to a store that is now a table, so the project recipe now matches `*.lock` the same way the host recipe always did. **The lesson is the one the phase's own criterion encodes:** a documented command is not verified by reading it, and this one had already been "verified" against constructed temp trees. The live run is what caught it.
+
+### Finding: `/clu-monitor`'s installed-check was reading a file nothing writes  *(empirical, this phase)*
+Its step 1 ran `test -f ~/.config/clu/monitor.json && cat ...`, so on a migrated host it reported "not installed" for an installed hook — and would have reported "already installed" off a leftover file. p2 moved that marker into the host database. The phase named only line 104 of that skill, so this is a plan defect: the sweep that found the stale event vocabulary did not look at what the skill EXECUTES. Now reads the marker through `monitor.load_marker()`.
+
+### Finding: two output strings had gone false, both fixed at review  *(empirical, this phase)*
+`clu init` printed `Initialized <...>/<slug>.state.json` — the most prominent instance of exactly what this phase's invariant targets, and the path the old workflow taught the operator to inspect. And `clu queue list` filed every `queue_history` row under "Recent failures:", which was true while that file held only abnormal outcomes and became false at p5, when a normal successful pop started writing `popped` there. Both are user-visible surfaces the phase does not name, so the worker correctly STOPPED on them; both are review findings on code this plan produced, so they were applied rather than asked about. Now: `Initialized <slug> in <project-root>` and `Recently dequeued:`.
+
+### Finding: doc claims the code contradicted, beyond the storage vocabulary  *(empirical, this phase)*
+`contract.md` listed `KIND_GATE_DIRTY` as bypassing quiet hours; `git log -S` shows it never has, so that table has been wrong since the dry-merge gate shipped. `notify.py`'s comment described a "four-member set" over a two-member set (p5 deleted two kinds and left the comment). `supervisor.sweep_zombie_states`' docstring said it scans `.orchestrator/*.state.json` while its body walks `plan_store.plan_slugs` — with an inline comment two lines below saying so. Three symbols named by docs no longer exist: `state.reap_orphan_pid`, `state.state_path_for`, and `db.py`'s pointer at `state.locked`.
+
+### Finding: `sqlite3 .backup` writes at the umask, not at 0600  *(empirical, this phase)*
+A plan database holds live claim tokens, and clu keeps its own files at 0600; the backup lands at 0644. The backup section says to `chmod 600` the result.
+
+### Decision: `docs/design-briefs/` is exempt from the vocabulary purge  *(status: active)*
+Treated alongside `docs/history/` and `plans/archive/`. All three briefs are dated point-in-time records — the SQLite one says "Verified against source 2026-08-19" — so rewriting them would falsify the record rather than correct it. Flagged rather than assumed.
+
 ## Failure modes to anticipate
 - A doc hit that is load-bearing for a NON-migrated surface (e.g. worker log paths, `.orchestrator.json` docs) getting over-zealously rewritten — the greps target store vocabulary, not every JSON mention.
 - The clu-phase SKILL.md is executed by cold workers verbatim — a wrong command in it strands every future phase; the `clu state dump` invocation must be tested by actually running it as written.

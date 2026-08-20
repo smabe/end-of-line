@@ -19,8 +19,10 @@ PHASE="$2"
 TOKEN="$3"
 STATE_FILE="$4"
 
-# State file lives at <project>/plans/.orchestrator/<slug>.state.json — strip 3
-# components to recover the project root.
+# {state_file} is a KEY, not a file: it names the plan inside
+# <project>/plans/.orchestrator/clu.db. Its SHAPE is still
+# <project>/plans/.orchestrator/<slug>.state.json, so stripping 3 components
+# recovers the project root — which is all this script wants from it.
 PROJECT="$(cd "$(dirname "$STATE_FILE")/../.." && pwd)"
 
 CLU=(python3 -m end_of_line.cli)
