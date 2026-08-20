@@ -2301,8 +2301,8 @@ Per project:
 ```bash
 cd <project>/plans/.orchestrator
 mkdir -p legacy
-find . -maxdepth 1 \( -name "*.state.json" -o -name "*.state.json.lock" \
-     -o -name "queue.json" -o -name "quota.json" \) -exec mv -- {} legacy/ \;
+find . -maxdepth 1 \( -name "*.state.json" -o -name "queue.json" \
+     -o -name "quota.json" -o -name "*.lock" \) -exec mv -- {} legacy/ \;
 ```
 
 On the host:
@@ -2325,6 +2325,11 @@ Notes:
   files moves NOTHING and prints only `no matches found`. Quoting the
   patterns hands the matching to `find`, which matches what exists and
   ignores the rest. Verified on both a full and a partial legacy tree.
+- **`*.lock` rather than the three named lockfiles.** The first version of this
+  recipe listed `*.state.json.lock` and `queue.json.lock` and missed
+  `quota.json.lock`, which then survived the sweep on a real host. Every
+  lockfile in that directory belongs to a store that is now a table, so match
+  them the same way the host recipe does.
 - Both recipes are idempotent — run them twice and the second run is a no-op.
 - `inbox` is a DIRECTORY and moves whole, `processed/` subdirectory included.
 - `config.json` STAYS. It is configuration, not a store.
