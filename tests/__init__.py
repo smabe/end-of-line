@@ -408,8 +408,9 @@ class GitProjectTestCase(CluTestCase):
 def isolate_monitor_marker(testcase: unittest.TestCase, tmp_path: Path) -> None:
     """Point clu's monitor marker file at a per-test XDG dir.
 
-    `monitor.marker_path()` resolves through `XDG_CONFIG_HOME`, so this
-    is the same monkeypatch as `isolate_registry`. Named separately so a
-    monitor test that doesn't touch registry doesn't read as registry-coupled.
+    The marker lives in the host database, which resolves through
+    `XDG_CONFIG_HOME`, so this is the same monkeypatch as `isolate_registry`.
+    Named separately so a monitor test that doesn't touch registry doesn't
+    read as registry-coupled.
     """
     isolate_registry(testcase, tmp_path)

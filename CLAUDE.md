@@ -38,11 +38,14 @@ For the *why* behind each, see
   any path join. Regex `^[a-z0-9][a-z0-9_-]{0,63}$`.
 - **`EVENT_*` constants, never raw strings.** A typo silently breaks
   `completed_phase_ids` and friends.
-- **`with st.mutate(path) as data:`** for state changes — lock + load +
-  atomic save in one window.
+- **Reads via `plan_store.snapshot`, writes via ONE `plan_store.op_*`**
+  (or one `db.write_txn` when no op fits). Never read a plan, edit the
+  dict and write it back — name the rows you change. Never nest a write
+  transaction inside another on the same database.
 - **`tests.isolate_registry(self, tmp_path)` in `setUp`** for any test
   that touches `registry.register` (directly or via `main(["init",
-  ...])`). Without it, tests pollute the real `~/.config/clu/registry.json`.
+  ...])`). Without it, tests pollute the real host database at
+  `~/.config/clu/clu.db`.
 - **One tick = one action.** `supervisor.tick` is first-match-wins
   through a 10-priority chain (canonical list in `supervisor.py`
   module docstring); never do two things per tick.
@@ -58,7 +61,11 @@ For the *why* behind each, see
 ## Project structure
 
 - **`end_of_line/`** — the `clu` package. `cli.py` is the CLI surface;
-  `state.py` the schema; `supervisor.py` the tick loop; `notify_*.py`
+  `db.py` owns the two SQLite databases (connections, transactions,
+  DDL); `plan_store.py` the per-plan store (snapshot, ops, tick
+  preconditions); `state.py` the domain layer over snapshot dicts —
+  vocabulary, projections, liveness, no storage engine;
+  `supervisor.py` the tick loop; `notify_*.py`
   pluggable channels (iMessage / Discord / watch); `watch.py` streams
   state events / `top.py` is the `clu top` worker dashboard (reads worker
   transcripts); `hooks/` ships
@@ -70,8 +77,9 @@ For the *why* behind each, see
 - **`docs/`** — depth docs (see "Where to look for depth" below).
   `design-briefs/` for in-flight design; `adr/` for ADRs;
   `history/` for frozen pre-Day-1 brainstorms (read-only).
-- **`plans/`** — active master + sub-plan markdown. State at
-  `plans/.orchestrator/<slug>.state.json`. `plans/archive/<slug>/`
+- **`plans/`** — active master + sub-plan markdown. State in
+  `plans/.orchestrator/clu.db` (inspect with `clu state dump`).
+  `plans/archive/<slug>/`
   holds shipped plans (reference only — they're frozen state, not
   current scope).
 - **`examples/`** — example `.orchestrator.json` configs.

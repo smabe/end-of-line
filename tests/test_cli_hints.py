@@ -179,7 +179,7 @@ This project uses clu for autonomous plan execution.
 - `clu queue add <slug>` to enqueue a plan; cron dispatches on each tick.
 - `clu queue list` for pending; `clu list` for fleet status.
 - Run `/clu-monitor` once per machine for background notifications on
-  halts and blockers (status: `~/.config/clu/monitor.json`).
+  halts and blockers.
 - The `/plan`, `/clu-plan`, and `/brainstorm` skills (bundled via
   `clu install-skill`) are the canonical authoring + pre-planning entry
   points. `/plan` is project-agnostic; `/clu-plan` produces the master +

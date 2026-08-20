@@ -248,7 +248,7 @@ class HookSurfacingTests(HookTestBase):
         )
         # A host upgrading from the directory version still has one, possibly
         # with unreadable files in it. Nothing may read it any more.
-        root = inbox.inbox_root()
+        root = Path(self.xdg) / "clu" / inbox.LEGACY_INBOX_DIRNAME
         root.mkdir(parents=True, exist_ok=True)
         (root / "bogus.json").write_text("{{{ not valid")
         rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)

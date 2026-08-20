@@ -107,5 +107,3 @@ class XdgGuardSilentTestCase(unittest.TestCase):
             # Deliberately NOT a store call — those open (and create) the real
             # host database, which is exactly what this suite must not touch.
             db.host_db_path()
-            inbox.inbox_root()
-            monitor.marker_path()

@@ -25,13 +25,13 @@ tests`).
 canonical factory template: it spins a `tempfile.TemporaryDirectory`,
 calls `tests.isolate_registry(self, tmp_path)`, lays out a minimal
 `plans/<plan>.md`, `git init`s a real repo so SHA validation can pass,
-runs `main(["init", ...])` to write the state file, and finally calls
+runs `main(["init", ...])` to create the plan's state, and finally calls
 `st.claim_phase(data, "a", lease_minutes=30)` to mint a token. Any new
 test that needs a "phase under an active claim" should follow that
 shape — git init, isolate registry, init plan, claim phase. Copy it
 rather than improvising; the dance is load-bearing because the worker
 callbacks check the live claim, the SHA against `git cat-file`, and the
-schema version of the state file in that order.
+schema version of the plan's state in that order.
 
 After a multi-file change, run the whole suite (`python3 -m unittest
 discover -s tests`) before commit. A green subset can hide a broken
@@ -119,16 +119,22 @@ Every worker-side CLI command — `complete`, `block`, `spawn`,
 the `claimed_by` on `current_claim` *and* the `--phase` MUST match the
 claim's phase. The check lives in `state.assert_claim_match`, which
 raises `ClaimMismatch` on either mismatch. Forged or stale tokens
-exit `ExitCode.CLAIM_MISMATCH` (4) and never touch the state file.
+exit `ExitCode.CLAIM_MISMATCH` (4) and never touch plan state.
 
 The decorator pattern in `cli.py` is:
 
 ```python
 @_translate_claim_mismatch
-def cmd_complete(args):
-    with st.mutate(state_path) as data:
-        st.assert_claim_match(data, args.token, args.phase)
-        ...
+def cmd_complete(args, cfg, state_path):
+    # Read-only pre-check: fail fast with CLAIM_MISMATCH before any gate.
+    data = st.load(state_path)
+    st.assert_claim_match(data, args.token, args.phase)
+    ...
+    # The write re-checks the token as the op's own WHERE clause, so a
+    # claim swapped since the snapshot loses here.
+    plan_store.op_release_claim(*st.key_for(state_path),
+                               token=args.token, phase=args.phase,
+                               events=events)
 ```
 
 `@_translate_claim_mismatch` catches a leaked `ClaimMismatch` and
@@ -162,7 +168,7 @@ naive `Path(...)` join.
 
 A bypassed slug is how `clu init --plan ../../../etc/passwd` would
 write outside `plans/.orchestrator/`. There is no other defense — the
-state file path is built by concatenation, and Python's path
+plan key is built by concatenation, and Python's path
 operations will happily accept `..`. The rule: any new code path that
 takes a plan or phase id from outside the trust boundary (CLI args,
 plan markdown, iMessage reply) must call `validate_slug(s, kind=...)`
@@ -206,8 +212,9 @@ every read site.
 
 ## Test isolation for the host registry
 
-`clu init` writes a host-level entry to `~/.config/clu/registry.json`
-so the fleet view (`clu`) can find every plan across every project.
+`clu init` writes a host-level entry into the `registry` table of
+`~/.config/clu/clu.db` so the fleet view (`clu`) can find every plan
+across every project.
 That same code path runs in tests when a case calls `main(["init",
 ...])` — and without isolation, those test runs pollute the
 operator's real registry with bogus `tmp/...` entries.
@@ -263,29 +270,41 @@ Tag fences when:
   commands — they'd hit the 30s timeout).
 - Side effects stay inside `HOME` / `XDG_CONFIG_HOME` / cwd.
 
-## Atomic state mutations
+## Snapshot to read, one op to write
 
-Reads and writes to a state file go through `state.mutate`:
+Plan state is rows in the project database. Read it as a snapshot; write it
+with exactly one operation that names the rows it changes:
 
 ```python
-with st.mutate(state_path) as data:
-    st.assert_claim_match(data, token, phase)
-    st.append_event(data, EVENT_PHASE_COMPLETED, phase_id=phase)
-    st.release_claim(data, expected_token=token, expected_phase=phase)
+data = plan_store.snapshot(orch_dir, slug)        # or st.load(state_path)
+...                                               # decide, holding nothing
+plan_store.op_release_claim(orch_dir, slug,       # one BEGIN IMMEDIATE
+                            token=token, phase=phase, events=events)
 ```
 
-The context manager takes a `flock` on `<state>.lock`, loads JSON,
-yields the dict for mutation, and writes back atomically on exit
-(temp file + `os.replace`). Don't `st.load(path)` and then
-`st.save_atomic(path, data)` as two separate calls when you need both
-— another tick or worker can interleave between them and the second
-write clobbers their progress. `mutate` is the lock window, and the
-lock window is the point.
+Three rules, each of which used to be enforced by the lock window and now
+is not:
 
-The escape hatch is `state.locked(path)`, which gives you the raw
-file lock without auto-save. Reserve it for the rare case where you
-need to coordinate two state files (e.g. cross-plan operations) under
-one lock; for the common case, always `mutate`.
+1. **Never read a plan, edit the whole dict, and write it back.** That
+   facade existed only to carry call sites across the engine swap and is
+   gone. It is why a heartbeat no longer rewrites a plan's entire event
+   history to stamp one timestamp.
+2. **Put the precondition in the write.** An op that must not apply against
+   moved state takes the fact it depends on as a keyword and re-checks it
+   inside its own transaction (`op_release_claim`'s `token`/`phase` become
+   the `WHERE` clause). A read-then-write with no compare-and-set is the bug
+   the lock used to hide.
+3. **Never nest a write transaction inside another on the same database**,
+   even on two connections — the second waits for a lock only the first can
+   release, and you get `db.DbBusy` after the budget expires. If a decision
+   is too big for one op (the tick), snapshot it, decide holding nothing,
+   and apply once under re-asserted preconditions
+   (`plan_store.snapshot_with_preconditions` / `apply_tick_delta`).
+
+`db.write_txn(conn)` is the escape hatch when no op fits — one
+`BEGIN IMMEDIATE` … `COMMIT`, rolled back on any exception. Use it when a
+change must span two stores in one project database (the queue pop creates a
+plan AND retires the queue head), not to hand-roll what an op already does.
 
 ## Load-bearing invariants
 
@@ -298,15 +317,23 @@ posture in one place:
 - **Slug regex on every external input.** Plan slugs and phase ids
   from CLI args, plan markdown, and iMessage replies pass through
   `validate_slug` before any path join.
-- **Lockfile `O_NOFOLLOW`.** `state.locked` opens the lock file with
-  `O_NOFOLLOW` so a symlinked lock can't redirect the flock onto
-  another process's file. Don't reopen the lock anywhere else.
-- **Schema version check.** `state.load` raises
-  `SchemaVersionMismatch` if the file's `schema_version` differs
-  from `state.SCHEMA_VERSION`. Bump the constant whenever you change
-  the JSON shape, even for additive changes that "look" backwards
-  compatible — the explicit fail is better than a half-migrated
-  state file in production.
+- **Database `O_NOFOLLOW` + 0600.** `db._ensure_private` creates (and on
+  every open re-asserts) the database file at 0600 with `O_NOFOLLOW`, so a
+  pre-seeded symlink can't redirect a store carrying claim tokens. It runs
+  on every open, not only on create — a restored backup or a `cp` would
+  otherwise arrive world-readable.
+- **Schema version check.** The durable version is the database's
+  `PRAGMA user_version`. A database NEWER than this clu understands raises
+  `db.SchemaTooNew` (`state.SchemaVersionMismatch` at the plan-store
+  boundary) and is **skipped, never downgraded** — a fleet walk skips that
+  project and keeps going. The check happens on the read path, before any
+  write lock, precisely so a read-only handle can hit it.
+- **Widen tolerant `except` clauses to what the STORE can raise.** A guard
+  that was complete for a file is incomplete for a database: a broken store
+  arrives as `sqlite3.Error`, contention as `db.DbBusy` (a `RuntimeError`,
+  so `except OSError` misses it), and a newer schema as `db.SchemaTooNew`.
+  `db.DEGRADABLE_ERRORS` is the tuple for "degrade rather than fail"; it
+  deliberately excludes the `RuntimeError` raised when WAL did not take.
 - **Per-phase spawn cap.** `task-done` enforces a default cap of 10
   spawned tasks per phase (configurable via `.orchestrator.json`).
   An unbounded spawn loop is the easiest way for a misbehaving
@@ -406,7 +433,7 @@ has no `plans/shipped/` is a no-op.
   apply here. If you find yourself wanting to import an iOS-specific
   helper into clu, you're in the wrong repo.
 - **No `git add -A`.** Stage explicit paths. The repo has a habit of
-  picking up `.orchestrator/` state files, log directories, or
+  picking up `.orchestrator/` databases, log directories, or
   worktree artifacts during development; `-A` swallows them all and
   forces a follow-up `git reset` that future-you will forget about.
   `git add end_of_line/cli.py tests/test_x.py` is verbose for a

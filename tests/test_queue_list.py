@@ -155,7 +155,7 @@ class QueueListTestCase(unittest.TestCase):
         queue.remove(self.orch, "beta")
         rc, out = self._run(["queue", "list", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        self.assertIn("Recent failures:", out)
+        self.assertIn("Recently dequeued:", out)
         self.assertIn("alpha", out)
         self.assertIn("abandoned", out)
         self.assertIn("beta", out)
@@ -167,7 +167,7 @@ class QueueListTestCase(unittest.TestCase):
         _add(self.project, "foo")
         rc, out = self._run(["queue", "list", "--project", str(self.project)])
         self.assertEqual(rc, ExitCode.OK)
-        self.assertNotIn("Recent failures:", out)
+        self.assertNotIn("Recently dequeued:", out)
 
     def test_list_bare_clu_queue_defaults_to_list(self) -> None:
         old_cwd = Path.cwd()

@@ -106,7 +106,11 @@ STATE_SUFFIX = ".state.json"
 
 
 class SchemaVersionMismatch(Exception):
-    """Raised when state.json was written by a different clu schema version."""
+    """Raised when a plan's store was written by a different clu schema version.
+
+    The store translates `db.SchemaTooNew` into this on the way out, so the
+    callers that have always caught it by name keep working.
+    """
 
 
 _ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -172,7 +176,7 @@ EVENT_PHASE_STALLED = "phase_stalled"
 EVENT_PAUSED = "paused"
 EVENT_RESUMED = "resumed"
 EVENT_RETRY_REQUESTED = "retry_requested"
-# Provenance event written as the FIRST event of a state.json created by
+# Provenance event written as the FIRST event of a plan created by
 # the supervisor's per-project queue advancement step. Fields: slug,
 # added_at, added_by, position. Worker dispatched after this event lands
 # sees it in its initial state read.
@@ -294,8 +298,9 @@ BLOCKER_REPLAN = "blocked_replan"
 SIGNAL_TERM = "SIGTERM"
 SIGNAL_TERM_THEN_KILL = "SIGTERM+SIGKILL"
 
-# Maximum CPU samples kept per claim in current_claim.cpu_samples. Caps
-# state.json growth — at 30s tick cadence this covers ~10 minutes of history.
+# Maximum CPU samples kept per claim in current_claim.cpu_samples. Caps the
+# claim row's JSON column — at 30s tick cadence this covers ~10 minutes of
+# history.
 WORKER_IDLE_SAMPLE_CAP = 20
 
 

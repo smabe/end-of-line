@@ -5,7 +5,7 @@ stdlib only: urllib.request + json. No third-party deps.
 
 DM channel.id is cached in the host database's `discord_dm_cache` table
 (keyed by user_id) to avoid a round-trip on every send. Blocker message_id
-is persisted on the plan's state.json for later Reply-UI correlation
+is persisted on the plan's blocker row for later Reply-UI correlation
 (phase discord-in).
 
 This class is constructed once per notification (`notify.py`), so the cache

@@ -2,9 +2,8 @@
 name: clu-monitor
 description: |
   Use proactively when the user is starting autonomous plan execution
-  with clu (after `clu queue add` or `clu init`) and
-  `~/.config/clu/monitor.json` is absent or carries the legacy v1
-  schema. Also use when the user says "monitor clu", "notify me when X
+  with clu (after `clu queue add` or `clu init`) and the monitor hook
+  is not installed on this machine. Also use when the user says "monitor clu", "notify me when X
   completes", or describes walking away. Idempotent — checks the marker
   first and short-circuits if the hook is already installed.
 user_invocable: true
@@ -18,21 +17,23 @@ operator's next Claude turn. After running this once per machine, the
 operator can queue plans and walk away — and when they come back and
 type anything, Claude already knows what clu did while they were away.
 
-The marker file at `~/.config/clu/monitor.json` is the source of truth
-for "is the hook already installed." `clu install-hook` writes the
-marker (schema v2) atomically; `clu uninstall-hook` removes it.
+The marker rows in clu's host database (`~/.config/clu/clu.db`) are the
+source of truth for "is the hook already installed." `clu install-hook`
+writes the marker; `clu uninstall-hook` clears it. A leftover
+`~/.config/clu/monitor.json` file from an older clu is inert — nothing
+reads it, in either schema — so ignore one if you see it.
 
 ## Workflow
 
 ### 1. Check whether the hook is already installed
 
 ```bash
-test -f ~/.config/clu/monitor.json && cat ~/.config/clu/monitor.json
+python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
 ```
 
-Inspect the JSON:
+Read the printed dict:
 
-- **v2 marker** (`schema_version: 2`, `hook_path`, `hook_installed_at`):
+- **A marker** (`schema_version: 2`, `hook_path`, `hook_installed_at`):
   the hook is installed. Print:
 
   > Hook already installed at `<hook_path>` (installed
@@ -41,16 +42,11 @@ Inspect the JSON:
 
   Exit. Do NOT touch settings.json.
 
-- **v1 marker** (`schema_version: 1`, `schedule_id`, `cadence`): legacy
-  `/schedule`-based install from before `/clu-monitor` was rewritten.
-  No longer functional. Print:
-
-  > Migrating from legacy /schedule mechanism (no longer functional).
-  > Installing the new UserPromptSubmit hook.
-
-  Proceed to step 2.
-
-- **No marker / corrupt**: clean slate. Proceed to step 2.
+- **`None`**: no marker — either a clean machine, or one whose only
+  monitoring was the legacy `/schedule` install (which has not been
+  functional for a long time). Either way this is a clean slate:
+  proceed to step 2. If the operator previously scheduled a routine by
+  hand, tell them to delete it via `/schedule delete <id>`.
 
 ### 2. Install the hook
 
@@ -79,7 +75,7 @@ This is the canonical install path:
   user-level hooks).
 - Refuses on malformed settings.json rather than guessing how to
   repair — surfaces a clear error.
-- Writes the v2 marker on success (with `session_start_hook_path` field
+- Writes the marker rows on success (with `session_start_hook_path`
   populated when `--session-start` was used).
 
 Capture the output. If `clu install-hook` exits non-zero, report the
@@ -91,25 +87,26 @@ before retry). Do NOT manually edit settings.json from this skill.
 
 On success:
 
-> Background monitoring active. clu writes events (halts, blockers,
-> plan completions, stuck blockers, stalled claims) to
-> `~/.config/clu/inbox/`. The UserPromptSubmit hook surfaces them into
-> your next Claude turn as a system reminder — type anything when you
-> return and Claude will see what happened while you were away. Status
-> file: `~/.config/clu/monitor.json`. To remove: `clu uninstall-hook`.
+> Background monitoring active. clu records events (halts, blockers,
+> plan completions, stuck blockers, stalled claims) in its host
+> database. The UserPromptSubmit hook surfaces them into your next
+> Claude turn as a system reminder — type anything when you return and
+> Claude will see what happened while you were away. To remove:
+> `clu uninstall-hook`.
 
 ## How the surfacing works (for your future self)
 
 Each tick of the supervisor that produces an operator-relevant event
-(halt, blocker iMessage, plan completion, queue skip/repair, stuck
-blocker re-ping, stalled claim transition) writes a small JSON file
-under `~/.config/clu/inbox/`. The hook script reads that directory at
-the start of every UserPromptSubmit, filters to events whose
-`project_root` matches the current Claude session's CWD, emits a
+(halt, blocker iMessage, plan completion, queue skip, stuck blocker
+re-ping, stalled claim transition) inserts a row in the host database's
+inbox table. The hook script reads that table at the start of every
+UserPromptSubmit, filters to events whose `project_root` matches the
+current Claude session's CWD, emits a
 `hookSpecificOutput.additionalContext` payload (~10K cap, 20 most
-recent events), and moves each surfaced event into
-`~/.config/clu/inbox/processed/`. Mark-and-sweep dedup. Events older
-than the 20-newest cap surface as a footer line.
+recent events), and marks each surfaced event processed — reading and
+claiming in one transaction, so two sessions can never surface the same
+event twice. Events older than the 20-newest cap surface as a footer
+line.
 
 iMessage notifications (the loud channel) still fire alongside inbox
 writes — quiet hours gate them, but inbox writes happen
@@ -209,5 +206,7 @@ lines as plain text rather than ignoring them.
   intentional — workers must not install user-level hooks. If you see
   this in a worker log, route the message back to the operator
   explicitly via `clu block` or surface it in the completion summary.
-- **Stale v1 marker after a manual reinstall.** `clu install-hook`
-  atomically overwrites v1 → v2, no operator action needed.
+- **Leftover `~/.config/clu/monitor.json`.** Inert in either schema —
+  nothing reads it. `clu install-hook` writes the marker rows and carries
+  no field out of the file. No operator action needed; the quarantine
+  recipe in `docs/operations.md` moves it aside.

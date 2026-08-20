@@ -30,7 +30,6 @@ from pathlib import Path
 
 from . import db
 from . import state as st
-from ._xdg_guard import assert_xdg_safe, clu_config_dir
 
 SCHEMA_VERSION = 1
 
@@ -41,13 +40,6 @@ LEGACY_INBOX_DIRNAME = "inbox"
 
 # Every column of an event payload, in the order `_payload` unpacks them.
 _EVENT_COLUMNS = "event_id, ts, type, plan_slug, project_root, summary, details"
-
-
-def inbox_root() -> Path:
-    """The LEGACY event directory. Inert — see `LEGACY_INBOX_DIRNAME`."""
-    path = clu_config_dir() / LEGACY_INBOX_DIRNAME
-    assert_xdg_safe(path)
-    return path
 
 
 def _payload(row: tuple) -> dict:

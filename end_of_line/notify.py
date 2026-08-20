@@ -76,7 +76,7 @@ KIND_QUOTA_PAUSED = "quota_paused"
 KIND_QUOTA_RESUMED = "quota_resumed"
 KIND_QUOTA_STUCK = "quota_stuck"
 # Heartbeat daemon reported its worker PID dead (#104). Deliberately NOT in
-# QUIET_HOURS_BYPASS_KINDS: that four-member set is reserved for halt-equivalent
+# QUIET_HOURS_BYPASS_KINDS: that two-member set is reserved for halt-equivalent
 # states with no self-healing path, and a dead worker self-heals once
 # death-recovery releases the claim for redispatch. The overnight surface is the
 # inbox entry, which reaches the operator on their next Claude turn.

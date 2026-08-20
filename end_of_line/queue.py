@@ -36,7 +36,7 @@ from . import state as st
 _ENTRY_COLUMNS = ("slug", "added_at", "added_by", "batch_id")
 
 # What leaving the pending queue is called, in the events and in
-# `clu queue list`'s "Recent failures" block.
+# `clu queue list`'s "Recently dequeued" block.
 OUTCOME_POPPED = "popped"
 OUTCOME_ABSORBED = "absorbed"
 OUTCOME_ABANDONED = "abandoned"

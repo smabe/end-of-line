@@ -28,7 +28,6 @@ from .notify_imessage_inbound import (  # noqa: F401
     INBOUND_STATE_SCHEMA_VERSION,
     LEGACY_SEEN_PATH,
     OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS,
-    OUTBOUND_PENDING_SCHEMA_VERSION,
     POLL_BATCH_LIMIT,
     Dispatcher,
     IMessageInboundPoller,

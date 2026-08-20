@@ -239,7 +239,7 @@ def read_pause(orchestrator_dir: Path) -> dict[str, Any] | None:
 def clear_pause(orchestrator_dir: Path) -> dict[str, Any] | None:
     """Delete the pause row; return what it held, or None if there was none.
 
-    The `rm quota.json` the notify bodies used to print, as a command — see
+    The file unlink the notify bodies used to print, as a command — see
     `cli.cmd_quota_clear`. Read and delete in ONE transaction so what is
     reported is what was removed.
     """

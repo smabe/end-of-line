@@ -13,7 +13,7 @@ module.
 Reasons:
 
 - Modules share one audience (developer extending clu) and one shape
-  (small, mostly-stateless utility around the state file + one
+  (small, mostly-stateless utility around the store + one
   supervisor entry). Splitting into `docs/reference/<module>.md` would
   fragment grep without adding navigation value.
 - Size spread is one order of magnitude: 67–536 LOC. `cli.py` at 536
@@ -31,19 +31,24 @@ reference section will be unwieldy and a directory becomes justified.
 
 In load order from `cli.py`:
 
+The LOC column is the Day-1 sizing that justified the single-file decision;
+it has not been re-measured since and should not be read as current.
+
 | Module | LOC | One-sentence responsibility |
 |---|---:|---|
-| `state.py` | 481 | Atomic state-file primitives: lock, mutate, append-only events, slug validation, claim lifecycle, projections (`completed_phase_ids`, `open_blockers`, `is_claim_stalled`). |
+| `db.py` | — | SQLite core: connection factories with clu's pragmas (WAL, `synchronous=FULL`, `busy_timeout`), `write_txn` / `read_txn`, both schemas, and the degradable-error vocabulary. |
+| `plan_store.py` | — | The per-plan store: `snapshot` (one read transaction over five tables), one `op_*` per write purpose, and the supervisor tick's snapshot / preconditions / apply pair. |
+| `state.py` | 481 | Plan-state DOMAIN layer: vocabulary, append-only events, slug validation, claim lifecycle, liveness probes, projections (`completed_phase_ids`, `open_blockers`, `is_claim_stalled`). No storage engine. |
 | `config.py` | 67 | Per-project `.orchestrator.json` loader → `ProjectConfig` with `state_path` path-traversal guard. |
 | `plan_parser.py` | 84 | Parse the master plan's `## Sessions index` table into `Phase` records; phase id = plan-file stem minus master stem. |
 | `supervisor.py` | 209 | One-tick decision logic; 8-priority chain returning `TickResult` (no I/O beyond state). |
 | `dispatch.py` | 130 | Fire-and-forget worker spawn with 0.5s fast-fail, per-token stderr log, pid stamping on the live claim. |
 | `notify.py` | 140 | Outbound iMessage via `osascript`; render functions per notification kind; quiet-hours gate (`_in_quiet_window`, `QUIET_HOURS_BYPASS_KINDS`). |
 | `notify_inbound.py` | 190 | Long-lived poller over `~/Library/Messages/chat.db`; reply grammar `^\s*(<slug>\s+)?[0-9]\s*$`; routes to `clu answer`; seen-rowid checkpoint. |
-| `registry.py` | 117 | Host-level index at `~/.config/clu/registry.json`; `register / unregister / list / load_entry_state`. |
-| `queue.py` | 196 | Per-project plan queue (`<plan_dir>/.orchestrator/queue.json`); load/save/mutate via `state.locked_json`; bytes-mode regex slug extraction + `validate_repair` for the auto-repair safety boundary. |
-| `monitor.py` | 72 | Account-wide background-monitoring marker at `$XDG_CONFIG_HOME/clu/monitor.json`; tolerant load/save/clear primitives used by the `/clu-monitor` skill and the CLI tip-suppression branch. |
-| `inbox.py` | 138 | Per-event JSON inbox at `$XDG_CONFIG_HOME/clu/inbox/`; `write_event / read_unprocessed / mark_processed / list_for_project` — mark-and-sweep dedup, surfaced into Claude Code via the `UserPromptSubmit` hook. |
+| `registry.py` | 117 | Host-level index in the `registry` table of `~/.config/clu/clu.db`; `register / unregister / list / load_entry_state`. |
+| `queue.py` | 196 | Per-project plan queue: the `queue` / `queue_history` tables in the project database, whole-operation reads/writes plus cursor-level halves for callers that must span two tables in one transaction. |
+| `monitor.py` | 72 | Account-wide background-monitoring marker in the host database's `monitor` table; tolerant load/record/clear primitives used by the `/clu-monitor` skill and the CLI tip-suppression branch. |
+| `inbox.py` | 138 | Per-event inbox in the host database's `inbox` table; `write_event / read_unprocessed / mark_processed / list_for_project / claim_for_project` — mark-and-sweep dedup, surfaced into Claude Code via the `UserPromptSubmit` hook. |
 | `hooks/clu_inbox_surface.py` | 121 | `UserPromptSubmit` hook script: reads stdin, filters inbox to current project (`git rev-parse --show-toplevel` / `os.getcwd()`), emits `hookSpecificOutput.additionalContext` capped at 20 events / 9500 chars, marks events processed. Crash-safe (logs to `~/.config/clu/inbox_hook.log` and exits 0). |
 | `fleet.py` | 103 | Pure projection of every registered plan into one-line `PlanSummary` for bare `clu`. |
 | `cli.py` | 536 | argparse dispatch + `ExitCode` IntEnum + `_die` helper + `@_translate_claim_mismatch` decorator + every operator/worker subcommand. |
@@ -92,7 +97,7 @@ Listed here so phase 2–6 workers can self-check before calling
 
 - **architecture.md**: one page, has a system diagram (ASCII fine),
   describes the tick → dispatch → worker → callback loop, names the
-  state file as the single durable artifact.
+  plan state as the single durable artifact.
 - **reference.md**: H1 + short package overview + one H2 per module
   from the list above, each with public functions/classes + invariants
   + cross-links to `contract.md` for schema details.

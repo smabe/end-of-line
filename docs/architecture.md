@@ -2,23 +2,28 @@
 
 clu is a cron-driven plan orchestrator. The supervisor itself is a tiny
 Python program that runs once every five minutes (via launchd), reads a
-JSON state file, and either does nothing or fires a single action. Long-
+snapshot of plan state out of SQLite, and either does nothing or fires a
+single action. Long-
 running work — the LLM that actually edits code — lives in *workers*:
 short-lived `claude --print` processes spawned for one phase at a time.
 The operator talks to the system through `clu status` and iMessage.
 
-Nothing carries context across processes. The state file is the single
-durable artifact; everything else (supervisor, worker, inbound poller)
-is replaceable and stateless between invocations.
+Nothing carries context across processes. **Plan state is the single durable
+artifact**; everything else (supervisor, worker, inbound poller) is
+replaceable and stateless between invocations. It lives in the project's
+database, `<project>/<plan_dir>/.orchestrator/clu.db` — see "Storage
+topology" below.
 
 ## Process model
 
 Four pieces, three of them processes:
 
 - **Supervisor.** `clu tick`, fired by `launchd` on a 5-min
-  cadence. ~50 ms of Python. Reads the state file under a `flock`,
-  picks the highest-priority action, writes one event, optionally spawns
-  a worker, exits. Burns zero LLM tokens.
+  cadence. ~50 ms of Python. Takes ONE consistent snapshot of the plan,
+  decides the highest-priority action while holding no transaction at all,
+  then applies that decision in a single write transaction guarded by a
+  compare-and-set over the facts it decided on. Writes one event, optionally
+  spawns a worker, exits. Burns zero LLM tokens.
 - **Inbound poller.** `clu inbound`, a long-lived LaunchAgent that tails
   `~/Library/Messages/chat.db` for replies to outbound iMessages and
   routes each reply into `clu answer`. Polls every few seconds.
@@ -44,26 +49,58 @@ log line-by-line. The shim is the process the supervisor tracks — it becomes
 `claim.pid`, the worker is its descendant — so the watchdog stack (stuck-tool
 tree walk, idle-CPU sum, killpg reapers, cmdline marker) operates on the shim
 pid; the idle watchdog was made tree-aware (phase `idle-treewalk`) precisely
-so the shim's own near-zero CPU doesn't false-fire `WORKER_IDLE`. Repair
-workers (synchronous, short-lived, not wedge-prone) skip the shim.
+so the shim's own near-zero CPU doesn't false-fire `WORKER_IDLE`.
+
+## Storage topology
+
+Two SQLite databases, never one:
+
+- **Per project** — `<project>/<plan_dir>/.orchestrator/clu.db`: plan state
+  (`plans`, `claims`, `blockers`, `spawned_tasks`, `events`,
+  `events_archive`), the queue (`queue`, `queue_history`), and the quota
+  pause (`quota`). One write lock per project, so two projects' ticks never
+  contend with each other.
+- **Host** — `~/.config/clu/clu.db`: the registry, the monitor marker, the
+  iMessage / Discord sidecars, the inbox, the skill-install receipt.
+
+Both run in WAL mode, so readers never block behind the writer and each
+database carries short-lived `-wal` / `-shm` siblings. Three rules hold the
+concurrency story up (`end_of_line/db.py` has the full argument):
+
+1. **Every write transaction opens `BEGIN IMMEDIATE`** — taking the write
+   lock up front turns SQLite's unrecoverable snapshot-conflict failure into
+   an ordinary bounded wait. A wait that outlives its budget raises
+   `db.DbBusy`, which is what makes "drop this write rather than freeze a
+   worker" a decision a caller can express.
+2. **Never nest a write transaction inside another on the same database**,
+   even across two connections: the second waits for a lock only the first
+   can release. The tick's snapshot-decide-apply shape exists so nothing
+   needs to.
+3. **Never hold a read transaction across polls.** A reader with an open
+   transaction pins the WAL past its autocheckpoint and the file grows
+   without bound (probed: 819KB to 12.8MB). Pollers read in short bursts.
+
+A database whose `PRAGMA user_version` is newer than this clu understands is
+skipped, never read optimistically and never downgraded — a fleet walk skips
+that project and keeps going.
 
 ## In-session signaling (inbox + UserPromptSubmit hook)
 
 Beyond iMessage to the operator, clu has a second notification channel
-aimed at active Claude Code sessions: a per-event JSON inbox at
-`~/.config/clu/inbox/` surfaced via a UserPromptSubmit hook
+aimed at active Claude Code sessions: a row-per-event inbox in the host
+database, surfaced via a UserPromptSubmit hook
 (`end_of_line/hooks/clu_inbox_surface.py`). The hook is installed
 through `clu install-hook` (or the `/clu-monitor` skill, which is its
-user-facing wrapper); a marker at `~/.config/clu/monitor.json` records
-the install for idempotency.
+user-facing wrapper); a marker in the host database's `monitor` table
+records the install for idempotency.
 
 When the supervisor fires an operator-relevant event, `notify.notify`
 performs two writes:
 
 1. **iMessage** (loud, immediate) — gated by `notify.quiet_hours` so
    the operator isn't woken at 03:00 by a halt that can wait.
-2. **Inbox** (quiet, persistent) — `inbox.write_event` drops a JSON
-   file tagged with `project_root`. Quiet hours do NOT apply here:
+2. **Inbox** (quiet, persistent) — `inbox.write_event` inserts a row
+   tagged with `project_root`. Quiet hours do NOT apply here:
    the inbox is read by *the next Claude turn*, not by the operator.
 
 On the next user message in Claude Code, the UserPromptSubmit hook
@@ -71,8 +108,8 @@ reads the inbox, filters to events whose `project_root` matches the
 session's CWD (via `git rev-parse --show-toplevel` or `os.getcwd()`),
 emits a `hookSpecificOutput.additionalContext` payload (≤10K chars,
 20 most recent events plus a footer line for older overflow), and
-moves each surfaced event into `inbox/processed/`. Mark-and-sweep
-dedup: Claude sees every event exactly once.
+marks each surfaced event `processed`. Mark-and-sweep dedup: Claude
+sees every event exactly once.
 
 This pattern is what makes "queue plans, walk away" work end-to-end:
 the operator gets the iMessage on their phone, walks back to a Claude
@@ -108,6 +145,35 @@ escalations, not emergencies) but write to the inbox unconditionally.
 tick writes one event and returns. This ordering is load-bearing — every
 debugging session that asks "why didn't this tick advance?" reduces to
 "which rule fired first?".
+
+**Snapshot, decide, apply.** The tick cannot be one transaction: its decisions
+rest on `ps`, `lsof` and a process-group reap that polls for seconds, and WAL
+allows exactly one writer — a transaction held across that work would starve
+every worker callback in the project. So the tick takes ONE snapshot, walks the
+chain holding **no transaction at all**, accumulates its changes in a delta,
+and applies them in a single `BEGIN IMMEDIATE` at the end.
+
+What makes that safe is not a version counter but a set of **preconditions**:
+the specific facts the decision actually rested on, re-asserted inside the
+write transaction (`plan_store.TickPreconditions`) —
+
+- `expect_claim` — the claim's `(claimed_by, phase_id)`, or "no claim row".
+- `expect_max_event_id` — the highest event id the snapshot saw.
+- `expect_claim_fields` — the exact claim fields a gap-fill emitter judged.
+- `expect_blocker_state` — per-blocker `(unanswered, consumed)`.
+- `expect_status` — the plan status the decision assumed.
+
+A whole-plan version counter would be blind here: it cannot tell "the claim was
+released" from "a heartbeat landed", so it would abort most watchdog ticks
+against exactly the plans a watchdog is watching. The two highest-frequency
+writers — the heartbeat every ~120s and the activity stamp on every Bash call —
+write no events and touch only their own claim columns, so they cannot false-
+trip a precondition they were not judged against. If a fact HAS moved, the
+apply raises `TickConflict`, nothing is written, the tick reports
+`idle / concurrent_write`, and the next cron tick re-derives from fresh state.
+A detection path needing a guarantee none of the five gives ADDS a field rather
+than widening one — widening is how a precondition set decays into a version
+counter.
 
 1. **Stale lease release.** If `current_claim.lease_expires` is in the
    past, drop the claim and write `lease_expired`. The phase's attempts
@@ -154,11 +220,11 @@ debugging session that asks "why didn't this tick advance?" reduces to
 8. **Project quota pause gate (#94).** Consulted only when this plan has
    a dispatchable phase (so the canary slot is stamped for a plan that
    will actually dispatch), immediately before the claim. If
-   `quota.json` is present and the pause is active, return idle
+   the project's `quota` row is present and the pause is active, return idle
    (`quota_paused` / `quota_stuck` / `quota_canary` in the detail). Past
    the reset, the first plan to tick stamps itself canary and dispatches
    as the survival probe; once the canary outlives its window, the gate
-   unlinks the file, emits `quota_resumed`, and the fleet dispatches
+   deletes the row, emits `quota_resumed`, and the fleet dispatches
    normally. Watchdog rules 1–5 keep running against in-flight claims
    while paused — only *dispatch* is gated. See "Quota pause gate" below.
 9. **Dispatch.** Walk phases from the master plan's `## Sessions index`
@@ -174,9 +240,8 @@ debugging session that asks "why didn't this tick advance?" reduces to
 The dispatch step is the only one that can spawn a worker. The
 supervisor never edits source code, runs tests, or calls Claude itself.
 
-Inside `supervisor.tick`, the same `with st.mutate(state_path) as data:`
-window that owns rule selection also snapshots `state.worktree` onto
-`TickResult.worktree`. That snapshot rides along to
+Inside `supervisor.tick`, the same snapshot that rule selection reads also
+carries `worktree` onto `TickResult.worktree`. That snapshot rides along to
 `dispatch_for_tick` so the dispatch step can `Popen(cwd=worktree.path)`
 without a second state load. When `state.worktree` is absent the field
 is `None` and dispatch keeps `cwd=cfg.project_root` (pre-worktree
@@ -200,7 +265,7 @@ host-scoped cron entry (`cmd_tick_all`) adds two post-loop passes,
 fired once per distinct project after every registered plan has
 ticked: per-project queue advancement and the worktree conflict scan
 (see "Queue advancement" and "Worktree conflict scan" below). Both
-operate cross-state (queue.json or paired state.jsons), so they live
+operate across plans (the queue tables, or two plans' states), so they live
 outside `supervisor.tick`. The "one tick = one action" invariant
 still holds within each plan; the post-loop passes are each at-most-
 one effect per project per cron interval.
@@ -214,16 +279,16 @@ lease-expiry, dispatch fast-fail — by `quota.classify_log_tail` reading
 the worker-log tail before the claim is released. A classified death
 (a) forgives the phase attempt (`quota_death` is a subtraction marker
 for `attempts_for_phase`, exactly like `systemic_failure`), (b) writes
-the project pause file `quota.json` with `paused_until = reset + 120s`,
+the project's single `quota` row with `paused_until = reset + 120s`,
 and (c) fires a `KIND_QUOTA_PAUSED` iMessage carrying the local resume
 time. The plan status never flips — quota pause is project-level, gated
 at dispatch, not a plan halt.
 
-The pause is a four-state machine resolved inside one `quota.json` lock
-window (`quota.gate_decision`):
+The pause is a four-state machine resolved inside one write transaction
+(`quota.gate_decision`):
 
 ```
-                 quota.json absent ──────────────► DISPATCH (hot path: one exists())
+                 quota row absent ───────────────► DISPATCH (hot path: one read-only SELECT)
                  │
    present ──► now < paused_until ───────────────► IDLE  (quota_paused)
                  │
@@ -233,19 +298,30 @@ window (`quota.gate_decision`):
                  │
                  ├─ canary stamped, now < deadline ► IDLE if another plan; DISPATCH if it's me
                  │
-                 └─ now ≥ canary_deadline ─────────► UNLINK file, emit quota_resumed, DISPATCH
+                 └─ now ≥ canary_deadline ─────────► DELETE row, emit quota_resumed, DISPATCH
 ```
+
+The row is read twice — once cheaply outside any transaction, once inside the
+transaction that may write — and the second read is authoritative. That
+re-read is why there is no branch for "the pause vanished between the check
+and the lock": it cannot race.
 
 The **canary** is the first plan to tick past the reset: it dispatches a
 single probe while the rest of the fleet idles. If that worker also dies
-on quota, the P2 death machinery overwrites `quota.json` with a fresh
+on quota, the death machinery overwrites the row with a fresh
 `paused_until` and clears the canary slot — so a still-throttled account
 re-pauses automatically, no special-casing. If the canary survives its
-180s window, the next gate tick unlinks the file (keeping "file absent ==
+180s window, the next gate tick deletes the row (keeping "row absent ==
 not paused" the one invariant) and the fleet resumes. A `STUCK` pause
-(unparseable reset → `paused_until: null`) idles indefinitely; only the
-operator removes the file. A corrupt or field-malformed `quota.json`
-degrades to DISPATCH — a bad file must never freeze the fleet.
+(unparseable reset → `paused_until: null`) idles indefinitely; only
+`clu quota clear` ends it.
+
+Degradation is split two ways, deliberately: an **unreadable** store (corrupt
+database, or one written by a newer clu) and a field-malformed row both
+DISPATCH with a stderr note — no malformed pause may freeze the fleet — while
+**contention** (`db.DbBusy`) IDLES, because a busy database is not a broken
+one, and dispatching into a pause we merely could not read costs a worker and
+a quota hit where idling costs one tick.
 
 ## Queue advancement
 
@@ -283,47 +359,54 @@ branch chain:
 5. **Abandon.** If the head's plan file (`<plan_dir>/<slug>.md`) doesn't
    exist, pop with `history` outcome `abandoned` and fire
    `KIND_QUEUE_SKIPPED` (gated by quiet hours — abandonment can wait).
-6. **Normal pop.** Under one queue-lock window:
-   `state.empty_state` → append `EVENT_QUEUE_POPPED` → `state.save_atomic`
-   → `registry.register` → `queue.pop(0)`. Dispatch fires **outside**
-   both locks via `_tick_one_plan`, matching the `cmd_init` order
-   (`cli.py:cmd_init`).
+6. **Normal pop.** TWO coordinated transactions, in this order:
+   - **Transaction one, project database.** Move the queue head into
+     `queue_history` (outcome `popped`) AND insert the new plan's rows,
+     together. The head check is the `DELETE`'s own `WHERE` clause, so a
+     second tick racing this one writes nothing rather than creating a
+     duplicate; and `plans.slug` being the primary key means the insert IS
+     the duplicate check.
+   - **Transaction two, host database.** `registry.register` — idempotent.
+
+   They cannot be one transaction: two databases, two write-ahead logs, no
+   atomicity across the pair whatever the syntax. Dispatch fires **outside**
+   both, via `_tick_one_plan`.
 
 The freeze predicate and the busy gate are independent: busy gate is a
 property of `current_claim` on any plan in the project; freeze is a
 property of the queue head's status. Never short-circuit one through
 the other.
 
-**Crash recovery.** The normal-pop sequence is idempotent. If the process
-dies between `state.save_atomic` and `registry.register`, the next tick
-re-enters: queue head is still present, no current_claim exists, the
-freeze predicate is false (the orphan state's status is `running` but
-the slug isn't yet registered — the "registered AND status" guard
-declines to absorb), and the inner `state.exists()` check skips re-
-creating. `registry.register` is idempotent; `queue.pop` then completes
-the sequence.
+**Crash recovery.** The crash window that matters is *between* the two
+transactions — a created-but-unregistered plan. It is the same window the
+nested flocks had, and it self-heals the same way: the next tick re-enters,
+`registry.register` is idempotent, and a replayed pop finds the head already
+gone (transaction one committed) or re-runs it whole (it did not).
 
-This self-heal only works while the **queue head is still present** — it
-relies on the next tick re-entering through the pop path. It cannot reach
-a state file that is `running` *and* fully unregistered with no queue
+That self-heal only works while the **queue head is still present**. It
+cannot reach a plan that is `running` *and* fully unregistered with no queue
 entry: `tick-all` walks the registry, so an unregistered slug is never
 visited, and the pop path never fires. That window — a plan unregistered
 (or finished) while `running`, the `fm-docs-sweep` zombie shape (#75) —
 is closed by the **registry-independent sweep**
 (`supervisor.sweep_zombie_states`). After its per-project rule pass,
-`tick-all` scans `.orchestrator/*.state.json` for unregistered files at
-`running` whose worker PID is gone (`state.is_zombie_state`), then
-terminalizes them (→ `halted` + `plan_abandoned`) and reaps the worker
-process group. `clu doctor` previews the same sweep dry-run. Residual
-gap: a project whose *every* plan is unregistered never appears in the
-registry, so its zombies surface only via `clu doctor --project <it>`.
+`tick-all` walks the *plans in the project database* (not files on disk),
+picks out the unregistered ones at `running` whose worker PID is gone
+(`state.is_zombie_state`), terminalizes them (→ `halted` +
+`plan_abandoned`) and reaps the worker process group. `clu doctor` previews
+the same sweep dry-run. Residual gap: a project whose *every* plan is
+unregistered never appears in the registry, so its zombies surface only via
+`clu doctor --project <it>`.
 
-**Lock ordering.** When two locks are taken together, the order is
-always `queue → state` (and `registry` reads/writes are queue-lock-
-protected by virtue of happening inside `queue.mutate`'s window). The
-normal-pop branch nests `state.locked(state_path)` *inside*
-`queue.mutate(queue_path)`. Don't invert; the queue is the higher-level
-resource and must be acquired first.
+**No lock ordering, by construction.** There used to be one — `queue →
+state`, with a nested-flock rule and an ABBA hazard behind it. Plan state
+and the queue are now tables in ONE database with ONE write lock, so there
+is no pair to order; what replaced the rule is the ban on nesting write
+transactions (see "Storage topology"). Where two DATABASES are genuinely
+involved (the pop's registry write, the worker-enqueue path's registry
+read), the second is done strictly outside the first's transaction — a query
+of one store while holding another's write lock is the shape this migration
+kept finding.
 
 ### Worker enqueue flow
 
@@ -340,27 +423,24 @@ state into the queue.
    `EVENT_QUEUE_REJECTED` with `reason="missing_plan_file"` + exit
    `UNKNOWN_TASK` (6).
 3. Registered-project check (same as the operator path).
-4. **Acquire source plan's state lock** (via `st.mutate`) and call
-   `assert_claim_match` — verifies the token is still live and matches
-   the declared `--plan`/`--phase`. A stale or forged token exits
-   `CLAIM_MISMATCH` (4) via `@_translate_claim_mismatch`.
-5. Inside the same `st.mutate` window: check the per-phase add cap
-   (count `queue + history` entries where `source_plan == S AND
-   source_phase == X`; if `>= max_queue_adds_per_phase` → emit
-   `EVENT_QUEUE_REJECTED` with `reason="cap"` + exit `QUEUE_CAP` (11)).
-6. **Acquire queue lock** (via `queue.mutate`) — nested inside the state
-   lock from step 4. This is the load-bearing lock-ordering rule:
-   **state lock first, queue lock second — never reverse.** Reversing
-   risks a deadlock with the queue-advancement path, which takes the
-   queue lock first (step 6 of the normal-pop branch above) and then
-   opens the target state file. Crossing the order creates a classic
-   ABBA cycle.
-7. Apply idempotency: pending slug → no-op; in-flight slug → no-op;
-   history slug → exit `STATUS_TRANSITION` (7).
-8. Append the entry (with `source_plan`, `source_phase`,
-   `source_token_fp`, `reason`) + append `EVENT_QUEUE_APPENDED` to the
-   source plan's events. Both writes happen inside the same nested-lock
-   window so they're atomic with respect to each other.
+4. **Check the claim against a snapshot** — `assert_claim_match` verifies
+   the token is still live and matches the declared `--plan`/`--phase`. A
+   stale or forged token exits `CLAIM_MISMATCH` (4) via
+   `@_translate_claim_mismatch`.
+5. Read the registry (a different database) to learn whether the slug is
+   already in flight — **before** the queue transaction opens, never inside
+   it.
+6. **One queue transaction** does the cap check, the idempotency check and
+   the insert together: count `queue + queue_history` entries where
+   `source_plan == S AND source_phase == X`, and if
+   `>= max_queue_adds_per_phase`, insert nothing. Pending slug → no-op;
+   in-flight slug → no-op; history slug → exit `STATUS_TRANSITION` (7);
+   over cap → `EVENT_QUEUE_REJECTED` with `reason="cap"` + exit
+   `QUEUE_CAP` (11).
+7. The outcome event (`EVENT_QUEUE_APPENDED` or `EVENT_QUEUE_REJECTED`)
+   lands on the source plan through a plan-store op that **re-checks the
+   claim in its own `WHERE` clause**. Three transactions, never nested: the
+   token is still the boundary; what changed is where the compare happens.
 
 **Token fingerprint.** `sha256(token.encode()).hexdigest()[:8]` — computed
 once at append time. The raw token is never written to disk.
@@ -536,60 +616,28 @@ branch is not yet an ancestor of `origin/main`, are skipped silently.
 
 Disabled per-project via `.orchestrator.json:auto_archive: false`.
 
-## Auto-repair worker
+## Auto-repair worker — deleted
 
-When the queue advancement step's `queue.load(queue_path)` raises
-(catastrophic JSON or schema corruption), clu can dispatch a headless
-Claude worker to repair the file. The full contract — including the
-hard rules clu enforces post-repair — lives in `contract.md` §
-"Auto-repair contract"; this section describes the runtime topology.
+There is no repair worker, and the deletion is deliberate rather than
+deferred. It existed because a JSON queue file interrupted mid-write is
+recoverable text: clu backed up the bytes, dispatched a headless Claude to
+rewrite them, and validated the result with a regex over the backup so no
+slug could be dropped. A WAL database never hands a reader a half-written
+store — the pop either committed or it did not — so the failure it repaired
+cannot occur.
 
-```
-cmd_tick_all (per-project)
-        │
-        │  queue.load fails (JSONDecodeError | SchemaVersionMismatch | OSError)
-        ▼
-_handle_corrupt_queue
-        │
-        │  1. read original bytes
-        │  2. write queue.json.corrupt-<UTCstamp> (backup)
-        │  3. throttle check (≥3 attempts on same diagnosis_hash → notify only)
-        │  4. repair_command unset → KIND_QUEUE_CORRUPT, increment throttle
-        │  5. dispatch_repair_worker (synchronous, 60s timeout)
-        │  6. queue.validate_repair(backup_bytes, queue_path)
-        │
-        ├─ validation fails ─▶ revert from backup → KIND_QUEUE_REPAIR_FAILED
-        └─ validation passes ─▶ KIND_QUEUE_REPAIRED, reset throttle
-```
-
-Three reasons clu's validation is the safety boundary, not the worker's
-prompt:
-
-- The prompt is operator-authored and can be wrong. Validation is in
-  Python, version-controlled, tested.
-- The worker is an LLM. Even with a correct prompt, "clean up" is a
-  plausible failure mode. The regex-based slug extraction over the
-  *backup* bytes is what makes "delete slug X to make the file parse"
-  impossible to get past clu.
-- The throttle (per-diagnosis-hash, capped at 3) keeps a worker that
-  keeps producing the same broken output from looping forever.
-
-`dispatch_repair_worker` is synchronous because the cron tick should not
-move on until the queue is either repaired or definitively-not-repaired
-— otherwise the next tick would race the in-flight repair on the same
-file. Synchronous wait + 60s timeout + post-validation is the simplest
-correct shape.
-
-The `repair_command` template variables (`{corrupt_path}`,
-`{backup_path}`, `{diagnosis}`, `{schema_json}`, `{log_path}`) are
-documented in `operations.md` § "Enabling auto-repair" alongside a
-recommended `claude --print` template.
+What replaced it is smaller: an unreadable project database (genuinely
+corrupt, or written by a newer clu) makes the queue-advancement rule skip
+that project with a stderr note and keep walking the fleet. That is not
+something a headless worker edits back to health, so it surfaces to the
+operator instead. `dispatch.repair_command` in an `.orchestrator.json` is
+parsed, ignored, and reported once on stderr.
 
 ## Typical happy path
 
 ```
                         ┌────────────────────────┐
-  cron 5 min ─tick──▶   │      supervisor        │ ─▶ state.json
+  cron 5 min ─tick──▶   │      supervisor        │ ─▶ clu.db
                         │ (priority chain)       │     (one event)
                         └──────────┬─────────────┘
                                    │ dispatch (fork + Popen)
@@ -601,7 +649,7 @@ recommended `claude --print` template.
                         └──────────┬─────────────┘
                                    │ clu complete --token T --commit SHA
                                    ▼
-                              state.json
+                                 clu.db
                           (phase_completed)
                                    │
                                    ▼
@@ -611,17 +659,18 @@ recommended `claude --print` template.
 Step by step:
 
 1. Operator runs `clu init --project ~/projects/foo --plan my-feature`.
-   The state file is created at
-   `~/projects/foo/plans/.orchestrator/my-feature.state.json`, and the
-   host registry at `~/.config/clu/registry.json` learns about it.
+   The plan's rows are created in
+   `~/projects/foo/plans/.orchestrator/clu.db`, and the host registry in
+   `~/.config/clu/clu.db` learns about it.
 2. Cron fires `clu tick`. The supervisor finds phase
    `design` pending, claims it (writing `phase_started` with a fresh
    token), and returns to `cmd_tick`.
-3. `cmd_tick` exits the state lock, then calls
+3. `cmd_tick` commits the tick's write transaction, then calls
    `dispatch.dispatch_for_tick`, which renders the project's
    `dispatch.command` template — substituting `{plan_slug}`,
    `{phase_id}`, `{token}`, `{state_file}`, `{project}` — and `Popen`s
-   it. The worker's stderr is captured to
+   it. (`{state_file}` still renders a `<slug>.state.json` path; it is the
+   store KEY the worker hands back to clu, not a file it opens.) The worker's stderr is captured to
    `plans/.orchestrator/logs/<phase>.<token>.log`. The worker's PID is
    stamped onto the live claim.
 4. The worker reads its sub-plan (per the `## Sessions index` row),
@@ -644,7 +693,7 @@ processes and the user's phone. A worker that calls `clu block` does
 question.
 
 ```
-worker          clu (state.json)            notify          iMessage          operator
+worker          clu (plan state)            notify          iMessage          operator
   │ clu block ─▶│                             │                 │                 │
   │             │ phase_blocked, claim cleared │                 │                 │
   │             │─ render_blocker ─────────▶  │                 │                 │
@@ -654,7 +703,7 @@ worker          clu (state.json)            notify          iMessage          op
                             inbound poller (chat.db)──────────────┘
                                   │ parse "<slug>? <digit>"
                                   ▼
-                            clu answer q-1 2 ──▶ state.json
+                            clu answer q-1 2 ──▶ plan state
                                   │
                                   │ next tick: blocker_resumed
                                   │ next-next tick: re-dispatch phase
@@ -667,9 +716,10 @@ worker          clu (state.json)            notify          iMessage          op
    (`q-1`, `q-2`, …), and releases the claim. Worker exits 0.
 2. **State → iMessage.** On that same tick the supervisor renders
    `notify.render_blocker(...)` and `cmd_tick` shells out to `osascript`
-   after dropping the state lock, so a hung Messages.app can't deadlock
-   future ticks. Quiet hours gate everything except the
-   `QUIET_HOURS_BYPASS_KINDS` set (currently `halted`).
+   AFTER the write transaction has committed, so a hung Messages.app cannot
+   hold the project's write lock against every other plan. Quiet hours gate
+   everything except the `QUIET_HOURS_BYPASS_KINDS` set (currently `halted`
+   and `quota_stuck`).
 3. **iMessage → poller.** The operator replies on their phone. The
    inbound LaunchAgent (`notify_inbound.poll_once`) reads new rows from
    `chat.db`, matches the reply against

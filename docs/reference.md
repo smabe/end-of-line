@@ -1,12 +1,12 @@
 # Reference
 
-Per-module reference for `end_of_line/`. One H2 per Python module, in load
-order from `cli.py`. Each section lists the public surface (the names a
+Per-module reference for `end_of_line/`. One H2 per Python module, roughly in
+load order from `cli.py` — storage first, since everything else sits on it. Each section lists the public surface (the names a
 contributor or worker callback talks to), the invariants that aren't
 obvious from the code, and pointers to other docs.
 
-For the JSON shape of the state file, the worker callback contract, and
-the plan-markdown contract, see `contract.md`. For the tick → dispatch →
+For the storage tables, the state document readers are handed, the worker
+callback contract, and the plan-markdown contract, see `contract.md`. For the tick → dispatch →
 worker → callback loop see `architecture.md`. This document answers
 "what is `X` and what does it do?", not "how do the pieces fit together?".
 
@@ -15,27 +15,153 @@ document.
 
 ## Modules
 
+### `db.py`
+
+The SQLite core: connection factories, transaction helpers, and both schemas.
+Nothing else in the package opens a connection or writes DDL.
+
+**Key names**
+
+- `project_db_path(orchestrator_dir)` / `host_db_path()` — the two databases.
+  Both are `clu.db`; the directory is what distinguishes them. `host_db_path`
+  goes through `assert_xdg_safe`, so a test that forgot its isolation fails
+  loudly instead of writing the operator's real config dir.
+- `connect(path, *, readonly=False, timeout_s=5.0)` — opens with clu's
+  pragmas: WAL (refused if it did not take), `synchronous=FULL`,
+  `busy_timeout`, `foreign_keys=ON`, `isolation_level=None`. Creates the file
+  at 0600 with `O_NOFOLLOW` first. `readonly=True` goes through a `mode=ro`
+  URI and skips every write pragma.
+- `host_conn(path=None)` / `project_conn(orchestrator_dir)` — context
+  managers that open, ensure the schema, and CLOSE. Short-lived by design;
+  `project_conn` sets `row_factory = sqlite3.Row`.
+- `write_txn(conn, *, timeout_s=None)` — `BEGIN IMMEDIATE` … `COMMIT`,
+  rolling back on any exception. `timeout_s` overrides the connection's
+  `busy_timeout` for this attempt only, and is restored afterwards.
+- `read_txn(conn)` — a deferred read transaction, ALWAYS rolled back on exit.
+- `DbBusy` — a bounded wait for the write lock expired. A `RuntimeError`, so
+  `except OSError` does NOT catch it.
+- `SchemaTooNew` — the database's `user_version` is newer than this clu.
+- `DEGRADABLE_ERRORS = (SchemaTooNew, DbBusy, sqlite3.Error, OSError)` — what
+  a caller catches when it would rather degrade (empty read, skipped
+  best-effort write) than fail.
+- `ensure_project_schema(conn)` / `ensure_host_schema(conn)` — idempotent DDL
+  + `user_version` stamp.
+- `PROJECT_SCHEMA_VERSION`, `HOST_SCHEMA_VERSION`, `DB_FILENAME`,
+  `DB_FILE_MODE`.
+
+**Invariants and gotchas**
+
+- **Every write transaction is `BEGIN IMMEDIATE`.** A deferred transaction
+  that reads first and writes later fails instantly when another connection
+  commits in between, with a `database is locked` that `busy_timeout` does
+  NOT absorb.
+- **Never nest a write transaction** on the same database file, even on two
+  connections in the same thread: the second waits for a lock only the first
+  can release. `write_txn` does NOT join an open transaction — an accidental
+  nest fails loudly as `DbBusy`, which is what you want.
+- **Never hold a `read_txn` across polls.** An open read transaction pins the
+  WAL past its autocheckpoint and the file grows without bound (probed:
+  819KB → 12.8MB).
+- **The schema fast path takes no write lock.** A database already at the
+  right version returns without one, so a dashboard refreshing once a second
+  cannot contend with the tick on every open — and the newer-schema refusal
+  is reachable on a read-only connection.
+- **WAL is required, not preferred.** `PRAGMA journal_mode` does not raise
+  when it cannot honour the request; `connect` reads the answer back and
+  raises a plain `RuntimeError` if it is not `wal`. That `RuntimeError` is
+  deliberately NOT in `DEGRADABLE_ERRORS`. The usual cause is a network
+  filesystem — clu is same-host, local-filesystem only.
+
+### `plan_store.py`
+
+The per-plan store: everything that turns a plan into rows and back. Reads
+hand back the same dict every consumer has always projected from; writes are
+one named op per purpose.
+
+**Key names**
+
+- `key_for_state_path(state_path)` → `(orch_dir, slug)` — the `<slug>.state.json`
+  path callers hold is the KEY. `config.state_path`'s slug validation and
+  traversal guard still gate every external slug.
+- `exists(orch_dir, slug)` / `exists_for_path(state_path)` — "does this plan
+  exist" without loading it. A first-class read, because 21 call sites used
+  to ask the filesystem this before ever reaching a load.
+- `plan_slugs(orch_dir)` — every plan in the project database.
+- `snapshot(orch_dir, slug)` — the plan as a dict, assembled inside ONE read
+  transaction across all five tables.
+- `dump_json(orch_dir, slug)` — `clu state dump`'s body. The one reader that
+  folds `events_archive` back in beside `events`.
+- `events_after(cur, slug, after_id)` — the streaming readers' cursor.
+- `create(orch_dir, data)` / `create_in_txn(cur, data, *, orch_dir=None)` —
+  insert a new plan. `plans.slug` is the primary key, so the insert IS the
+  duplicate check; a duplicate raises `FileExistsError`.
+- `op_*` — the write surface, one `BEGIN IMMEDIATE` each, touching only the
+  rows that change: `op_heartbeat`, `op_activity`, `op_stamp_claim_fields`,
+  `op_append_events`, `op_release_claim`, `op_stamp_attestation`,
+  `op_add_blocker`, `op_answer_blocker`, `op_stamp_blocker_metadata`,
+  `op_spawn_task`, `op_complete_task`, `op_set_status`, `op_refuse_attestation`,
+  `op_set_fields`, `op_set_worktree`, `op_extend_lease`, `op_archive_events`.
+- `snapshot_with_preconditions(orch_dir, slug)` → `(data, TickPreconditions)`
+  and `apply_tick_delta(orch_dir, slug, pre, delta)` — the supervisor tick's
+  two halves. `TickConflict` is raised inside the apply when a precondition
+  no longer holds; nothing is written.
+- `TickPreconditions` / `UNCHECKED` — the closed vocabulary of facts a tick
+  may re-assert: `expect_claim`, `expect_max_event_id`, `expect_claim_fields`,
+  `expect_blocker_state`, `expect_status`.
+- `BLOCKING_TIMEOUT_S = 60.0` — what a write waits for the project's write
+  lock when the caller names no budget. The flock it replaced blocked
+  forever; bounded means a wedged holder surfaces as an error instead of a
+  hung fleet.
+
+**Invariants and gotchas**
+
+- **Exception types are contract.** A missing plan (or missing database)
+  raises `FileNotFoundError`, a database newer than this clu raises
+  `st.SchemaVersionMismatch`, and a database that cannot be read at all
+  raises `ValueError` — the same three shapes the file era raised, so every
+  tolerant reader in the fleet keeps its `except` clause. A raw
+  `sqlite3.Error` escaping into those call sites would take down a fleet walk
+  that used to skip one unreadable plan.
+- **There is no read-whole-write-whole path.** It existed to carry call sites
+  across the engine swap and is gone. Nothing rewrites a plan's event history
+  to stamp one timestamp.
+- **A precondition set is not a version counter.** Widening one is how it
+  decays into a version counter that aborts every watchdog tick against
+  exactly the plans a watchdog is watching. A path that needs a guarantee
+  none of the five gives ADDS a field.
+- Ops that must not apply against moved state take the fact as a keyword and
+  re-check it in their own `WHERE` clause (`op_release_claim`'s
+  `token`/`phase`). Never emulate that with a read-then-write.
+
 ### `state.py`
 
-Atomic state-file primitives. Owns the lock, the JSON shape on disk, the
-append-only event log, slug validation (a path-traversal guard), claim
-lifecycle, and the projections everyone else reads from. Every other
-module either mutates the file through this one or reads what it wrote.
+The plan-state DOMAIN layer: the vocabulary, the projections, and the
+liveness probes. No storage engine — the flock, the atomic write, and the
+whole-document mutate window are gone. What remains that touches storage is
+`load` (one read transaction, delegated to `plan_store`) and `key_for`, which
+turns the state PATH callers still hold into the store's `(dir, slug)` key.
 
-This module has no I/O except the lock + load + atomic write. Everything
-else is a pure function over the `data` dict, which is why supervisor,
-CLI, fleet, and dispatch can all reuse the same code without re-opening
-the file.
+Everything else is a pure function over the loaded dict, which is why
+supervisor, CLI, fleet, and dispatch can all reuse it without going near the
+database.
 
 **Key types and functions**
 
 - `SLUG_PATTERN`, `validate_slug(slug, *, kind)` — regex fragment + check.
-  Every `plan_slug`/`phase_id` that touches the filesystem MUST pass
-  through this.
+  Every `plan_slug`/`phase_id` that reaches a store key or a filesystem path
+  MUST pass through this.
 - `InvalidSlug`, `ClaimMismatch`, `SchemaVersionMismatch` — typed errors
-  the CLI translates into specific `ExitCode`s.
-- `SCHEMA_VERSION` — bumped any time the on-disk schema changes; load
-  fails loud on mismatch.
+  the CLI translates into specific `ExitCode`s. `SchemaVersionMismatch` is
+  what `db.SchemaTooNew` becomes at the plan-store boundary.
+- `SCHEMA_VERSION` — the constant projected onto every snapshot as
+  `schema_version`. The DURABLE version is the database's `user_version`;
+  this is the document-shape marker readers have always seen.
+- `STATE_SUFFIX = ".state.json"` — the key's shape, not a file extension.
+- `load(state_path)` — the plan as a dict, via `plan_store.snapshot`. Takes
+  no expected version: there is no `schema_version` field in the store to
+  compare against.
+- `key_for(state_path)` → `(orch_dir, slug)` — the store key, for handing to
+  an `op_*`.
 - `STATUS_*`, `TERMINAL_STATUSES`, `STATUS_STALLED`, `STATUS_MISSING` —
   the plan-status enum. `STALLED` and `MISSING` are display-only (fleet
   view derives them).
@@ -50,65 +176,62 @@ the file.
 - `get_worktree(data)` — reader for the additive-optional `worktree`
   field. Returns `dict | None`; callers never read the raw key.
 - `BLOCKER_INPUT`, `BLOCKER_REPLAN` — blocker types.
-- `utcnow()`, `parse_iso(ts)` — single timestamp format
+- `utcnow()`, `utcnow_compact()`, `parse_iso(ts)` — single timestamp format
   (`%Y-%m-%dT%H:%M:%SZ`). All UTC.
 - `empty_state(plan_slug, plan_dir)` — fresh state dict, with config
-  defaults baked in.
-- `locked(state_path)` — `flock` context manager with `O_NOFOLLOW`
-  on the sibling lockfile.
-- `locked_json(path, *, expected_version, empty=None, timeout_seconds=None)`
-  — generic lock + load + yield-for-mutation + atomic-write. The shared
-  primitive every clu JSON file (state, registry, queue) is built on. Pass
-  `empty` to tolerate a missing-on-first-write file; state.json passes
-  `None` so load() raises `FileNotFoundError` as documented. `timeout_seconds`
-  forwards to `locked` — `None` (default) blocks forever; a positive budget
-  raises `LockTimeout`.
-- `mutate(state_path, *, timeout_seconds=None)` — lock + load + yield +
-  atomic-write. Thin wrapper over `locked_json` for state files. The default
-  read-modify-write helper; only drop to `locked()` when coordinating
-  multiple files. `timeout_seconds` (default `None` → block forever) bounds
-  the lock for callers that must not hang — the heartbeat daemon's death
-  report passes a budget because it runs on a `setsid`-detached,
-  reaper-immune exit path where a blocking `flock` would strand it forever.
-- `load(state_path, *, expected_version)` — JSON read + schema check.
-  Reused by `registry.py` with its own version.
-- `save_atomic(state_path, data)` — tmp + fsync + rename. Caller must
-  hold the lock.
-- `append_event(data, event_type, **fields)` — the only event-writer.
+  defaults baked in. Handed to `plan_store.create`.
+- `append_event(data, event_type, **fields)` — appends onto a snapshot in
+  memory. What PERSISTS it is the op the caller picks (`events=` on most
+  ops, or `op_append_events`).
 - `claim_phase(data, phase_id, lease_minutes, claimed_by=None)` — claim a
   phase, write `phase_started`, return the token. Raises if a live claim
   exists.
 - `release_claim(data, expected_token=None, expected_phase=None)` —
-  clear `current_claim`. Pass both expected fields to validate first;
-  passing neither clears unconditionally (supervisor-only).
+  clear `current_claim` on the dict. Pass both expected fields to validate
+  first; passing neither clears unconditionally (supervisor-only).
 - `release_if_expired(data)` — drop an expired lease + emit
   `lease_expired`. Shared between `claim_phase` (reclaim) and the
   supervisor (stale-lease rule).
 - `assert_claim_match(data, expected_token, expected_phase)` — raises
   `ClaimMismatch` unless the live claim matches both. Every worker-side
-  CLI command calls this.
+  CLI command calls this on its snapshot BEFORE the write whose `WHERE`
+  clause re-checks the same pair.
 - `record_heartbeat(data, expected_token, expected_phase)` — stamps
   `last_heartbeat_at`; no event written (would flood the log).
-- `heartbeat_age_seconds(claim)`, `is_claim_stalled(claim, threshold)` —
-  what supervisor and fleet view use to derive stalled status.
+- `heartbeat_age_seconds(claim)`, `is_claim_stalled(claim, threshold)`,
+  `claim_is_stalled(data, claim)`, `stalled_threshold_for_phase(data, phase)`,
+  `lease_ttl_for_phase(data, phase)` — what supervisor and fleet view use to
+  derive stalled status and per-phase lease length.
 - `terminalize(data, *, status=halted, event=plan_abandoned, **fields)` —
   compare-and-set flip of a non-terminal plan to a terminal status +
   audit event; no-op (returns False) if already terminal. Used by
   `unregister` and the zombie sweep. (#75)
-- `reap_orphan_pid(pid, cmdline_match=None)` /
-  `reap_orphan_pgroup(pgid, cmdline_match=None)` — SIGTERM→poll→SIGKILL a
-  single worker PID / its whole process group (`os.killpg`). The group
-  reaper takes worker + heartbeat together (the worker is a session
-  leader, pgid == pid); guards `pgid != getpgid(0)` and a cmdline marker
-  before signaling. `reap_claim(data)` wraps the group reaper using the
-  plan slug as the marker.
+- `claim_worker_alive(claim, cmdline_match=None)` — is the claim's worker
+  still the process it claims to be (ESRCH, or a recycled PID whose cmdline
+  no longer carries the plug slug as a whole token).
+- `reap_orphan_pgroup(pgid, cmdline_match=None)` — SIGTERM→poll→SIGKILL a
+  worker's whole process group (`os.killpg`), taking worker + heartbeat
+  together (the worker is a session leader, pgid == pid). Guards
+  `pgid != getpgid(0)` and a cmdline marker before signaling.
+  `reap_claim(data)` wraps it using the plan slug as the marker; both return
+  a `ReapResult`.
 - `is_zombie_state(data)` — True when `status=running` and (no claim OR
-  the worker PID is gone). Callers restrict it to unregistered files; the
+  the worker PID is gone). Callers restrict it to unregistered plans; the
   zombie sweep's predicate. (#75)
 - `add_blocker(...)`, `answer_blocker(blocker_id, answer)`,
-  `resolve_blocker_answer(data, blocker_id, raw)` — blocker lifecycle.
-  `resolve_*` translates "2" → option-text so the event log records the
+  `resolve_blocker_answer(data, blocker_id, raw)` — blocker lifecycle on the
+  dict. `resolve_*` translates "2" → option-text so the event log records the
   human-readable choice.
+- `stamp_attestation(data, kind, commit_sha)`, `attestation_commit_sha(data,
+  kind)` — the verify / simplify quality stamps.
+- `mark_tool_stuck_emitted` / `tool_stuck_already_emitted` /
+  `mark_worker_idle_emitted` / `worker_idle_already_emitted` /
+  `mark_worker_death_reported` / `worker_death_already_reported` /
+  `mark_heartbeat_loop_failing_notified` — the once-per-condition dedup
+  flags the watchdogs stamp on a claim.
+- `append_cpu_sample`, `worker_idle_window_satisfied`,
+  `mark_active_tool_start`, `clear_active_tool`, `stamp_activity_marker` —
+  the idle / stuck-tool detector's inputs.
 - `completed_phase_ids(data)`, `open_blockers(data)`,
   `phase_has_open_blocker(data, phase_id)` — projections. Centralized so
   the predicates can't drift between callers.
@@ -122,6 +245,8 @@ the file.
   right phase when `--phase` isn't given.
 - `status_reason(data)` — derived one-line cause for `paused`/`halted`
   status, read by `clu status`.
+- `is_branch_merged_into(...)`, `local_branch_exists(...)` — the git
+  predicates the auto-archive and worktree rules read.
 
 **Invariants and gotchas**
 
@@ -131,10 +256,13 @@ the file.
   silently breaks `completed_phase_ids()` and friends, which is how
   phases double-dispatch.
 - Slugs MUST go through `validate_slug` before any code path that builds
-  a filesystem path from them. The regex is the path-traversal guard.
-- Every worker-side mutation MUST happen inside `mutate()` (or under
-  `locked()` for multi-file coordination). Don't read state outside the
-  lock and act on it.
+  a store key or a filesystem path from them. The regex is the
+  path-traversal guard.
+- **Readers use snapshots; writers use ops; never hold a read transaction
+  across polls.** Editing a snapshot changes nothing durable — what persists
+  an edit is the op the caller picks. A decision that must not apply against
+  moved state carries its precondition INTO the write rather than trusting
+  the read.
 - `release_claim`: pass both `expected_token` and `expected_phase` or
   neither. Passing only one raises `ValueError` — that's by design, it's
   always a programming bug.
@@ -143,15 +271,15 @@ the file.
 
 **See also**
 
-- `contract.md` for the JSON schema, event-type roster, and worker
-  callback table.
+- `contract.md` for the tables, the state document, the event-type roster,
+  and the worker callback table.
 - `architecture.md` for the priority chain that consumes these
-  projections.
+  projections, and for the storage topology.
 
 ### `config.py`
 
 Per-project `.orchestrator.json` loader. Resolves the path of every
-state file under a project, with a defense-in-depth check that rejects a
+plan under a project, with a defense-in-depth check that rejects a
 resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
 
 **Key types and functions**
@@ -169,23 +297,24 @@ resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
   auto-backgrounded (#106). Default `1_800_000` (30 min), against the
   invariant `gate duration < ceiling < lease TTL`. Validated by
   `_validate_non_negative_int` (rejects non-int, negative, and bool).
-- `ProjectConfig.state_path(plan_slug)` — returns the canonical state
-  path; raises `InvalidSlug` if resolution escapes the orchestrator dir.
-- `ProjectConfig.queue_path()` — `<project>/<plan_dir>/.orchestrator/
-  queue.json`. No slug involved → no path-traversal validation. One
-  queue file per project.
+- `ProjectConfig.orchestrator_dir()` — `<project>/<plan_dir>/.orchestrator/`,
+  the directory that holds `clu.db` and `logs/`. Every store function is
+  keyed by this DIR rather than a file, so one place knows the filename.
+- `ProjectConfig.state_path(plan_slug)` — the canonical plan KEY
+  (`<orch_dir>/<slug>.state.json`); raises `InvalidSlug` if resolution
+  escapes the orchestrator dir. Nothing opens the result — it is the store
+  key, and this method is where the traversal guard lives.
 - `ProjectConfig.master_plan_path(plan_slug)` — `<project>/<plan_dir>/
   <slug>.md`. Absence is the canonical "archived" signal; used by
   `cmd_unregister --all-archived` and `clu worktree gc` to widen
   scope with `--include-archived`.
 - `DispatchSpec` — `kind` (only `"shell"` in v0.1) + `command` template
-  string + optional `path` (absolute PATH for worker subprocess) +
-  optional `repair_command` template. Worker `command` substitutions:
-  `{plan_slug}`, `{phase_id}`, `{token}`, `{project}`, `{state_file}`.
-  Repair `repair_command` substitutions: `{corrupt_path}`,
-  `{backup_path}`, `{diagnosis}`, `{schema_json}`, `{log_path}`. Unset
-  `repair_command` disables queue auto-repair (clu still backs up and
-  notifies via `KIND_QUEUE_CORRUPT`).
+  string + optional `path` (absolute PATH for worker subprocess). Worker
+  `command` substitutions: `{plan_slug}`, `{phase_id}`, `{token}`,
+  `{project}`, `{state_file}`. `repair_command` is still PARSED, and
+  deliberately inert: setting it prints a one-line stderr deprecation at
+  config load and changes nothing (the queue lives in a transactional
+  database, so there is nothing to repair).
 - `NotifySpec` — `imessage_to` (handle) + `quiet_hours` (tuple of
   `"HH:MM"` strings).
 - `load_project_config(project_root)` — parses
@@ -250,18 +379,25 @@ finds its sub-plan via the same table.
 
 ### `supervisor.py`
 
-The single-tick decision engine. Pure function over `data`: it reads,
-mutates, optionally appends one event, and returns a `TickResult`
-describing what to do next. The supervisor never spawns a worker
-itself — `dispatch_for_tick` does that after the lock is released.
+The single-tick decision engine, shaped **snapshot → detect → apply**. It
+takes one snapshot, walks the priority chain holding no transaction at all,
+accumulates its changes in a `TickDelta`, and applies them in a single
+end-of-tick transaction guarded by `plan_store.TickPreconditions`. The
+supervisor never spawns a worker itself — `dispatch_for_tick` does that after
+the apply has committed.
 
 **Key types and functions**
 
-- `tick(state_path, config)` — entry point. Walks the nine-priority
+- `tick(state_path, config)` — entry point. Walks the ten-priority
   chain (see `architecture.md`) and returns a `TickResult`.
+- `TickDelta` — the accumulated changes plus the preconditions the walk's
+  decisions rested on. `plan_store.apply_tick_delta` writes all of it or
+  none of it; a precondition that no longer holds raises `TickConflict`,
+  nothing is written, and the tick reports `idle / concurrent_write`.
 - `sweep_zombie_states(cfg, registered_slugs, *, dry_run=False)` — the
-  registry-independent reaper. Scans a project's `.orchestrator/*.state.json`
-  for unregistered files at `status=running` whose worker is gone
+  registry-independent reaper. Walks the PLANS IN THE PROJECT DATABASE
+  (not files on disk), picking out the unregistered ones at
+  `status=running` whose worker is gone
   (`state.is_zombie_state`), terminalizes + reaps them, and returns a
   list of `ZombieSweepResult`. Run automatically per project by
   `cmd_tick_all` and dry-run by `cmd_doctor`. Backstops the
@@ -283,8 +419,9 @@ itself — `dispatch_for_tick` does that after the lock is released.
   the dead-PID rule).
 - Dead-PID detection (priority 2, issue #72) is inlined in `tick()`
   rather than a separate `_detect_*` helper because it threads through
-  multiple state-mutation steps (event → release_claim_and_emit →
-  best-effort reap) under the existing `with st.mutate()` window.
+  several steps of one decision (event → claim release → best-effort
+  reap) that all land in the same end-of-tick apply. The reap itself runs
+  AFTER the apply commits — durable state first, subprocesses second.
 - `_emit_stuck_blocker_repings(data, config, side_notifies)` — re-pings
   any open blocker un-consumed for ≥30 min (and again every 30 min
   thereafter via `last_repinged_at`). Mutates `data` + appends to
@@ -365,28 +502,14 @@ instead of block-buffering until exit — a wedged worker otherwise leaves a
   Claude Code hooks inside the worker (the activity hook) inherit the
   claim identity — worker-side `export` can't deliver this because env
   doesn't persist across Bash tool calls in headless `--print`
-  sessions (#91). Repair workers pass no kwargs: they carry no claim
-  or token, and the activity hook's empty-token short-circuit is the
-  correct behavior for them. Cfg-only call with no PATH override keeps
+  sessions (#91). Cfg-only call with no PATH override keeps
   returning `None` — `clu doctor`'s "(source: inherited)" display
   depends on it. Also `setdefault`s `BASH_MAX_TIMEOUT_MS` (from
   `dispatch.bash_max_timeout_ms`) inside the inject branch, so a long
   test gate runs in the foreground instead of being auto-backgrounded
   past end-of-turn (#106); `setdefault` lets an operator who already
   exports the var win, and keeping it inside the branch preserves the
-  `None`-inherit contract. Repair workers (no kwargs) get no ceiling.
-- `dispatch_repair_worker(cfg, corrupt_path, backup_path, diagnosis,
-  log_path, *, timeout_sec=60)` — synchronous repair-worker spawn for a
-  corrupt `queue.json`. Renders `cfg.dispatch.repair_command`, waits for
-  the worker to exit (or kills it on timeout, returning
-  `REPAIR_RC_TIMEOUT = -1`), and returns the rc. Caller MUST follow up
-  with `queue.validate_repair` regardless of rc — the rc is advisory.
-  Stays separate from `dispatch_for_tick` because the contracts differ:
-  there's no claim or token, the wait is synchronous (the cron tick
-  blocks), and the logs go to `repair-queue-<UTCstamp>.log` instead of
-  the per-token path.
-- `DEFAULT_REPAIR_TIMEOUT_SEC` (60s), `REPAIR_RC_TIMEOUT` (-1) —
-  sentinel for the timeout-killed path.
+  `None`-inherit contract.
 - `_FAST_FAIL_WAIT_SEC` (0.5s) — how long `proc.wait()` polls before
   declaring the worker healthy. Exits sooner if the worker crashed.
 - `_release_with_failure(state_file, result, *, reason)` — clears the
@@ -447,47 +570,55 @@ can't read confidently (weekly `resets Mon 12:00am`, date forms).
 - `read_log_tail(log_path, lines=50)` — deque-bounded tail read; `""`
   on `OSError`. Shared with the systemic matcher (`dispatch.py` reads
   through it).
-- `record_quota_pause(orchestrator_dir, match, now)` — writes
-  `quota.json` (`paused_until = reset + 120s`, or `null` for stuck) and
-  returns `paused_until`. Always resets the canary fields. Takes the
-  **orchestrator dir** (state-file parent), not the project root —
-  `plan_dir` is configurable and every death site already holds the
-  state path.
+- `record_quota_pause(orchestrator_dir, match, now)` — writes the project's
+  single `quota` row (`paused_until = reset + 120s`, or `null` for stuck)
+  and returns `paused_until`. Always resets the canary fields. Takes the
+  **orchestrator dir** (the plan key's parent), not the project root —
+  `plan_dir` is configurable and every death site already holds the key.
+- `read_pause(orchestrator_dir)` — the row as a dict, or `None`. Read-ONLY:
+  consulting the pause must never create a database and never take the
+  write lock, because the overwhelmingly common answer is "no row" on a
+  path every tick walks.
+- `clear_pause(orchestrator_dir)` — delete the row and return what it held,
+  read and delete in ONE transaction so what is reported is what was
+  removed. `clu quota clear`'s body.
 - `record_quota_death(data, match, *, phase_id, token, orchestrator_dir)`
-  — the shared recorder all three death sites call: writes the pause file
-  plus `quota_death` (forgiveness marker) + `quota_paused` events into the
-  open state-mutation `data`. Returns `paused_until`.
+  — the shared recorder all three death sites call: writes the pause row
+  first (its own transaction, so a pause is never lost to a later failure),
+  then appends `quota_death` (forgiveness marker) + `quota_paused` onto the
+  caller's snapshot for the caller to persist. Returns `paused_until`.
 - `gate_decision(orchestrator_dir, plan_slug, now)` → `GateDecision(dispatch, detail, resumed)`
   — the dispatch gate's four-state machine (see architecture.md "Quota
   pause gate"). `dispatch=False` → supervisor returns idle; `resumed=True`
   → supervisor also appends `quota_resumed`.
 - `PAUSE_BUFFER_SEC` (120), `CANARY_WINDOW_SEC` (180),
-  `QUOTA_FILE_NAME` (`"quota.json"`), `QUOTA_SCHEMA_VERSION` (1),
   `LOG_TAIL_LINES` (50) — module constants; no config knobs (no second
   caller exists).
 
 **Invariants and gotchas**
 
-- **File absent == not paused** is the one invariant the hot path
-  (`Path.exists()` before any lock) and the operator escape hatch
-  (`rm quota.json`) both rely on. Resume *unlinks*; it never writes a
-  cleared sentinel.
-- `gate_decision` does NOT reuse `record_quota_pause`'s `locked_json` —
-  `locked_json` unconditionally re-saves on exit, which would resurrect
-  the file on the unlink-resume path. The gate uses raw `state.locked`
-  + `state.load` + conditional `save_atomic`/`unlink`. Their save
-  semantics genuinely differ; don't merge them.
+- **Row absent == not paused** is the one invariant the hot path (a
+  read-only `SELECT`, no write lock) and the operator escape hatch
+  (`clu quota clear`) both rely on. The `quota` table is single-row by
+  construction (`CHECK (id = 1)`) precisely so "absent" cannot be
+  ambiguous; resume DELETES, it never writes a cleared sentinel.
+- The pause is read twice — once cheaply, once inside the transaction that
+  may write — and the second read is authoritative. That re-read is why
+  there is no branch for "the pause vanished between the check and the
+  lock": it cannot race.
 - `quota_paused` events carry **no `phase` key** — consumers iterating
   `data["events"]` must not assume one.
-- A corrupt or field-malformed `quota.json` degrades to dispatch (a
-  malformed file must never freeze the fleet); a benign
-  `FileNotFoundError` from a concurrent resume race is caught
-  separately and stays silent.
+- Degradation is split two ways, deliberately. An unreadable store
+  (`sqlite3.Error`, `SchemaTooNew`, `OSError`) and a field-malformed row
+  both DISPATCH with a stderr note — no malformed pause may freeze the
+  fleet. CONTENTION (`db.DbBusy`) IDLES instead: a busy database is not a
+  broken one, and dispatching into a pause we merely could not read costs
+  a worker and a quota hit, where idling costs one tick.
 
 **See also**
 
-- `contract.md` § "Quota-death event semantics" + "Quota pause file
-  schema" for the event kwargs and `quota.json` shape.
+- `contract.md` § "Quota-death event semantics" + "Quota pause" for the
+  event kwargs and the row shape.
 - `architecture.md` § "Quota pause gate" for the state machine.
 - `operations.md` § "Recovering from a quota pause" for the operator
   runbook.
@@ -561,8 +692,8 @@ live claim every 120s while the worker PID is alive.
   pid_alive, ping) -> str` — the pure decision core: dead worker PID →
   exit; ping rejected (`ClaimMismatch` — claim released or superseded) →
   exit, NOT a strike; any other failure → strike. The ping is in-process
-  (`state.record_heartbeat` under `state.mutate`) — the same code path
-  `cmd_heartbeat` uses, so the daemon holds no subprocess PATH
+  (`plan_store.op_heartbeat` — one transaction touching one claim column,
+  no events) — the same code path `cmd_heartbeat` uses, so the daemon holds no subprocess PATH
   assumptions. The default liveness probe (`_make_pid_alive(plan)`) is
   **cmdline-anchored** via `state.claim_worker_alive` with the plan slug as
   `cmdline_match` — a bare `kill(0)` false-positives on PID reuse, and
@@ -575,7 +706,7 @@ live claim every 120s while the worker PID is alive.
   (#104), turning the detection into an event/inbox/notify/watch line AND
   releasing the claim (quota-classified first) so the phase is redispatchable;
   claim-gone (a normal `clu complete`/`block` release) never reports. The
-  report call is wrapped so nothing — `LockTimeout` included — can stop the
+  report call is wrapped so nothing — `db.DbBusy` included — can stop the
   loop returning 0. `sleep` / `tick` / `notify_failure` / `report_death` /
   `max_ticks` are injectable so tests run without wall-clock or forking.
 - `run(..., detach=True)` — `_daemonize` (double-fork + setsid, stdio
@@ -806,7 +937,7 @@ registry walk (`notify_imessage_inbound`, `cli.cmd_answer`,
   optional `state_path`, `blocker_id`, `answer_index`, `project_root`, and
   `candidates: list[OpenBlocker]` for the `AMBIGUOUS` case.
 - `find_blocker_for_reply(entries, reply_text) -> LocatorResult` — walks
-  the registry, loads each plan's state file tolerantly (skipping
+  the registry, loads each plan's state tolerantly (skipping
   unreadable ones with a log warning), and resolves `reply_text` to a
   single open blocker.
 
@@ -823,34 +954,30 @@ registry walk (`notify_imessage_inbound`, `cli.cmd_answer`,
 
 Host-level index of `(project_root, plan_slug)` pairs. Multi-plan
 features — fleet view, inbound reply routing — walk this to find every
-state file on the host without scanning the filesystem.
+plan on the host without scanning the filesystem.
 
-Stored at `$XDG_CONFIG_HOME/clu/registry.json` (default
-`~/.config/clu/registry.json`).
+Stored in the `registry` table of the host database, `$XDG_CONFIG_HOME/clu/clu.db`
+(default `~/.config/clu/clu.db`).
 
 **Key types and functions**
 
 - `PlanEntry` — frozen dataclass: `project_root`, `plan_slug`,
   `registered_at`.
-- `SCHEMA_VERSION` — independent from `state.SCHEMA_VERSION`; passed to
-  `state.load` via `expected_version`.
-- `registry_path()` — resolves `$XDG_CONFIG_HOME` → path. Don't inline.
-- `entries(path=None)` — list every registered plan.
+- `entries(path=None)` — list every registered plan. `path` names the host
+  DATABASE, not a registry file — the same test seam the keyword always was.
+- `entries_for_project(project_root, path=None)` — the subset for one project.
 - `register(project_root, plan_slug, *, path=None)` — add a pair.
-  Returns `False` if it was already present. Auto-invoked by `clu init`.
+  Returns `False` if it was already present. Idempotent, and auto-invoked by
+  `clu init` and by the queue pop.
 - `unregister(project_root, plan_slug, *, path=None)` — remove a pair.
   Returns `False` if it wasn't there.
 - `load_entry_state(entry)` — `entry → loaded state dict` or `None`.
-  Tolerant of every failure mode (missing project, deleted state file,
-  schema drift). Never raises.
-- `_mutate(path)` — internal lock + load + atomic-write helper. Mirrors
-  `state.mutate` but tolerates a missing file (first register creates).
+  Tolerant of every failure mode (missing project, missing plan, missing or
+  newer-schema database). Never raises.
 
 **Invariants and gotchas**
 
-- Reads and writes go through `state.locked` + `state.save_atomic`. The
-  same primitive that protects per-plan state protects the registry —
-  no second locking model.
+- Exactly one registry walk in the codebase; callers must not re-implement it.
 - `load_entry_state` is the boundary between "registry says X exists"
   and "X is actually loadable." Every multi-plan walker (fleet,
   inbound) MUST go through this so a stale entry can't take them down.
@@ -858,108 +985,101 @@ Stored at `$XDG_CONFIG_HOME/clu/registry.json` (default
   absolute path — that absolute string is what unregister keys against,
   so two calls with different relative paths to the same dir collapse
   correctly.
+- A read that cannot reach the host database (absent, busy, newer schema)
+  degrades to an EMPTY registry, not an exception. `db.DEGRADABLE_ERRORS` is
+  the guard; note that `db.DbBusy` is a `RuntimeError`, so an `except OSError`
+  written for the file era would have walked straight past it.
 
 **See also**
 
 - `fleet.py` and `notify_inbound.py` are the two consumers.
-- `contract.md` § "Host-level registry" for the JSON shape on disk.
+- `contract.md` § "Host-level registry".
 
 ### `queue.py`
 
-Per-project plan queue. Holds the list of plans waiting to be `init`ed
-after the current one finishes. Storage at `<plan_dir>/.orchestrator/
-queue.json`; schema in `contract.md` § "Queue schema". The
-auto-repair safety boundary lives here too — `validate_repair` is what
-makes "trust the prompt" optional.
+Per-project plan queue: the list of plans waiting to be `init`ed after the
+current one finishes. Two tables in the project database — `queue` (pending)
+and `queue_history` (departed); schema in `contract.md` § "Queue schema".
+
+There is no repair machinery here any more, and its absence is the point: a
+WAL database never hands a reader a half-written store, so the corruption the
+old regex-over-raw-bytes rescue existed for cannot occur.
 
 **Key types and functions**
 
-- `SCHEMA_VERSION` — independent from `state.SCHEMA_VERSION`; passed to
-  `state.load` via `expected_version`.
-- `_empty()` — fresh shape: `{"schema_version": 1, "queue": [],
-  "history": []}`. Private to the module; callers use `mutate`.
-- `load(path)` — `state.load` with the queue's schema version. Raises
-  `FileNotFoundError`, `json.JSONDecodeError`, or
-  `state.SchemaVersionMismatch`. Callers (cli + supervisor) bundle these
-  into `_QUEUE_LOAD_ERRORS` for `try/except`.
-- `save_atomic(path, data)` — thin alias over `state.save_atomic`.
-- `mutate(path)` — lock + load + yield-for-mutation + atomic-write,
-  tolerant of a missing file via `state.locked_json(empty=_empty)`. The
-  read-modify-write helper for every queue write.
-- `best_effort_extract_slugs(data: bytes)` → `set[str]` — regex over raw
-  bytes for every `"slug": "..."` match. Catches catastrophic loss; the
-  worker can't surgically corrupt around it because the slug values
-  usually survive even a truncated JSON.
-- `best_effort_extract_history_slugs(data: bytes)` → `set[str]` — scans
-  the `"history": [ ... ]` block specifically, with a small
-  bracket-counter that respects escaped strings. Pending-only slug set
-  is `best_effort_extract_slugs - best_effort_extract_history_slugs`.
-- `validate_repair(backup_bytes, repaired_path)` → `ValidationResult` —
-  the hard slug-preservation check. Returns
-  `ValidationResult(ok=False, reason=...)` on any rule violation;
-  caller MUST revert from backup when `ok=False`. See `contract.md`
-  § "Auto-repair contract" for the rules.
-- `ValidationResult` — dataclass: `ok: bool`, `reason: str | None`.
-- `read_throttle(throttle_path, diagnosis_hash)` → `int` — current
-  attempt count for `diagnosis_hash`. Returns 0 on any read failure
-  (FileNotFound, corrupt JSON, mismatched hash) — we don't want a
-  "repair-the-throttle" sub-failure.
-- `increment_throttle(throttle_path, diagnosis_hash)` — bump the
-  counter. Writes
-  `{"attempts": N, "last_at": "...", "diagnosis_hash": "..."}`.
-- `reset_throttle(throttle_path)` — unlink the throttle file. Called
-  after a successful repair so the next failure starts fresh.
+- `OUTCOME_POPPED / OUTCOME_ABSORBED / OUTCOME_ABANDONED / OUTCOME_REMOVED` —
+  what leaving the pending queue is called, in the events and in
+  `clu queue list`.
+- `AlreadyQueued` — raised INSIDE the insert transaction (carrying the
+  existing position) so the duplicate check and the insert cannot be
+  separated by another writer.
+- `pending(orch_dir)` / `history(orch_dir)` — whole-operation reads. An
+  absent database reads as an empty queue — the direct heir of "no queue file
+  means no queue".
+- `add(orch_dir, entry)` / `add_many(orch_dir, entries, *, front=False)` —
+  whole-operation writes; return the 1-based position(s).
+- `remove(orch_dir, slug)` — drop a pending entry into history as `removed`.
+- `pop_head_if(orch_dir, slug, outcome)` — pop only if the head is still
+  `slug`.
+- `pending_in_txn(cur)` / `history_in_txn(cur)` / `insert_in_txn(cur, entry,
+  *, front=False)` / `pop_head_in_txn(cur, slug, outcome, extra=None)` /
+  `remove_in_txn(cur, slug)` — the cursor-level halves, for callers that must
+  span the queue and another table in ONE transaction (the pop creates the
+  plan; the worker-enqueue path checks its cap and inserts).
 
 **Invariants and gotchas**
 
-- The validation step is the safety boundary, NOT the worker's prompt.
-  Even a perfectly-prompted worker can hallucinate; the regex over the
-  backup bytes is what makes "delete slug X to make the file parse"
-  impossible to slip past.
-- `history` is append-only at the semantic level — `validate_repair`
-  enforces it. `cmd_queue_remove` and the supervisor's
-  abandon/absorb branches all append; no code path removes.
-- `read_throttle` resets to 0 on a hash mismatch: a *different*
-  corruption gets its own three attempts. The throttle is per-error-
-  type, not per-file-lifetime.
-- Slug regex (`_SLUG_RE`) is bytes-mode and case-sensitive — it matches
-  exactly what `state.SLUG_PATTERN` accepts via JSON. Don't widen.
+- **`id` is the ORDER, not just an identity.** The head is the smallest id, a
+  tail-add takes the next autoincrement, and `--front` inserts BELOW the
+  current minimum (explicit, possibly negative rowids) so nothing already
+  queued is renumbered.
+- **The head re-check is the `DELETE`'s own `WHERE` clause.** Two ticks
+  racing the same pop are safe: the loser reads a head that is no longer
+  `slug`, returns `False` before deleting anything, and repeats none of the
+  winner's work.
+- Everything on an entry that has no column of its own — `position_at_add`
+  and the worker-enqueue provenance — rides in the JSON `extra` column, so an
+  entry dict round-trips whole.
+- `queue_history` is append-only at the semantic level. Every branch appends;
+  no code path removes.
 
 **See also**
 
-- `contract.md` § "Queue schema" and "Auto-repair contract" for the
-  on-disk shape and worker/clu responsibility split.
-- `dispatch.dispatch_repair_worker` for the spawn side.
+- `contract.md` § "Queue schema" for the table shapes and outcome semantics.
+- `architecture.md` § "Queue advancement" for the two-transaction pop.
 - `cli.cmd_queue_*` for the operator surface.
 
 ### `monitor.py`
 
-Background-monitoring marker file (account-wide, not per-project). The
-`clu install-hook` CLI writes this after registering the
-`UserPromptSubmit` hook in `~/.claude/settings.json`; clu CLI commands
-read it to suppress monitoring tips when the hook is already in place.
-Tolerant by design — missing file, corrupt JSON, schema mismatch, and
-legacy v1 markers all surface as `None` / `False` so the install
-workflow re-runs cleanly.
+Background-monitoring marker (account-wide, not per-project): rows in the
+host database's key/value `monitor` table. The `clu install-hook` CLI writes
+them after registering the `UserPromptSubmit` hook in
+`~/.claude/settings.json`; clu CLI commands read them to suppress monitoring
+tips when the hook is already in place. Tolerant by design — no rows, an
+absent or busy store, and a newer schema all surface as `None` / `False` so
+the install workflow re-runs cleanly.
 
 **Key types and functions**
 
-- `SCHEMA_VERSION = 2` — bumped from v1 (the broken `/schedule`-based
-  install) when `clu install-hook` shipped. v1 markers are treated as
-  "needs reinstall" rather than migrated in place.
-- `marker_path()` → `Path` — XDG-respecting location
-  (`$XDG_CONFIG_HOME/clu/monitor.json` or `~/.config/clu/monitor.json`).
-- `load_marker(path=None)` → `dict | None` — marker contents, `None`
-  on any failure mode (missing, corrupt JSON, schema version mismatch,
-  v1 legacy marker).
+- `SCHEMA_VERSION = 2` — projected onto the marker dict readers are handed;
+  v1 was the broken `/schedule`-based install. A leftover v1 or v2
+  `monitor.json` FILE is inert — nothing reads it — so a host carrying one
+  still reads as un-monitored and `/clu-monitor` reinstalls cleanly.
+- `LEGACY_MARKER_FILENAME = "monitor.json"` — the retired file's name, kept
+  only so the quarantine sweep in `operations.md` has something to point at.
+- `load_marker(path=None)` → `dict | None` — the marker rows as a dict,
+  `None` when there are no rows or the store cannot be read
+  (`db.DEGRADABLE_ERRORS`). `path` names the host DATABASE.
 - `is_scheduled(path=None)` → `bool` — `True` iff `load_marker` returns
   a dict. The single predicate every CLI suppression branch keys off.
 - `record_hook_installed(hook_path, settings_json_path, *, path=None)` —
-  atomic v2 marker write via `state.locked_json`. Overwrites stale v1
-  markers in place.
-- `clear_marker(path=None)` — idempotent delete; no error on absent
-  file. Invoked by `clu uninstall-hook` after `settings.json` is
-  pruned.
+  one `INSERT OR REPLACE` transaction. Carries no field from a legacy
+  marker: the rows are all there is.
+- `clear_marker(path=None)` — delete the rows; idempotent. Invoked by
+  `clu uninstall-hook` after `settings.json` is pruned. Unlike the unlink it
+  replaced, this CAN fail (a contended or unreadable store), and the caller
+  reports that rather than leaving the operator with a half-finished
+  uninstall.
 
 **Invariants and gotchas**
 
@@ -972,15 +1092,15 @@ workflow re-runs cleanly.
   ordering: `clu install-hook` updates `settings.json` first and only
   writes the marker on success. A failed install leaves the marker
   absent so the next attempt retries cleanly.
-- The path resolution mirrors `registry.registry_path()` — same XDG
-  rules, same parent directory (`$XDG_CONFIG_HOME/clu/`).
+- The marker shares the host database with the registry, the inbox and the
+  sidecars — same XDG resolution, one file (`$XDG_CONFIG_HOME/clu/clu.db`).
 
 **See also**
 
 - `operations.md` § "Background monitoring" for the user-facing setup
   + reset workflow.
-- `contract.md` § "Background-monitoring marker" for the v2 JSON shape
-  and the v1 → v2 migration story.
+- `contract.md` § "Background-monitoring marker" for the marker shape and
+  what a leftover legacy file does (nothing).
 - `cli.cmd_install_hook` / `cli.cmd_uninstall_hook` for the install
   workflow that writes/clears this marker.
 - `end_of_line/skills/clu-monitor/SKILL.md` for the skill that shells
@@ -988,46 +1108,50 @@ workflow re-runs cleanly.
 
 ### `inbox.py`
 
-Per-event JSON inbox surfaced to active Claude Code sessions via the
-`UserPromptSubmit` hook. One file per event under `~/.config/clu/inbox/`,
-mark-and-sweep dedup into a `processed/` subdir.
+The per-event inbox surfaced to active Claude Code sessions via the
+`UserPromptSubmit` hook. One ROW per event in the host database's `inbox`
+table, with a `processed` flag for mark-and-sweep dedup.
 
 **Key types and functions**
 
-- `SCHEMA_VERSION = 1` — embedded in every event payload; the hook
-  ignores events with a higher version it doesn't understand.
-- `inbox_root()` → `Path` — XDG-respecting
-  (`$XDG_CONFIG_HOME/clu/inbox/` or `~/.config/clu/inbox/`).
+- `SCHEMA_VERSION = 1` — projected onto every event payload readers are
+  handed. The durable version is the host database's `user_version`.
+- `LEGACY_INBOX_DIRNAME = "inbox"` — the retired directory's name, kept only
+  so the quarantine sweep in `operations.md` has something to point at.
+  Nothing reads it.
 - `write_event(*, type, plan_slug, project_root, summary, details=None, inbox=None)` → `str` —
-  atomic `tmp + rename` write of one event JSON; returns the event id
-  (`evt-<8hex>`). `project_root` is resolved to an absolute path so the
-  hook's `git rev-parse --show-toplevel` filter compares apples to
-  apples.
-- `read_unprocessed(inbox=None)` → `list[dict]` — every payload in
-  `inbox/` (NOT `inbox/processed/`), sorted by filename (== arrival
-  order thanks to the `time.time_ns()` suffix). Corrupt files are
-  silently skipped.
-- `mark_processed(event_id, inbox=None)` → `None` — scans for the file
-  whose payload has `id == event_id` and moves it into `processed/`.
-  Idempotent: missing inbox, empty inbox, and unknown id all return
-  silently — never propagate cleanup failures into the hook.
+  inserts one event row; returns the event id (`evt-<8hex>`). `project_root`
+  is resolved to an absolute path so the hook's `git rev-parse
+  --show-toplevel` filter compares apples to apples. The `inbox` keyword
+  names the host DATABASE — the same test seam it always was.
+- `read_unprocessed(inbox=None)` → `list[dict]` — every unprocessed payload
+  in arrival order (the table's autoincrement `id`).
+- `mark_processed(event_id, inbox=None)` → `None` — flags one event
+  processed. Idempotent: an unknown or already-processed id updates nothing
+  and returns silently. `AND processed = 0` makes the check and the flag ONE
+  statement, so a second session cannot claim an event this one already took.
 - `list_for_project(project_root, inbox=None)` → `list[dict]` —
-  `read_unprocessed` filtered to events whose `project_root` resolves
-  to the given path. The hook calls this once per Claude turn.
+  `read_unprocessed` filtered to one project.
+- `claim_for_project(project_root, *, limit, inbox=None)` → `list[dict]` —
+  read this project's unprocessed events AND flag the newest `limit` of them
+  processed, in ONE transaction. The hook's entry point.
 
 **Invariants and gotchas**
 
-- Filename format `<safe_ts>-<time_ns>-<type>-<short>.json` makes
-  lexical order == arrival order. The `time_ns()` suffix is the
-  monotonicity guarantee (the second-resolution `timestamp` field ties
-  under tight-loop writes); the 8-char short id is the cross-process
-  collision tiebreaker.
-- No flock on writes — each event is its own file, atomic via
-  `tmp + rename`. Concurrent writers race on filenames, but the
-  ns-suffix + random-short combo is collision-free in practice.
-- `mark_processed` reads every event in the directory looking for a
-  matching id. This is O(N) but N caps low — the surfacer processes
-  events serially, and the hook is bounded to 20 events per turn.
+- **`event_id` is `UNIQUE`** — that column is the dedupe the old
+  move-into-`processed/` protocol used to get from the filename.
+- **Ordering is the autoincrement `id`**, which is arrival order. No
+  filename timestamp encoding, and two processes writing simultaneously
+  cannot collide.
+- `claim_for_project` returns MORE than it claims, deliberately: flagging is
+  capped at `limit` because the caller renders at most that many (claiming
+  everything would silently consume events the operator never saw), while the
+  return is uncapped because the caller needs the total to write its
+  truncation footer.
+- Reads degrade to `[]` on `db.DEGRADABLE_ERRORS` (absent, busy, corrupt, or
+  newer-schema store). The surfacer must never crash on the way to rendering
+  a prompt — and `db.DbBusy` is a `RuntimeError`, so a file-era
+  `except OSError` would have missed it.
 - Inbox writes are unconditional w.r.t. quiet hours. `notify.notify()`
   gates the iMessage but always calls `write_event` when `plan_slug` +
   `project_root` are in scope. The asymmetry is deliberate: the inbox
@@ -1035,19 +1159,17 @@ mark-and-sweep dedup into a `processed/` subdir.
 
 **See also**
 
-- `contract.md` § "Inbox event files" for the JSON payload shape and
-  filename convention.
+- `contract.md` § "Inbox events" for the payload shape.
 - `end_of_line/hooks/clu_inbox_surface.py` — the canonical consumer;
-  reads stdin, calls `list_for_project`, emits
-  `hookSpecificOutput.additionalContext`, calls `mark_processed` per
-  surfaced event.
+  reads stdin, calls `claim_for_project`, emits
+  `hookSpecificOutput.additionalContext`.
 - `notify.notify()` for the integration point that writes inbox events
   alongside iMessage sends.
 
 ### `watch.py`
 
 Streaming projection of plan state-machine events for AI-agent
-consumption (Claude's `Monitor` tool). Polls state files on disk and
+consumption (Claude's `Monitor` tool). Polls the project database and
 emits one concise line per meaningful transition to stdout.
 
 **Key types and functions**
@@ -1082,7 +1204,7 @@ emits one concise line per meaningful transition to stdout.
   the parent TASK_CREATE.
 - `stream_loop(state_paths, *, json_mode, verbose, sink, poll_interval,
   max_ticks, _before_first_tick, task_list_mode) -> int` — poll loop
-  over a list of state file paths. On startup, emits a `[snapshot]`
+  over a list of plan keys. On startup, emits a `[snapshot]`
   baseline line per plan (current status + active phase), sets
   per-path cursors, then polls at `poll_interval` seconds. New events
   since the last tick are projected through `project_event` (text
@@ -1111,9 +1233,9 @@ emits one concise line per meaningful transition to stdout.
 - `stream_loop` silently drops state paths that go missing mid-watch
   (plan archived while watching) — the cursor map entry is removed and
   no error is emitted.
-- `_slug_for_path` extracts the plan slug from `<slug>.state.json` by
-  stripping the `.state` suffix from the stem. Relies on the canonical
-  naming convention from `state.state_path_for`.
+- `_slug_for_path` extracts the plan slug from a `<slug>.state.json` KEY by
+  stripping the `.state` suffix from the stem. Relies on the canonical key
+  shape (`state.STATE_SUFFIX`, minted by `config.state_path`).
 
 **See also**
 
@@ -1493,7 +1615,7 @@ mutates, never writes.
   exists and its heartbeat age exceeds the threshold, the projection
   swaps the status to `STATUS_STALLED`.
 - `missing` is a display-only label rendered when state can't be
-  loaded — the registry knows about the plan but the state file is
+  loaded — the registry knows about the plan but its state is
   gone.
 - This module imports `registry` and `state` only. No side effects, no
   network, no subprocess. Safe to call repeatedly.
@@ -1552,7 +1674,7 @@ project per tick" invariant, paralleling `supervisor.tick`'s per-plan chain.
   call each, apply and return on first non-None. Called by `cmd_tick_all`
   after the worktree conflict scan.
 - `load_plans_for_project(project_root, cfg) → list[ProjectPlan]` —
-  registry walk; tolerates missing/corrupt state files (logs + skips).
+  registry walk; tolerates missing/unreadable plans (logs + skips).
 - `dry_merge_gate_rule(project_root, plans)` — fires when ≥2 DONE plans
   share a `batch_id` and have live worktree branches. See `architecture.md`
   § "Multi-plan batch integration gate" for trigger conditions, idempotency
@@ -1565,8 +1687,9 @@ project per tick" invariant, paralleling `supervisor.tick`'s per-plan chain.
 - Rule-first-match-wins means the gate never fires in the same tick that
   queue advancement or conflict detection fires.
 - `_apply` takes ALL paths from both `events_per_plan` and
-  `field_updates_per_plan`; state writes are batched per path into a single
-  `st.mutate` window.
+  `field_updates_per_plan`; each plan's field updates and events go out as
+  ONE `plan_store.op_set_fields` call, so a rule's writes per plan are one
+  transaction.
 
 ### `skill_sync.py`
 
@@ -1597,12 +1720,14 @@ owns the only write, and the callers (`cmd_doctor`, `cmd_init`,
 - `record_install(name: str, digest: str) -> None` — remember that clu
   wrote these bytes for this skill.
 - `installed_record() -> dict[str, str]` — name → hex digest of what clu
-  last wrote, from the sidecar at `clu_config_dir()/installed-skills.json`.
-  A missing, corrupt, or future-schema file reads as `{}`.
+  last wrote, from the `skills` table of the host database. An absent,
+  locked, or newer-schema store reads as `{}` — this is a cache of clu's
+  own writes, not durable data, so losing it degrades recognition to the
+  manifest, which is a smaller feature rather than a wrong answer.
 
 Supporting surface: `installed_path`, `bundled_bytes`,
 `is_writable_target`, `digest`, `load_manifest` (fingerprints + a reason
-string when they are unusable), `shipped_fingerprints`, `record_path`.
+string when they are unusable), `shipped_fingerprints`.
 
 **Invariants and gotchas**
 
@@ -1694,15 +1819,17 @@ operator (`tick`, `status`, `pause`, `resume`, `retry`, `init`,
     `EVENT_QUEUE_REJECTED` in the source plan's events. See
     `architecture.md` § "Worker enqueue flow" for the full validation
     order. Decorated with `@_translate_claim_mismatch`.
-- `_cmd_queue_add_worker(args, cfg, queue_path)` — the worker-mode
-  dispatch path extracted from `cmd_queue_add`. Sibling of `cmd_spawn`:
-  both are worker callbacks that take `--token`, both wear
-  `@_translate_claim_mismatch`, both open the source state under
-  `st.mutate` before touching secondary resources (queue vs spawned-
-  task list). Not a public CLI subcommand — called only by
-  `cmd_queue_add` after mode discrimination.
+- `_cmd_queue_add_worker(args)` — the worker-mode dispatch path extracted
+  from `cmd_queue_add`. Sibling of `cmd_spawn`: both are worker callbacks
+  that take `--token` and wear `@_translate_claim_mismatch`. Three
+  transactions, never nested: check the claim against a snapshot; run the
+  cap + idempotency + insert in one queue transaction; land the outcome
+  event through an op that re-checks the claim in its own `WHERE` clause.
+  The registry read that answers "is this slug already in flight" happens
+  BEFORE the queue transaction — it is a different database. Not a public
+  CLI subcommand.
 - `cmd_queue_list(args)` — render the pending queue + a `Recent
-  failures:` tail of the last 10 history entries. Uses `registry.entries`
+  failures:` tail of the last 10 `queue_history` entries. Uses `registry.entries`
   + `registry.load_entry_state` to derive a STATUS column per pending
   entry; the head's status drives a `chain frozen at head` NOTE when the
   freeze predicate fires.
@@ -1785,8 +1912,8 @@ operator (`tick`, `status`, `pause`, `resume`, `retry`, `init`,
   remove the `UserPromptSubmit` hook in `~/.claude/settings.json` that
   surfaces inbox events into the active Claude Code session. The
   `/clu-monitor` skill is the user-facing wrapper; the CLI is the
-  underlying mechanism. Both maintain the v2 marker at
-  `~/.config/clu/monitor.json`.
+  underlying mechanism. Both maintain the v2 marker rows in the host
+  database.
 - `cmd_doctor(args)` — smoke-test what a worker subprocess sees:
   prints the effective PATH (after `dispatch.build_worker_env`),
   resolves common tools (`claude`, `gh`, `git`, `python3`), and exits
@@ -1834,24 +1961,27 @@ operator (`tick`, `status`, `pause`, `resume`, `retry`, `init`,
   `tail -f` semantics.
 - `cmd_prior_blocker(args)` — worker-side helper that prints the most
   recent answered blocker for the current phase, so a re-dispatched
-  worker can read the operator's choice without parsing state.json
+  worker can read the operator's choice without going near the store
   itself.
 - `_resolve_project_arg(args)` — centralizes the four-site
   `args.project or Path.cwd()` pattern with uniform `.resolve()`.
   `getattr` tolerates the bare `clu queue` shape where the
   Namespace has no `--project` attribute.
-- `_handle_corrupt_queue(cfg, exc, queue_path)` — the auto-repair
-  pipeline (see `architecture.md` § "Auto-repair worker").
-- `_refuse_on_corrupt_queue(queue_path, exc)` — operator-at-keyboard
-  refusal path for `cmd_queue_*`. Surfaces backup paths + a
-  paste-into-Claude diagnosis. The auto-repair pipeline only runs from
-  `cmd_tick_all`, never from the operator CLI.
+- `_refuse_on_unreadable_queue(orch_dir, exc)` — operator-at-keyboard
+  refusal path for `cmd_queue_*`. It REPORTS rather than repairs, and that
+  is the whole change from the file era: a transaction cannot leave a
+  half-written queue, so what reaches here is a database that is genuinely
+  broken or written by a newer clu — neither of which a worker edits back to
+  health.
 - `_queue_footer(entries)` — one-line summary of pending queue work,
   printed under the fleet table when bare `clu` finds any project with
   a non-empty queue. `None` when nothing's pending and nothing's
   unreadable.
-- `_QUEUE_LOAD_ERRORS` — `(JSONDecodeError, SchemaVersionMismatch,
-  KeyError, OSError)` tuple every queue-loader wraps with `try/except`.
+- `_QUEUE_READ_ERRORS` — `(*db.DEGRADABLE_ERRORS, st.SchemaVersionMismatch,
+  ValueError)`, the tuple every queue reader wraps with `try/except`. Note
+  what `db.DEGRADABLE_ERRORS` adds over the file era's `OSError`:
+  `sqlite3.Error` for a broken store, `db.DbBusy` (a `RuntimeError`) for
+  contention, `db.SchemaTooNew` for a newer clu's database.
 - `cmd_validate(args)` — operator-on-demand dry-merge (mode-agnostic;
   reused by `clu ship --check` in both direct and as-pr modes).
   Accepts `--project` + (`--batch B` or `--branches a,b`). Resolves
@@ -1895,7 +2025,7 @@ operator (`tick`, `status`, `pause`, `resume`, `retry`, `init`,
   the command starts (so a mid-test commit can't slip a stale SHA
   into the stamp). On rc=0 stamps `current_claim.attestations.verify`
   and emits `EVENT_VERIFY_STAMPED`. On rc!=0 exits non-zero with
-  stderr tail; state file untouched so the operator can re-run.
+  stderr tail; plan state untouched so the operator can re-run.
   `--token` validates against the live claim when present (worker
   mode); operator omits it for manual re-verification or rescue.
 - `cmd_attest(args)` — worker self-attestation. `--simplify` stamps

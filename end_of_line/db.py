@@ -26,7 +26,7 @@ Three rules hold the concurrency story up, and all three are load-bearing:
    still see a brief SQLITE_BUSY during last-connection-close cleanup and crash
    recovery (sqlite.org/wal.html, "Sometimes Queries Return SQLITE_BUSY").
 
-`synchronous=FULL` is deliberate: every clu write fsyncs today (tmp + fsync +
+`synchronous=FULL` is deliberate: every clu write used to fsync (tmp + fsync +
 rename), and a storage migration whose premise is "no behavior change" must not
 quietly weaken durability on the way through.
 """
@@ -48,9 +48,9 @@ HOST_SCHEMA_VERSION = 1
 # them (`plans/.orchestrator/` per project, `clu_config_dir()` for the host).
 DB_FILENAME = "clu.db"
 
-# State files are 0600 today (mkstemp) and carry claim tokens — the token IS
-# the worker security boundary, so the database that inherits them is no more
-# readable than the files it replaces.
+# The state files this replaced were 0600 (mkstemp) and carried claim tokens —
+# the token IS the worker security boundary, so the database that inherits them
+# is no more readable than the files it replaces.
 DB_FILE_MODE = 0o600
 
 DEFAULT_TIMEOUT_S = 5.0
@@ -110,7 +110,7 @@ def _ensure_private(path: Path) -> None:
     SQLite would create it with the process umask (typically 0644), and there
     is no window in which a claim token should be world-readable — so the file
     exists at the right mode before any row is written. `O_NOFOLLOW` refuses a
-    pre-seeded symlink, matching `state.locked`'s lockfile handling.
+    pre-seeded symlink, matching the refusal the retired lockfile path had.
 
     The mode is re-established on EVERY open, not only on create. The files
     this database replaces were 0600 on every write — each one was mkstemp'd

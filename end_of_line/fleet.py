@@ -22,10 +22,10 @@ class PlanSummary:
 
 
 def summarize_plan(entry: registry.PlanEntry) -> PlanSummary | None:
-    """Project (registry entry → state.json) into a one-line summary.
+    """Project (registry entry → plan state) into a one-line summary.
 
-    Returns None when the state file is missing/unreadable so the caller
-    can render a `missing` placeholder line; never raises on stale registry.
+    Returns None when the plan is missing/unreadable so the caller can render
+    a `missing` placeholder line; never raises on stale registry.
     """
     data = registry.load_entry_state(entry)
     if data is None:

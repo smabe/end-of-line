@@ -47,7 +47,6 @@ from pathlib import Path
 from typing import Literal
 
 from . import db
-from ._xdg_guard import assert_xdg_safe, clu_config_dir
 
 # What is on disk at the target path.
 #   file       — a regular file, no symlink anywhere on its path to it
@@ -84,12 +83,6 @@ MANIFEST_FILENAME = "skills_manifest.json"
 # host database. It never goes inside a SKILL.md: a per-install stamp in the
 # file would make the installed copy differ from the bundled one by
 # construction, so every skill would report drift forever.
-#
-# `RECORD_FILENAME` / `SCHEMA_VERSION` describe the JSON sidecar the record
-# lived in before that. Nothing reads or writes it any more; the names are
-# kept only so the quarantine sweep has something to point at.
-RECORD_FILENAME = "installed-skills.json"
-SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -178,13 +171,6 @@ def shipped_fingerprints() -> dict[str, list[str]]:
     also reports WHY when the answer is empty.
     """
     return load_manifest()[0]
-
-
-def record_path() -> Path:
-    """The LEGACY sidecar's location. Inert — see `RECORD_FILENAME`."""
-    path = clu_config_dir() / RECORD_FILENAME
-    assert_xdg_safe(path)
-    return path
 
 
 def installed_record() -> dict[str, str]:

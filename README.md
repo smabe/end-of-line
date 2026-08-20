@@ -13,8 +13,8 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 
 ## How it works
 
-- **State lives outside sessions.** Each plan owns `<project>/plans/.orchestrator/<slug>.state.json`. Workers don't carry context; they read state on startup.
-- **Atomic writes under a lock.** Every mutation is `tmp + fsync + rename` under `flock`. Two ticks colliding is safe.
+- **State lives outside sessions.** Every plan in a project is rows in one SQLite database, `<project>/plans/.orchestrator/clu.db`. Workers don't carry context; they read state on startup (`clu state dump` prints it).
+- **Transactional writes.** Every mutation is one `BEGIN IMMEDIATE` transaction naming the rows it changes, `synchronous=FULL`, WAL on. Two ticks colliding is safe; readers never block behind the writer.
 - **Append-only event log.** Phase claims, completions, lease expirations, blockers — all derivable from `events[]`. State corruption is recoverable by replaying.
 - **`/plan` convention.** Phase declarations come from the master plan's `## Sessions index` markdown table. The parser is 80 lines.
 - **System cron is the heartbeat.** No long-running orchestrator process. Each tick is ~50ms of Python; the supervisor itself burns zero LLM tokens. Workers are the only thing that costs API money.
@@ -35,7 +35,7 @@ On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path tha
 
 `clu install-skill` writes seven bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
 
-After installing the skills, run `/clu-monitor` once in Claude Code to install a `UserPromptSubmit` hook that surfaces clu's events into Claude's context on your next message — type "ok" after walking back and Claude already knows what halted, completed, or stuck. Idempotent — re-running prints the current install status. State file: `~/.config/clu/monitor.json`.
+After installing the skills, run `/clu-monitor` once in Claude Code to install a `UserPromptSubmit` hook that surfaces clu's events into Claude's context on your next message — type "ok" after walking back and Claude already knows what halted, completed, or stuck. Idempotent — re-running prints the current install status. The install marker lives in the host database, `~/.config/clu/clu.db`.
 
 For a live in-session feed, `clu watch` streams state-machine events to stdout as they happen — one line per transition. It's the at-desk sibling to the inbox hook: the inbox catches events from between sessions; `clu watch` covers the current session live. The `/clu-plan` skill arms `Monitor(command="clu watch --project . --plan <slug> --task-list", persistent=True)` automatically after `clu queue add`, so Claude-driven sessions get a live feed that populates the native TaskCreate UI hands-free. Add `--task-list` to emit `TASK_CREATE`/`TASK_UPDATE` protocol lines instead of text; omit it for plain-text output (compatible with `--json` for jq pipelines).
 
@@ -76,7 +76,7 @@ graphify claude install  # CLAUDE.md section + PreToolUse hook to consult the gr
 - **`/clu-plan`** — clu-format authorship: produces a master with `## Sessions index` table PLUS one sub-plan file per phase (the worker brief). Use this whenever you intend to dispatch the plan via `clu queue add`. Refuses with a pointer to `/plan` in non-clu projects.
 - **`/clu-reply`** — explicit blocker reply for scripted or disambiguation contexts. The natural-language inbox surface handles most replies hands-free; reach for `/clu-reply <plan-slug> <answer>` when you need precision (multiple open blockers, non-interactive script).
 - **`/brainstorm`** — parallel-persona pre-planning. Launches 3-6 agents (UX, engineer, QA, …) in parallel to analyze a feature from different angles, then consolidates their outputs into a master plan. Useful before `/plan` or `/clu-plan` when the problem space is fuzzy and you'd rather explore than guess.
-- **`/clu-monitor`** — one-shot setup skill that registers a `UserPromptSubmit` hook in `~/.claude/settings.json`. The hook surfaces clu's events (halts, blockers, plan completions, queue lifecycle, stuck-blocker re-pings, stalled claims) into Claude's context on every user message, so walking back to a session always has Claude already aware of what happened. Run once per machine; idempotent via the marker at `~/.config/clu/monitor.json`.
+- **`/clu-monitor`** — one-shot setup skill that registers a `UserPromptSubmit` hook in `~/.claude/settings.json`. The hook surfaces clu's events (halts, blockers, plan completions, queue lifecycle, stuck-blocker re-pings, stalled claims) into Claude's context on every user message, so walking back to a session always has Claude already aware of what happened. Run once per machine; idempotent via the marker in the host database (`~/.config/clu/clu.db`).
 
 ### Recommended workflow
 
@@ -226,7 +226,7 @@ Workers can also chain a follow-up plan into the project queue mid-phase via `cl
 | Command | Purpose |
 |---|---|
 | `clu` | Fleet view across every registered plan |
-| `clu init` | Create state.json for a new plan (auto-registers) |
+| `clu init` | Create a new plan's state in the project database (auto-registers) |
 | `clu list` | List plans on this host (name + project path) |
 | `clu register` / `clu unregister` | Manual registry edits |
 | `clu status` | Pretty-print one plan's current state, with a `Reason:` line for paused/halted plans |
@@ -265,7 +265,9 @@ Workers can also chain a follow-up plan into the project queue mid-phase via `cl
 
 ## State schema
 
-Sketch — see `docs/contract.md` for the full schema:
+Sketch of the state document `clu state dump` prints — the projection of the
+`plans` / `claims` / `blockers` / `spawned_tasks` / `events` tables. See
+`docs/contract.md` for the tables and the full document:
 
 ```json
 {
@@ -283,7 +285,7 @@ Sketch — see `docs/contract.md` for the full schema:
 ## Repo layout
 
 ```
-end_of_line/          # the package (cli, supervisor, state, notify, dispatch, …)
+end_of_line/          # the package (cli, supervisor, db, plan_store, state, notify, dispatch, …)
 end_of_line/skills/   # bundled skills (/clu-phase worker, /plan + /clu-plan authorship, /brainstorm pre-planning, /clu-monitor in-session signaling) installed via `clu install-skill`
 end_of_line/hooks/    # bundled UserPromptSubmit hook script that surfaces inbox events into Claude's context
 tests/                # unittest suite

@@ -28,7 +28,6 @@ from pathlib import Path
 
 from . import db
 from . import state as st
-from ._xdg_guard import assert_xdg_safe, clu_config_dir
 
 SCHEMA_VERSION = 2
 
@@ -36,13 +35,6 @@ SCHEMA_VERSION = 2
 # clu reads or writes this file any more; the path is kept only so the
 # quarantine sweep has a name to point at.
 LEGACY_MARKER_FILENAME = "monitor.json"
-
-
-def marker_path() -> Path:
-    """The LEGACY marker file's location. Inert — see `LEGACY_MARKER_FILENAME`."""
-    path = clu_config_dir() / LEGACY_MARKER_FILENAME
-    assert_xdg_safe(path)
-    return path
 
 
 def load_marker(path: Path | None = None) -> dict | None:

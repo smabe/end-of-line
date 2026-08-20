@@ -23,10 +23,6 @@ LEGACY_SEEN_PATH = Path.home() / ".clu" / "seen_msg_rowid"
 DEFAULT_POLL_SECONDS = 4
 POLL_BATCH_LIMIT = 500
 INBOUND_STATE_SCHEMA_VERSION = 1
-# The schema version of the `outbound_pending.json` file the marks lived in
-# before they became rows. Nothing reads or writes that file any more; the
-# constant is kept only so the quarantine sweep has a name to point at.
-OUTBOUND_PENDING_SCHEMA_VERSION = 1
 OUTBOUND_MARK_SANITY_TIMEOUT_SECONDS = 60.0
 APPLE_EPOCH_OFFSET_SECONDS = 978_307_200  # Unix → Apple-epoch (Jan 1 2001).
 

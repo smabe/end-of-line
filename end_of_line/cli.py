@@ -4,7 +4,7 @@ Subcommands (orchestrator-side):
   tick      — one supervisor tick (cron target)
   tick-all  — tick every registered plan once (cron target for the host)
   status    — show current state
-  init      — bootstrap state.json for a plan
+  init      — bootstrap a plan's state in the project database
 
 Subcommands (worker-side, called by phase-runner sessions):
   complete  — mark current phase complete + record commits
@@ -135,7 +135,7 @@ This project uses clu for autonomous plan execution.
 - `clu queue add <slug>` to enqueue a plan; cron dispatches on each tick.
 - `clu queue list` for pending; `clu list` for fleet status.
 - Run `/clu-monitor` once per machine for background notifications on
-  halts and blockers (status: `~/.config/clu/monitor.json`).
+  halts and blockers.
 - The `/plan`, `/clu-plan`, and `/brainstorm` skills (bundled via
   `clu install-skill`) are the canonical authoring + pre-planning entry
   points. `/plan` is project-agnostic; `/clu-plan` produces the master +
@@ -2142,7 +2142,7 @@ def cmd_init(args, cfg: ProjectConfig, state_path: Path) -> int:
     # without a separate setup step.
     registry.register(cfg.project_root, args.plan)
     _ensure_quality_stub(cfg.project_root)
-    print(f"Initialized {state_path}")
+    print(f"Initialized {args.plan} in {cfg.project_root}")
     _refresh_bundled_skills()
     _print_worker_model(cfg)
     _ensure_worker_settings()
@@ -2879,7 +2879,7 @@ _DOCTOR_PROBE_SCRIPT = (
 def cmd_doctor(args) -> int:
     """Smoke-test the worker subprocess env: print PATH + resolved binaries.
 
-    Read-only: no state.json read or write, no registry mutation. Reuses
+    Read-only: no plan state read or write, no registry mutation. Reuses
     `dispatch.build_worker_env` to show PATH resolution. It calls it with no
     claim kwargs, so the phase-dispatch-only injections — CLU_PLAN / CLU_PHASE
     / CLU_TOKEN / CLU_PROJECT and the BASH_MAX_TIMEOUT_MS ceiling — are NOT
@@ -3376,7 +3376,7 @@ def cmd_quota(args) -> int:
 
 
 def cmd_quota_clear(args) -> int:
-    """Clear the project's quota pause — the escape hatch `rm quota.json` was.
+    """Clear the project's quota pause — the escape hatch a file unlink was.
 
     A stuck pause (one whose reset time did not parse) has no auto-resume, so
     an operator has to end it by hand; the pause is a row now, so the hatch is
@@ -3672,7 +3672,7 @@ _FREEZE_STATUSES = frozenset(
 
 
 def _project_state_status(state: dict) -> str:
-    """Project a loaded state.json into the one-word STATUS column label."""
+    """Project a loaded plan state into the one-word STATUS column label."""
     claim = state.get("current_claim")
     if claim and st.claim_is_stalled(state, claim):
         return st.STATUS_STALLED
@@ -3790,8 +3790,12 @@ def cmd_queue_list(args) -> int:
 
     if history:
         print()
-        print("Recent failures:")
+        print("Recently dequeued:")
         # Cap at 10 — operator wants the most recent context, not the full log.
+        # The header says "dequeued", not "failures": since the queue moved to a
+        # table every head that leaves lands here with an outcome, and `popped`
+        # is the SUCCESS path. Calling that a failure is how an operator comes
+        # to distrust the whole block.
         for entry in history[-10:]:
             age = _format_age_iso(entry.get("ended_at"))
             outcome = entry.get("outcome", "?")
@@ -4261,7 +4265,7 @@ def cmd_tick_all(args) -> int:
     # busy gate needs to see.
     # Build the project set AND the per-project registered-slug map from one
     # registry read — the zombie sweep below needs the slugs and there's no
-    # reason to re-read registry.json once per project.
+    # reason to re-read the registry once per project.
     slugs_by_project: dict[Path, set[str]] = {}
     for row in registry.entries():
         try:

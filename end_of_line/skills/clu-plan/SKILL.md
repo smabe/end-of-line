@@ -1148,8 +1148,9 @@ the operator says it's dead, prepend a one-line `> **ABANDONED
 <date>:** <reason>` banner to the master and move the master + every
 sub-plan to `plans/archive/<slug>/` yourself. Dead plan files left in
 `plans/` are a queue accident waiting for a future session. (When in
-doubt whether a lingering plan was ever init'ed, check for
-`plans/.orchestrator/<slug>.state.json`.)
+doubt whether a lingering plan was ever init'ed, run
+`clu state dump --plan <slug>` — it exits non-zero when clu has never
+heard of the plan.)
 
 ## Critical rules
 
@@ -1237,7 +1238,7 @@ doubt whether a lingering plan was ever init'ed, check for
   decisions — same master, different author and time. Deliberately NOT a
   separate research file (clu workers already read the master every
   phase, so a section costs no extra read and `/plan` bans split research
-  files) and NOT `state.json` (findings are worker-readable prose, not
+  files) and NOT plan state (findings are worker-readable prose, not
   machine coordination). One worktree per plan + sequential phases means
   no intra-plan write contention on the master.
 
@@ -1496,7 +1497,7 @@ Monitor(
   `/clu-phase` consumes.
 - **`/clu-monitor`** installs the in-session inbox hook. After
   queueing plans with this skill, remind the operator to run
-  `/clu-monitor` if `~/.config/clu/monitor.json` is missing or v1.
+  `/clu-monitor` if the monitor hook isn't installed on this machine.
 - **`/brainstorm`** is for divergent design exploration BEFORE
   scoping. If the operator hasn't committed to an approach yet,
   suggest `/brainstorm` first, then `/clu-plan` once decisions land.

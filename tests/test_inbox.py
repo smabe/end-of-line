@@ -20,12 +20,8 @@ from end_of_line import db, inbox
 from tests import isolate_monitor_marker
 
 
-class InboxLegacyPathTests(unittest.TestCase):
-    """The retired directory's location still resolves, for the sweep to find."""
-
-    def test_legacy_inbox_path_respects_xdg_config_home(self) -> None:
-        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/tmp/xdg"}):
-            self.assertEqual(inbox.inbox_root(), Path("/tmp/xdg") / "clu" / "inbox")
+class InboxStorePathTests(unittest.TestCase):
+    """The inbox reads and writes the host database, wherever XDG points."""
 
     def test_store_path_respects_xdg_config_home(self) -> None:
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/tmp/xdg"}):

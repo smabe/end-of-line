@@ -160,8 +160,10 @@ phase. Sites:
 
 The spawn is fire-and-forget: `start_new_session=True` detaches from
 the caller's process group so worker exit can't reap the tick, and
-stdout/stderr go to `/dev/null`. The per-plan `st.mutate` lock
-prevents the spawned tick from racing a coincidental cron tick.
+stdout/stderr go to `/dev/null`. A spawned tick racing a coincidental cron
+tick is safe by construction: whichever applies second finds a precondition
+it decided on has moved, discards its whole tick, and reports
+`idle / concurrent_write`.
 
 **Pull-side (fallback):** the LaunchAgent cron fires `clu tick-all`
 every `StartInterval` seconds (default **30** as of this feature, was
@@ -206,7 +208,8 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
 | `/tmp/clu-inbound.out`, `/tmp/clu-inbound.err` | Inbound poller stdout/stderr |
 | `/tmp/clu-tick.out`, `/tmp/clu-tick.err` | Tick driver stdout/stderr |
 | `<project>/plans/.orchestrator/logs/<phase>.<token>.log` | Per-worker stderr |
-| `<project>/plans/.orchestrator/<plan>.state.json` | Plan state (single source of truth) |
+| `<project>/plans/.orchestrator/clu.db` | Every plan's state for that project (single source of truth) — read it with `clu state dump`, never with an editor |
+| `~/.config/clu/clu.db` | Host database: registry, monitor marker, inbox, notify sidecars |
 
 ## Watching workers — `clu top`
 
@@ -467,9 +470,9 @@ A clean end-to-end against a real project.
    clu list                                  # confirms registration
    ```
 
-   `clu init` creates `plans/.orchestrator/demo-feature.state.json` and
-   adds the plan to `~/.config/clu/registry.json` so the tick driver
-   picks it up.
+   `clu init` creates the plan's rows in `plans/.orchestrator/clu.db` and
+   registers it in the host database (`~/.config/clu/clu.db`) so the tick
+   driver picks it up.
 
    Three optional knobs let you override the per-plan defaults at init time:
 
@@ -513,8 +516,9 @@ A clean end-to-end against a real project.
 
 Once a project has at least one registered plan, the operator can queue
 follow-up plans for clu to `init` automatically as the chain drains.
-Storage lives in `<project>/<plan_dir>/.orchestrator/queue.json`; one
-queue per project (not per plan).
+Storage is the `queue` / `queue_history` tables in
+`<project>/<plan_dir>/.orchestrator/clu.db`; one queue per project (not per
+plan).
 
 ```bash
 clu queue add my-next-plan          # append at tail
@@ -548,8 +552,8 @@ In flight: foo (dispatched 14:32:05 UTC, lease until 15:02:05 UTC)
 ```
 
 Sorted by `started_at` ascending if multiple. Omitted cleanly when no
-in-flight plans. The footer is independent of `queue.history` (which
-records only failures — see `docs/contract.md`).
+in-flight plans. The footer derives from the registry, not from
+`queue_history`.
 
 The supervisor's post-loop step in `clu tick-all` walks every distinct
 project_root and pops at most one entry per tick into a fresh `clu
@@ -569,74 +573,48 @@ run `clu init --project /Users/.../foo --plan <slug>` first
 ```
 
 The bootstrap rule exists so an operator who points `clu queue add` at
-a stray directory can't silently create a queue file in an unintended
+a stray directory can't silently create a database in an unintended
 project.
 
 ### Multi-host queues
 
 The queue is **per project, per host**. If you run clu against the same
-git-synced project from two Macs, each Mac has its own `.orchestrator/
-queue.json` and its own `repair-attempts` counter. clu does **not**
-attempt any cross-host merge.
+git-synced project from two Macs, each Mac has its own
+`.orchestrator/clu.db`. clu does **not** attempt any cross-host merge.
+
+`.orchestrator/` should not be committed, and the database must never live
+on a network filesystem (iCloud Drive, Dropbox, NFS/SMB): WAL needs shared
+memory the mount cannot provide, and clu refuses to run rather than silently
+dropping to a rollback journal.
 
 **Recommendation: pick one Mac as the cron host and only enqueue from
 that one.** Other Macs can still run `clu status` / `clu queue list`
 read-only against the local copy, but `queue add` and `queue remove`
 should be limited to the cron host to avoid two queues that diverge.
 
-This is a deliberate design choice — the queue file is a small,
+This is a deliberate design choice — the queue is a small,
 operator-facing list of intentions, not a synced data structure. If the
 cron host's queue is the source of truth, the worst-case multi-machine
 failure mode is "the other Mac's queue is stale," not "two ticks
 dispatched the same plan twice."
 
-### Enabling auto-repair
+### There is no auto-repair (and nothing to enable)
 
-If `queue.json` ever fails to load (catastrophic JSON / schema
-corruption), clu can dispatch a headless Claude worker to repair it.
-This is opt-in: set `dispatch.repair_command` in `.orchestrator.json`.
-Without it, clu falls back to a halt-bypass `KIND_QUEUE_CORRUPT`
-notification — operator repairs by hand.
+Older clu could dispatch a headless Claude worker to repair a corrupt
+`queue.json`, gated on `dispatch.repair_command`. That whole subsystem is
+gone: the queue is rows in a transactional database, so the failure it
+repaired — a JSON file interrupted mid-write — cannot happen. A pop either
+committed or it did not.
 
-Recommended template:
+`dispatch.repair_command` left in an `.orchestrator.json` is parsed, ignored,
+and reported once on stderr at config load. Remove it.
 
-```jsonc
-{
-  "dispatch": {
-    "command": "...",
-    "repair_command": "claude --print 'queue.json at {corrupt_path} is corrupt: {diagnosis}. Backup at {backup_path}. Read both files, diagnose, repair in place using atomic write (tmp + fsync + os.replace). HARD RULES (clu validates and reverts on violation): 1. The queue array MUST contain at least every slug from the original. 2. Do NOT write an empty queue array unless the original was provably empty. 3. The history array is forensic — do not remove entries; you may append. 4. If you cannot repair without violating rules 1-3, exit 9 (REPAIR_DECLINED). Log to {log_path}. Expected schema: {schema_json}.'"
-  }
-}
-```
-
-Template variables: `{corrupt_path}`, `{backup_path}`, `{diagnosis}`,
-`{schema_json}`, `{log_path}` — all shlex-quoted before substitution.
-
-What's worth knowing about the pipeline:
-
-- **clu's validation is the safety boundary, not the prompt.** The
-  prompt is advisory; clu's `queue.validate_repair` re-loads the file,
-  checks every backup slug against the repaired output, and reverts from
-  the backup on any rule violation. A worker that ignores its prompt
-  cannot drop slugs past us.
-- **Backups are kept.** Every corruption produces a
-  `queue.json.corrupt-<UTCstamp>` sibling whether the repair succeeds or
-  not. Diff old vs new after a `KIND_QUEUE_REPAIRED` ping to see what
-  the worker rewrote; the backup is also what clu reverts from on
-  validation failure.
-- **Throttle.** After 3 failed attempts on the same diagnosis-hash, the
-  4th corruption skips dispatch entirely and goes straight to
-  `KIND_QUEUE_CORRUPT`. The counter is per-diagnosis (different
-  corruption errors get their own three attempts) and resets on a
-  successful repair.
-- **Synchronous.** `dispatch_repair_worker` blocks the cron tick for up
-  to 60s. The next tick won't move on the queue until this one decides
-  repaired-or-reverted. If you set a faster cron cadence than 60s, the
-  next tick will wait for the queue lock the previous one holds.
-
-The operator CLI (`clu queue add/list/remove`) does **not** trigger
-auto-repair — it refuses loudly on a corrupt queue and prints a paste-
-into-Claude diagnosis. Auto-repair only runs from `tick-all`.
+What you get instead: a project database that genuinely cannot be read
+(corrupt, or written by a newer clu) makes `tick-all` skip THAT project with
+a stderr note and keep walking the fleet, and makes the operator CLI
+(`clu queue add/list/remove`) refuse loudly with the error naming the
+database path. Recovery is a restore from backup — see "Backing up the
+databases" below — not a worker.
 
 ## Hardened worker dispatch
 
@@ -775,10 +753,11 @@ the wall.
 
 ### Guard rails
 
-- `clu doctor` warns when `dispatch.command` or
-  `dispatch.repair_command` carries `bypassPermissions` or
-  `--dangerously-skip-permissions`, and points back here. Quiet when
-  clean.
+- `clu doctor` warns when `dispatch.command` carries `bypassPermissions`
+  or `--dangerously-skip-permissions`, and points back here. Quiet when
+  clean. (`dispatch.repair_command` is deliberately NOT checked — it is
+  parsed but inert, and warning about a permission flag in a command clu
+  will never run would point the operator at a setting that does nothing.)
 - `{plan_slug}` in `dispatch.command` is load-bearing beyond the worker
   prompt: the supervisor's PID-reuse liveness checks
   (`claim_worker_alive`, the orphan reaper) match a claim's plan slug
@@ -1239,7 +1218,8 @@ sends from your Mac to yourself; you answer from your phone.
 Replies in the self-chat have `is_from_me = 1` in `chat.db` because the operator IS
 the sender. The poller scopes to one chat (your self-chat) and accepts both
 `is_from_me` values; clu's own outbound rows are skipped via an outbound-floor
-tracker (`outbound_pending.json` → `inbound_state.json.outbound_rowids[chat_id]`).
+tracker: a pending mark per send (`outbound_marks`), drained by the poller into a
+per-chat floor (`outbound_floors`).
 
 By default the inbound daemon auto-resolves your self-chat by joining
 `chat → chat_handle_join → handle` for the unique iMessage chat where your handle is
@@ -1255,9 +1235,16 @@ Run `clu doctor --project <path>` to see what gets resolved. The `Notify channel
 section prints `self_chat=<id> (auto-resolved | override)` per iMessage channel, or
 the `SelfChatLookupError` message when neither path succeeds.
 
-State files (under `$XDG_CONFIG_HOME/clu/`, default `~/.config/clu/`):
-- `inbound_state.json` — `{schema_version, last_inbound_rowid, outbound_rowids}`
-- `outbound_pending.json` — pending marks waiting for the poller to drain
+Poller state lives in the host database (`$XDG_CONFIG_HOME/clu/clu.db`, default
+`~/.config/clu/clu.db`):
+- `inbound_state` — the `last_inbound_rowid` checkpoint
+- `outbound_floors` — per-chat rowid floor below which nothing is ours to read
+- `outbound_marks` — pending marks waiting for the poller to drain
+
+**No host transaction is open while `chat.db` is being queried.** That shape is
+deliberate: the marks now share ONE database with the registry, the inbox and
+the monitor marker, so a write transaction held across N queries of Apple's
+chat.db would block every other host writer for however long that takes.
 
 Grant Full Disk Access to the pipx venv python so the inbound poller can open `chat.db`
 (System Settings → Privacy & Security → Full Disk Access → add
@@ -1473,21 +1460,18 @@ Outbound — fired during supervisor ticks. Kinds:
 | `plan_completed` | All phases done | Gated |
 | `halted` | Plan halted (max attempts, lease expired too many times, etc.) | **Bypasses quiet hours** |
 | `queue_skipped` | Queue head abandoned (plan file missing) | Gated |
-| `queue_repaired` | Auto-repair fixed a corrupt `queue.json` | Gated |
-| `queue_repair_failed` | Auto-repair failed validation — file reverted from backup | **Bypasses quiet hours** |
-| `queue_corrupt` | `queue.json` corrupt and auto-repair disabled OR throttle exhausted | **Bypasses quiet hours** |
 | `stuck_blocker` | Open blocker un-consumed for >30 min; re-pings every 30 min | Gated (inbox always writes) |
 | `stalled_claim` | Live claim's lease expired with plan status still `running`; one-shot per claim | Gated (inbox always writes) |
 | `phase_worker_dead_reported` | Fired by the **per-worker heartbeat daemon** (not a tick) ~120s after it detects its worker PID dead mid-phase; one-shot per claim, deduped so the supervisor's own worker-dead branch won't re-ping. Carries the post-mortem log path. The daemon also releases the claim (quota-classifying first) so the phase is redispatchable. Default-visible in `clu watch`. A quota death routes to `quota_paused`/`quota_stuck` instead of a generic death ping | Gated (inbox always writes) |
 | `quota_paused` | Worker killed by a quota limit with a parseable reset; project pauses, then auto-resumes (see "Recovering from a quota pause") | Gated |
 | `quota_resumed` | Canary survived the reset; quota pause cleared | Gated |
-| `quota_stuck` | Quota death whose reset didn't parse; no auto-resume — needs `rm quota.json` | **Bypasses quiet hours** |
+| `quota_stuck` | Quota death whose reset didn't parse; no auto-resume — needs `clu quota clear` | **Bypasses quiet hours** |
 
 Quiet hours default to `["22:00", "08:00"]` local time and wrap
 overnight. Configure per project under `notify.quiet_hours` in
 `.orchestrator.json`. The bypass set lives in
-`notify.QUIET_HOURS_BYPASS_KINDS` — halts fire at any hour because a
-halted plan won't progress until you intervene.
+`notify.QUIET_HOURS_BYPASS_KINDS` — two kinds, `halted` and `quota_stuck`.
+Both fire at any hour because neither progresses until you intervene.
 
 Inbound reply grammar — locked at `^\s*(<plan-slug>\s+)?[0-9]\s*$`:
 
@@ -1541,8 +1525,8 @@ Settings updated: /Users/you/.claude/settings.json
 ```
 
 Account-wide, not per-project — one hook covers every clu-managed plan
-on the host. The marker at `~/.config/clu/monitor.json` (v2) records
-the install so re-running `/clu-monitor` is idempotent.
+on the host. The marker rows in the host database record the install so
+re-running `/clu-monitor` is idempotent.
 
 Under the hood, `/clu-monitor` shells out to `clu install-hook`. You
 can run that directly from a TTY if you want to skip the skill (the
@@ -1553,21 +1537,25 @@ silently modifying the user's settings.json).
 
 ```bash
 # Check installed
-$ cat ~/.config/clu/monitor.json
-{
-  "schema_version": 2,
-  "hook_installed_at": "2026-05-12T19:00:00Z",
-  "hook_path": "/Users/.../end_of_line/hooks/clu_inbox_surface.py",
-  "settings_json_path": "/Users/you/.claude/settings.json"
-}
+$ python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
+{'schema_version': 2, 'hook_installed_at': '2026-05-12T19:00:00Z',
+ 'hook_path': '/Users/.../end_of_line/hooks/clu_inbox_surface.py',
+ 'settings_json_path': '/Users/you/.claude/settings.json'}
 
 # Inspect pending events (debug)
-$ ls ~/.config/clu/inbox/
+$ python3 -c "from end_of_line import inbox; print(inbox.read_unprocessed())"
 
 # Full uninstall
-$ clu uninstall-hook            # removes hook entry from settings.json
-$ rm ~/.config/clu/monitor.json # forget the install
-$ rm -rf ~/.config/clu/inbox    # discard pending events (optional)
+$ clu uninstall-hook   # removes the hook entry from settings.json AND
+                       # clears the marker rows. It reports rather than
+                       # crashes if the marker cannot be cleared.
+```
+
+To discard pending inbox events, mark them processed rather than deleting a
+directory:
+
+```bash
+$ python3 -c "from end_of_line import inbox; [inbox.mark_processed(e['id']) for e in inbox.read_unprocessed()]"
 ```
 
 ### What gets surfaced
@@ -1578,7 +1566,7 @@ shipped with the inbox in #20:
 - `halted` — plan transitioned to HALTED or HALTED_REPLAN
 - `blocked` — worker called `clu block` (first ping)
 - `plan_completed` — plan finished cleanly
-- `queue_*` — queue lifecycle (skipped, corrupt, repaired, repair_failed)
+- `queue_skipped` — queue head abandoned (plan file missing)
 - `stuck_blocker` — blocker open >30min and not consumed; re-pings every 30min
 - `stalled_claim` — claim's lease expired with plan status still RUNNING
 - `phase_worker_dead_reported` — heartbeat daemon detected its worker PID dead
@@ -1589,15 +1577,15 @@ iMessages and inbox writes are independent: quiet hours
 (`notify.quiet_hours` in `.orchestrator.json`) suppress iMessages but
 NOT inbox writes.
 
-### Migration from pre-#20 install
+### Leftover `monitor.json` files
 
-If `~/.config/clu/monitor.json` exists with `schema_version: 1` (the
-broken `/schedule`-based install from #19), `is_scheduled()` now
-returns False so the CLI tip fires and `/clu-monitor` re-runs cleanly
-— the v1 marker is overwritten in place with v2 on the next install.
-No data migrated; the v1 `schedule_id` was never used by anything
-beyond the routine creation. If you previously scheduled a routine
-manually, delete it via `/schedule delete <id>` first.
+A `~/.config/clu/monitor.json` from before the marker moved into the host
+database is **inert** in either shape — v1 (the broken `/schedule`-based
+install from #19) or v2 (the hook install). Nothing reads it, so a host
+carrying one reads as un-monitored, the CLI tip fires, and `/clu-monitor`
+reinstalls cleanly. Nothing is migrated out of it; the quarantine sweep
+below moves it aside. If you previously scheduled a routine manually,
+delete it via `/schedule delete <id>` first.
 
 ### Smoke test (run once after install)
 
@@ -1612,8 +1600,8 @@ $ python3 -c "from end_of_line import inbox; inbox.write_event(
 
 # 2. Open Claude Code in this directory, type anything (e.g. 'hi').
 # 3. Claude should respond aware of the smoke-test event.
-# 4. Verify the event moved:
-$ ls ~/.config/clu/inbox/processed/    # smoke event should be here
+# 4. Verify the event was consumed (the smoke event should be gone):
+$ python3 -c "from end_of_line import inbox; print(inbox.read_unprocessed())"
 ```
 
 If Claude didn't see the event, check:
@@ -1656,11 +1644,11 @@ This project uses clu for autonomous plan execution.
 - `clu queue add <slug>` to enqueue a plan; cron dispatches on each tick.
 - `clu queue list` for pending; `clu list` for fleet status.
 - Run `/clu-monitor` once per machine for background notifications on
-  halts and blockers (status: `~/.config/clu/monitor.json`).
+  halts and blockers.
 - The `/plan`, `/clu-plan`, and `/brainstorm` skills (bundled via
   `clu install-skill`) are the canonical authoring + pre-planning entry
-  points. `/clu-plan` produces the clu-format master + sub-plan files;
-  `/plan` is the generic single-file fallback.
+  points. `/plan` is project-agnostic; `/clu-plan` produces the master +
+  sub-plan files clu's supervisor expects for queue dispatch.
 ```
 
 ### Live in-session feed (`clu watch`)
@@ -1885,15 +1873,13 @@ description="clu operator dashboard")` unless one is already in flight.
 The marker records both fields when both hooks are installed:
 
 ```bash
-$ cat ~/.config/clu/monitor.json
-{
-  "schema_version": 2,
-  "hook_installed_at": "...",
-  "hook_path": ".../clu_inbox_surface.py",
-  "session_start_hook_path": ".../clu_session_start.py",
-  "session_start_installed_at": "...",
-  "settings_json_path": "/Users/.../.claude/settings.json"
-}
+$ python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
+{'schema_version': 2,
+ 'hook_installed_at': '...',
+ 'hook_path': '.../clu_inbox_surface.py',
+ 'session_start_hook_path': '.../clu_session_start.py',
+ 'session_start_installed_at': '...',
+ 'settings_json_path': '/Users/.../.claude/settings.json'}
 ```
 
 `clu uninstall-hook` removes both entries.
@@ -1991,8 +1977,9 @@ Check, in order:
    literal `{phase_id}` in its prompt.
 4. The 0.5-second fast-fail. If the spawned process exits within
    500 ms, the supervisor logs `dispatch_failed` to the state event
-   stream — `clu status` shows it and `cat state.json | jq .events[-5:]`
-   has the stderr capture.
+   stream — `clu status` shows it and
+   `clu state dump --plan <slug> | jq '.events[-5:]'` has the stderr
+   capture.
 
 #### Manual force-complete after operator rescue
 
@@ -2194,15 +2181,14 @@ sites and handles it automatically:
 - The phase attempt is **forgiven** (a `quota_death` event, like
   `systemic_failure`) — three quota deaths in a row never advance the
   halt counter.
-- The whole **project** pauses (not just the one plan) by writing
-  `<project>/plans/.orchestrator/quota.json` with `paused_until = reset
-  + ~2min`. Every plan's dispatch idles until then; in-flight workers
+- The whole **project** pauses (not just the one plan) by writing the
+  project's single `quota` row with `paused_until = reset + ~2min`. Every plan's dispatch idles until then; in-flight workers
   and the watchdogs keep running.
 - You get one `quota_paused` iMessage carrying the local resume time.
   It's **gated by quiet hours** — there's nothing to do, so it won't
   wake you; `clu watch` and the inbox show the event regardless.
 - Past the reset, the first plan to tick dispatches as a **canary**
-  while the rest idle. If it survives ~3 min, clu deletes `quota.json`,
+  while the rest idle. If it survives ~3 min, clu deletes the pause row,
   emits `quota_resumed`, and the fleet resumes on its own. If the
   account is still throttled, the canary re-dies and re-pauses with the
   new reset time — no attempts burned, no action from you.
@@ -2216,50 +2202,137 @@ with no horizon is halt-equivalent). The escape hatch is one command,
 once your quota is actually back:
 
 ```bash
-rm <project>/plans/.orchestrator/quota.json   # clears the pause; plans dispatch next tick
+clu quota clear --project <project>   # clears the pause; plans dispatch next tick
 ```
 
-That's the same file the auto-resume deletes — "file absent == not
-paused" is the whole contract. Deleting it by hand is always safe; the
-worst case is a still-throttled worker re-dies and re-pauses.
+It prints what it removed (the signature and the reset it was waiting for),
+or `no quota pause recorded` when there was nothing to clear. That is the same row the
+auto-resume deletes — "row absent == not paused" is the whole contract.
+Clearing by hand is always safe; the worst case is a still-throttled worker
+re-dies and re-pauses.
 
 The signature table (what counts as a quota death) and the reset parser
 are hard-coded in `quota.py`; a new wording lands via PR with a test in
 `tests/test_quota.py`. See `architecture.md` § "Quota pause gate" for
-the canary state machine and `contract.md` § "Quota pause file schema"
-for the `quota.json` fields.
+the canary state machine and `contract.md` § "Quota pause" for the row's
+fields.
 
-### `queue.json` corrupt
+### The project database is unreadable
 
-Symptom: `clu queue list` / `clu queue add` / `clu queue remove` exits
-loud with a `queue.json corrupt at ...` message + a paste-into-Claude
-diagnosis. The supervisor sends a `queue_corrupt` or
-`queue_repair_failed` iMessage when it hits the same path in `tick-all`.
+Symptom: `clu queue list` / `clu queue add` / `clu queue remove` exits loud
+with `queue unreadable in <path>/clu.db:` plus the underlying error, and
+`clu tick-all` prints `queue unreadable @ <project>` and keeps walking the
+rest of the fleet.
 
-The operator has four paths:
+There is no auto-repair, and there is nothing to repair by hand: a
+transaction cannot leave a half-written queue, so what reaches here is one of
+three things.
 
-1. **Wait for auto-repair.** If `dispatch.repair_command` is set in
-   `.orchestrator.json`, the next `tick-all` will dispatch the repair
-   worker (up to 3 attempts per diagnosis-hash). A `queue_repaired`
-   iMessage means it's back; a `queue_repair_failed` means the worker's
-   output didn't pass clu's slug-preservation rules and the file was
-   reverted from backup — go to path 2 or 3.
-2. **Inspect the backup.** Every corruption produces a
-   `queue.json.corrupt-<UTCstamp>` sibling. Diff it against the current
-   file to see what's missing; hand-edit the live file with the parts
-   you want preserved.
-3. **Start fresh.** `mv queue.json queue.json.bad` — clu treats a
-   missing queue file as empty. Pending entries are lost; history is
-   lost. Use this when the corruption is total and the backups don't
-   help.
-4. **Ask Claude in-project.** Open `claude` interactively in the
-   project root and paste the diagnosis from the CLI's refusal message.
-   The CLI surfaces backup paths in the same output, so Claude can
-   read both files and propose a fix without clu's auto-repair gate.
+1. **Contention** (`DbBusy`). Something is holding the project's write lock —
+   most often a wedged worker callback. Check `clu top`, then retry; a busy
+   database is not a broken one.
+2. **A newer clu wrote it** (`SchemaTooNew`). Upgrade clu on this host. clu
+   never downgrades a database it does not understand.
+3. **Genuine corruption** (`sqlite3.DatabaseError`). Confirm with
+   `sqlite3 <project>/plans/.orchestrator/clu.db "PRAGMA integrity_check"`.
+   Restore from a backup (see "Backing up the databases"). If you have none
+   and the plans are expendable, move the database aside —
+   `mv clu.db clu.db.bad` (take its `-wal` / `-shm` siblings with it) — and
+   re-`clu init` the plans you still want. Everything in it is lost: plan
+   state, event history, the queue, the quota pause.
 
-The throttle file lives next to the queue at
-`queue.json.repair-attempts`. If you want to retry auto-repair after
-hitting the cap, delete it.
+### Backing up the databases
+
+Two files carry everything: `<project>/plans/.orchestrator/clu.db` per
+project and `~/.config/clu/clu.db` for the host.
+
+**A plain `cp` of a live database is not a backup.** With WAL, the committed
+truth is split across the `.db` and its `-wal` sibling, so copying the `.db`
+alone can capture a torn state. Two safe options:
+
+```bash
+# 1. Online, no downtime — SQLite does the consistency work for you.
+sqlite3 <project>/plans/.orchestrator/clu.db ".backup /path/to/backup.db"
+
+# 2. Quiescent copy — stop the tick first, then take all three files.
+launchctl bootout gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
+cp clu.db clu.db-wal clu.db-shm /path/to/backup-dir/    # -wal/-shm may be absent
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
+```
+
+`sqlite3 .backup` writes at your umask (typically 0644), while clu keeps its
+databases at 0600 — and a plan database holds live claim tokens. `chmod 600`
+the backup, or keep it somewhere only you can read.
+
+The `-wal` and `-shm` siblings beside each database are **normal**, not
+debris: WAL is what lets readers (`clu top`, `clu serve`, `clu watch`) run
+without blocking behind the tick. They are recreated as needed and can be
+absent when nothing has the database open.
+
+**Never put a clu database on a network filesystem** — iCloud Drive, Dropbox,
+NFS, SMB. WAL needs shared memory those mounts cannot provide, and clu
+refuses to run rather than silently dropping to a rollback journal. Keep
+`.orchestrator/` out of git for the same reason it is not synced: it is
+per-host runtime state.
+
+### Reading raw plan state
+
+There is no per-plan JSON file to open in an editor any more. The
+replacement:
+
+```bash
+clu state dump --project <project> --plan <slug>    # one plan's full state
+clu state dump --project <project>                  # every plan, keyed by slug
+clu state dump --plan <slug> | jq '.events[-10:]'   # last ten events
+```
+
+With `--plan`, the output IS the plan's state document, with archived events
+folded back in beside the live ones. Without it, an object keyed by slug.
+Read-only; it never takes the write lock.
+
+### Quarantining the pre-SQLite stores
+
+One-time, after upgrading a host that ran the JSON-file era. Nothing reads
+these files any more — this moves them aside so they cannot be mistaken for
+live state, while keeping them readable if you ever want the history.
+
+Per project:
+
+```bash
+cd <project>/plans/.orchestrator
+mkdir -p legacy
+find . -maxdepth 1 \( -name "*.state.json" -o -name "*.state.json.lock" \
+     -o -name "queue.json" -o -name "quota.json" \) -exec mv -- {} legacy/ \;
+```
+
+On the host:
+
+```bash
+cd ~/.config/clu
+mkdir -p legacy
+find . -maxdepth 1 \( -name "registry.json" -o -name "monitor.json" \
+     -o -name "inbound_state.json" -o -name "outbound_pending.json" \
+     -o -name "discord_state.json" -o -name "discord_cursor.json" \
+     -o -name "installed-skills.json" -o -name "inbox" -o -name "*.lock" \) \
+     -exec mv -- {} legacy/ \;
+```
+
+Notes:
+
+- **`find` rather than `mv` with globs, deliberately.** In zsh — the default
+  macOS shell — a glob that matches nothing aborts the whole command line, so
+  a bare `mv -- *.state.json queue.json legacy/` on a host that has no state
+  files moves NOTHING and prints only `no matches found`. Quoting the
+  patterns hands the matching to `find`, which matches what exists and
+  ignores the rest. Verified on both a full and a partial legacy tree.
+- Both recipes are idempotent — run them twice and the second run is a no-op.
+- `inbox` is a DIRECTORY and moves whole, `processed/` subdirectory included.
+- `config.json` STAYS. It is configuration, not a store.
+- Frozen `plans/archive/<slug>/` content is untouched — archived plans are
+  reference material and remain readable JSON by decision.
+- Afterwards, `plans/.orchestrator/` should contain exactly `clu.db` (plus
+  its `-wal`/`-shm` siblings), `logs/`, and `legacy/`; `~/.config/clu/`
+  should contain no `*.json` store files and no `*.lock` outside `legacy/`.
 
 ### Extending a live lease
 
@@ -2278,9 +2351,9 @@ rejected. Appends a `lease_extended` event to the audit log.
 
 ### Stuck claim that won't release
 
-If the state file shows a live claim whose worker is definitely dead
-(no process at the stamped PID, no log entries) and the 60-minute
-lease hasn't expired yet:
+If `clu status` (or `clu state dump --plan S`) shows a live claim whose
+worker is definitely dead (no process at the stamped PID, no log entries)
+and the 60-minute lease hasn't expired yet:
 
 ```bash
 clu release-claim --project P --plan S [--reason "worker OOM"]

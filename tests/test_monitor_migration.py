@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 
 from end_of_line import monitor
+from end_of_line._xdg_guard import clu_config_dir
 from tests import isolate_monitor_marker, must
 
 
@@ -29,7 +30,7 @@ class LegacyMarkerFileTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
         isolate_monitor_marker(self, self.tmp)
-        self.legacy = monitor.marker_path()
+        self.legacy = clu_config_dir() / monitor.LEGACY_MARKER_FILENAME
         self.legacy.parent.mkdir(parents=True, exist_ok=True)
 
     def _write_v1(self) -> None:

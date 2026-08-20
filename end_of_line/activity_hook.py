@@ -22,7 +22,10 @@ from . import state as st
 
 
 def _resolve_state_path(project_root: Path, plan: str) -> Path:
-    """Resolve `<project>/<plan_dir>/.orchestrator/<plan>.state.json`.
+    """Resolve the plan's state KEY: `<project>/<plan_dir>/.orchestrator/<plan>.state.json`.
+
+    Path-shaped, with no file behind it — it names (that `.orchestrator/`
+    directory's database, that plan), which is what every clu store call takes.
 
     Reads `plan_dir` from `<project>/.orchestrator.json` directly to avoid
     importing the full `end_of_line.config` module. Falls back to "plans"

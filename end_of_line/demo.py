@@ -6,8 +6,8 @@ scenario through clu's real init -> tick -> claim -> transcript pipeline, and
 lights up `clu top` / `clu serve` with busy / idle / blocked / dead rows — then
 guarantees teardown (Ctrl-C trap, `clu demo down`, and a `clu doctor` sweep).
 
-Decision A (operator-approved): the demo lives in the real
-`~/.config/clu/registry.json`, namespaced `demo-`, rather than an isolated
+Decision A (operator-approved): the demo lives in the real host registry
+(`~/.config/clu/clu.db`), namespaced `demo-`, rather than an isolated
 registry — so the operator's own `clu top`/`clu serve` see it. The `demo-`
 prefix makes the plans queryable + visually distinct and teardown-by-marker
 exact; three teardown paths bound orphan risk.

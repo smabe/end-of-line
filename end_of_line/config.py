@@ -159,11 +159,6 @@ class ProjectConfig:
         """
         return self.project_root / self.plan_dir / ORCHESTRATOR_DIR
 
-    def queue_path(self) -> Path:
-        """Per-project queue file. Lives in the same `.orchestrator/` dir as
-        state files. No slug → no path-traversal validation needed."""
-        return self.orchestrator_dir() / "queue.json"
-
     def master_plan_path(self, plan_slug: str) -> Path:
         """The plan's `<slug>.md` master file under `plan_dir/`.
 

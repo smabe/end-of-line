@@ -565,7 +565,7 @@ def _emit_stuck_tool(
         active_age_s = (st._now_utc() - st.parse_iso(active_at)).total_seconds()
     except ValueError:
         # Corrupt marker — worker stamped non-ISO via clu activity. The only
-        # way this lands is a bug in our writer or a hand-edited state.json;
+        # way this lands is a bug in our writer or a hand-edited claim row;
         # either way the operator should know. Log once-per-tick to stderr
         # rather than appending an event every tick (which would flood the
         # log until the operator fixes the value).
@@ -1293,13 +1293,14 @@ def sweep_zombie_states(
 ) -> list[ZombieSweepResult]:
     """Registry-independent reaper for `status=running` zombies.
 
-    Scans a project's `.orchestrator/*.state.json` for UNREGISTERED files stuck
-    at `running` whose worker is gone (`state.is_zombie_state`), then
-    terminalizes + reaps them. This is the backstop for the "unregistered +
-    running" window that `tick-all`'s registry walk can never reach (#75): the
-    documented crash-recovery self-heal (architecture.md "Crash recovery") only
-    fires while the queue head is still present, so a fully-unregistered zombie
-    like `fm-docs-sweep` would otherwise sit at `running` forever.
+    Walks the plans in a project's database (never the files in its directory)
+    for UNREGISTERED ones stuck at `running` whose worker is gone
+    (`state.is_zombie_state`), then terminalizes + reaps them. This is the
+    backstop for the "unregistered + running" window that `tick-all`'s registry
+    walk can never reach (#75): the documented crash-recovery self-heal
+    (architecture.md "Crash recovery") only fires while the queue head is still
+    present, so a fully-unregistered zombie like `fm-docs-sweep` would
+    otherwise sit at `running` forever.
 
     Registered slugs are skipped — tick-all / the supervisor own them, and a
     registered plan may legitimately sit claimless between phases. Unreadable
