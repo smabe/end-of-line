@@ -1173,25 +1173,26 @@ def stamp_activity_marker(
 
     `action` is "start" (PreToolUse) or "end" (PostToolUse). Token + phase
     are validated against the live claim; mismatch raises `ClaimMismatch`.
-    `timeout_seconds` is forwarded to `mutate` — the hot-path hook entry
-    point passes 2.0 so a contended store drops the update rather than
-    freezing the worker's Bash invocation. Returns True on stamp, False
-    on `LockTimeout`. Shared by `cli.cmd_activity` and the thin
-    `end_of_line.activity_hook` entry point.
+    `timeout_seconds` bounds the wait — the hot-path hook entry point passes
+    2.0 so a contended store drops the update rather than freezing the
+    worker's Bash invocation. Returns True on stamp, False on that drop.
+    Shared by `cli.cmd_activity` and the thin `end_of_line.activity_hook`
+    entry point.
+
+    One native UPDATE of one column, not a whole-plan rewrite: this fires on
+    every Bash tool call a worker makes, which is the highest write rate in
+    the fleet after the heartbeat.
     """
-    if action not in ("start", "end"):
-        raise ValueError(f"action must be 'start' or 'end', got {action!r}")
-    try:
-        with mutate(state_path, timeout_seconds=timeout_seconds) as data:
-            assert_claim_match(data, token, phase)
-            claim = data["current_claim"]
-            if action == "start":
-                mark_active_tool_start(claim, utcnow())
-            else:
-                clear_active_tool(claim)
-    except LockTimeout:
-        return False
-    return True
+    plan_store = _plan_store()
+    orch_dir, slug = plan_store.key_for_state_path(state_path)
+    return plan_store.op_activity(
+        orch_dir,
+        slug,
+        token=token,
+        phase=phase,
+        action=action,
+        timeout_s=timeout_seconds,
+    )
 
 
 def add_blocker(

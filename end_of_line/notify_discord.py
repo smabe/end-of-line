@@ -106,16 +106,15 @@ class DiscordNotifier:
         state_path = self._state_root / f"{plan_slug}{st.STATE_SUFFIX}"
         if not plan_store.exists_for_path(state_path):
             return
-        with st.mutate(state_path) as data:
-            for b in data.get("blockers", []):
-                if b["id"] == blocker_id:
-                    if "notify_metadata" not in b:
-                        b["notify_metadata"] = {}
-                    b["notify_metadata"]["discord"] = {
-                        "channel_id": channel_id,
-                        "message_id": message_id,
-                    }
-                    break
+        # One UPDATE of one blocker's metadata column. The whole-plan write
+        # this replaces ran while a Discord round-trip was still in flight
+        # upstream of it, holding the project's write lock the whole time.
+        plan_store.op_stamp_blocker_metadata(
+            *plan_store.key_for_state_path(state_path),
+            blocker_id=blocker_id,
+            channel="discord",
+            metadata={"channel_id": channel_id, "message_id": message_id},
+        )
 
     def _load_dm_cache(self) -> str | None:
         try:

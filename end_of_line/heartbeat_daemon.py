@@ -30,6 +30,7 @@ import sys
 import time
 from pathlib import Path
 
+from end_of_line import plan_store
 from end_of_line import state as st
 
 DEFAULT_INTERVAL_SECONDS = 120
@@ -59,9 +60,17 @@ def _make_pid_alive(plan: str | None):
 
 
 def _ping(state_path, token: str, phase: str) -> None:
-    """The same code path `cmd_heartbeat` uses — in-process, no PATH games."""
-    with st.mutate(Path(state_path)) as data:
-        st.record_heartbeat(data, token, phase)
+    """The same code path `cmd_heartbeat` uses — in-process, no PATH games.
+
+    One row, one UPDATE, one short transaction: this fires every 120s for
+    every live worker, so it is the write the store is least willing to have
+    hold the project's lock for longer than it must.
+    """
+    plan_store.op_heartbeat(
+        *plan_store.key_for_state_path(Path(state_path)),
+        token=token,
+        phase=phase,
+    )
 
 
 def _notify_failure(project_root, plan: str, phase: str, token: str, log_path) -> None:

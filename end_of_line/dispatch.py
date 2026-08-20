@@ -19,7 +19,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import coolant, notify, plan_store, quota
+from . import coolant, db, notify, plan_store, quota
 from . import state as st
 from .config import ProjectConfig
 from .supervisor import TickResult
@@ -67,10 +67,22 @@ _REPAIR_SCHEMA_HINT = json.dumps(
 )
 
 # Exceptions that are recoverable in dispatch fallback paths.
-# `ValueError` rather than `json.JSONDecodeError`: a store that cannot be read
-# used to be a JSON parse error (a ValueError) and now arrives as one from the
-# store's own translation, so the narrower name would let it through.
-_DISPATCH_FALLBACK_ERRORS = (OSError, ValueError, st.SchemaVersionMismatch)
+# What a dispatch-time state write degrades on rather than crashing the tick
+# that called it. `ValueError` rather than `json.JSONDecodeError`: a store that
+# cannot be read used to be a JSON parse error (a ValueError) and now arrives as
+# one from the store's own translation, so the narrower name would let it
+# through. `db.DEGRADABLE_ERRORS` is the rest of the database's vocabulary —
+# `sqlite3.Error` for a broken store and `DbBusy` for one held past the budget,
+# neither of which is an `OSError`; without them a busy project (any other
+# plan's tick holds the same write lock now) would take the whole dispatch down
+# with a traceback where a stderr line belongs. `st.LockTimeout` covers the
+# facade paths dispatch still reaches through `st.mutate`.
+_DISPATCH_FALLBACK_ERRORS = (
+    *db.DEGRADABLE_ERRORS,
+    ValueError,
+    st.SchemaVersionMismatch,
+    st.LockTimeout,
+)
 
 # Hard-coded signature list. Grows via PR only; no config field. Order
 # matters — first match wins, so put the most specific (rc-gated) one
@@ -668,25 +680,17 @@ def _pause_and_halt(
     event constant + kwargs and the rendered iMessage body.
     """
     try:
-        with st.mutate(state_file) as data:
-            st.append_event(
-                data,
-                event_type,
-                phase=result.phase_id,
-                token=result.token,
+        _pause_recording(
+            state_file,
+            result,
+            {
+                "ts": st.utcnow(),
+                "type": event_type,
+                "phase": result.phase_id,
+                "token": result.token,
                 **event_kwargs,
-            )
-            try:
-                st.release_claim(
-                    data,
-                    expected_token=result.token,
-                    expected_phase=result.phase_id,
-                )
-            except st.ClaimMismatch:
-                # Concurrent operator action already swapped the claim;
-                # don't clobber it. The event is still recorded.
-                pass
-            data["status"] = st.STATUS_PAUSED
+            },
+        )
     except _DISPATCH_FALLBACK_ERRORS as exc:
         print(
             f"dispatch: failed to record {log_label}: {exc}",
@@ -761,24 +765,20 @@ def _record_quota_fast_fail(
         return False
     paused_until = None
     try:
-        with st.mutate(state_file) as data:
-            paused_until = quota.record_quota_death(
-                data,
-                match,
-                phase_id=result.phase_id or "",
-                token=result.token,
-                orchestrator_dir=state_file.parent,
-            )
-            try:
-                st.release_claim(
-                    data,
-                    expected_token=result.token,
-                    expected_phase=result.phase_id,
-                )
-            except st.ClaimMismatch:
-                # Concurrent operator action already swapped the claim;
-                # don't clobber it. The events are still recorded.
-                pass
+        # `record_quota_death` writes the project's pause FILE and builds the
+        # two plan events. It runs outside the transaction — the pause file has
+        # its own lock, and nesting one store's lock inside another's is the
+        # shape this migration exists to remove — and the events it produced
+        # are then written with the release in one transaction.
+        harvest: dict = {"events": []}
+        paused_until = quota.record_quota_death(
+            harvest,
+            match,
+            phase_id=result.phase_id or "",
+            token=result.token,
+            orchestrator_dir=state_file.parent,
+        )
+        _release_recording(state_file, result, harvest["events"])
     except _DISPATCH_FALLBACK_ERRORS as exc:
         print(f"dispatch: failed to record quota death: {exc}", file=sys.stderr)
         return False
@@ -792,26 +792,61 @@ def _record_quota_fast_fail(
     return True
 
 
+def _release_recording(state_file: Path, result: TickResult, events: list[dict]) -> None:
+    """Record `events` and release the just-made claim, in one transaction.
+
+    The claim is released only if it is still ours — but the events are
+    recorded either way. That asymmetry predates the store and is deliberate:
+    a concurrent operator action that swapped the claim must not have it
+    yanked out from under the new owner, while the failure that brought us
+    here still belongs in the log. The compare-and-set makes "still ours" the
+    database's answer rather than a re-read's; the second transaction runs only
+    on a path where a dispatch has already failed.
+    """
+    orch_dir, slug = st.key_for(state_file)
+    try:
+        plan_store.op_release_claim(
+            orch_dir,
+            slug,
+            token=result.token,
+            phase=result.phase_id,
+            events=events,
+        )
+    except st.ClaimMismatch:
+        plan_store.op_append_events(orch_dir, slug, events)
+
+
+def _pause_recording(state_file: Path, result: TickResult, event: dict) -> None:
+    """`_release_recording` plus the status flip — the dispatch-time pause.
+
+    Status, event and release commit together: a plan left at `running` with a
+    claim that outlived its failed dispatch is one bug in two halves.
+    """
+    orch_dir, slug = st.key_for(state_file)
+    try:
+        plan_store.op_set_status(
+            orch_dir,
+            slug,
+            status=st.STATUS_PAUSED,
+            event=event,
+            release_token=result.token,
+            release_phase=result.phase_id,
+        )
+    except st.ClaimMismatch:
+        plan_store.op_set_status(orch_dir, slug, status=st.STATUS_PAUSED, event=event)
+
+
 def _release_with_failure(state_file: Path, result: TickResult, *, reason: str) -> None:
     """Release the just-made claim + emit a dispatch_failed event."""
+    event = {
+        "ts": st.utcnow(),
+        "type": st.EVENT_DISPATCH_FAILED,
+        "phase": result.phase_id,
+        "token": result.token,
+        "reason": reason,
+    }
     try:
-        with st.mutate(state_file) as data:
-            st.append_event(
-                data,
-                st.EVENT_DISPATCH_FAILED,
-                phase=result.phase_id,
-                token=result.token,
-                reason=reason,
-            )
-            try:
-                st.release_claim(
-                    data,
-                    expected_token=result.token,
-                    expected_phase=result.phase_id,
-                )
-            except st.ClaimMismatch:
-                # Someone else already changed the claim — leave it alone.
-                pass
+        _release_recording(state_file, result, [event])
     except _DISPATCH_FALLBACK_ERRORS as exc:
         print(f"dispatch: failed to record dispatch_failed: {exc}", file=sys.stderr)
 
@@ -824,19 +859,33 @@ def _stamp_pid(
     session_id: str | None = None,
 ) -> None:
     """Best-effort pid/log_path/session_id stamping on the active claim."""
+    if result.token is None:
+        # Nothing to compare-and-set against. A claimless dispatch result never
+        # reaches here (the claim is what produced the token), and stamping a
+        # pid onto whatever claim happens to be live would be worse than not
+        # stamping at all.
+        return
+    fields: dict = {
+        "pid": pid,
+        # Worker spawned start_new_session=True ⇒ it leads its own process
+        # group, pgid == pid. Record it so cleanup reapers can killpg the whole
+        # group (worker + heartbeat loop) — #75.
+        "pgid": pid,
+        "log_path": str(log_path),
+    }
+    if session_id is not None:
+        # Deterministic transcript filename for `clu top` (#session-id).
+        fields["session_id"] = session_id
     try:
-        with st.mutate(state_file) as data:
-            claim = data.get("current_claim") or {}
-            if claim.get("claimed_by") == result.token:
-                claim["pid"] = pid
-                # Worker spawned start_new_session=True ⇒ it leads its own
-                # process group, pgid == pid. Record it so cleanup reapers can
-                # killpg the whole group (worker + heartbeat loop) — #75.
-                claim["pgid"] = pid
-                claim["log_path"] = str(log_path)
-                if session_id is not None:
-                    # Deterministic transcript filename for `clu top` (#session-id).
-                    claim["session_id"] = session_id
-                data["current_claim"] = claim
+        plan_store.op_stamp_claim_fields(
+            *st.key_for(state_file),
+            token=result.token,
+            fields=fields,
+        )
+    except st.ClaimMismatch:
+        # The claim moved between Popen and here (operator release, a racing
+        # tick). Stamping it would attach this worker's pid to somebody else's
+        # claim, so the stamp is simply dropped — as it always was.
+        pass
     except _DISPATCH_FALLBACK_ERRORS as exc:
         print(f"dispatch: failed to stamp pid: {exc}", file=sys.stderr)

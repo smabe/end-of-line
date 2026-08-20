@@ -14,8 +14,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import db, registry, state_locator
-from . import state as st
+from . import db, plan_store, registry, state_locator
 from .config import load_project_config
 from .notify_base import OpenBlocker, Reply
 
@@ -138,15 +137,18 @@ def _spawn_tick(project_root: Path, plan_slug: str) -> None:
 
 
 def _shell_clu_answer(state_path: Path, blocker_id: str, answer_index: int) -> None:
-    """Directly write the blocker answer into the state file.
+    """Directly write the blocker answer into the plan's store.
 
     Replaces the old subprocess-based _cli_dispatch for the iMessage path;
     avoids the overhead of spawning a new process when the locator has already
-    resolved state_path and answer_index.
+    resolved state_path and answer_index. The option-index translation happens
+    inside the op's transaction, against the options that row actually holds.
     """
-    with st.mutate(state_path) as data:
-        resolved = st.resolve_blocker_answer(data, blocker_id, str(answer_index))
-        st.answer_blocker(data, blocker_id, resolved)
+    plan_store.op_answer_blocker(
+        *plan_store.key_for_state_path(state_path),
+        blocker_id=blocker_id,
+        answer=str(answer_index),
+    )
 
 
 # Apple NSAttributedString typedstream decoder. chat.db stores message

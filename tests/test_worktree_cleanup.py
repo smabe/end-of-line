@@ -16,12 +16,14 @@ a remote and expects pre-#34 behavior to be preserved)."""
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from end_of_line import db, plan_store
 from end_of_line import state as st
 from end_of_line.cli import ExitCode, _remove_worktree_and_branch, main
 from tests import isolate_registry, must
@@ -239,7 +241,12 @@ class CmdArchiveTests(WorktreeCleanupBase):
         self.assertEqual(rc, 0)
         self.assertIsNotNone(self._wt_record("alpha"))
         self.assertIn("retained", stdout)
-        events = st.load(self._state_path("alpha"))["events"]
+        # Read the history the way an operator does after an archive: the same
+        # command that archived the plan moved its events to `events_archive`,
+        # so the live snapshot is empty by design and `clu state dump` is what
+        # still renders the audit trail.
+        orch = self.project / "plans" / ".orchestrator"
+        events = json.loads(plan_store.dump_json(orch, "alpha"))["events"]
         kinds = [e.get("type") for e in events]
         self.assertIn(st.EVENT_WORKTREE_RETAINED_AHEAD, kinds)
 
@@ -391,6 +398,75 @@ class CmdArchivePlanMoveTests(WorktreeCleanupBase):
         rc, stdout, _ = self._archive("alpha")
         self.assertEqual(rc, 0)
         self.assertIn("archive", stdout.lower())
+
+
+class CmdArchiveEventArchiveTests(WorktreeCleanupBase):
+    """Archival is the one moment a plan's events leave the hot table.
+
+    Not a halt and not a pause — those can be retried or resumed, and both read
+    their own history to do it. Archive is terminal for real, so the rows move
+    to `events_archive`, where `clu state dump` still finds them and the tables
+    every poller reads no longer carry them.
+    """
+
+    def _events(self, table: str, slug: str) -> int:
+        orch = self.project / "plans" / ".orchestrator"
+        conn = db.connect(db.project_db_path(orch))
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE plan_slug = ?", (slug,)
+            ).fetchone()
+            return int(row[0])
+        finally:
+            conn.close()
+
+    def _lived_a_little(self, slug: str) -> None:
+        """A real history: two phases claimed and completed."""
+        for phase in ("a", "b"):
+            token = self._claim_phase(slug, phase)
+            rc, err = self._complete(slug, phase, token)
+            self.assertEqual(rc, 0, err)
+
+    def test_archive_moves_the_event_history_out_of_the_hot_table(self) -> None:
+        self._init_plan("alpha", worktree=False)
+        self._lived_a_little("alpha")
+        self._set_status("alpha", st.STATUS_DONE)
+        before = self._events("events", "alpha")
+        # An archive of nothing would satisfy any count-matching assertion
+        # vacuously, so prove there is a history to move first.
+        self.assertGreaterEqual(before, 5)
+        self.assertEqual(self._events("events_archive", "alpha"), 0)
+
+        rc, _, err = self._archive("alpha")
+        self.assertEqual(rc, 0, err)
+
+        self.assertEqual(self._events("events", "alpha"), 0)
+        self.assertEqual(self._events("events_archive", "alpha"), before)
+
+    def test_dump_still_renders_the_history_the_snapshot_no_longer_carries(self) -> None:
+        self._init_plan("alpha", worktree=False)
+        self._lived_a_little("alpha")
+        self._set_status("alpha", st.STATUS_DONE)
+        orch = self.project / "plans" / ".orchestrator"
+        before = len(plan_store.snapshot(orch, "alpha")["events"])
+
+        rc, _, err = self._archive("alpha")
+        self.assertEqual(rc, 0, err)
+
+        self.assertEqual(plan_store.snapshot(orch, "alpha")["events"], [])
+        dumped = json.loads(plan_store.dump_json(orch, "alpha"))
+        self.assertEqual(len(dumped["events"]), before)
+        self.assertIn(st.EVENT_PHASE_COMPLETED, [e["type"] for e in dumped["events"]])
+
+    def test_a_halted_plan_keeps_its_events_until_it_is_archived(self) -> None:
+        # The operator's call: halted and paused plans stay in the live table
+        # so they can be resumed or retried — and `attempts_for_phase` reads a
+        # complete history for any plan that can still run.
+        self._init_plan("alpha", worktree=False)
+        self._lived_a_little("alpha")
+        self._set_status("alpha", st.STATUS_HALTED)
+        self.assertGreaterEqual(self._events("events", "alpha"), 5)
+        self.assertEqual(self._events("events_archive", "alpha"), 0)
 
 
 class CmdArchiveAtomicCommitTests(WorktreeCleanupBase):

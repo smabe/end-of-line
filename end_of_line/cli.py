@@ -310,6 +310,29 @@ def _translate_claim_mismatch(fn):
     return wrapper
 
 
+def _emit_coolant_stop(cfg: ProjectConfig, plan_slug: str, phase: str, token: str) -> None:
+    """Tell coolant a worker stopped — AFTER the release has committed.
+
+    `release_claim_and_emit` did this inside the write window, which was
+    tolerable when the window was one plan's flock and is not now that it is
+    the whole project's write lock: coolant shells out to a script, and a slow
+    script would block every other plan's writes for as long as it ran.
+
+    The identity it needs is the token and the phase, and the compare-and-set
+    that released the claim already proved both matched — so the released
+    claim does not have to be carried back here to name them. Best-effort by
+    construction: `coolant.emit_stop` never raises.
+    """
+    if not cfg.coolant.enabled or not token or not phase:
+        return
+    coolant.emit_stop(
+        session_id=token,
+        agent_id=coolant.format_agent_id(plan_slug, phase),
+        agent_type=coolant.AGENT_TYPE,
+        script_override=cfg.coolant.script_dir,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="clu", description="End of Line — plan orchestrator (clu CLI)"
@@ -2123,10 +2146,22 @@ def cmd_unregister_one(args) -> int:
                     if data.get("current_claim"):
                         st.release_claim_and_emit(data, **cfg.coolant.release_kwargs())
                     st.terminalize(data, reason="unregister")
-        except (OSError, ValueError, st.SchemaVersionMismatch) as exc:
-            # A corrupt / stale-schema state file must NOT block registry
+        except (
+            *db.DEGRADABLE_ERRORS,
+            ValueError,
+            st.SchemaVersionMismatch,
+            st.LockTimeout,
+        ) as exc:
+            # A corrupt / stale-schema / busy store must NOT block registry
             # cleanup — unregister is the operator's tool for broken plans.
             # Best-effort terminalize; always fall through to remove the row.
+            # The database vocabulary is the whole of `DEGRADABLE_ERRORS` plus
+            # the two translations the store makes on the way out
+            # (`SchemaVersionMismatch`, and `LockTimeout` for a `mutate` that
+            # waited out its budget): `DbBusy` is a RuntimeError and
+            # `sqlite3.Error` is neither that nor an OSError, so naming OSError
+            # alone would turn "the tick holds the project lock right now" into
+            # a crashed unregister.
             print(
                 f"warning: could not terminalize {args.plan!r} before unregister: {exc}",
                 file=sys.stderr,
@@ -3918,7 +3953,11 @@ def cmd_worktree_gc(args) -> int:
         if plan_store.exists_for_path(state_path):
             try:
                 fresh = st.load(state_path)
-            except (OSError, ValueError, st.SchemaVersionMismatch):
+            except (*db.DEGRADABLE_ERRORS, ValueError, st.SchemaVersionMismatch):
+                # `DEGRADABLE_ERRORS` rather than OSError alone: a plan whose
+                # store is momentarily busy is unreadable in exactly the sense
+                # this skip already meant, and gc walks every plan in the
+                # project — one busy read must not abort the walk.
                 print(f"  skipped: {slug}: state unreadable")
                 continue
             if fresh.get("status") not in st.GC_ELIGIBLE_STATUSES:
@@ -4736,44 +4775,50 @@ def cmd_answer(args) -> int:
     assert (
         state_path is not None and blocker_id is not None and answer_index is not None
     )  # FOUND sets all (state_locator)
-    with st.mutate(state_path) as data:
-        resolved = st.resolve_blocker_answer(data, blocker_id, str(answer_index))
-        st.answer_blocker(data, blocker_id, resolved)
+    # The option-index translation happens inside the op's transaction, against
+    # the options the row holds — and comes back as the text that was stored.
+    resolved = plan_store.op_answer_blocker(
+        *st.key_for(state_path),
+        blocker_id=blocker_id,
+        answer=str(answer_index),
+    )
     print(f"Answered {blocker_id}: {resolved}")
     return ExitCode.OK
 
 
 @_translate_claim_mismatch
 def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
-    with st.mutate(state_path) as data:
-        st.assert_claim_match(data, args.token, args.phase)
-        cap = data["config"].get("max_spawns_per_phase", st.DEFAULT_MAX_SPAWNS_PER_PHASE)
-        existing = sum(1 for t in data["spawned_tasks"] if t.get("spawned_by_phase") == args.phase)
-        if existing >= cap:
-            return _die(
-                ExitCode.SPAWN_CAP,
-                f"phase {args.phase} already spawned {existing} task(s); cap is {cap}",
-            )
-        task_id = f"task-{len(data['spawned_tasks']) + 1}"
-        data["spawned_tasks"].append(
-            {
-                "id": task_id,
-                "source": args.source,
-                "spawned_by_phase": args.phase,
-                "title": args.title,
-                "description": args.description,
-                "depends_on_phases": [args.phase],
-                "status": "pending",
-                "spawned_at": st.utcnow(),
-            }
+    orch_dir, slug = st.key_for(state_path)
+    # The per-phase cap is a GATE: it reads a snapshot, because refusing needs
+    # the numbers for its message. The write that follows is compare-and-set on
+    # the token, and the task id is minted inside that transaction — so a
+    # snapshot that went stale costs a rejected write, never a duplicate id.
+    data_snap = plan_store.snapshot(orch_dir, slug)
+    st.assert_claim_match(data_snap, args.token, args.phase)
+    cap = data_snap["config"].get("max_spawns_per_phase", st.DEFAULT_MAX_SPAWNS_PER_PHASE)
+    existing = sum(
+        1 for t in data_snap["spawned_tasks"] if t.get("spawned_by_phase") == args.phase
+    )
+    if existing >= cap:
+        return _die(
+            ExitCode.SPAWN_CAP,
+            f"phase {args.phase} already spawned {existing} task(s); cap is {cap}",
         )
-        st.append_event(
-            data,
-            st.EVENT_TASK_SPAWNED,
-            task=task_id,
-            source=args.source,
-            spawned_by_phase=args.phase,
-        )
+    task_id = plan_store.op_spawn_task(
+        orch_dir,
+        slug,
+        task={
+            "source": args.source,
+            "spawned_by_phase": args.phase,
+            "title": args.title,
+            "description": args.description,
+            "depends_on_phases": [args.phase],
+            "spawned_at": st.utcnow(),
+        },
+        status="pending",
+        token=args.token,
+        phase=args.phase,
+    )
     print(f"Spawned {task_id}: {args.title}")
     return 0
 
@@ -4782,32 +4827,36 @@ def cmd_spawn(args, cfg: ProjectConfig, state_path: Path) -> int:
 def cmd_task_done(args, cfg: ProjectConfig, state_path: Path) -> int:
     if args.force and args.token:
         return _die(ExitCode.CLAIM_MISMATCH, "--force and --token are mutually exclusive")
-    with st.mutate(state_path) as data:
-        match = next(
-            (t for t in data["spawned_tasks"] if t["id"] == args.task_id),
-            None,
+    orch_dir, slug = st.key_for(state_path)
+    # Snapshot first for the three refusals, which need the task row to answer:
+    # unknown id, already-done, and which phase spawned it (the phase half of
+    # the compare-and-set the write then re-evaluates for real).
+    data_snap = plan_store.snapshot(orch_dir, slug)
+    match = next((t for t in data_snap["spawned_tasks"] if t["id"] == args.task_id), None)
+    if match is None:
+        return _die(ExitCode.UNKNOWN_TASK, f"no task {args.task_id!r}")
+    if match["status"] == "done":
+        print(f"task {args.task_id} already done")
+        return ExitCode.OK
+    if not args.force and not args.token:
+        return _die(
+            ExitCode.CLAIM_MISMATCH,
+            "--token required (or pass --force for manual cleanup)",
         )
-        if match is None:
-            return _die(ExitCode.UNKNOWN_TASK, f"no task {args.task_id!r}")
-        if match["status"] == "done":
-            print(f"task {args.task_id} already done")
-            return ExitCode.OK
-        if not args.force:
-            if not args.token:
-                return _die(
-                    ExitCode.CLAIM_MISMATCH,
-                    "--token required (or pass --force for manual cleanup)",
-                )
-            st.assert_claim_match(data, args.token, match["spawned_by_phase"])
-        match["status"] = "done"
-        match["completed_at"] = st.utcnow()
-        st.append_event(
-            data,
-            st.EVENT_TASK_COMPLETED,
-            task=args.task_id,
-            commits=list(args.commits),
-            forced=bool(args.force),
-        )
+    plan_store.op_complete_task(
+        orch_dir,
+        slug,
+        task=args.task_id,
+        token=None if args.force else args.token,
+        phase=None if args.force else match["spawned_by_phase"],
+        event={
+            "ts": st.utcnow(),
+            "type": st.EVENT_TASK_COMPLETED,
+            "task": args.task_id,
+            "commits": list(args.commits),
+            "forced": bool(args.force),
+        },
+    )
     _spawn_post_action_tick(cfg)
     print(f"task {args.task_id} done")
     return 0
@@ -5016,31 +5065,57 @@ def cmd_complete(args, cfg: ProjectConfig, state_path: Path) -> int:
                             f"or pass --skip-simplify.",
                         )
 
-    with st.mutate(state_path) as data:
-        st.release_claim_and_emit(
-            data,
-            expected_token=args.token,
-            expected_phase=args.phase,
-            **cfg.coolant.release_kwargs(),
+    events: list[dict] = [
+        {
+            "ts": st.utcnow(),
+            "type": st.EVENT_PHASE_COMPLETED,
+            "phase": args.phase,
+            "commits": list(args.commits),
+        }
+    ]
+    if args.skip_verify:
+        events.append(
+            {
+                "ts": st.utcnow(),
+                "type": st.EVENT_OPERATOR_SKIP_VERIFY,
+                "phase": args.phase,
+                "operator": True,
+            }
         )
-        st.append_event(
-            data,
-            st.EVENT_PHASE_COMPLETED,
-            phase=args.phase,
-            commits=list(args.commits),
+    if args.skip_simplify:
+        events.append(
+            {
+                "ts": st.utcnow(),
+                "type": st.EVENT_OPERATOR_SKIP_SIMPLIFY,
+                "phase": args.phase,
+                "operator": True,
+            }
         )
-        if args.skip_verify:
-            st.append_event(data, st.EVENT_OPERATOR_SKIP_VERIFY, phase=args.phase, operator=True)
-        if args.skip_simplify:
-            st.append_event(data, st.EVENT_OPERATOR_SKIP_SIMPLIFY, phase=args.phase, operator=True)
-        if not cfg.quality.verify_required:
-            st.append_event(data, st.EVENT_VERIFY_POLICY_SKIPPED, phase=args.phase)
-        _maybe_cleanup_worktree(
-            cfg,
-            data,
-            trigger="complete",
-            require_all_phases_done=True,
+    if not cfg.quality.verify_required:
+        events.append(
+            {"ts": st.utcnow(), "type": st.EVENT_VERIFY_POLICY_SKIPPED, "phase": args.phase}
         )
+    # The completion. Release + every event in one transaction, compare-and-set
+    # on the token — so a claim swapped since the gate snapshot loses here
+    # exactly as the re-load-under-lock made it lose before.
+    plan_store.op_release_claim(
+        *st.key_for(state_path),
+        token=args.token,
+        phase=args.phase,
+        events=events,
+    )
+    _emit_coolant_stop(cfg, args.plan, args.phase, args.token)
+    # Worktree cleanup runs git — several subprocesses of it — and stays on the
+    # facade for now. Only after the completion has committed, and only when
+    # there is a worktree to consider, so the common path pays nothing.
+    if st.get_worktree(data_snap) is not None:
+        with st.mutate(state_path) as data:
+            _maybe_cleanup_worktree(
+                cfg,
+                data,
+                trigger="complete",
+                require_all_phases_done=True,
+            )
     _spawn_post_action_tick(cfg)
     print(f"Completed phase {args.phase}")
     return ExitCode.OK
@@ -5941,6 +6016,12 @@ def _perform_archive(
                 plan_moved = True
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
                 _git_mv_exc = exc
+    # Archival is the ONE moment events leave the hot table. Not a halt and not
+    # a pause: both of those can be resumed or retried, and both read their own
+    # history to do it. An archived plan cannot, so its history moves to
+    # `events_archive` — where `clu state dump` still renders it and the tables
+    # every poller reads no longer carry it.
+    plan_store.op_archive_events(*st.key_for(state_path))
     if _git_mv_exc is not None:
         raise _git_mv_exc
     if plan_moved:
@@ -6125,8 +6206,11 @@ def cmd_migrate_archive(args) -> int:
 
 @_translate_claim_mismatch
 def cmd_heartbeat(args, cfg: ProjectConfig, state_path: Path) -> int:
-    with st.mutate(state_path) as data:
-        ts = st.record_heartbeat(data, args.token, args.phase)
+    ts = plan_store.op_heartbeat(
+        *st.key_for(state_path),
+        token=args.token,
+        phase=args.phase,
+    )
     print(f"heartbeat {args.phase} @ {ts}")
     return ExitCode.OK
 
@@ -6154,9 +6238,13 @@ def cmd_heartbeat_daemon(args, cfg: ProjectConfig, state_path: Path) -> int:
             ExitCode.INVALID_VALUE,
             f"--worker-pid must be a positive PID, got {args.worker_pid}",
         )
-    with st.mutate(state_path) as data:
-        ts = st.record_heartbeat(data, args.token, args.phase)
-        worker_pid = args.worker_pid or (data.get("current_claim") or {}).get("pid")
+    orch_dir, slug = st.key_for(state_path)
+    # The validation ping IS the first heartbeat, so it runs before anything
+    # forks — a forged token dies here rather than in a daemon log.
+    ts = plan_store.op_heartbeat(orch_dir, slug, token=args.token, phase=args.phase)
+    worker_pid = args.worker_pid
+    if worker_pid is None:
+        worker_pid = (plan_store.snapshot(orch_dir, slug).get("current_claim") or {}).get("pid")
     if not worker_pid or worker_pid <= 0:
         return _die(
             ExitCode.INVALID_VALUE,
@@ -6192,22 +6280,40 @@ def cmd_notify_heartbeat_failure(args, cfg: ProjectConfig, state_path: Path) -> 
 
     Token-validated and idempotent — heartbeat_loop_failing_notified on the
     claim prevents duplicate events and inbox entries if a strike run ever
-    fires the call more than once.
+    fires the call more than once. The marker and the event land in ONE
+    transaction, so the guard cannot be won twice.
+
+    Bounded like the death report below: this also runs on the detached
+    daemon's behalf, and a wedged holder of the project's write lock must not
+    strand it.
     """
-    notify_body = None
-    with st.mutate(state_path) as data:
-        st.assert_claim_match(data, args.token, args.phase)
-        claim = data["current_claim"]
-        if not st.mark_heartbeat_loop_failing_notified(claim):
-            print(f"notify-heartbeat-failure {args.phase}: already notified, skipping")
-            return ExitCode.OK
-        st.append_event(
-            data,
-            st.EVENT_HEARTBEAT_LOOP_FAILING,
+    try:
+        first = plan_store.op_stamp_claim_fields(
+            *st.key_for(state_path),
+            token=args.token,
             phase=args.phase,
-            log_path=args.log,
+            fields={"heartbeat_loop_failing_notified": True},
+            if_unset="heartbeat_loop_failing_notified",
+            events=[
+                {
+                    "ts": st.utcnow(),
+                    "type": st.EVENT_HEARTBEAT_LOOP_FAILING,
+                    "phase": args.phase,
+                    "log_path": args.log,
+                }
+            ],
+            timeout_s=_DAEMON_REPORT_LOCK_TIMEOUT_S,
         )
-        notify_body = notify.render_heartbeat_loop_failing(args.plan, args.phase, args.log)
+    except db.DbBusy:
+        print(
+            f"notify-heartbeat-failure {args.phase}: store busy ({state_path}), skipping",
+            file=sys.stderr,
+        )
+        return ExitCode.OK
+    if not first:
+        print(f"notify-heartbeat-failure {args.phase}: already notified, skipping")
+        return ExitCode.OK
+    notify_body = notify.render_heartbeat_loop_failing(args.plan, args.phase, args.log)
     try:
         inbox.write_event(
             type="heartbeat_loop_failing",
@@ -6227,12 +6333,12 @@ def cmd_notify_heartbeat_failure(args, cfg: ProjectConfig, state_path: Path) -> 
     return ExitCode.OK
 
 
-# The heartbeat daemon's death report runs on a `setsid`-detached, reaper-immune
-# process's exit path. A blocking flock there would strand it forever, so the
-# report acquires the lock with a bounded budget and degrades to a log line on
-# LockTimeout. Generous enough that a normal supervisor tick (classify + release
-# + reap) clears the lock first; bounded so a wedged tick can't hang the daemon.
-_WORKER_DEAD_REPORT_LOCK_TIMEOUT_S = 10.0
+# The heartbeat daemon's reports run on a `setsid`-detached, reaper-immune
+# process's exit path. An unbounded wait there would strand it forever, so both
+# reports take the store's write lock with a budget and degrade to a log line on
+# `DbBusy`. Generous enough that a normal supervisor tick (classify + release +
+# reap) clears the lock first; bounded so a wedged tick can't hang the daemon.
+_DAEMON_REPORT_LOCK_TIMEOUT_S = 10.0
 
 
 @_translate_claim_mismatch
@@ -6247,11 +6353,12 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
     daemon callback uses. `append_event` does no claim validation, so a direct
     daemon write would be the project's first unvalidated worker-side mutation.
 
-    Token-validated and idempotent — the claim's worker_death_reported marker
-    prevents a duplicate event/inbox/notify/release if the daemon fires more
-    than once, and the guard sits BEFORE the release so a repeat invocation
-    can't clear a newly dispatched worker's claim. The lock is bounded
-    (`LockTimeout` → skip, exit OK) so the detached daemon can't hang.
+    Token-validated and idempotent. Two guards, not one: the claim's
+    worker_death_reported marker short-circuits a repeat call, and the release
+    itself is compare-and-set on (token, phase) — so a second fire against a
+    NEWLY dispatched worker's claim is refused by the database rather than by
+    the freshness of a read. The store wait is bounded (`DbBusy` → skip, exit
+    OK) so the detached daemon can't hang on a wedged holder.
 
     Reads pid + log_path off the live claim: log_path is the ATTEMPT log the
     dispatcher stamped, the file a post-mortem wants — never the daemon's own
@@ -6260,10 +6367,11 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
     death-recovery (#104): the reporter also RELEASES the claim it reported
     dead, so the phase is redispatchable by the next supervisor tick rather
     than sitting claimed until a tick re-derives a death already on record.
-    Quota is classified BEFORE the release, in the same lock window, because
-    release clears the claim that carries `log_path` — mirroring the
-    supervisor's dead-PID branch (supervisor.py worker-dead ordering) so a
-    quota death still pauses the project and forgives the attempt (#94).
+    Quota is classified BEFORE the write — it reads the worker's log off disk
+    and writes the project's pause file, neither of which belongs inside a
+    transaction — and its events commit WITH the release, mirroring the
+    supervisor's dead-PID branch so a quota death still pauses the project and
+    forgives the attempt (#94).
 
     The reporter also REAPS the worker's process group after release. This is a
     correction to the plan's locked "daemon does not reap" decision: that
@@ -6278,78 +6386,97 @@ def cmd_notify_worker_dead(args, cfg: ProjectConfig, state_path: Path) -> int:
     so a slow reap can't strand the reaper-immune daemon on the lock.
     """
     st.validate_slug(args.plan)
+    orch_dir, slug = st.key_for(state_path)
     notifies: list[tuple[str, str]] = []
-    pid = None
-    pgid = None
-    log_path = None
+    # The dedup guard reads a snapshot rather than the write transaction: the
+    # release below is compare-and-set on (token, phase), so a claim that moves
+    # between the read and the write loses the race there instead of here —
+    # and a second daemon fire still cannot release a newly dispatched worker.
+    #
+    # The read degrades rather than raising for the same reason the write is
+    # bounded: this runs on a detached daemon's exit path, and a store that is
+    # momentarily busy, broken, or newer than this clu should cost the report,
+    # never the process. `ValueError` is the store's translation of a database
+    # it cannot read at all.
     try:
-        with st.mutate(
-            state_path, timeout_seconds=_WORKER_DEAD_REPORT_LOCK_TIMEOUT_S
-        ) as data:
-            st.assert_claim_match(data, args.token, args.phase)
-            claim = data["current_claim"]
-            if st.worker_death_already_reported(claim):
-                print(f"notify-worker-dead {args.phase}: already reported, skipping")
-                return ExitCode.OK
-            st.mark_worker_death_reported(claim, st._now_utc())
-            pid = claim.get("pid")
-            pgid = claim.get("pgid") or pid
-            log_path = claim.get("log_path")
-            st.append_event(
-                data,
-                st.EVENT_PHASE_WORKER_DEAD_REPORTED,
-                phase=args.phase,
-                pid=pid,
-                log_path=log_path,
-                reporter="heartbeat_daemon",
-            )
-            # Quota classification MUST precede the release: release_claim_and_emit
-            # clears the claim that carries log_path, and classify_log_tail reads
-            # it. A quota match records the pause + EVENT_QUOTA_DEATH (attempt
-            # forgiveness) and swaps the generic death ping for the actionable
-            # quota-pause notification, exactly as the supervisor does.
-            quota_match = quota.classify_log_tail(log_path)
-            if quota_match is not None:
-                paused_until = quota.record_quota_death(
-                    data,
-                    quota_match,
-                    phase_id=args.phase,
-                    token=args.token,
-                    orchestrator_dir=state_path.parent,
-                )
-                notifies.append(
-                    notify.quota_pause_notification(
-                        args.plan,
-                        quota_match.line,
-                        paused_until,
-                        str(state_path.parent / quota.QUOTA_FILE_NAME),
-                    )
-                )
-            else:
-                notifies.append(
-                    (
-                        notify.KIND_WORKER_DEAD_REPORTED,
-                        notify.render_worker_dead_reported(
-                            args.plan, args.phase, pid, log_path
-                        ),
-                    )
-                )
-            # Durable state first (event + quota + release + coolant); the
-            # supervisor's own reap stays the backstop — the daemon's setsid
-            # puts it outside the group it would reap, and the worker PID is
-            # gone by definition.
-            st.release_claim_and_emit(
-                data,
-                expected_token=args.token,
-                expected_phase=args.phase,
-                **cfg.coolant.release_kwargs(),
-            )
-    except st.LockTimeout as exc:
+        data_snap = plan_store.snapshot(orch_dir, slug)
+    except (*db.DEGRADABLE_ERRORS, ValueError, st.SchemaVersionMismatch) as exc:
         print(
-            f"notify-worker-dead {args.phase}: lock timeout ({exc.path}), skipping",
+            f"notify-worker-dead {args.phase}: state unreadable ({exc}), skipping",
             file=sys.stderr,
         )
         return ExitCode.OK
+    st.assert_claim_match(data_snap, args.token, args.phase)
+    claim = data_snap["current_claim"]
+    if st.worker_death_already_reported(claim):
+        print(f"notify-worker-dead {args.phase}: already reported, skipping")
+        return ExitCode.OK
+    pid = claim.get("pid")
+    pgid = claim.get("pgid") or pid
+    # The ATTEMPT log the dispatcher stamped, never the daemon's .hb.log
+    # sidecar — it is what a post-mortem and the quota classifier both want.
+    log_path = claim.get("log_path")
+    events: list[dict] = [
+        {
+            "ts": st.utcnow(),
+            "type": st.EVENT_PHASE_WORKER_DEAD_REPORTED,
+            "phase": args.phase,
+            "pid": pid,
+            "log_path": log_path,
+            "reporter": "heartbeat_daemon",
+        }
+    ]
+    # Quota classification reads the worker's log off disk and writes the
+    # project's pause file — file work that stays OUTSIDE the transaction, and
+    # ahead of it because the QUOTA_PAUSED event carries the resume time the
+    # pause computes. A match records EVENT_QUOTA_DEATH (attempt forgiveness)
+    # and swaps the generic death ping for the actionable quota-pause one,
+    # exactly as the supervisor does.
+    quota_match = quota.classify_log_tail(log_path)
+    if quota_match is not None:
+        harvest: dict = {"events": []}
+        paused_until = quota.record_quota_death(
+            harvest,
+            quota_match,
+            phase_id=args.phase,
+            token=args.token,
+            orchestrator_dir=state_path.parent,
+        )
+        events.extend(harvest["events"])
+        notifies.append(
+            notify.quota_pause_notification(
+                args.plan,
+                quota_match.line,
+                paused_until,
+                str(state_path.parent / quota.QUOTA_FILE_NAME),
+            )
+        )
+    else:
+        notifies.append(
+            (
+                notify.KIND_WORKER_DEAD_REPORTED,
+                notify.render_worker_dead_reported(args.plan, args.phase, pid, log_path),
+            )
+        )
+    # Durable state first: the event, the quota record and the release commit
+    # together; coolant and the reap follow, because neither belongs inside a
+    # transaction holding the project's write lock.
+    try:
+        plan_store.op_release_claim(
+            orch_dir,
+            slug,
+            token=args.token,
+            phase=args.phase,
+            events=events,
+            timeout_s=_DAEMON_REPORT_LOCK_TIMEOUT_S,
+        )
+    except db.DbBusy:
+        print(
+            f"notify-worker-dead {args.phase}: store busy ({state_path}), skipping",
+            file=sys.stderr,
+        )
+        return ExitCode.OK
+    _emit_coolant_stop(cfg, args.plan, args.phase, args.token)
     try:
         inbox.write_event(
             type="phase_worker_dead_reported",
@@ -6391,11 +6518,12 @@ def cmd_activity(args, cfg: ProjectConfig, state_path: Path) -> int:
 
     Both the operator-facing `clu activity` path and the hot-path
     `python3 -m end_of_line.activity_hook` thin entry point delegate to
-    `state.stamp_activity_marker`. The 2-second lock timeout matches the
-    thin entry — under contention we'd rather drop the marker update
-    than freeze the worker's Bash invocation. `stamp_activity_marker`
-    returns False on `LockTimeout`; we still exit 0 to keep the operator-
-    side UX consistent with the hook-side `|| true` semantics.
+    `state.stamp_activity_marker`, which is one native UPDATE of one column.
+    The 2-second budget matches the thin entry — under contention we'd
+    rather drop the marker update than freeze the worker's Bash
+    invocation. `stamp_activity_marker` returns False when it dropped one;
+    we still exit 0 to keep the operator-side UX consistent with the
+    hook-side `|| true` semantics.
     """
     if not (args.start_bash or args.end_bash):
         return _die(
@@ -6414,21 +6542,21 @@ def cmd_activity(args, cfg: ProjectConfig, state_path: Path) -> int:
 
 @_translate_claim_mismatch
 def cmd_block(args, cfg: ProjectConfig, state_path: Path) -> int:
-    with st.mutate(state_path) as data:
-        st.release_claim_and_emit(
-            data,
-            expected_token=args.token,
-            expected_phase=args.phase,
-            **cfg.coolant.release_kwargs(),
-        )
-        blocker_id = st.add_blocker(
-            data,
-            args.phase,
-            args.question,
-            args.options,
-            args.context,
-            args.type,
-        )
+    # Release and blocker commit together. Split across two transactions, a
+    # crash in between would leave a claimless RUNNING plan with no question on
+    # record — which the supervisor would redispatch, losing what the worker
+    # stopped to ask.
+    blocker_id = plan_store.op_add_blocker(
+        *st.key_for(state_path),
+        phase_id=args.phase,
+        question=args.question,
+        options=args.options,
+        context=args.context,
+        blocker_type=args.type,
+        release_token=args.token,
+        release_phase=args.phase,
+    )
+    _emit_coolant_stop(cfg, args.plan, args.phase, args.token)
     notify.notify(
         cfg.notify,
         notify.KIND_BLOCKER,
@@ -6491,14 +6619,21 @@ def cmd_verify(args, cfg: ProjectConfig, state_path: Path) -> int:
             ExitCode.GENERIC,
             f"verify failed (rc={result.returncode}):\n" + "\n".join(tail),
         )
-    with st.mutate(state_path) as data:
-        st.stamp_attestation(data, st.ATTESTATION_VERIFY, head)
-        st.append_event(
-            data,
-            st.EVENT_VERIFY_STAMPED,
-            phase=args.phase,
-            commit_sha=head,
-        )
+    # The 600s subprocess above ran with nothing held; only the stamp is
+    # transactional, and it carries its event in the same transaction.
+    plan_store.op_stamp_attestation(
+        *st.key_for(state_path),
+        token=args.token or None,
+        phase=args.phase,
+        kind=st.ATTESTATION_VERIFY,
+        commit_sha=head,
+        event={
+            "ts": st.utcnow(),
+            "type": st.EVENT_VERIFY_STAMPED,
+            "phase": args.phase,
+            "commit_sha": head,
+        },
+    )
     print(f"verified at {head}")
     return ExitCode.OK
 
@@ -6520,15 +6655,19 @@ def cmd_attest(args, cfg: ProjectConfig, state_path: Path) -> int:
     head = _resolve_ref(git_root, "HEAD")
     if not head:
         return _die(ExitCode.GENERIC, "could not resolve HEAD SHA")
-    with st.mutate(state_path) as data:
-        st.assert_claim_match(data, args.token, args.phase)
-        st.stamp_attestation(data, st.ATTESTATION_SIMPLIFY, head)
-        st.append_event(
-            data,
-            st.EVENT_SIMPLIFY_STAMPED,
-            phase=args.phase,
-            commit_sha=head,
-        )
+    plan_store.op_stamp_attestation(
+        *st.key_for(state_path),
+        token=args.token,
+        phase=args.phase,
+        kind=st.ATTESTATION_SIMPLIFY,
+        commit_sha=head,
+        event={
+            "ts": st.utcnow(),
+            "type": st.EVENT_SIMPLIFY_STAMPED,
+            "phase": args.phase,
+            "commit_sha": head,
+        },
+    )
     print(f"attested simplify at {head}")
     return ExitCode.OK
 
