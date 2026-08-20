@@ -253,9 +253,13 @@ All three of the surface-level questions the read-back surfaced are closed; none
 - Every documented operator escape hatch resolves: `clu state dump`, `clu quota clear` exist and are named in the docs that used to name raw files (p8 sweep).
 - Legacy stores quarantined: `plans/.orchestrator/` on this repo contains `clu.db` (plus its `-wal`/`-shm` siblings when a connection is or was open), `logs/`, and `legacy/` — nothing else.
 
-## Parking lot
+## Parking lot — DISPOSITIONED AT SHIP (2026-08-20)
 
-- Unify the two attempt counters (`claim_phase` stored field vs `attempts_for_phase` projection) — surfaced by B1/B2, deliberately NOT changed in this plan.
-- `synchronous=NORMAL` perf option (documented-only; plan ships FULL for parity with today's fsync guarantee).
-- **The hook's truncation footer names `clu inbox`, which is not a command** — surfaced at p2 (`clu_inbox_surface.py:199`, confirmed against the CLI's own choice list). Pre-existing and user-visible, so p2 left it alone. It belongs to p8's invariant that no documented escape hatch names something that does not resolve; the operator's call is whether p8 rewords the footer or the plan grows a `clu inbox` command (upstream #5 names only `clu state dump` and `clu quota clear` as the affordances to ship).
-- **`clu watch` always prints `attempt 1`** — surfaced at p1, deliberately NOT fixed in this plan. `claim_phase` computes the attempt count onto the claim but never puts it in the `phase_started` event (`state.py:762`), while the formatter falls back to 1 (`watch.py:121,334`). Fixing it is a behavior change in a plan whose premise is that behavior is unchanged, and it would contaminate the pre-migration golden that p3, p6 and p7 diff against. p4 and p6 carry Done criteria keeping the event as-is; this is the follow-up after the plan ships.
+Every item filed as a GitHub issue at the operator's direction; none dropped.
+
+- **#109** — `clu watch` reports every attempt as "attempt 1"; `phase_started` never carried the count. Frozen through the plan so p1's golden stayed a valid baseline for p3/p6/p7; that constraint expires with the plan, and the issue says so.
+- **#110** — the worker-death dedup marker has no reader anywhere, so one death has always pinged twice.
+- **#111** — the inbox hook's truncation footer names `clu inbox`, which is not a command.
+- **#112** — two divergent attempt counters: `clu top`'s ATT column shows the raw count while dispatch acts on the forgiven one.
+- **#113** — evaluate `synchronous=NORMAL` under WAL; the plan shipped FULL for parity with the old per-write fsync, never measured.
+- **#114** — `docs/_outline.md`'s LOC column is stale by an order of magnitude.
