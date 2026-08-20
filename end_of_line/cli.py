@@ -5918,44 +5918,60 @@ def _perform_archive(
     Raises CalledProcessError or TimeoutExpired on git mv failure (state
     is still saved; caller decides how to surface the error). Does not
     check STATUS_RUNNING.
+
+    Every git invocation here runs against a SNAPSHOT, outside any
+    transaction; the one write window at the end holds no subprocess. The
+    worktree teardown alone is up to four git commands with 30s timeouts, and
+    the project's write lock now covers every plan in the project — so holding
+    it across them would stall the fleet on an archive of one finished plan.
     """
     state_path = cfg.state_path(plan)
     plan_moved = False
     _git_mv_exc: Exception | None = None
-    with st.mutate(state_path) as data:
-        before = st.get_worktree(data)
-        _maybe_cleanup_worktree(
-            cfg,
-            data,
-            trigger="archive",
-            require_all_phases_done=False,
-        )
-        after = st.get_worktree(data)
-        # Clear clu-ship lifecycle markers so they don't haunt the
-        # orphaned state file after archive (clu-ship.md phase 7).
-        data.pop("ship_pending", None)
-        data.pop("ready_to_ship_announced", None)
-        plan_dir = cfg.project_root / cfg.plan_dir
-        plan_md = plan_dir / f"{plan}.md"
-        sources: list[Path] = []
-        if plan_md.exists():
-            sources.append(plan_md)
-        sources.extend(sorted(plan_dir.glob(f"{plan}-*.md")))
-        if sources:
-            archive_dir = plan_dir / "archive" / plan
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                subprocess.run(
-                    ["git", "mv", *[str(s) for s in sources], str(archive_dir)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=str(cfg.project_root),
-                    timeout=30,
-                )
-                plan_moved = True
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                _git_mv_exc = exc
+    # Read once. `_maybe_cleanup_worktree` mutates this snapshot (events +
+    # `worktree`) exactly as it always did; what changed is that the snapshot
+    # is not a live transaction, so the git it shells out to holds no lock.
+    data = plan_store.snapshot(*st.key_for(state_path))
+    recorded_events = len(data["events"])
+    before = st.get_worktree(data)
+    _maybe_cleanup_worktree(
+        cfg,
+        data,
+        trigger="archive",
+        require_all_phases_done=False,
+    )
+    after = st.get_worktree(data)
+    worktree_cleared = "worktree" in data and data["worktree"] is None
+    plan_dir = cfg.project_root / cfg.plan_dir
+    plan_md = plan_dir / f"{plan}.md"
+    sources: list[Path] = []
+    if plan_md.exists():
+        sources.append(plan_md)
+    sources.extend(sorted(plan_dir.glob(f"{plan}-*.md")))
+    if sources:
+        archive_dir = plan_dir / "archive" / plan
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                ["git", "mv", *[str(s) for s in sources], str(archive_dir)],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=str(cfg.project_root),
+                timeout=30,
+            )
+            plan_moved = True
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            _git_mv_exc = exc
+    # Now the write: the cleanup's events, the cleared worktree, and the
+    # clu-ship lifecycle markers that must not haunt an archived plan
+    # (clu-ship.md phase 7).
+    with st.mutate(state_path) as live:
+        live["events"].extend(data["events"][recorded_events:])
+        if worktree_cleared:
+            live["worktree"] = None
+        live.pop("ship_pending", None)
+        live.pop("ready_to_ship_announced", None)
     # Archival is the ONE moment events leave the hot table. Not a halt and not
     # a pause: both of those can be resumed or retried, and both read their own
     # history to do it. An archived plan cannot, so its history moves to

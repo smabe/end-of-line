@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -254,49 +253,24 @@ def _require_wal(conn: sqlite3.Connection, path: Path) -> None:
 # --- transactions -----------------------------------------------------------
 
 
-# Write transactions currently open in THIS thread, keyed by database file.
+# A NOTE ON NESTING, because this file used to hold a workaround for it.
 #
 # SQLite's write lock is per-connection, not per-process: a second connection
 # asking for `BEGIN IMMEDIATE` while this thread already holds one on the same
-# file waits for a lock that only the waiter can release, and gets `DbBusy`
-# when the budget runs out (measured: 1.07s at a 1s budget, on the exact
-# `st.mutate` → quota-row shape below). That never came up while every store
-# was its own file with its own flock, and it arrives the moment plan state,
-# the queue and the quota pause share one database — the supervisor's tick
-# consults the quota gate from INSIDE its state window, and the two queue
-# stores likewise sit under callers that may already be writing plan rows.
+# file waits for a lock only the waiter can release, and gets `DbBusy` when the
+# budget runs out (measured: 1.10s at a 1s budget). That never came up while
+# every store was its own file with its own flock, and it arrived the moment
+# plan state, the queue and the quota pause shared one database: the supervisor
+# consulted the quota gate from INSIDE its state window. `write_txn` grew a
+# thread-local registry so a nested call would JOIN the open transaction rather
+# than deadlock against it.
 #
-# So a nested `write_txn` on the same database JOINS the transaction already
-# open instead of asking for a lock it cannot get. Two consequences worth
-# naming: the inner work commits with the outer one (an all-or-nothing that is
-# stronger than the two separate files gave), and an exception inside it aborts
-# the whole outer transaction, which is what "one transaction" has to mean.
-#
-# Thread-local because two THREADS holding write transactions on one database
-# are genuine contention, and two of this project's tests measure exactly that.
-_ACTIVE = threading.local()
-
-
-def _active_writes() -> dict[str, sqlite3.Connection]:
-    writes = getattr(_ACTIVE, "writes", None)
-    if writes is None:
-        writes = {}
-        _ACTIVE.writes = writes
-    return writes
-
-
-def _main_db_file(conn: sqlite3.Connection) -> str:
-    """The filename behind this connection's `main` schema, "" for in-memory.
-
-    In-memory databases all report an empty filename and are never shared, so
-    an empty key opts out of the join-the-open-transaction path entirely
-    rather than making every in-memory connection look like the same store.
-    """
-    try:
-        row = conn.execute("PRAGMA database_list").fetchone()
-    except sqlite3.Error:
-        return ""
-    return str(row[2]) if row and row[2] else ""
+# That is gone, because the shape that needed it is gone: the tick now decides
+# while holding no transaction at all and applies once at the end, so nothing
+# in the package nests a write transaction on one database. Removing it buys
+# back two guarantees the join quietly took away — `with write_txn(...)` again
+# means "committed at block exit", and an accidental nest fails loudly as
+# contention instead of silently sharing a stranger's transaction.
 
 
 def _set_busy_timeout(conn: sqlite3.Connection, ms: int) -> None:
@@ -322,21 +296,10 @@ def write_txn(
     raises `DbBusy` rather than SQLite's generic `OperationalError`, which is
     what makes drop-on-contention a decision a caller can express.
 
-    When this thread ALREADY has a write transaction open on the same database
-    file, the cursor yielded belongs to that transaction and this block neither
-    begins nor commits — see `_ACTIVE` for why that is the only thing it can
-    safely do.
+    Never nest one of these inside another on the same database file, even on
+    two different connections — the second waits for a lock only the first can
+    release. See the note above this function.
     """
-    key = _main_db_file(conn)
-    active = _active_writes()
-    if key and key in active:
-        cur = active[key].cursor()
-        try:
-            yield cur
-        finally:
-            cur.close()
-        return
-
     restore: int | None = None
     if timeout_s is not None:
         restore = _current_busy_timeout(conn)
@@ -348,8 +311,6 @@ def write_txn(
             if _busy_error(exc):
                 raise DbBusy(str(exc)) from exc
             raise
-        if key:
-            active[key] = conn
         cur = conn.cursor()
         try:
             yield cur
@@ -358,7 +319,6 @@ def write_txn(
             raise
         finally:
             cur.close()
-            active.pop(key, None)
         try:
             conn.execute("COMMIT")
         except sqlite3.OperationalError as exc:

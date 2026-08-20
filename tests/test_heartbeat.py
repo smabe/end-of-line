@@ -10,7 +10,7 @@ from pathlib import Path
 from end_of_line import state as st
 from end_of_line.cli import main
 from end_of_line.config import DispatchSpec, ProjectConfig
-from end_of_line.supervisor import _detect_stalled, tick
+from end_of_line.supervisor import TickDelta, _detect_stalled, tick
 from tests import CluTestCase, must
 
 PLAN_BODY = """\
@@ -298,7 +298,7 @@ class NoHeartbeatGuardTestCase(unittest.TestCase):
     def test_no_heartbeat_does_not_emit_phase_stalled(self) -> None:
         """Guard suppresses phase_stalled when last_heartbeat_at == started_at."""
         data = self._make_data(last_heartbeat_at=self._STARTED)
-        result = _detect_stalled(data)
+        result = _detect_stalled(data, delta=TickDelta())
         self.assertIsNone(result)
         stalled = [e for e in data["events"] if e["type"] == st.EVENT_PHASE_STALLED]
         self.assertEqual(stalled, [])
@@ -306,7 +306,7 @@ class NoHeartbeatGuardTestCase(unittest.TestCase):
     def test_real_heartbeat_past_threshold_still_emits(self) -> None:
         """Regression: phase_stalled still emits when worker HAS heartbeated."""
         data = self._make_data(last_heartbeat_at=self._PAST_HEARTBEAT)
-        result = must(_detect_stalled(data))
+        result = must(_detect_stalled(data, delta=TickDelta()))
         self.assertEqual(result.action, "stalled")
         stalled = [e for e in data["events"] if e["type"] == st.EVENT_PHASE_STALLED]
         self.assertEqual(len(stalled), 1)

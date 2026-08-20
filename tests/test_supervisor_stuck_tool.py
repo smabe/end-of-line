@@ -15,6 +15,7 @@ from end_of_line import inbox
 from end_of_line import state as st
 from end_of_line.config import ProjectConfig
 from end_of_line.supervisor import (
+    TickDelta,
     _emit_stuck_tool,
     _parse_duration,
     _parse_ps_output,
@@ -197,7 +198,7 @@ class EmitStuckToolTestCase(CluTestCase):
     def test_emits_event_when_descendant_wedged(self) -> None:
         data = _empty_data_with_claim()
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(len(events), 1)
         ev = events[0]
@@ -210,15 +211,15 @@ class EmitStuckToolTestCase(CluTestCase):
     def test_dedup_does_not_re_emit_same_descendant(self) -> None:
         data = _empty_data_with_claim()
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(len(events), 1)
 
     def test_no_emit_when_descendant_below_elapsed_threshold(self) -> None:
         data = _empty_data_with_claim()
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_FRESH_BUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_FRESH_BUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(events, [])
 
@@ -226,28 +227,28 @@ class EmitStuckToolTestCase(CluTestCase):
         # 10 min alive but 8 min CPU — clearly doing work, not wedged.
         data = _empty_data_with_claim()
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_BUSY_BUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_BUSY_BUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(events, [])
 
     def test_no_emit_when_no_claim(self) -> None:
         data = st.empty_state("plan-x", "/tmp/plan-x")
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(events, [])
 
     def test_no_emit_when_claim_has_no_pid(self) -> None:
         data = _empty_data_with_claim(worker_pid=None)
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(events, [])
 
     def test_threshold_zero_disables_detection(self) -> None:
         data = _empty_data_with_claim()
         cfg = _config_with_thresholds(threshold=0)
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(events, [])
 
@@ -255,8 +256,11 @@ class EmitStuckToolTestCase(CluTestCase):
         # The inbox event is what session-start surfaces via inbox-hook.
         data = _empty_data_with_claim()
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
-        # Find any tool_stuck event file in the test's isolated inbox.
+        delta = TickDelta()
+        _emit_stuck_tool(data, cfg, delta=delta, ps_output=PS_WEDGED_XCODEBUILD)
+        # Raised onto the delta, written by the tick after its apply commits.
+        for event in delta.inbox_events:
+            inbox.write_event(**event)
         events = inbox.read_unprocessed()
         tool_stuck = [e for e in events if e["type"] == "tool_stuck"]
         self.assertEqual(len(tool_stuck), 1)
@@ -270,9 +274,9 @@ class EmitStuckToolTestCase(CluTestCase):
         # repeated detection on the same descendant stays one-shot.
         data = _empty_data_with_claim()
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         st.append_event(data, st.EVENT_PHASE_STARTED, phase="X")
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(len(events), 1)
 
@@ -305,7 +309,7 @@ class EmitStuckToolActiveMarkerTestCase(CluTestCase):
         # Explicitly strip the marker the fixture seeds.
         data["current_claim"].pop("active_tool_started_at", None)
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(events, [])
 
@@ -316,7 +320,7 @@ class EmitStuckToolActiveMarkerTestCase(CluTestCase):
         data = _empty_data_with_claim()
         data["current_claim"]["active_tool_started_at"] = utcnow_minus(30)
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_IDLE_MCP_SERVERS)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_IDLE_MCP_SERVERS)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(events, [])
 
@@ -327,7 +331,7 @@ class EmitStuckToolActiveMarkerTestCase(CluTestCase):
         data = _empty_data_with_claim()
         data["current_claim"]["active_tool_started_at"] = utcnow_minus(605)
         cfg = _config_with_thresholds()
-        _emit_stuck_tool(data, cfg, ps_output=PS_WEDGED_XCODEBUILD)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=PS_WEDGED_XCODEBUILD)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(len(events), 1)
         self.assertIn("xcodebuild", events[0]["command"])
@@ -350,7 +354,7 @@ class EmitStuckToolActiveMarkerTestCase(CluTestCase):
                 ]
             )
         )
-        _emit_stuck_tool(data, cfg, ps_output=raw)
+        _emit_stuck_tool(data, cfg, delta=TickDelta(), ps_output=raw)
         events = [e for e in data["events"] if e["type"] == st.EVENT_TOOL_STUCK]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["descendant_pid"], 81681)

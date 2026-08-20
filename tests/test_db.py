@@ -326,16 +326,21 @@ class TxnTest(CluTestCase):
 
 
 class NestedWriteTxnTest(CluTestCase):
-    """A second write transaction on the same database JOINS the first.
+    """A write transaction is never nested on one database, so it never joins.
 
-    Not an optimization: SQLite's write lock is per-connection, so a second
-    connection asking for `BEGIN IMMEDIATE` while this thread already holds one
-    waits for a lock only the waiter can release. That shape is unavoidable now
-    that plan state, the queue and the quota pause share one database and the
-    tick consults the quota gate from inside its state window.
+    p5 gave `write_txn` a thread-local registry: a nested call on the same
+    database JOINED the transaction already open, because SQLite's write lock
+    is per-connection and the second `BEGIN IMMEDIATE` would otherwise wait for
+    a lock only the waiter can release. The one caller that needed it was the
+    supervisor consulting the quota gate from inside its own state window; the
+    tick restructure removed that window, and with it the join.
+
+    What these pin is the state after the removal: a genuine nest fails LOUDLY
+    as contention rather than silently sharing a stranger's transaction, and
+    `with write_txn(...)` means "committed at block exit" again.
     """
 
-    def test_nested_write_on_the_same_database_does_not_deadlock(self) -> None:
+    def test_nesting_on_one_database_now_surfaces_as_contention(self) -> None:
         path = self.tmp_path / "nested.db"
         _make_counter_db(path)
         outer = db.connect(path, timeout_s=1.0)
@@ -343,37 +348,31 @@ class NestedWriteTxnTest(CluTestCase):
         inner = db.connect(path, timeout_s=1.0)
         self.addCleanup(inner.close)
 
-        started = time.monotonic()
         with db.write_txn(outer) as cur:
             cur.execute("UPDATE counter SET n = 1 WHERE id = 1")
-            with db.write_txn(inner, timeout_s=1.0) as inner_cur:
-                inner_cur.execute("UPDATE counter SET n = n + 1 WHERE id = 1")
-        elapsed = time.monotonic() - started
+            with self.assertRaises(db.DbBusy):
+                with db.write_txn(inner, timeout_s=0.2):
+                    pass
+        self.assertEqual(_read_counter(path), 1)
 
-        self.assertEqual(_read_counter(path), 2)
-        self.assertLess(elapsed, 0.5, f"the nested write waited {elapsed:.2f}s for a lock")
-
-    def test_the_nested_write_commits_with_the_outer_one(self) -> None:
-        # It joined the transaction, so it shares its fate — the whole point of
-        # joining rather than opening a second one that could half-commit.
-        path = self.tmp_path / "nested-rollback.db"
+    def test_the_block_commits_at_its_own_exit(self) -> None:
+        # The join's real cost: with it, an inner block's work was still
+        # uncommitted when the block ended. Without it, leaving the block means
+        # the write is durable — which is what every caller reads it as.
+        path = self.tmp_path / "commit-at-exit.db"
         _make_counter_db(path)
-        outer = db.connect(path)
-        self.addCleanup(outer.close)
-        inner = db.connect(path)
-        self.addCleanup(inner.close)
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
 
-        with self.assertRaises(ValueError):
-            with db.write_txn(outer) as cur:
-                cur.execute("UPDATE counter SET n = 5 WHERE id = 1")
-                with db.write_txn(inner) as inner_cur:
-                    inner_cur.execute("UPDATE counter SET n = 9 WHERE id = 1")
-                raise ValueError("outer fails after the nested write committed")
-        self.assertEqual(_read_counter(path), 0)
+        with db.write_txn(conn) as cur:
+            cur.execute("UPDATE counter SET n = 7 WHERE id = 1")
+        self.assertEqual(_read_counter(path), 7)
+        self.assertFalse(conn.in_transaction)
 
     def test_two_different_databases_still_take_their_own_locks(self) -> None:
-        # The join is keyed by database FILE — an open transaction on one
-        # project must not silently swallow writes meant for another.
+        # Two projects' databases have independent write locks — an open
+        # transaction on one must not delay or swallow a write meant for
+        # another.
         a, b = self.tmp_path / "a.db", self.tmp_path / "b.db"
         _make_counter_db(a)
         _make_counter_db(b)
@@ -392,8 +391,8 @@ class NestedWriteTxnTest(CluTestCase):
         self.assertEqual(_read_counter(a), 3)
 
     def test_a_separate_thread_still_contends(self) -> None:
-        # The registry is thread-local on purpose: two threads holding write
-        # transactions on one database are genuine contention, not nesting.
+        # Two threads holding write transactions on one database are genuine
+        # contention, and the loser waits out its budget and gives up.
         path = self.tmp_path / "threaded.db"
         _make_counter_db(path)
         holder = db.connect(path, timeout_s=CHILD_TIMEOUT_S)
@@ -420,7 +419,7 @@ class NestedWriteTxnTest(CluTestCase):
             acquired.wait(timeout=CHILD_JOIN_S)
         release.set()
         worker.join(timeout=CHILD_JOIN_S)
-        self.assertEqual(outcome, ["busy"], "another thread joined this thread's transaction")
+        self.assertEqual(outcome, ["busy"], "another thread did not contend for the lock")
 
 
 class SchemaTest(CluTestCase):

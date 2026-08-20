@@ -8,7 +8,7 @@ import unittest
 from end_of_line import inbox
 from end_of_line import state as st
 from end_of_line.config import ProjectConfig
-from end_of_line.supervisor import _emit_worker_idle
+from end_of_line.supervisor import TickDelta, _emit_worker_idle
 from tests import CluTestCase, utcnow_minus
 
 
@@ -82,7 +82,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
         data = _data_with_idle_claim()
         cfg = self._cfg()
         side_notifies: list = []
-        _emit_worker_idle(data, cfg, side_notifies, lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, side_notifies, delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(len(events), 1)
         self.assertIn("worker_idle", events[0]["type"])
@@ -94,7 +94,14 @@ class EmitWorkerIdleTestCase(CluTestCase):
     def test_fires_writes_inbox_event(self) -> None:
         data = _data_with_idle_claim()
         cfg = self._cfg()
-        _emit_worker_idle(data, cfg, [], lsof_output=_NO_ANTHROPIC_LSOF)
+        delta = TickDelta()
+        _emit_worker_idle(data, cfg, [], delta=delta, lsof_output=_NO_ANTHROPIC_LSOF)
+        # The emitter RAISES the inbox event onto the delta; the tick writes it
+        # only after its own apply commits, so a discarded tick leaves no note
+        # about a state change it never made. Flushing here is what the tick
+        # does, and it also proves the payload is a valid `write_event` call.
+        for event in delta.inbox_events:
+            inbox.write_event(**event)
         events = inbox.read_unprocessed()
         worker_idle = [e for e in events if e["type"] == "worker_idle"]
         self.assertEqual(len(worker_idle), 1)
@@ -103,8 +110,8 @@ class EmitWorkerIdleTestCase(CluTestCase):
     def test_idempotent_within_same_claim(self) -> None:
         data = _data_with_idle_claim()
         cfg = self._cfg()
-        _emit_worker_idle(data, cfg, [], lsof_output=_NO_ANTHROPIC_LSOF)
-        _emit_worker_idle(data, cfg, [], lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, [], delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, [], delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(len(events), 1)
 
@@ -112,7 +119,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
         data = _data_with_idle_claim()
         cfg = self._cfg()
         side_notifies: list = []
-        _emit_worker_idle(data, cfg, side_notifies, lsof_output=_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, side_notifies, delta=TickDelta(), lsof_output=_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(events, [])
         self.assertEqual(side_notifies, [])
@@ -121,7 +128,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
         data = _data_with_idle_claim(with_active_tool=True)
         cfg = self._cfg()
         side_notifies: list = []
-        _emit_worker_idle(data, cfg, side_notifies, lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, side_notifies, delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(events, [])
         self.assertEqual(side_notifies, [])
@@ -132,7 +139,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
         data["current_claim"]["cpu_samples"] = _idle_samples(6, 12.0, cpu=30.0)
         cfg = self._cfg()
         side_notifies: list = []
-        _emit_worker_idle(data, cfg, side_notifies, lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, side_notifies, delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(events, [])
 
@@ -141,14 +148,14 @@ class EmitWorkerIdleTestCase(CluTestCase):
         data["current_claim"]["cpu_samples"] = _idle_samples(3, 8.0, cpu=0.0)
         cfg = self._cfg()
         side_notifies: list = []
-        _emit_worker_idle(data, cfg, side_notifies, lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, side_notifies, delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(events, [])
 
     def test_notified_cleared_on_release_allows_re_fire(self) -> None:
         data = _data_with_idle_claim()
         cfg = self._cfg()
-        _emit_worker_idle(data, cfg, [], lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, [], delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         self.assertTrue(data["current_claim"].get("worker_idle_notified"))
 
         # Release claim and re-claim the same phase fresh
@@ -164,7 +171,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
             "cpu_samples": _idle_samples(),
         }
         side_notifies: list = []
-        _emit_worker_idle(data, cfg, side_notifies, lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, side_notifies, delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         # Two fires, one per claim
         self.assertEqual(len(events), 2)
@@ -172,7 +179,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
     def test_no_emit_when_no_claim(self) -> None:
         data = st.empty_state("plan-y", "/tmp/plan-y")
         cfg = self._cfg()
-        _emit_worker_idle(data, cfg, [], lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, [], delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(events, [])
 
@@ -180,7 +187,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
         data = _data_with_idle_claim(worker_pid=0)
         data["current_claim"].pop("pid", None)
         cfg = self._cfg()
-        _emit_worker_idle(data, cfg, [], lsof_output=_NO_ANTHROPIC_LSOF)
+        _emit_worker_idle(data, cfg, [], delta=TickDelta(), lsof_output=_NO_ANTHROPIC_LSOF)
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(events, [])
 
@@ -195,6 +202,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
             data,
             cfg,
             side_notifies,
+            delta=TickDelta(),
             tree_ps_output=_tree_snapshot(42000, 42001),
             ps_output="0.1\n30.0\n",
             lsof_output=_NO_ANTHROPIC_LSOF,
@@ -212,6 +220,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
             data,
             cfg,
             side_notifies,
+            delta=TickDelta(),
             tree_ps_output=_tree_snapshot(42000, 42001),
             ps_output="0.2\n0.3\n",
             lsof_output=_NO_ANTHROPIC_LSOF,
@@ -229,6 +238,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
             data,
             cfg,
             side_notifies,
+            delta=TickDelta(),
             tree_ps_output=_tree_snapshot(42000, 42001),
             ps_output="0.2\n",
             lsof_output=_NO_ANTHROPIC_LSOF,
@@ -246,6 +256,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
             data,
             cfg,
             side_notifies,
+            delta=TickDelta(),
             tree_ps_output=_tree_snapshot(42000),
             ps_output="0.3\n",
             lsof_output=_NO_ANTHROPIC_LSOF,
@@ -258,7 +269,7 @@ class EmitWorkerIdleTestCase(CluTestCase):
         # Since we can't control the real lsof in tests, use the seam with empty output.
         data = _data_with_idle_claim()
         cfg = self._cfg()
-        _emit_worker_idle(data, cfg, [], lsof_output="")
+        _emit_worker_idle(data, cfg, [], delta=TickDelta(), lsof_output="")
         events = [e for e in data["events"] if e["type"] == st.EVENT_WORKER_IDLE]
         self.assertEqual(len(events), 1)
 

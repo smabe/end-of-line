@@ -41,16 +41,25 @@ corrupt JSON document raised.
 
 from __future__ import annotations
 
+import copy
 import errno
 import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import db
 from . import state as st
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    # `supervisor` imports this module; the delta it hands `apply_tick_delta`
+    # is therefore a type this module can name but must never import at
+    # runtime. Only the annotation needs it, and `from __future__ import
+    # annotations` above keeps every annotation a string.
+    from .supervisor import TickDelta
 
 # Re-exported from `state`, which owns the definition because its three
 # primitives route on it. Named here too so the store's own callers do not have
@@ -132,6 +141,9 @@ _BLOCKER_JSON = frozenset({"options", "notify_metadata"})
 _BLOCKER_KNOWN = frozenset(k for k, _ in _BLOCKER_ALWAYS) | frozenset(
     k for k, _ in _BLOCKER_OPTIONAL
 )
+# Dict key → column, for the writers that update named fields on ONE blocker
+# rather than rewriting the whole list.
+_BLOCKER_COLUMN = dict((*_BLOCKER_ALWAYS, *_BLOCKER_OPTIONAL))
 
 _TASK_OWN_KEYS = frozenset({"id", "status"})
 
@@ -897,27 +909,14 @@ def op_stamp_claim_fields(
             or (phase is not None and row["phase_id"] != phase)
         ):
             raise _claim_mismatch(cur, slug, token, phase)
-        flags = json.loads(row["flags"]) if row["flags"] is not None else {}
         if if_unset is not None:
+            flags = json.loads(row["flags"]) if row["flags"] is not None else {}
             current = flags.get(if_unset)
             if current is None and if_unset in _CLAIM_SCALARS:
                 current = row[if_unset]
             if current:
                 return False
-        columns: list[str] = []
-        values: list[Any] = []
-        for key, value in fields.items():
-            if key in _CLAIM_SCALARS:
-                columns.append(key)
-                values.append(value)
-            elif key in _CLAIM_JSON:
-                columns.append(key)
-                values.append(json.dumps(value))
-            else:
-                flags[key] = value
-        if flags:
-            columns.append("flags")
-            values.append(json.dumps(flags))
+        columns, values = _claim_assignments(row, fields)
         if columns:
             # Column names come from the two frozen whitelists above (plus the
             # literal "flags"), never from caller text.
@@ -928,6 +927,33 @@ def op_stamp_claim_fields(
             )
         _insert_events(cur, slug, events)
     return True
+
+
+def _claim_assignments(row: sqlite3.Row, fields: dict[str, Any]) -> tuple[list[str], list[Any]]:
+    """Split a claim-field write into `SET` columns and values.
+
+    Fields with a column of their own land in that column; everything else
+    merges into the `flags` catch-all — the same split `_write_claim` makes on
+    the way in, so a caller keeps writing the claim dict it always wrote.
+    `row` supplies the flags being merged into, so a write of one marker never
+    erases another.
+    """
+    flags = json.loads(row["flags"]) if row["flags"] is not None else {}
+    columns: list[str] = []
+    values: list[Any] = []
+    for key, value in fields.items():
+        if key in _CLAIM_SCALARS:
+            columns.append(key)
+            values.append(value)
+        elif key in _CLAIM_JSON:
+            columns.append(key)
+            values.append(json.dumps(value))
+        else:
+            flags[key] = value
+    if flags:
+        columns.append("flags")
+        values.append(json.dumps(flags))
+    return columns, values
 
 
 def op_append_events(
@@ -1312,3 +1338,283 @@ def op_archive_events(orch_dir: Path, slug: str) -> int:
         moved = cur.rowcount
         cur.execute("DELETE FROM events WHERE plan_slug = ?", (slug,))
     return max(moved, 0)
+
+
+# --- the supervisor tick ------------------------------------------------------
+#
+# The tick cannot be one transaction. Its decisions rest on `ps`, `lsof` and a
+# process-group reap that polls for seconds, and WAL allows exactly one writer —
+# so a transaction held across that work starves every callback in the project.
+#
+# So the tick reads ONE snapshot, decides while holding nothing, and applies
+# every change in one `BEGIN IMMEDIATE` at the end. What makes that safe is not
+# a version counter but a set of PRECONDITIONS: the specific facts the tick's
+# decision actually rested on, re-asserted inside the write transaction. A
+# whole-plan version would be blind — it cannot tell "the claim was released"
+# from "a heartbeat landed", so it would abort most watchdog ticks against
+# exactly the plans a watchdog is watching. The load-bearing detail is that the
+# two highest-frequency writers (the heartbeat every ~120s, the activity stamp
+# on every Bash call) write NO events and touch only their own claim column, so
+# `expect_max_event_id` is untouched by them by construction and
+# `expect_claim_fields` names only what a given decision read.
+
+
+class TickConflict(RuntimeError):
+    """A fact the tick's decision rested on changed before the apply.
+
+    Raised INSIDE `apply_tick_delta`'s transaction, so nothing is written. The
+    supervisor turns it into `TickResult("idle", "concurrent_write")` and the
+    30s cron re-drives: detection is cheap, and re-deriving beats writing a
+    decision made against state that has moved.
+    """
+
+
+class _Unchecked:
+    """"This precondition was not judged, so it is not re-asserted."
+
+    A distinct sentinel because `None` already means something on
+    `expect_claim`: "assert that NO claim row exists", which is what the
+    dispatch path declares.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNCHECKED"
+
+
+UNCHECKED = _Unchecked()
+
+
+@dataclass
+class TickPreconditions:
+    """The facts a tick's decision rested on, re-asserted inside the apply.
+
+    Each field is one entry in a closed vocabulary, and each protects a named
+    set of decisions. A detection path that needs a guarantee none of these
+    gives ADDS a field rather than widening one, because widening is how a
+    precondition set decays into a version counter.
+
+    - `expect_claim` — the claim's `(claimed_by, phase_id)`, or `None` for "no
+      claim row". Guards every lifecycle decision: lease-expiry release,
+      dead-PID release, dispatch, plan-done.
+    - `expect_max_event_id` — the highest `events.id` the snapshot saw. Guards
+      every decision derived from the event log: the attempts budget, the
+      completed-phase set, halt-on-max-attempts, plan-done.
+    - `expect_claim_fields` — the specific claim fields a gap-fill emitter
+      judged. A heartbeat landing mid-tick correctly cancels a stalled emit
+      (it judged `last_heartbeat_at`); a Bash call starting mid-tick correctly
+      cancels a worker-idle emit (it judged `active_tool_started_at`). Neither
+      cancels a lease-expiry release, which judged `lease_expires`.
+    - `expect_blocker_state` — `blocker_id -> (unanswered, consumed)`, for the
+      SLA-escalation and answered-blocker paths.
+    - `expect_status` — the plan status the decision assumed.
+    """
+
+    expect_claim: tuple[str | None, str | None] | None | _Unchecked = UNCHECKED
+    expect_max_event_id: int | None = None
+    expect_claim_fields: dict[str, Any] = field(default_factory=dict)
+    expect_blocker_state: dict[str, tuple[bool, bool]] = field(default_factory=dict)
+    expect_status: str | None = None
+
+
+def snapshot_with_preconditions(orch_dir: Path, slug: str) -> tuple[dict, TickPreconditions]:
+    """The plan dict plus every fact a precondition could be built from.
+
+    One read transaction, so the claim, the blockers, the status and the event
+    high-water mark all describe the same instant. The returned preconditions
+    are the OBSERVED values — the caller copies across only the ones its own
+    decision read.
+
+    The claim fields are deep-copied. `state.append_cpu_sample` and
+    `state.mark_tool_stuck_emitted` mutate nested containers on the snapshot's
+    claim in place, and a shallow copy would have them edit the very value the
+    precondition is supposed to compare against.
+    """
+    st.validate_slug(slug, kind="plan slug")
+    with _tolerant_read(), _read_conn(orch_dir) as conn, db.read_txn(conn) as cur:
+        data = _snapshot_in_txn(cur, orch_dir, slug)
+        max_id = cur.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM events WHERE plan_slug = ?",
+            (slug,),
+        ).fetchone()[0]
+    claim = data.get("current_claim")
+    observed = TickPreconditions(
+        expect_claim=None
+        if claim is None
+        else (claim.get("claimed_by"), claim.get("phase_id")),
+        expect_max_event_id=int(max_id),
+        expect_claim_fields={} if claim is None else copy.deepcopy(claim),
+        expect_blocker_state={
+            b["id"]: (b.get("answer") is None, bool(b.get("consumed")))
+            for b in (data.get("blockers") or [])
+        },
+        expect_status=data.get("status"),
+    )
+    return data, observed
+
+
+def apply_tick_delta(
+    orch_dir: Path,
+    slug: str,
+    pre: TickPreconditions,
+    delta: TickDelta,
+) -> str | None:
+    """Write one tick's whole decision, or write nothing at all.
+
+    Every non-`UNCHECKED` precondition is re-asserted with an ordinary SELECT
+    inside the same `BEGIN IMMEDIATE` window as the writes, so a mismatch
+    raises `TickConflict` with the transaction still open and unwritten.
+
+    Returns the claim token when the delta dispatches a phase — minted here,
+    because the claim row and the `phase_started` event that names it have to
+    be the same write.
+    """
+    st.validate_slug(slug, kind="plan slug")
+    token: str | None = None
+    with _write_conn(orch_dir) as conn, db.write_txn(conn) as cur:
+        # Same first statement as `_plan_txn`: the version bump doubles as the
+        # plan's existence check, and the version is what dashboards poll.
+        cur.execute("UPDATE plans SET version = version + 1 WHERE slug = ?", (slug,))
+        if cur.rowcount == 0:
+            raise _missing(orch_dir, slug)
+        _assert_preconditions(cur, slug, pre)
+        if delta.claim_updates:
+            _apply_claim_updates(cur, slug, delta.claim_token, delta.claim_updates)
+        for blocker_id, fields in delta.blocker_updates.items():
+            _apply_blocker_updates(cur, slug, blocker_id, fields)
+        if delta.release_claim:
+            cur.execute("DELETE FROM claims WHERE plan_slug = ?", (slug,))
+        if delta.status is not None:
+            cur.execute("UPDATE plans SET status = ? WHERE slug = ?", (delta.status, slug))
+        _insert_events(cur, slug, delta.events)
+        if delta.claim_phase is not None:
+            token = _claim_in_txn(cur, slug, delta)
+    return token
+
+
+def _assert_preconditions(cur: sqlite3.Cursor, slug: str, pre: TickPreconditions) -> None:
+    claim: dict | None = None
+    claim_read = False
+    if not isinstance(pre.expect_claim, _Unchecked):
+        claim = _read_claim(cur, slug)
+        claim_read = True
+        found = None if claim is None else (claim.get("claimed_by"), claim.get("phase_id"))
+        want = None if pre.expect_claim is None else tuple(pre.expect_claim)
+        if found != want:
+            raise TickConflict(
+                f"{slug}: claim is {found!r}, was {want!r} when the tick decided"
+            )
+    if pre.expect_claim_fields:
+        if not claim_read:
+            claim = _read_claim(cur, slug)
+        if claim is None:
+            raise TickConflict(f"{slug}: the claim the tick judged is gone")
+        for name, expected in pre.expect_claim_fields.items():
+            if claim.get(name) != expected:
+                raise TickConflict(
+                    f"{slug}: claim field {name!r} is {claim.get(name)!r}, "
+                    f"was {expected!r} when the tick decided"
+                )
+    if pre.expect_max_event_id is not None:
+        found_id = cur.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM events WHERE plan_slug = ?",
+            (slug,),
+        ).fetchone()[0]
+        if int(found_id) != pre.expect_max_event_id:
+            raise TickConflict(
+                f"{slug}: events moved to id {found_id} from {pre.expect_max_event_id} "
+                f"while the tick was deciding"
+            )
+    for blocker_id, expected_state in pre.expect_blocker_state.items():
+        row = cur.execute(
+            "SELECT answer, consumed FROM blockers WHERE plan_slug = ? AND blocker_id = ?",
+            (slug, blocker_id),
+        ).fetchone()
+        found_state = None if row is None else (row["answer"] is None, bool(row["consumed"]))
+        if found_state != tuple(expected_state):
+            raise TickConflict(
+                f"{slug}: blocker {blocker_id} is {found_state!r}, "
+                f"was {tuple(expected_state)!r} when the tick decided"
+            )
+    if pre.expect_status is not None:
+        row = cur.execute("SELECT status FROM plans WHERE slug = ?", (slug,)).fetchone()
+        if row is None or row["status"] != pre.expect_status:
+            raise TickConflict(
+                f"{slug}: status is {None if row is None else row['status']!r}, "
+                f"was {pre.expect_status!r} when the tick decided"
+            )
+
+
+def _apply_claim_updates(
+    cur: sqlite3.Cursor,
+    slug: str,
+    token: str | None,
+    fields: dict[str, Any],
+) -> None:
+    """Set claim fields, compare-and-set on the token the tick was looking at.
+
+    A conflict rather than a `ClaimMismatch`: nobody forged anything, the claim
+    simply moved between the snapshot and the apply, and the whole tick is
+    discarded rather than this one write.
+    """
+    row = cur.execute("SELECT * FROM claims WHERE plan_slug = ?", (slug,)).fetchone()
+    if row is None or row["claimed_by"] != token:
+        raise TickConflict(
+            f"{slug}: claim is held by {None if row is None else row['claimed_by']!r}, "
+            f"not {token!r}"
+        )
+    columns, values = _claim_assignments(row, fields)
+    if columns:
+        assignments = ", ".join(f"{col} = ?" for col in columns)
+        cur.execute(
+            f"UPDATE claims SET {assignments} WHERE plan_slug = ?",
+            (*values, slug),
+        )
+
+
+def _apply_blocker_updates(
+    cur: sqlite3.Cursor,
+    slug: str,
+    blocker_id: str,
+    fields: dict[str, Any],
+) -> None:
+    columns: list[str] = []
+    values: list[Any] = []
+    for key, value in fields.items():
+        col = _BLOCKER_COLUMN.get(key)
+        if col is None:
+            raise ValueError(f"{slug}: blocker field {key!r} has no column")
+        columns.append(col)
+        if key in _BLOCKER_JSON:
+            values.append(json.dumps(value))
+        elif key == "consumed":
+            values.append(int(bool(value)))
+        else:
+            values.append(value)
+    assignments = ", ".join(f"{col} = ?" for col in columns)
+    cur.execute(
+        f"UPDATE blockers SET {assignments} WHERE plan_slug = ? AND blocker_id = ?",
+        (*values, slug, blocker_id),
+    )
+    if cur.rowcount == 0:
+        raise TickConflict(f"{slug}: blocker {blocker_id} vanished before the apply")
+
+
+def _claim_in_txn(cur: sqlite3.Cursor, slug: str, delta: TickDelta) -> str:
+    """Mint the claim the dispatch decision asked for, and its start event.
+
+    Built by `state.claim_phase` against a scratch document rather than by
+    hand, so the token format, the lease arithmetic and — the part a golden
+    depends on — the exact `phase_started` payload stay one definition. Only
+    `attempts` is carried in: the scratch has no history to count, and the
+    tick counted it against the real snapshot.
+    """
+    scratch: dict = {"events": [], "current_claim": None, "plan_slug": slug}
+    token = st.claim_phase(scratch, str(delta.claim_phase), int(delta.lease_minutes or 0))
+    claim = scratch["current_claim"]
+    if delta.claim_attempts is not None:
+        claim["attempts"] = delta.claim_attempts
+    _write_claim(cur, slug, claim)
+    _insert_events(cur, slug, scratch["events"])
+    return token
