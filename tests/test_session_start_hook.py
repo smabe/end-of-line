@@ -157,18 +157,19 @@ class SessionStartInstallTestBase(unittest.TestCase):
 
 
 class InstallSessionStartFlagTests(SessionStartInstallTestBase):
-    def test_install_no_flag_does_not_add_session_start(self) -> None:
+    def test_install_no_flag_adds_session_start_and_not_the_inbox(self) -> None:
+        # The dashboard surface is the default install now; the inbox
+        # surface is retired and only `--inbox` wires it back up.
         rc, _, err = self._install()
         self.assertEqual(rc, int(ExitCode.OK), msg=err)
         hooks = self._hooks_block()
-        self.assertIn("UserPromptSubmit", hooks)
-        self.assertNotIn("SessionStart", hooks)
+        self.assertIn("SessionStart", hooks)
+        self.assertEqual(hooks.get("UserPromptSubmit", []), [])
 
     def test_install_with_flag_adds_session_start_entry(self) -> None:
         rc, _, err = self._install("--session-start")
         self.assertEqual(rc, int(ExitCode.OK), msg=err)
         hooks = self._hooks_block()
-        self.assertIn("UserPromptSubmit", hooks)
         self.assertIn("SessionStart", hooks)
         ss = hooks["SessionStart"]
         self.assertEqual(len(ss), 1)
@@ -192,17 +193,20 @@ class InstallSessionStartFlagTests(SessionStartInstallTestBase):
         self.assertIn("session_start_hook_path", m)
         self.assertIn("clu_session_start.py", m["session_start_hook_path"])
 
-    def test_install_no_flag_does_not_set_marker_field(self) -> None:
+    def test_install_no_flag_sets_the_session_start_marker_field(self) -> None:
+        # `/clu-monitor` keys idempotence off the marker, so the default
+        # install has to stamp one even with the inbox surface retired.
         rc, _, _ = self._install()
         self.assertEqual(rc, int(ExitCode.OK))
         m = must(monitor.load_marker())
-        self.assertNotIn("session_start_hook_path", m)
+        self.assertIn("session_start_hook_path", m)
+        self.assertIn("settings_json_path", m)
 
     def test_install_session_start_after_plain_install_adds_only_session_start(self) -> None:
-        # Operator runs `install-hook` first, then later runs
-        # `install-hook --session-start`. Plain UPS entry stays put;
-        # SessionStart gets added on top.
-        self._install()
+        # Operator opts the retired inbox surface back in, then later
+        # re-runs install. The UPS entry stays put; SessionStart is
+        # already there from the first run and must not duplicate.
+        self._install("--inbox")
         ups_before = self._hooks_block().get("UserPromptSubmit", [])
         self._install("--session-start")
         hooks_after = self._hooks_block()

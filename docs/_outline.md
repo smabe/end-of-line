@@ -16,44 +16,42 @@ Reasons:
   (small, mostly-stateless utility around the store + one
   supervisor entry). Splitting into `docs/reference/<module>.md` would
   fragment grep without adding navigation value.
-- Size spread is one order of magnitude: 67–536 LOC. `cli.py` at 536
-  and `state.py` at 481 are the largest, but neither dominates the
-  whole file (~10 H2 sections, no section >200 doc lines once trimmed
-  to public surface).
 - Single file = single diff when an invariant changes that touches
   multiple modules (slug validation, token discipline, event-type
   constants).
 
-Revisit if any single module crosses ~800 LOC of source — by then the
-reference section will be unwieldy and a directory becomes justified.
+**The original revisit trigger has been crossed and the decision has
+not been revisited.** This layout was chosen when the spread was
+67–536 LOC and the rule was "revisit if any single module crosses ~800
+LOC of source." Several now do — `cli.py` is past 6,900 — so the
+single-file choice stands on the shared-audience and single-diff
+arguments alone, not on size. Splitting `reference.md` into a
+directory is a live question, not a settled one.
 
 ## Module list (phase 3 turns each into an H2 under `## Modules`)
 
 In load order from `cli.py`:
 
-The LOC column is the Day-1 sizing that justified the single-file decision;
-it has not been re-measured since and should not be read as current.
+| Module | One-sentence responsibility |
+|---|---|
+| `db.py` | SQLite core: connection factories with clu's pragmas (WAL, `synchronous=FULL`, `busy_timeout`), `write_txn` / `read_txn`, both schemas, and the degradable-error vocabulary. |
+| `plan_store.py` | The per-plan store: `snapshot` (one read transaction over five tables), one `op_*` per write purpose, and the supervisor tick's snapshot / preconditions / apply pair. |
+| `state.py` | Plan-state DOMAIN layer: vocabulary, append-only events, slug validation, claim lifecycle, liveness probes, projections (`completed_phase_ids`, `open_blockers`, `is_claim_stalled`). No storage engine. |
+| `config.py` | Per-project `.orchestrator.json` loader → `ProjectConfig` with `state_path` path-traversal guard. |
+| `plan_parser.py` | Parse the master plan's `## Sessions index` table into `Phase` records; phase id = plan-file stem minus master stem. |
+| `supervisor.py` | One-tick decision logic; first-match-wins priority chain (canonical list in the module docstring) returning `TickResult` (no I/O beyond state). |
+| `dispatch.py` | Fire-and-forget worker spawn with 0.5s fast-fail, per-token stderr log, pid stamping on the live claim. |
+| `notify.py` | Outbound routing across the configured channels (Discord REST, iMessage via `osascript`); render functions per notification kind; quiet-hours gate (`in_quiet_window`, `QUIET_HOURS_BYPASS_KINDS`) — unset `quiet_hours` means never gated, which is the shipped default. |
+| `notify_inbound.py` | Long-lived poller over `~/Library/Messages/chat.db`; reply grammar `^\s*(<slug>\s+)?[0-9]\s*$`; routes to `clu answer`; seen-rowid checkpoint. |
+| `registry.py` | Host-level index in the `registry` table of `~/.config/clu/clu.db`; `register / unregister / list / load_entry_state`. |
+| `queue.py` | Per-project plan queue: the `queue` / `queue_history` tables in the project database, whole-operation reads/writes plus cursor-level halves for callers that must span two tables in one transaction. |
+| `monitor.py` | Account-wide background-monitoring marker in the host database's `monitor` table; tolerant load/record/clear primitives used by the `/clu-monitor` skill and the CLI tip-suppression branch. |
+| `inbox.py` | Per-event inbox in the host database's `inbox` table; `write_event / read_unprocessed / mark_processed / list_for_project / claim_for_project` — mark-and-sweep dedup. **Dormant**: supervisor ticks still write rows, but the reading surface is retired and nothing consumes them unless `clu install-hook --inbox` re-arms it. |
+| `hooks/clu_inbox_surface.py` | Retired `UserPromptSubmit` hook script, kept on disk and opt-in via `clu install-hook --inbox`: reads stdin, filters inbox to current project (`git rev-parse --show-toplevel` / `os.getcwd()`), emits `hookSpecificOutput.additionalContext` capped at 20 events / 9500 chars, marks events processed. Crash-safe (logs to `~/.config/clu/inbox_hook.log` and exits 0). |
+| `fleet.py` | Pure projection of every registered plan into one-line `PlanSummary` for bare `clu`. |
+| `cli.py` | argparse dispatch + `ExitCode` IntEnum + `_die` helper + `@_translate_claim_mismatch` decorator + every operator/worker subcommand. |
 
-| Module | LOC | One-sentence responsibility |
-|---|---:|---|
-| `db.py` | — | SQLite core: connection factories with clu's pragmas (WAL, `synchronous=FULL`, `busy_timeout`), `write_txn` / `read_txn`, both schemas, and the degradable-error vocabulary. |
-| `plan_store.py` | — | The per-plan store: `snapshot` (one read transaction over five tables), one `op_*` per write purpose, and the supervisor tick's snapshot / preconditions / apply pair. |
-| `state.py` | 481 | Plan-state DOMAIN layer: vocabulary, append-only events, slug validation, claim lifecycle, liveness probes, projections (`completed_phase_ids`, `open_blockers`, `is_claim_stalled`). No storage engine. |
-| `config.py` | 67 | Per-project `.orchestrator.json` loader → `ProjectConfig` with `state_path` path-traversal guard. |
-| `plan_parser.py` | 84 | Parse the master plan's `## Sessions index` table into `Phase` records; phase id = plan-file stem minus master stem. |
-| `supervisor.py` | 209 | One-tick decision logic; 8-priority chain returning `TickResult` (no I/O beyond state). |
-| `dispatch.py` | 130 | Fire-and-forget worker spawn with 0.5s fast-fail, per-token stderr log, pid stamping on the live claim. |
-| `notify.py` | 140 | Outbound iMessage via `osascript`; render functions per notification kind; quiet-hours gate (`_in_quiet_window`, `QUIET_HOURS_BYPASS_KINDS`). |
-| `notify_inbound.py` | 190 | Long-lived poller over `~/Library/Messages/chat.db`; reply grammar `^\s*(<slug>\s+)?[0-9]\s*$`; routes to `clu answer`; seen-rowid checkpoint. |
-| `registry.py` | 117 | Host-level index in the `registry` table of `~/.config/clu/clu.db`; `register / unregister / list / load_entry_state`. |
-| `queue.py` | 196 | Per-project plan queue: the `queue` / `queue_history` tables in the project database, whole-operation reads/writes plus cursor-level halves for callers that must span two tables in one transaction. |
-| `monitor.py` | 72 | Account-wide background-monitoring marker in the host database's `monitor` table; tolerant load/record/clear primitives used by the `/clu-monitor` skill and the CLI tip-suppression branch. |
-| `inbox.py` | 138 | Per-event inbox in the host database's `inbox` table; `write_event / read_unprocessed / mark_processed / list_for_project / claim_for_project` — mark-and-sweep dedup, surfaced into Claude Code via the `UserPromptSubmit` hook. |
-| `hooks/clu_inbox_surface.py` | 121 | `UserPromptSubmit` hook script: reads stdin, filters inbox to current project (`git rev-parse --show-toplevel` / `os.getcwd()`), emits `hookSpecificOutput.additionalContext` capped at 20 events / 9500 chars, marks events processed. Crash-safe (logs to `~/.config/clu/inbox_hook.log` and exits 0). |
-| `fleet.py` | 103 | Pure projection of every registered plan into one-line `PlanSummary` for bare `clu`. |
-| `cli.py` | 536 | argparse dispatch + `ExitCode` IntEnum + `_die` helper + `@_translate_claim_mismatch` decorator + every operator/worker subcommand. |
-
-`__init__.py` (7 LOC) is not worth a section — mention in passing under
+`__init__.py` is a stub and not worth a section — mention in passing under
 the package overview at the top of `reference.md` if at all.
 
 ## Cross-document boundaries
@@ -84,8 +82,8 @@ phases should keep in mind rather than splitting into new docs:
   fail-loud) is small enough to live as a section inside
   `conventions.md` under "Load-bearing invariants". Don't spin a
   `security.md` — the surface is one paragraph plus a checklist.
-- **Notification model** (kinds, quiet hours, bypass set, iMessage
-  self-chat handle expectation, inbound grammar) belongs in
+- **Notification model** (kinds, quiet-hours gate and why it ships off,
+  bypass set, channel config, inbound grammar) belongs in
   `operations.md` next to the LaunchAgent setup; the `notify.py` and
   `notify_inbound.py` reference sections handle the code-level
   details.

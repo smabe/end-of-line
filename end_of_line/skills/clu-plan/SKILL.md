@@ -1495,7 +1495,8 @@ Monitor(
 - **`/clu-phase`** is the worker skill that reads each sub-plan and
   executes it. The sub-plan format you produce here is what
   `/clu-phase` consumes.
-- **`/clu-monitor`** installs the in-session inbox hook. After
+- **`/clu-monitor`** installs the SessionStart hook that arms the
+  operator dashboard Monitor. After
   queueing plans with this skill, remind the operator to run
   `/clu-monitor` if the monitor hook isn't installed on this machine.
 - **`/brainstorm`** is for divergent design exploration BEFORE

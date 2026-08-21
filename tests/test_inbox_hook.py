@@ -208,6 +208,27 @@ class HookSurfacingTests(HookTestBase):
         self.assertIn("event 24", ctx)
         self.assertIn("5 older events", ctx)
 
+    def test_overflow_footer_names_no_command_that_does_not_resolve(self) -> None:
+        # The footer used to say "run `clu inbox`", which is not a
+        # subcommand — the one moment the operator is told there is
+        # information they cannot see, with a wrong way to see it.
+        for i in range(25):
+            inbox.write_event(
+                type="halted",
+                plan_slug="foo",
+                project_root=str(self.proj),
+                summary=f"event {i:02d}",
+            )
+        rc, out, err, _ = _run_hook(cwd=self.proj, xdg=self.xdg)
+        self.assertEqual(rc, 0, msg=err)
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        # The section header "clu inbox (unprocessed):" is a label, not a
+        # command — it is the backticked invocation that has to go.
+        self.assertNotIn("`clu inbox`", ctx)
+        # And it states what actually happens: the claim takes the newest
+        # MAX_EVENTS and leaves the older rows unprocessed for a later turn.
+        self.assertIn("later turn", ctx)
+
     def test_hook_truncates_additional_context_at_10k_chars(self) -> None:
         huge = "X" * 2000
         for i in range(20):

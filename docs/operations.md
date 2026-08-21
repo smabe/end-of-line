@@ -33,7 +33,7 @@ the path that works without `--break-system-packages`.
 Once `clu` is on `$PATH`, install the bundled skills:
 
 ```bash
-clu install-skill                       # interactive — installs five
+clu install-skill                       # interactive — installs seven
                                         # skills + prompts about CLAUDE.md
 clu install-skill --add-claude-md-note  # non-interactive, accept the note
 clu install-skill --no-claude-md-note   # non-interactive, skip the note
@@ -77,7 +77,7 @@ below for how to confirm.
 
 ## Install both LaunchAgents
 
-clu needs two daemons: a long-lived inbound poller and a 5-minute tick
+clu needs two daemons: a long-lived inbound poller and a 30-second tick
 driver. Templates live under `examples/`.
 
 ### Inbound poller — `com.clu.inbound`
@@ -131,7 +131,7 @@ Load it:
 ```bash
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.clu.tick.plist
 launchctl list | grep com.clu.tick
-tail -f /tmp/clu-tick.out                      # one block per 5-min tick
+tail -f /tmp/clu-tick.out                      # one block per tick
 ```
 
 The tick driver calls `clu list`, then `clu tick --project P --plan S`
@@ -1406,16 +1406,18 @@ To silence one noisy project while keeping the global setup, mask each kind with
 
 ## Setup: clu-watch only (zero external transport)
 
-Skip outbound transport entirely — clu's inbox hook surfaces events into the active
-Claude Code session on your next message. No iMessage handle, no bot token needed.
+Skip outbound transport entirely and rely on the live dashboard stream. No iMessage
+handle, no bot token needed.
 
 1. `channels: []` (empty or omit `notify.channels`) in `.orchestrator.json`, **and** no
    `~/.config/clu/config.json` (a global config would otherwise be inherited — see
    [Global notify config](#global-notify-config-all-projects)).
-2. Run `/clu-monitor` once in Claude Code to install the inbox hook.
+2. Run `/clu-monitor` once in Claude Code to install the SessionStart hook.
 
-All notification events still appear in the Claude Code session when you're at your
-desk. You won't get phone pings when you're AFK — that's the tradeoff.
+Events appear in a Claude Code session that has the dashboard Monitor armed. **This is
+a real tradeoff now that the inbox surface is retired**: `clu watch` only tails forward,
+so anything that fires while no session is running is not reported anywhere — you would
+find it with `clu state dump` or not at all. Pick this only when you are watching.
 
 ## Suppressing notifications
 
@@ -1443,7 +1445,8 @@ Four levers, from narrowest to broadest:
 clu --no-notify tick --project . --plan my-feature
 ```
 
-**Permanent silence** — inbox hook still works; just no outbound sends:
+**Permanent silence** — no outbound sends at all; only a live dashboard Monitor sees
+events, and only while it runs:
 ```json
 "notify": {"channels": []}
 ```
@@ -1467,10 +1470,18 @@ Outbound — fired during supervisor ticks. Kinds:
 | `quota_resumed` | Canary survived the reset; quota pause cleared | Gated |
 | `quota_stuck` | Quota death whose reset didn't parse; no auto-resume — needs `clu quota clear` | **Bypasses quiet hours** |
 
-Quiet hours default to `["22:00", "08:00"]` local time and wrap
-overnight. Configure per project under `notify.quiet_hours` in
-`.orchestrator.json`. The bypass set lives in
-`notify.QUIET_HOURS_BYPASS_KINDS` — two kinds, `halted` and `quota_stuck`.
+Quiet hours ship **unset**, so every kind above sends around the clock.
+Set `notify.quiet_hours` to `[start, end]` local time (wraps overnight)
+per project in `.orchestrator.json`, or globally in
+`~/.config/clu/config.json`, to gate the kinds marked Gated. The bypass
+set lives in `notify.QUIET_HOURS_BYPASS_KINDS` — two kinds, `halted` and
+`quota_stuck`.
+
+**The gate drops; it does not defer.** `notify.notify` returns without
+sending and nothing re-sends afterwards, so a suppressed notification is
+lost to that channel rather than delivered in the morning. That is why
+the default is off: a client-side do-not-disturb keeps the message and
+still lets you sleep.
 Both fire at any hour because neither progresses until you intervene.
 
 Inbound reply grammar — locked at `^\s*(<plan-slug>\s+)?[0-9]\s*$`:
@@ -1487,41 +1498,50 @@ clu sends notifications on halts, blockers, plan completions, and queue
 events through configured channels. That covers the
 "operator on their phone, away from the keyboard" case.
 
-The remaining gap is in-session signaling: when you walk back to an
-active Claude Code session AFTER clu has changed state, Claude has no
-idea what happened unless you summarize for it. **The `/clu-monitor`
-skill closes that gap** by installing a `UserPromptSubmit` hook that
-surfaces clu's events into Claude's context automatically on your next
-message.
+The remaining gap is in-session signaling: while you work in a Claude
+Code session, clu keeps changing state and Claude has no idea unless
+you tell it. **The `/clu-monitor` skill closes that gap** by installing
+a `SessionStart` hook that arms a persistent Monitor on the operator
+dashboard.
 
 ### How it works
 
-1. clu writes each notification event as a JSON file to
-   `~/.config/clu/inbox/` alongside sending the iMessage. Inbox writes
-   are unconditional — quiet hours don't gate them (Claude needs the
-   context even when you're asleep).
-2. The bundled `end_of_line/hooks/clu_inbox_surface.py` hook script
-   reads that directory on every user message in Claude Code.
-3. Events tagged with the current `project_root` (derived from
-   `git rev-parse --show-toplevel`, falling back to `os.getcwd()`) get
-   surfaced as a system reminder in the same turn as your message,
-   capped at 20 events / 9500 chars.
-4. Surfaced events are moved to `~/.config/clu/inbox/processed/` so
-   you never see the same event twice.
+1. Every supervisor tick that produces an operator-relevant event
+   appends to the plan's event log and fires a notification on each
+   configured channel.
+2. The bundled `end_of_line/hooks/clu_session_start.py` hook script
+   emits an `additionalContext` block on SessionStart telling the
+   session to arm `Monitor(command="clu watch --all --operator",
+   persistent=True)`.
+3. That Monitor tails every registered plan's event log and prints one
+   line per wedge — stuck tools, blockers, refused gates, stalled
+   claims — as it happens, each carrying an
+   investigate-then-recommend contract.
+4. The stream is forward-only: `clu watch` starts at the current end of
+   the log, so it reports what happens while it runs and never replays
+   what it missed.
 
-Walk back to Claude after a notification, type literally anything
-("ok", "next", "/post-ship"), and Claude reacts with full context.
+Prior Monitors survive `/clear` and `/compact`, so the SessionStart
+hook matters mainly for genuinely fresh conversations.
+
+**The retired inbox surface.** `clu install-hook --inbox` additionally
+wires `end_of_line/hooks/clu_inbox_surface.py`, a `UserPromptSubmit`
+hook that batched unread events into your next prompt. It is off by
+default: live events arrive through the dashboard and away events
+through the notify channels. Supervisor ticks still write rows to the
+host database's `inbox` table (guarded everywhere, treated as a
+parallel surface), and with no reader attached they accumulate unread.
 
 ### Setup
 
 ```bash
 $ clu install-skill --force      # one-time; installs /clu-phase + /plan
-                                 # + /clu-plan + /clu-reply
-                                 # + /brainstorm + /clu-monitor
+                                 # + /clu-plan + /clu-reply + /brainstorm
+                                 # + /clu-monitor + /audit-skill
 $ # then, in a Claude Code session opened in any project:
 $ /clu-monitor
-Installed UserPromptSubmit hook → /Users/you/.../end_of_line/hooks/clu_inbox_surface.py
-Settings updated: /Users/you/.claude/settings.json
+Installed SessionStart hook → /Users/you/.../end_of_line/hooks/clu_session_start.py
+Settings: /Users/you/.claude/settings.json
 ```
 
 Account-wide, not per-project — one hook covers every clu-managed plan
@@ -1538,11 +1558,12 @@ silently modifying the user's settings.json).
 ```bash
 # Check installed
 $ python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
-{'schema_version': 2, 'hook_installed_at': '2026-05-12T19:00:00Z',
- 'hook_path': '/Users/.../end_of_line/hooks/clu_inbox_surface.py',
+{'schema_version': 2, 'session_start_installed_at': '2026-08-21T03:00:00Z',
+ 'session_start_hook_path': '/Users/.../end_of_line/hooks/clu_session_start.py',
  'settings_json_path': '/Users/you/.claude/settings.json'}
+# `hook_path` appears only when `--inbox` was used.
 
-# Inspect pending events (debug)
+# Inspect pending inbox events (debug; nothing reads them by default)
 $ python3 -c "from end_of_line import inbox; print(inbox.read_unprocessed())"
 
 # Full uninstall
@@ -1606,10 +1627,18 @@ $ python3 -c "from end_of_line import inbox; print(inbox.read_unprocessed())"
 
 If Claude didn't see the event, check:
 
-- `cat ~/.claude/settings.json | jq '.hooks.UserPromptSubmit'` — entry
-  present with absolute path to `clu_inbox_surface.py`?
-- `cat ~/.config/clu/inbox_hook.log` — the hook logs exceptions here
-  before exiting 0; a non-empty log usually points at the cause.
+- `cat ~/.claude/settings.json | jq '.hooks.SessionStart'` — entry
+  present with absolute path to `clu_session_start.py`?
+- Is a Monitor actually armed in the session? The hook only *instructs*
+  the session to arm one; a session that ignored the instruction has no
+  stream. Re-arm by hand with
+  `Monitor(command="clu watch --all --operator", persistent=True)`.
+- Remember the stream is forward-only — an event that fired before the
+  Monitor started will never appear in it.
+- Only if you opted into `--inbox`:
+  `jq '.hooks.UserPromptSubmit' ~/.claude/settings.json` and
+  `cat ~/.config/clu/inbox_hook.log`, where the hook logs exceptions
+  before exiting 0.
 
 ### CLI tips
 
@@ -1653,10 +1682,12 @@ This project uses clu for autonomous plan execution.
 
 ### Live in-session feed (`clu watch`)
 
-The inbox hook is the **AFK channel**: events accumulate while you're
-away and surface into Claude on your next message. `clu watch` is the
-**at-desk channel**: a live stream of state transitions emitted to
-stdout as they happen, one line per event.
+Your notify channels are the **AFK channel**: they fire the moment an
+event happens, wherever you are. `clu watch` is the **at-desk channel**:
+a live stream of state transitions emitted to stdout as they happen, one
+line per event. With the inbox surface retired these are the two
+channels — and neither replays, so an event that fires while no session
+is running reaches you only through a notify channel.
 
 ```bash
 # Watch a single plan (default 1s poll):
@@ -1696,10 +1727,10 @@ characterized empirically in [`docs/research/monitor-lifecycle.md`](research/mon
 armed Monitors survive both session-reset commands until their own
 `timeout_ms` boundary.
 
-Inbox (`/clu-monitor`) and `clu watch` are complementary: both run in
-the same session without conflict. The inbox surfaces events from
-between sessions (across `/clear` or restart boundaries); `clu watch`
-covers the current session live.
+The dashboard Monitor (`/clu-monitor` arms it) and a per-plan
+`clu watch` are complementary: both run in the same session without
+conflict. The dashboard is cross-plan and wedge-only; a per-plan watch
+is scoped and verbose. Both tail forward from the moment they start.
 
 #### Task-list mode (`--task-list`)
 
@@ -1861,7 +1892,7 @@ The remaining gap is **cold-start**: a brand-new conversation has no
 prior Monitor. Close it with the SessionStart hook:
 
 ```bash
-clu install-hook --session-start      # composes with the default UserPromptSubmit install
+clu install-hook                      # the SessionStart dashboard hook IS the default
 ```
 
 Adds a `SessionStart` entry to `~/.claude/settings.json` pointing at
@@ -1886,8 +1917,8 @@ $ python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
 
 ##### Investigate-then-recommend contract
 
-Each of the four wedge event classes carries an instruction block in the
-inbox-hook surface telling the receiving session what to do. The contract
+Each of the four wedge event classes carries an instruction block
+telling the receiving session what to do. The contract
 is uniform: **investigate autonomously → recommend a recovery path →
 wait for explicit operator approval before any destructive action**.
 This honors the operator-approval checkpoint in user-level CLAUDE.md.
@@ -1905,7 +1936,7 @@ the predicate + composition happen automatically.
 
 ##### End-to-end verification
 
-Smoke-test the full dashboard chain after `clu install-hook --session-start`:
+Smoke-test the full dashboard chain after `clu install-hook`:
 
 ```bash
 # 1. Drop a synthetic attestation_refused into the inbox.
@@ -1922,8 +1953,8 @@ $ python3 -c "from end_of_line import inbox; inbox.write_event(
 # 4. Claude should propose a recovery (clu verify / --skip-verify) and
 #    wait for your approval rather than auto-running anything.
 
-# Verify the event moved:
-$ ls ~/.config/clu/inbox/processed/    # smoke event lands here
+# Verify the event was recorded:
+$ clu state dump --plan <slug> | python3 -m json.tool | grep -A3 attestation_refused
 ```
 
 ## Troubleshooting

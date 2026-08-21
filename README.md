@@ -7,7 +7,7 @@
 > "End of line."
 > — Master Control Program
 
-A cron-driven plan orchestrator. You write a multi-phase plan as markdown; `clu` dispatches each phase to a fresh Claude session, tracks state in atomic JSON, and pings you on iMessage when it hits a question. Workers run cold (no carried-over context), report back via CLI callbacks, and the supervisor advances the plan one tick at a time.
+A cron-driven plan orchestrator. You write a multi-phase plan as markdown; `clu` dispatches each phase to a fresh Claude session, tracks state in SQLite, and pings you on Discord or iMessage when it hits a question. Workers run cold (no carried-over context), report back via CLI callbacks, and the supervisor advances the plan one tick at a time.
 
 The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-of-line/commit/aef2b81) that decided whether halts should bypass quiet hours was shipped by clu — a worker opened the blocker, I answered via iMessage, the worker resumed, edited `notify.py`, wrote tests, and committed.
 
@@ -16,11 +16,11 @@ The system runs itself: the [halt-bypass feature](https://github.com/smabe/end-o
 - **State lives outside sessions.** Every plan in a project is rows in one SQLite database, `<project>/plans/.orchestrator/clu.db`. Workers don't carry context; they read state on startup (`clu state dump` prints it).
 - **Transactional writes.** Every mutation is one `BEGIN IMMEDIATE` transaction naming the rows it changes, `synchronous=FULL`, WAL on. Two ticks colliding is safe; readers never block behind the writer.
 - **Append-only event log.** Phase claims, completions, lease expirations, blockers — all derivable from `events[]`. State corruption is recoverable by replaying.
-- **`/plan` convention.** Phase declarations come from the master plan's `## Sessions index` markdown table. The parser is 80 lines.
+- **`/plan` convention.** Phase declarations come from the master plan's `## Sessions index` markdown table. The parser is ~110 lines.
 - **System cron is the heartbeat.** No long-running orchestrator process. Each tick is ~50ms of Python; the supervisor itself burns zero LLM tokens. Workers are the only thing that costs API money.
 - **Workers are sandboxed, not trusted.** Dispatch runs every worker least-privilege: a scoped tool allowlist (`--permission-mode dontAsk`) as friction, the OS sandbox (Seatbelt on macOS) as the boundary — worktree-confined writes, allowlisted network. A denied worker asks a question (`clu block`) instead of wedging; worker logs stream through a PTY shim so even a dead worker leaves a legible trail.
-- **Pluggable notification backends.** iMessage (macOS, via `osascript` + `chat.db` poll) and Discord (any OS, REST) ship out of the box; the protocol is open for more. Quiet hours (default 22:00–08:00) gate non-halt notifications. In-session-only mode (`channels: []`) skips outbound entirely — the inbox hook covers that case.
-- **Three observation surfaces.** iMessage for halts and blockers (loud, your phone), the inbox hook for AFK pickup (quiet, Claude's next message), `clu watch` for live in-session streaming (Claude's `Monitor` tool, at-desk). Same event stream, three audiences.
+- **Pluggable notification backends.** iMessage (macOS, via `osascript` + `chat.db` poll) and Discord (any OS, REST) ship out of the box; the protocol is open for more. Quiet hours are opt-in: set `notify.quiet_hours` to gate non-halt kinds, or omit it (the default) to send around the clock. Note the gate drops rather than defers — nothing re-sends what it suppressed.
+- **Two observation surfaces.** Notify channels (Discord or iMessage) for halts and blockers while you're away, and `clu watch` for live in-session streaming (Claude's `Monitor` tool, at-desk). Same event stream, two audiences. A third — the `UserPromptSubmit` inbox hook, which batched events into your next prompt — is retired but still on disk behind `clu install-hook --inbox`.
 
 ## Install
 
@@ -35,9 +35,9 @@ On macOS, `pip install` is usually blocked by PEP 668 — `pipx` is the path tha
 
 `clu install-skill` writes seven bundled skills into `~/.claude/skills/`, one subdirectory per skill. Pass `--force` to overwrite an existing regular file (symlinks are overwritten without it), `--dry-run` to preview, or `--only <name>` to install just one.
 
-After installing the skills, run `/clu-monitor` once in Claude Code to install a `UserPromptSubmit` hook that surfaces clu's events into Claude's context on your next message — type "ok" after walking back and Claude already knows what halted, completed, or stuck. Idempotent — re-running prints the current install status. The install marker lives in the host database, `~/.config/clu/clu.db`.
+After installing the skills, run `/clu-monitor` once in Claude Code to install a `SessionStart` hook. Every fresh session then arms a persistent Monitor on `clu watch --all --operator`, so wedges — stuck tools, blockers, refused gates, stalled claims — stream in live across every registered plan. Idempotent — re-running prints the current install status. The install marker lives in the host database, `~/.config/clu/clu.db`.
 
-For a live in-session feed, `clu watch` streams state-machine events to stdout as they happen — one line per transition. It's the at-desk sibling to the inbox hook: the inbox catches events from between sessions; `clu watch` covers the current session live. The `/clu-plan` skill arms `Monitor(command="clu watch --project . --plan <slug> --task-list", persistent=True)` automatically after `clu queue add`, so Claude-driven sessions get a live feed that populates the native TaskCreate UI hands-free. Add `--task-list` to emit `TASK_CREATE`/`TASK_UPDATE` protocol lines instead of text; omit it for plain-text output (compatible with `--json` for jq pipelines).
+For a live in-session feed, `clu watch` streams state-machine events to stdout as they happen — one line per transition. It only tails forward — the cursor starts at the current end of the log — so it covers the running session, and your notify channels cover everything that fires while no session is alive. The `/clu-plan` skill arms `Monitor(command="clu watch --project . --plan <slug> --task-list", persistent=True)` automatically after `clu queue add`, so Claude-driven sessions get a live feed that populates the native TaskCreate UI hands-free. Add `--task-list` to emit `TASK_CREATE`/`TASK_UPDATE` protocol lines instead of text; omit it for plain-text output (compatible with `--json` for jq pipelines).
 
 > **Caveat — the todo/task tools are off by default on newer models.** Claude Code 2.1.233 removed `TaskCreate` / `TaskGet` / `TaskUpdate` / `TaskList` / `TodoWrite` from the default toolset on Opus 4.8, Sonnet 5, Fable 5, Mythos 5, and anything newer. `--task-list` still streams correct protocol lines, but the agent has no task UI to put them in, so no tree appears. Set `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in the `env` block of `~/.claude/settings.json` (or export it in your shell) and restart the session. The same switch is what makes the `TodoWrite` entry in the worker allowlist below mean anything — see `docs/operations.md` § "Task-list mode".
 
@@ -69,13 +69,14 @@ graphify claude install  # CLAUDE.md section + PreToolUse hook to consult the gr
 
 ## Working with clu
 
-`clu install-skill` ships six skills:
+`clu install-skill` ships seven skills:
 
 - **`/clu-phase`** — the worker skill clu's dispatch invokes for each phase. Required for clu to function; you don't run it directly. The dispatch command in `.orchestrator.json` (see [Configure a project](#configure-a-project)) launches Claude with this skill so each phase honors the worker callback contract.
 - **`/plan`** — generic project-agnostic authorship skill. Drops a single file at `plans/<slug>.md` with Goal / Files-to-touch / Failure-modes / Done-criteria sections. Use this for solo human-authored plans in any project. Does NOT produce the Sessions-index format clu's supervisor needs — for clu-dispatched plans use `/clu-plan`.
 - **`/clu-plan`** — clu-format authorship: produces a master with `## Sessions index` table PLUS one sub-plan file per phase (the worker brief). Use this whenever you intend to dispatch the plan via `clu queue add`. Refuses with a pointer to `/plan` in non-clu projects.
-- **`/clu-reply`** — explicit blocker reply for scripted or disambiguation contexts. The natural-language inbox surface handles most replies hands-free; reach for `/clu-reply <plan-slug> <answer>` when you need precision (multiple open blockers, non-interactive script).
+- **`/clu-reply`** — explicit blocker reply for scripted or disambiguation contexts. Reply on your notify channel (the inbound poller routes it) or reach for `/clu-reply <plan-slug> <answer>` in-session. Hands-free natural-language reply inside Claude Code came from the retired inbox hook's instruction block, so it needs `clu install-hook --inbox` to work again.
 - **`/brainstorm`** — parallel-persona pre-planning. Launches 3-6 agents (UX, engineer, QA, …) in parallel to analyze a feature from different angles, then consolidates their outputs into a master plan. Useful before `/plan` or `/clu-plan` when the problem space is fuzzy and you'd rather explore than guess.
+- **`/audit-skill`** — drift audit of a `SKILL.md` against the current code: finds stale counts, renamed commands, and references to things that no longer exist. Advisory — it produces a punch list, never auto-edits.
 - **`/clu-monitor`** — one-shot setup skill that registers a `UserPromptSubmit` hook in `~/.claude/settings.json`. The hook surfaces clu's events (halts, blockers, plan completions, queue lifecycle, stuck-blocker re-pings, stalled claims) into Claude's context on every user message, so walking back to a session always has Claude already aware of what happened. Run once per machine; idempotent via the marker in the host database (`~/.config/clu/clu.db`).
 
 ### Recommended workflow
@@ -137,13 +138,13 @@ Three notification modes — pick one or combine:
 
 - **iMessage (macOS):** `{"kind": "imessage", "to": "<your-handle>"}`. Requires Full Disk Access for the pipx venv python and the inbound LaunchAgent (`examples/clu.inbound.plist`).
 - **Discord (any OS):** `{"kind": "discord", "bot_token": "...", "user_id": "..."}`. Bot DMs you directly; inbound poller in `examples/clu.discord_inbound.plist` / `examples/clu-discord-inbound.service`. See `docs/operations.md` for the Discord app setup walkthrough.
-- **In-session only:** `"channels": []` — no phone pings, but the inbox hook surfaces events into Claude Code on your next message. Great for local-only work.
+- **Fully silent:** `"channels": []` — no outbound sends at all. With the inbox hook retired this means events reach you ONLY through a live `clu watch` Monitor; anything that fires with no session running is visible just in `clu state dump`. Use it for local-only work where you are watching.
 
 Other config fields:
 
 - `dispatch.command` gets `{plan_slug}`, `{phase_id}`, `{token}`, `{state_file}`, `{project}` substituted (all shlex-quoted) before launching.
 - `dispatch.path` (optional) — colon-separated PATH for the worker subprocess. `~` is expanded per segment. Empty/unset = inherit parent env.
-- `quiet_hours` is `[start, end]` in local wall-clock time; wraps overnight. Halt notifications bypass it (see `notify.QUIET_HOURS_BYPASS_KINDS`).
+- `quiet_hours` is `[start, end]` in local wall-clock time; wraps overnight. Omit it (the default) and nothing is ever gated. Halt and quota-stuck notifications bypass it when set (see `notify.QUIET_HOURS_BYPASS_KINDS`). A gated notification is dropped, not queued — prefer your client's own do-not-disturb if you want the message to survive the night.
 - `clu --no-notify <cmd>` suppresses outbound sends for a single invocation (debug/dry-run). `clu notify-test` fires a test notification through all configured channels.
 - `keep_remote_branches` (default `false`) — when `false`, archive cleanup deletes `origin/<branch>` after merge and `clu ship --direct` skips the feature-branch push entirely (main carries the work). Set to `true` to preserve worker branches on the remote for audit / external tooling.
 
@@ -210,14 +211,14 @@ A worker is a process clu spawns for one phase. The included `/clu-phase` skill 
 | Spawn a follow-up | `clu spawn --project P --plan S --phase X --token T --source <kind> --title "..."` |
 | Still alive (long phases) | `clu heartbeat --project P --plan S --phase X --token T` |
 | Active-tool window (Claude Code) | `clu activity --plan S --phase X --token T --start-bash` (wired as `PreToolUse(Bash)`) and `--end-bash` (wired as `PostToolUse(Bash)`) — stamps `active_tool_started_at` so the supervisor's stuck-tool detection only fires while a Bash call is actually running |
-| Quality gate (before `complete`) | `clu verify --token T` (runs `quality.verify_command` from `.orchestrator.json`) and `clu attest --token T --simplify` (after `/code-review`); both stamp `current_claim.attestations.*` so `complete` doesn't refuse with `ATTESTATION_MISSING` |
+| Quality gate (before `complete`) | `clu verify --token T` (runs `quality.verify_command` from `.orchestrator.json`) and `clu attest --token T --simplify` (after `/code-review`); both stamp `current_claim.attestations.*` so `complete` doesn't refuse with exit code 7 (`STATUS_TRANSITION`) |
 | Read prior answered blocker (resume) | `clu prior-blocker --project P --plan S --phase X --token T` |
 
 Every worker callback validates `--token` against the live claim — `clu` rejects forged tokens with exit code 4 (`CLAIM_MISMATCH`). Never exit without calling `complete` or `block`, or the lease expires (default 60 min, effort-scaled per phase via `plan_parser.parse_effort_minutes` so a `4h` phase gets a proportionally longer TTL) and your phase's attempts counter ticks toward the halt cap.
 
 If a worker calls `clu block`, clu releases the claim and sends an iMessage. When you reply, the inbound poller routes the answer back, the supervisor consumes it on the next tick, and re-dispatches the phase — the resume-aware worker reads the answered blocker from state and continues with your choice.
 
-The bundled skill also encodes **9 universal quality mandates** — TDD before logic changes, structured commit messages, `command -v` fallbacks for external tools, re-running the project's primary check from a fresh process before `clu complete`, and so on. See `end_of_line/skills/clu-phase/SKILL.md` for the full list. Each mandate earned its slot by capturing a witnessed failure mode from real worker sessions, not hypothetical good advice. Project-specific rules (test framework, naming conventions, files to avoid) layer on top via your project's `CLAUDE.md`.
+The bundled skill also encodes **10 universal quality mandates** — TDD before logic changes, structured commit messages, `command -v` fallbacks for external tools, re-running the project's primary check from a fresh process before `clu complete`, and so on. See `end_of_line/skills/clu-phase/SKILL.md` for the full list. Each mandate earned its slot by capturing a witnessed failure mode from real worker sessions, not hypothetical good advice. Project-specific rules (test framework, naming conventions, files to avoid) layer on top via your project's `CLAUDE.md`.
 
 Workers can also chain a follow-up plan into the project queue mid-phase via `clu queue add <slug> --token <T> --plan <source-plan> --phase <source-phase>`. The new plan lands in the queue with lineage stamped (which plan, which phase, a fingerprinted token — the raw token is never persisted). Per-phase cap is 3 by default (`max_queue_adds_per_phase` in the plan's config block). See [`docs/contract.md`](docs/contract.md) for the full worker-enqueue contract.
 
@@ -255,7 +256,7 @@ Workers can also chain a follow-up plan into the project queue mid-phase via `cl
 | `clu archive --project P --plan S` | Post-ship cleanup: removes the clu-managed worktree + branch (when reachable from origin) AND `git mv plans/<slug>*.md plans/archive/<slug>/` + commits the rename atomically. Idempotent on the file-move step |
 | `clu migrate-archive --project P [--dry-run]` | One-shot migration helper for projects on the old flat `plans/shipped/` layout — moves each shipped plan into `plans/archive/<master-slug>/`, committing one rename per master |
 | `clu install-skill [--force] [--dry-run] [--only <name>] [--list]` | (Re-)install the 7 bundled skills (`/clu-phase` + `/plan` + `/clu-plan` + `/clu-reply` + `/brainstorm` + `/clu-monitor` + `/audit-skill`) into `~/.claude/skills/`. `--only <name>` installs one; `--force` overwrites a regular file (symlinks are overwritten without it); `--list` enumerates bundled skills and exits |
-| `clu install-hook` / `clu uninstall-hook` | Register or remove the `UserPromptSubmit` hook in `~/.claude/settings.json` that surfaces clu's inbox events into the active Claude session. `/clu-monitor` is the user-facing wrapper |
+| `clu install-hook [--inbox]` / `clu uninstall-hook` | Register or remove the `SessionStart` hook in `~/.claude/settings.json` that arms the operator dashboard. `--inbox` additionally wires the retired `UserPromptSubmit` inbox surface. `/clu-monitor` is the user-facing wrapper |
 | `clu doctor --project P` | Smoke-test what a worker subprocess sees (PATH + resolved binary locations, channel handles, coolant integration). No state writes |
 | `clu notify-test --project P` | Fire a test notification through every configured channel; reports per-channel send status. Smoke-test after credential setup |
 | `clu unregister --all-archived [--dry-run]` | Batch-prune registry entries whose master plan file no longer exists. `--dry-run` previews without mutating |
@@ -287,7 +288,7 @@ Sketch of the state document `clu state dump` prints — the projection of the
 ```
 end_of_line/          # the package (cli, supervisor, db, plan_store, state, notify, dispatch, …)
 end_of_line/skills/   # bundled skills (/clu-phase worker, /plan + /clu-plan authorship, /brainstorm pre-planning, /clu-monitor in-session signaling) installed via `clu install-skill`
-end_of_line/hooks/    # bundled UserPromptSubmit hook script that surfaces inbox events into Claude's context
+end_of_line/hooks/    # bundled SessionStart hook (arms the operator dashboard) + the retired inbox-surface script
 tests/                # unittest suite
 plans/                # active plan files (dogfooded — this repo uses clu on itself)
 plans/archive/<slug>/ # shipped plans, nested by master slug — receipts that the system runs on itself

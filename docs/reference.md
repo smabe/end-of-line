@@ -1108,7 +1108,7 @@ the install workflow re-runs cleanly.
 
 ### `inbox.py`
 
-The per-event inbox surfaced to active Claude Code sessions via the
+The per-event inbox, formerly surfaced to active Claude Code sessions via the
 `UserPromptSubmit` hook. One ROW per event in the host database's `inbox`
 table, with a `processed` flag for mark-and-sweep dedup.
 

@@ -1,7 +1,7 @@
 # Architecture
 
 clu is a cron-driven plan orchestrator. The supervisor itself is a tiny
-Python program that runs once every five minutes (via launchd), reads a
+Python program that runs every 30 seconds (via launchd), reads a
 snapshot of plan state out of SQLite, and either does nothing or fires a
 single action. Long-
 running work — the LLM that actually edits code — lives in *workers*:
@@ -18,8 +18,9 @@ topology" below.
 
 Four pieces, three of them processes:
 
-- **Supervisor.** `clu tick`, fired by `launchd` on a 5-min
-  cadence. ~50 ms of Python. Takes ONE consistent snapshot of the plan,
+- **Supervisor.** `clu tick`, fired by `launchd` on a 30-second
+  cadence (`StartInterval 30` in `examples/clu.tick.plist`; `clu complete`
+  also push-dispatches the next tick directly). ~50 ms of Python. Takes ONE consistent snapshot of the plan,
   decides the highest-priority action while holding no transaction at all,
   then applies that decision in a single write transaction guarded by a
   compare-and-set over the facts it decided on. Writes one event, optionally
@@ -84,38 +85,51 @@ A database whose `PRAGMA user_version` is newer than this clu understands is
 skipped, never read optimistically and never downgraded — a fleet walk skips
 that project and keeps going.
 
-## In-session signaling (inbox + UserPromptSubmit hook)
+## In-session signaling (the operator dashboard)
 
-Beyond iMessage to the operator, clu has a second notification channel
-aimed at active Claude Code sessions: a row-per-event inbox in the host
-database, surfaced via a UserPromptSubmit hook
-(`end_of_line/hooks/clu_inbox_surface.py`). The hook is installed
+Beyond the outbound notify channels, clu surfaces events to active
+Claude Code sessions through the **operator dashboard**: a persistent
+Monitor on `clu watch --all --operator`, armed by a SessionStart hook
+(`end_of_line/hooks/clu_session_start.py`). The hook is installed
 through `clu install-hook` (or the `/clu-monitor` skill, which is its
 user-facing wrapper); a marker in the host database's `monitor` table
 records the install for idempotency.
 
+The dashboard streams **forward only**. `clu watch` sets its cursor to
+the current end of each plan's event log when it starts, so it reports
+what happens while it runs and never replays history. That is the
+division of labour with the notify channels: the Monitor covers the
+running session, the channels cover everything else.
+
 When the supervisor fires an operator-relevant event, `notify.notify`
-performs two writes:
+sends on every configured channel, gated by `notify.quiet_hours` when
+that is set. **The gate drops rather than defers** — it returns without
+sending and nothing re-sends later, so a gated notification is simply
+lost to that channel. `quiet_hours` ships unset for exactly that
+reason; a client-side do-not-disturb keeps the message while staying
+silent.
 
-1. **iMessage** (loud, immediate) — gated by `notify.quiet_hours` so
-   the operator isn't woken at 03:00 by a halt that can wait.
-2. **Inbox** (quiet, persistent) — `inbox.write_event` inserts a row
-   tagged with `project_root`. Quiet hours do NOT apply here:
-   the inbox is read by *the next Claude turn*, not by the operator.
+### The retired inbox surface
 
-On the next user message in Claude Code, the UserPromptSubmit hook
-reads the inbox, filters to events whose `project_root` matches the
-session's CWD (via `git rev-parse --show-toplevel` or `os.getcwd()`),
-emits a `hookSpecificOutput.additionalContext` payload (≤10K chars,
-20 most recent events plus a footer line for older overflow), and
-marks each surfaced event `processed`. Mark-and-sweep dedup: Claude
-sees every event exactly once.
+`notify.notify` also inserts a row into the host database's `inbox`
+table, tagged with `project_root`, unconditionally with respect to
+quiet hours — the inbox was designed to be read by *the next Claude
+turn* rather than to wake anyone, which made it the deferral target the
+quiet-hours gate never had.
 
-This pattern is what makes "queue plans, walk away" work end-to-end:
-the operator gets the iMessage on their phone, walks back to a Claude
-session (the same one or a fresh `/clear`), types literally anything,
-and Claude already knows what halted, completed, or got stuck. No
-manual context summary.
+That reader is now retired. The UserPromptSubmit hook
+(`end_of_line/hooks/clu_inbox_surface.py`) still exists and still works
+— it filters the inbox to the session's CWD, emits a
+`hookSpecificOutput.additionalContext` payload (≤10K chars, 20 most
+recent events plus a footer for the overflow), and claims what it
+showed in one transaction so two sessions cannot render the same event
+— but `clu install-hook` no longer wires it. Pass `--inbox` to bring it
+back.
+
+The writes continue because every write site is already guarded and
+treats the inbox as a parallel surface, never the source of truth
+(`cli.py`'s attestation mirror says so directly). With no reader
+attached the rows simply accumulate, unread and harmless.
 
 The supervisor extends `TickResult` with `side_notifies: list[(kind,
 body)]` so a single tick can emit multiple parallel notifications

@@ -468,7 +468,7 @@ opt in to this mode intentionally.
 
 ## Notification kinds
 
-The outbound router (`notify.py`) classifies every send by kind. Quiet hours (default 22:00–08:00 local) gate every kind not in `notify.QUIET_HOURS_BYPASS_KINDS`.
+The outbound router (`notify.py`) classifies every send by kind. Quiet hours, when configured, gate every kind not in `notify.QUIET_HOURS_BYPASS_KINDS`; `quiet_hours` is unset by default, so nothing is gated. A gated send is DROPPED — `notify.notify` returns without sending and nothing re-sends it.
 
 | Kind | Trigger | Quiet hours |
 |---|---|---|
@@ -486,7 +486,7 @@ The outbound router (`notify.py`) classifies every send by kind. Quiet hours (de
 | `KIND_QUOTA_RESUMED` | Dispatch gate cleared the quota pause after the canary survived | Gated |
 | `KIND_QUOTA_STUCK` | Quota death whose reset didn't parse; no auto-resume horizon | **Bypass** |
 
-Bypass set: `{KIND_HALTED, KIND_QUOTA_STUCK}` — two members since the queue's repair kinds were deleted along with the repair subsystem. These are unrecoverable-without-operator states; deferring them past quiet hours would let the chain sit silently broken until morning. `KIND_QUOTA_PAUSED`/`KIND_QUOTA_RESUMED` stay gated because the pause self-heals via auto-resume — there's nothing for the operator to do overnight, and `clu watch` + the inbox surface the events regardless.
+Bypass set: `{KIND_HALTED, KIND_QUOTA_STUCK}` — two members since the queue's repair kinds were deleted along with the repair subsystem. These are unrecoverable-without-operator states; deferring them past quiet hours would let the chain sit silently broken until morning. `KIND_QUOTA_PAUSED`/`KIND_QUOTA_RESUMED` stay gated because the pause self-heals via auto-resume — there's nothing for the operator to do overnight, and a live `clu watch` surfaces the events regardless.
 
 Inbox-vs-iMessage asymmetry: every `notify()` call with `plan_slug` + `project_root` in scope writes an inbox event regardless of quiet-hours gating. Quiet hours suppress only the iMessage send — the inbox is for the next Claude turn, not for waking the operator, so it can't be deferred. The two new "gap-fill" kinds (`KIND_STUCK_BLOCKER`, `KIND_STALLED_CLAIM`) ride on the same wire alongside whatever primary action the supervisor's tick already produces, via `TickResult.side_notifies`.
 

@@ -88,23 +88,30 @@ def record_hook_installed(
 
 def record_session_start_installed(
     session_start_hook_path: str,
+    settings_json_path: str | None = None,
     *,
     path: Path | None = None,
 ) -> None:
     """Stamp the SessionStart hook path onto the marker (#70).
 
-    Additive — operators running `clu install-hook --session-start` get this
-    field and the existing `hook_path` field populated. Also stamps
-    install-time, so the operator can audit when the SessionStart hook was
-    added separately from UserPromptSubmit.
+    Additive, per-key upsert. `clu install-hook` calls this on every run —
+    SessionStart is the default surface — so `settings_json_path` is stamped
+    here too; without it a default install would leave the marker without the
+    path `/clu-monitor` reports back. Passing it stays optional so callers
+    that only want the hook path recorded are unaffected.
     """
-    _stamp(
-        [
-            ("session_start_hook_path", session_start_hook_path),
-            ("session_start_installed_at", st.utcnow()),
-        ],
-        path,
-    )
+    pairs = [("session_start_hook_path", session_start_hook_path)]
+    if settings_json_path is not None:
+        pairs.append(("settings_json_path", settings_json_path))
+    # FIRST observation wins for install-time. `clu install-hook` calls this on
+    # every run, including no-op re-runs that write no settings, so stamping
+    # unconditionally would report the time of the last CHECK as the install
+    # date — which is what `/clu-monitor` prints back to the operator. Absent
+    # (a fresh machine, or a marker wiped by a store migration) still stamps.
+    existing = load_marker(path) or {}
+    if not existing.get("session_start_installed_at"):
+        pairs.append(("session_start_installed_at", st.utcnow()))
+    _stamp(pairs, path)
 
 
 def clear_marker(path: Path | None = None) -> None:

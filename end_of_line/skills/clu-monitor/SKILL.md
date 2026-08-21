@@ -11,11 +11,19 @@ user_invocable: true
 
 ## You are the clu monitoring setup skill
 
-This skill installs the `UserPromptSubmit` hook that surfaces
-unprocessed clu events (halts, blockers, plan completions) into the
-operator's next Claude turn. After running this once per machine, the
-operator can queue plans and walk away — and when they come back and
-type anything, Claude already knows what clu did while they were away.
+This skill installs the `SessionStart` hook that arms the operator
+dashboard — a persistent Monitor on `clu watch --all --operator` that
+streams wedge events (stuck tools, blockers, refused gates, stalled
+claims) into the session live, across every registered plan on the
+host. After running this once per machine, the operator can queue plans
+and keep working; wedges surface as they happen rather than on the next
+prompt.
+
+The `UserPromptSubmit` inbox surface is **retired** and no longer
+installs. Live events reach the session through this dashboard Monitor
+and away events through the notify channels, which leaves the inbox no
+gap to cover. Its code is still on disk and `clu install-hook --inbox`
+wires it back up if a gap ever reappears.
 
 The marker rows in clu's host database (`~/.config/clu/clu.db`) are the
 source of truth for "is the hook already installed." `clu install-hook`
@@ -33,12 +41,12 @@ python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
 
 Read the printed dict:
 
-- **A marker** (`schema_version: 2`, `hook_path`, `hook_installed_at`):
-  the hook is installed. Print:
+- **A marker** (`schema_version: 2`, `session_start_hook_path`,
+  `session_start_installed_at`): the hook is installed. Print:
 
-  > Hook already installed at `<hook_path>` (installed
-  > `<hook_installed_at>`). Settings: `<settings_json_path>`. To
-  > reinstall, run `clu uninstall-hook` then re-run `/clu-monitor`.
+  > Hook already installed at `<session_start_hook_path>` (installed
+  > `<session_start_installed_at>`). Settings: `<settings_json_path>`.
+  > To reinstall, run `clu uninstall-hook` then re-run `/clu-monitor`.
 
   Exit. Do NOT touch settings.json.
 
@@ -54,29 +62,27 @@ Run via Bash:
 
 <!-- skilltest -->
 ```bash
-clu install-hook                       # UserPromptSubmit (inbox surface) only
-clu install-hook --session-start       # adds SessionStart hook too (#70 operator dashboard)
+clu install-hook                       # SessionStart (#70 operator dashboard)
+clu install-hook --inbox               # also wires the retired inbox surface
 ```
 
-Pass `--session-start` if the operator wants the cross-plan dashboard
-(live Monitor stream of wedges across every registered plan, armed
-automatically on cold-start sessions). Without it, only the at-desk
-inbox surface installs.
+Plain `clu install-hook` is what you want. Only pass `--inbox` if the
+operator explicitly asks for the retired UserPromptSubmit surface back.
 
 This is the canonical install path:
 
-- Adds a `UserPromptSubmit` entry to `~/.claude/settings.json`,
-  preserving any existing hooks and matching the operator's
-  nested-vs-flat array style.
-- With `--session-start`, ALSO adds a `SessionStart` entry pointing at
-  the bundled `clu_session_start.py` script. Both entries are
-  idempotent on absolute hook path; re-runs are no-ops.
+- Adds a `SessionStart` entry to `~/.claude/settings.json` pointing at
+  the bundled `clu_session_start.py` script, preserving any existing
+  hooks and matching the operator's nested-vs-flat array style.
+- With `--inbox`, ALSO adds a `UserPromptSubmit` entry for the retired
+  inbox surface. Both entries are idempotent on absolute hook path;
+  re-runs are no-ops.
 - Refuses to run in non-TTY contexts (workers shouldn't install
   user-level hooks).
 - Refuses on malformed settings.json rather than guessing how to
   repair — surfaces a clear error.
-- Writes the marker rows on success (with `session_start_hook_path`
-  populated when `--session-start` was used).
+- Writes the marker rows on success (with `hook_path` populated only
+  when `--inbox` was used).
 
 Capture the output. If `clu install-hook` exits non-zero, report the
 error verbatim to the user with one-line diagnosis (most common: the
@@ -87,31 +93,31 @@ before retry). Do NOT manually edit settings.json from this skill.
 
 On success:
 
-> Background monitoring active. clu records events (halts, blockers,
-> plan completions, stuck blockers, stalled claims) in its host
-> database. The UserPromptSubmit hook surfaces them into your next
-> Claude turn as a system reminder — type anything when you return and
-> Claude will see what happened while you were away. To remove:
-> `clu uninstall-hook`.
+> Background monitoring active. Every fresh Claude Code session now
+> arms a persistent Monitor on `clu watch --all --operator`, so wedges
+> (stuck tools, blockers, refused gates, stalled claims) stream into
+> the session as they happen across every registered plan. Anything
+> that fires while you're away reaches you through your notify
+> channels. To remove: `clu uninstall-hook`.
 
 ## How the surfacing works (for your future self)
 
 Each tick of the supervisor that produces an operator-relevant event
-(halt, blocker iMessage, plan completion, queue skip, stuck blocker
-re-ping, stalled claim transition) inserts a row in the host database's
-inbox table. The hook script reads that table at the start of every
-UserPromptSubmit, filters to events whose `project_root` matches the
-current Claude session's CWD, emits a
-`hookSpecificOutput.additionalContext` payload (~10K cap, 20 most
-recent events), and marks each surfaced event processed — reading and
-claiming in one transaction, so two sessions can never surface the same
-event twice. Events older than the 20-newest cap surface as a footer
-line.
+(halt, blocker, plan completion, queue skip, stuck blocker re-ping,
+stalled claim transition) appends to the plan's event log and fires a
+notification. Two surfaces read those:
 
-iMessage notifications (the loud channel) still fire alongside inbox
-writes — quiet hours gate them, but inbox writes happen
-unconditionally because the inbox is for the operator's *next* turn,
-not for waking them.
+- **The dashboard Monitor** — `clu watch --all --operator` tails every
+  registered plan's event log and prints one line per wedge. It streams
+  forward only: it sets its cursor at the current end of the log when
+  it starts, so it shows what happens *while it runs*, never history.
+- **The notify channels** — Discord and/or iMessage, fired at the
+  moment the event happens.
+
+Supervisor ticks still insert rows into the host database's inbox
+table, and the writes are guarded everywhere (the plan's event log is
+the source of truth; the inbox is a parallel surface). Nothing reads
+those rows while the surface is retired.
 
 ### Wedge event contracts (#67, #70)
 
@@ -144,7 +150,7 @@ Registry at `end_of_line/hooks/clu_inbox_surface.py::WEDGE_INSTRUCTION_BLOCKS`
 
 ### Operator dashboard (#70)
 
-When `clu install-hook --session-start` is used, every fresh Claude Code
+`clu install-hook` wires this by default, so every fresh Claude Code
 session sees an additionalContext block on `SessionStart` instructing
 the session to arm:
 
@@ -157,10 +163,8 @@ Monitor(
 ```
 
 The Monitor streams only the four wedge events listed above (the
-`--operator` filter narrows the default visible set). Combined with the
-inbox-hook contracts, the operator sees wedges live (Monitor) AND at
-next-turn (inbox), with the same investigate-then-recommend handling
-either way.
+`--operator` filter narrows the default visible set), each carrying the
+investigate-then-recommend contract.
 
 Pre-`/clear` / pre-`/compact` Monitors survive both reset commands per
 the research note at `docs/research/monitor-lifecycle.md`, so the
@@ -168,9 +172,8 @@ SessionStart hook only matters for genuinely fresh conversations.
 
 ## Live in-session feed (`clu watch`)
 
-The inbox hook is the *AFK* channel — it batches events into the next
-user prompt. For *live* streaming while the operator is at-desk, use
-`clu watch` inside Claude's Monitor tool:
+`clu watch` inside Claude's Monitor tool is the live channel, and with
+the inbox surface retired it is the only in-session one:
 
 ```
 # Single-plan task-list mode (what /clu-plan auto-arms):
@@ -182,9 +185,10 @@ Monitor(command="clu watch --all --operator", persistent=True,
 ```
 
 Each state transition emits one stdout line, surfaced as a
-notification. The three channels are complementary: inbox for the
-walk-away path, per-plan task-list for active plan execution,
-`--operator` for the cross-plan dashboard.
+notification. The two modes are complementary: per-plan task-list for
+active plan execution, `--operator` for the cross-plan dashboard.
+Neither replays history — arm them before walking away, and rely on the
+notify channels for anything that fires while no session is alive.
 
 `--task-list` mode needs `TaskCreate` / `TaskUpdate`, which are not in
 the default toolset on Opus 4.8, Sonnet 5, Fable 5, Mythos 5, and newer

@@ -47,7 +47,7 @@ For the *why* behind each, see
   ...])`). Without it, tests pollute the real host database at
   `~/.config/clu/clu.db`.
 - **One tick = one action.** `supervisor.tick` is first-match-wins
-  through a 10-priority chain (canonical list in `supervisor.py`
+  through an 11-priority chain (canonical list in `supervisor.py`
   module docstring); never do two things per tick.
 
 ## What NOT to do
@@ -109,10 +109,21 @@ For ship history + per-feature memory, see
 
 Don't re-litigate without a real reason:
 
-- **Notifications:** iMessage to the operator's self-chat handle, no
-  Pushover.
-- **Quiet hours:** 22:00–08:00 local. Halt bypasses; everything else
-  defers.
+- **Notifications:** Discord DM is the configured channel; iMessage to
+  the operator's self-chat handle stays supported. No Pushover.
+- **Quiet hours: off.** `notify.quiet_hours` is unset, so every kind
+  sends around the clock. Suppressing at the source was an iMessage-era
+  decision — Discord's own DND keeps the message while staying silent,
+  which is the right layer for "don't wake me." Note the gate never
+  deferred: `notify.notify` returns without sending and nothing
+  re-sends, so a gated notification was simply dropped.
+- **The inbox surface is retired.** `clu install-hook` wires the
+  `SessionStart` operator dashboard only; the `UserPromptSubmit` inbox
+  hook is opt-in behind `--inbox`. Live events arrive through the
+  dashboard Monitor, away events through the notify channels. The
+  inbox's writers and reader stay on disk and dormant — every write
+  site is already guarded and treats it as a parallel surface, so
+  nothing breaks with no reader attached.
 - **Worker dispatch is hardened (#90):** scoped permissions
   (`--permission-mode dontAsk` + one comma-joined `--allowedTools`) as
   friction, Claude Code's native Seatbelt sandbox as the boundary

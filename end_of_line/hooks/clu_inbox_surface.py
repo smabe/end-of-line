@@ -196,7 +196,12 @@ def _build_context(events: Iterable[dict]) -> str:
     lines = ["clu inbox (unprocessed):"]
     lines.extend(_format_event(e) for e in capped)
     if truncated_count > 0:
-        lines.append(f"  (+ {truncated_count} older events — run `clu inbox` to see all)")
+        # No command lists these, so don't name one. The claim takes the
+        # NEWEST MAX_EVENTS and leaves the older rows unprocessed, so they
+        # are not lost — they surface once these are out of the way.
+        lines.append(
+            f"  (+ {truncated_count} older events, still unread — they surface on a later turn)"
+        )
     out = "\n".join(lines)
     if len(out) > MAX_CONTEXT_CHARS:
         footer = "\n  (truncated)"

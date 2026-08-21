@@ -570,5 +570,66 @@ class DispatchMarkerHealthTestCase(_DoctorProjectTestCase):
         self.assertNotIn(_MARKER_WARNING, stdout)
 
 
+class QuietHoursCoverageTests(unittest.TestCase):
+    """Quiet hours DROP rather than defer, and the inbox surface that used to
+    catch what they dropped is retired. Setting one without the other reopens
+    a hole with no channel in it — doctor is where that gets caught.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        self.settings = self.home / ".claude" / "settings.json"
+        self.project = Path(self.tmp.name) / "proj"
+        self.project.mkdir()
+        # `isolate_registry` owns the HOME patch — it allocates its own temp
+        # home unless handed one, and it runs last, so patching HOME here
+        # separately would just be overridden. `_hook_settings_path` reads
+        # `Path.home()`, so this is what points it at the fixture.
+        isolate_registry(self, Path(self.tmp.name), home=self.home)
+
+    def _write_cfg(self, quiet: list[str] | None) -> None:
+        notify: dict = {"channels": []}
+        if quiet is not None:
+            notify["quiet_hours"] = quiet
+        (self.project / ".orchestrator.json").write_text(
+            json.dumps({"dispatch": {"kind": "shell", "command": "echo"}, "notify": notify})
+        )
+
+    def _install_inbox_hook(self) -> None:
+        self.settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"hooks": [{"type": "command", "command": "py clu_inbox_surface.py"}]}
+                        ]
+                    }
+                }
+            )
+        )
+
+    def _run(self) -> str:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            main(["doctor", "--project", str(self.project)])
+        return out.getvalue() + err.getvalue()
+
+    def test_quiet_hours_without_the_inbox_hook_warns(self) -> None:
+        self._write_cfg(["22:00", "08:00"])
+        self.assertIn("quiet hours", self._run().lower())
+
+    def test_quiet_hours_with_the_inbox_hook_is_quiet(self) -> None:
+        self._write_cfg(["22:00", "08:00"])
+        self._install_inbox_hook()
+        self.assertNotIn("quiet hours", self._run().lower())
+
+    def test_no_quiet_hours_is_quiet(self) -> None:
+        self._write_cfg(None)
+        self.assertNotIn("quiet hours", self._run().lower())
+
+
 if __name__ == "__main__":
     unittest.main()

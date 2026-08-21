@@ -696,21 +696,32 @@ def main(argv: list[str] | None = None) -> int:
 
     p_install_hook = sub.add_parser(
         "install-hook",
-        help="Register the clu UserPromptSubmit hook in "
-        "~/.claude/settings.json so Claude Code sessions see "
-        "unprocessed inbox events at the start of every turn. "
+        help="Register the clu SessionStart hook in "
+        "~/.claude/settings.json so every Claude Code session arms the "
+        "operator dashboard (`clu watch --all --operator`). "
         "Idempotent; preserves the operator's other hooks and "
         "their nested/flat array style.",
+    )
+    p_install_hook.add_argument(
+        "--inbox",
+        action="store_true",
+        default=False,
+        dest="install_inbox",
+        help="Also wire the retired UserPromptSubmit inbox surface. "
+        "Off by default: live events reach the session through the "
+        "dashboard Monitor and away events through the notify "
+        "channels, so the inbox has no gap left to cover. The code "
+        "stays on disk — this flag is how it comes back.",
     )
     p_install_hook.add_argument(
         "--session-start",
         action="store_true",
         default=False,
         dest="install_session_start",
-        help="Also install the SessionStart hook for cold-start "
-        "Monitor arming on the operator dashboard (#70). Composes "
-        "with the default UserPromptSubmit install — pass once to "
-        "get both surfaces.",
+        help="Deprecated no-op. SessionStart is now the default install, "
+        "so this flag adds nothing — but note it no longer brings the "
+        "UserPromptSubmit inbox surface with it, which the default "
+        "install used to add. Pass --inbox if you want that too.",
     )
     sub.add_parser(
         "uninstall-hook",
@@ -2691,6 +2702,13 @@ def _entry_command(entry: dict) -> str | None:
     return None
 
 
+# Matched against an installed hook's command string. The BASENAME, not the
+# resolved absolute path: an operator whose clu moved (reinstall, new venv,
+# a second checkout) still has a working inbox hook, and reporting it as
+# missing would send them to fix something that isn't broken.
+_INBOX_HOOK_BASENAME = "clu_inbox_surface.py"
+
+
 def _entry_mentions_hook_path(entry: dict, hook_path: str) -> bool:
     cmd = _entry_command(entry) or ""
     return hook_path in cmd
@@ -2723,17 +2741,17 @@ def _build_hook_entry(command: str, *, nested: bool) -> dict:
 
 
 def cmd_install_hook(args) -> int:
-    """Register the clu inbox surface hook in `~/.claude/settings.json`.
+    """Register the clu operator-dashboard hook in `~/.claude/settings.json`.
 
-    Adds (or refreshes) a UserPromptSubmit entry pointing at the bundled
-    inbox-surface script. With `--session-start`, also adds a
-    SessionStart entry pointing at the bundled session-start script (#70
-    cold-start dashboard arming). Both entries are idempotent on
-    absolute hook_path. Refuses on malformed settings.json (don't try
-    to repair). Writes the marker on success.
+    Adds (or refreshes) a SessionStart entry pointing at the bundled
+    session-start script (#70 cold-start dashboard arming). With
+    `--inbox`, ALSO adds the UserPromptSubmit entry for the retired
+    inbox surface — off by default because live events reach the
+    session through the dashboard Monitor and away events through the
+    notify channels, leaving the inbox no gap to cover. Both entries
+    are idempotent on absolute hook_path. Refuses on malformed
+    settings.json (don't try to repair). Writes the marker on success.
     """
-    hook_path = _resolve_hook_script_path()
-    command = _hook_command(hook_path)
     settings_path = _hook_settings_path()
     settings_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2750,33 +2768,44 @@ def cmd_install_hook(args) -> int:
         data = {}
 
     hooks = data.setdefault("hooks", {})
-    ups = hooks.setdefault("UserPromptSubmit", [])
     nested = _detect_nested_style(hooks)
-
     changed = False
-    already_ups = any(_entry_mentions_hook_path(e, hook_path) for e in ups)
-    if not already_ups:
-        ups.append(_build_hook_entry(command, nested=nested))
-        changed = True
-        print(f"Installed UserPromptSubmit hook → {hook_path}")
-    else:
-        print(f"UserPromptSubmit hook already installed at {hook_path}")
 
-    session_start_path: str | None = None
+    session_start_path = _resolve_hook_script_path("clu_session_start.py")
+    ss_command = _hook_command(session_start_path)
+    ss = hooks.get("SessionStart")
+    if not isinstance(ss, list):
+        ss = []
+        hooks["SessionStart"] = ss
+    already_ss = any(_entry_mentions_hook_path(e, session_start_path) for e in ss)
+    if not already_ss:
+        ss.append(_build_hook_entry(ss_command, nested=nested))
+        changed = True
+        print(f"Installed SessionStart hook → {session_start_path}")
+    else:
+        print(f"SessionStart hook already installed at {session_start_path}")
+
     if args.install_session_start:
-        session_start_path = _resolve_hook_script_path("clu_session_start.py")
-        ss_command = _hook_command(session_start_path)
-        ss = hooks.get("SessionStart")
-        if not isinstance(ss, list):
-            ss = []
-            hooks["SessionStart"] = ss
-        already_ss = any(_entry_mentions_hook_path(e, session_start_path) for e in ss)
-        if not already_ss:
-            ss.append(_build_hook_entry(ss_command, nested=nested))
+        # It used to compose with a default that installed the inbox surface;
+        # silently doing less than a script asked for is how a machine ends up
+        # provisioned wrong. Say so rather than accepting it quietly.
+        print(
+            "note: --session-start is a no-op (SessionStart is the default). "
+            "It no longer installs the inbox surface — pass --inbox for that."
+        )
+
+    hook_path: str | None = None
+    if args.install_inbox:
+        hook_path = _resolve_hook_script_path()
+        command = _hook_command(hook_path)
+        ups = hooks.setdefault("UserPromptSubmit", [])
+        already_ups = any(_entry_mentions_hook_path(e, hook_path) for e in ups)
+        if not already_ups:
+            ups.append(_build_hook_entry(command, nested=nested))
             changed = True
-            print(f"Installed SessionStart hook → {session_start_path}")
+            print(f"Installed UserPromptSubmit hook → {hook_path}")
         else:
-            print(f"SessionStart hook already installed at {session_start_path}")
+            print(f"UserPromptSubmit hook already installed at {hook_path}")
 
     if changed:
         tmp = settings_path.with_suffix(".tmp")
@@ -2784,9 +2813,9 @@ def cmd_install_hook(args) -> int:
         os.replace(tmp, settings_path)
     print(f"Settings: {settings_path}")
 
-    monitor.record_hook_installed(hook_path, str(settings_path))
-    if session_start_path is not None:
-        monitor.record_session_start_installed(session_start_path)
+    monitor.record_session_start_installed(session_start_path, str(settings_path))
+    if hook_path is not None:
+        monitor.record_hook_installed(hook_path, str(settings_path))
     return ExitCode.OK
 
 
@@ -2916,6 +2945,7 @@ def cmd_doctor(args) -> int:
     _print_dispatch_permission_health(cfg)
     _print_dispatch_marker_health(cfg)
     _print_notify_health(cfg)
+    _print_quiet_hours_coverage_health(cfg)
     _print_coolant_health(cfg)
     _print_effort_health(cfg)
     _print_stuck_tool_health(cfg)
@@ -3226,6 +3256,47 @@ def _print_worker_idle_health(cfg: ProjectConfig) -> None:
         for ts, slug, phase, pid in findings:
             ts_short = ts[:19] if len(ts) >= 19 else ts
             print(f"  {ts_short}  {slug}/{phase}  pid={pid}")
+
+
+def _print_quiet_hours_coverage_health(cfg: ProjectConfig) -> None:
+    """Warn when quiet hours are gating sends that nothing else will catch.
+
+    The gate DROPS: `notify.notify` returns without sending and nothing
+    re-sends, so a suppressed notification is lost to that channel. The inbox
+    surface used to be the deferral target — it is written regardless of quiet
+    hours — but it is retired by default, and `clu watch` only tails forward.
+    Quiet hours set + inbox hook not installed = a blocker raised inside the
+    window with no session running reaches no surface at all.
+
+    Quiet when clean, like the other doctor printers. An absent or unreadable
+    settings.json counts as "not installed": the warning is cheap and the
+    failure mode it names is silent.
+    """
+    if not cfg.notify.quiet_hours:
+        return
+    settings_path = _hook_settings_path()
+    installed = False
+    try:
+        data = json.loads(settings_path.read_text())
+        entries = data.get("hooks", {}).get("UserPromptSubmit") or []
+        installed = any(
+            _INBOX_HOOK_BASENAME in (_entry_command(e) or "")
+            for e in entries
+            if isinstance(e, dict)
+        )
+    except (OSError, json.JSONDecodeError, AttributeError):
+        installed = False
+    if installed:
+        return
+    start, end = cfg.notify.quiet_hours
+    print(f"\nQuiet hours {start}–{end} are set, but nothing catches what they suppress:")
+    print("  the gate drops rather than defers — notify.notify returns without sending")
+    print("  and nothing re-sends. The inbox surface that used to catch these is not")
+    print("  installed, and `clu watch` only streams events that fire while it runs.")
+    print("  So a blocker raised in the window with no live session reaches no surface.")
+    print("  Fix it either way: drop `notify.quiet_hours` and use your notification")
+    print("  client's own do-not-disturb, or run `clu install-hook --inbox` to restore")
+    print("  the catch-up surface.")
 
 
 def _print_notify_health(cfg: ProjectConfig) -> None:

@@ -44,9 +44,12 @@ class InstallHookTestBase(unittest.TestCase):
         self.settings = self.home / ".claude" / "settings.json"
 
     def _run_install(self) -> tuple[int, str, str]:
+        # These cases exercise UserPromptSubmit install MECHANICS
+        # (idempotence, array style, not clobbering), which now live
+        # behind `--inbox` since the inbox surface was retired.
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = main(["install-hook"])
+            rc = main(["install-hook", "--inbox"])
         return rc, out.getvalue(), err.getvalue()
 
     def _run_uninstall(self) -> tuple[int, str, str]:
@@ -291,6 +294,69 @@ class UninstallTests(InstallHookTestBase):
             data["hooks"]["PreToolUse"][0]["command"],
             "echo pre",
         )
+
+class DefaultSurfaceTests(InstallHookTestBase):
+    """The inbox surface is retired: `install-hook` arms the operator
+    dashboard (SessionStart) and leaves the inbox hook unwired unless
+    `--inbox` asks for it explicitly. The inbox code stays on disk and
+    importable — only the thing that STARTS it is gone.
+    """
+
+    def _ss_entries(self) -> list:
+        data = json.loads(self.settings.read_text())
+        return data.get("hooks", {}).get("SessionStart", [])
+
+    def _install(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["install-hook", *args])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_default_install_arms_session_start(self) -> None:
+        rc, _, err = self._install()
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertEqual(len(self._ss_entries()), 1)
+
+    def test_default_install_does_not_wire_the_inbox_hook(self) -> None:
+        rc, _, err = self._install()
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertEqual(self._ups_entries(), [])
+
+    def test_default_install_still_writes_a_marker(self) -> None:
+        # `/clu-monitor` short-circuits on marker presence; the retired
+        # inbox surface must not take that idempotence guard with it.
+        rc, _, _ = self._install()
+        self.assertEqual(rc, int(ExitCode.OK))
+        m = must(monitor.load_marker())
+        self.assertIn("session_start_hook_path", m)
+        self.assertIn("settings_json_path", m)
+
+    def test_inbox_flag_wires_the_dormant_surface_back_up(self) -> None:
+        rc, _, err = self._install("--inbox")
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertEqual(len(self._ups_entries()), 1)
+        self.assertEqual(len(self._ss_entries()), 1)
+
+    def test_reinstall_does_not_bump_the_install_timestamp(self) -> None:
+        # `/clu-monitor` prints this field back as "installed <when>". A no-op
+        # re-run writes no settings, so it must not rewrite the date either.
+        self._install()
+        first = must(monitor.load_marker())["session_start_installed_at"]
+        self._install()
+        self.assertEqual(must(monitor.load_marker())["session_start_installed_at"], first)
+
+    def test_session_start_flag_says_it_no_longer_adds_the_inbox(self) -> None:
+        rc, out, err = self._install("--session-start")
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertIn("--inbox", out)
+        self.assertEqual(self._ups_entries(), [])
+
+    def test_session_start_flag_is_accepted_and_redundant(self) -> None:
+        # Kept so existing muscle memory and scripts don't break.
+        rc, _, err = self._install("--session-start")
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertEqual(len(self._ss_entries()), 1)
+        self.assertEqual(self._ups_entries(), [])
 
 
 if __name__ == "__main__":
