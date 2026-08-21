@@ -49,6 +49,44 @@ INSTRUCTION = (
     "operator approval before any destructive action.\n"
 )
 
+# Open-blocker surfacing budget. Defined HERE — the same-named constants in
+# clu_inbox_surface.py belong to the retired inbox surface, which this hook
+# must not import. MAX_CONTEXT_CHARS is the ceiling on the WHOLE
+# additionalContext block (dashboard + per-plan + protocol + blockers); the
+# documented hard cap is 10,000, and this stays under it with headroom for any
+# inflation Claude Code applies.
+MAX_BLOCKERS = 10
+MAX_CONTEXT_CHARS = 9500
+# Per-question / per-options truncation keeps a pathological blocker from
+# eating the budget. Options are bounded too — a blocker with many long option
+# strings is as capable of blowing the ceiling as a long question.
+MAX_QUESTION_CHARS = 280
+MAX_OPTIONS_CHARS = 600
+# Room reserved for the not-shown footer so the reply instruction (which names
+# --blocker) always survives the per-entry budget check.
+_BLOCKER_FOOTER_RESERVE = 180
+_TRUNC_MARKER = " …(truncated)"
+
+BLOCKER_SECTION_HEADER = "\n## Open blockers awaiting a reply\n\n"
+BLOCKER_TEMPLATE = (
+    "Plan `{slug}`, phase `{phase}`, blocker `{blocker_id}`:\n"
+    "Question: {question}\n"
+    "Options:\n"
+    "{options_list}\n"
+)
+# Names the `--blocker` form that phase answer-scope made addressable. All
+# three of --project / --plan / --blocker are required together for the direct
+# path; `.` resolves to the session's project root.
+BLOCKER_REPLY_INSTRUCTION = (
+    "\nTo answer one, run via Bash:\n"
+    "```\n"
+    "clu answer --project . --plan <slug> --blocker <q-N> <answer>\n"
+    "```\n"
+    "`<answer>` is an option number (0-indexed) or free text. When more than "
+    "one blocker is open, ask the operator which one they mean and pass that "
+    "blocker's `--blocker <q-N>` — never guess.\n"
+)
+
 # Compressed from /clu-plan SKILL.md "Reacting to task-list protocol
 # notifications". Emitted only when active plans are detected.
 TASK_LIST_PROTOCOL_INSTRUCTION = (
@@ -85,9 +123,9 @@ TASK_LIST_PROTOCOL_INSTRUCTION = (
 )
 
 
-def _scan_entries(entries) -> tuple[bool, list[str]]:
+def _scan_entries(entries) -> tuple[bool, list[str], list[dict]]:
     """One pass over the pre-loaded registry list: returns
-    (any_live, running_slugs_for_cwd).
+    (any_live, running_slugs_for_cwd, open_blockers_for_cwd).
 
     `any_live` — some entry's state is non-terminal (or unreadable, which
     counts as live: a corrupt state file must not silence the dashboard).
@@ -97,10 +135,19 @@ def _scan_entries(entries) -> tuple[bool, list[str]]:
     `running_slugs_for_cwd` — STATUS_RUNNING entries registered for the
     current CWD, for the per-plan Monitor blocks.
 
+    `open_blockers_for_cwd` — every unanswered blocker on a plan registered for
+    the current CWD, as render-dicts (slug/phase_id/id/question/options). This
+    read is scoped to the CWD's plans (the plan cost-control), but rides the
+    single host-wide walk `any_live` already needs — a separate
+    `entries_for_project` pass would re-open the CWD plans' databases a second
+    time. It bypasses the liveness gate ON PURPOSE: a paused plan is terminal,
+    and an SLA-breached blocker is exactly what pauses a plan, so gating
+    blockers on liveness would hide the one that has waited longest.
+
     Tolerates all failures by failing open on `any_live`.
     """
     if not entries:
-        return (False, [])
+        return (False, [], [])
     try:
         from end_of_line import registry  # local — avoid module-load cost
         from end_of_line import state as st
@@ -108,6 +155,7 @@ def _scan_entries(entries) -> tuple[bool, list[str]]:
         cwd = Path(os.getcwd()).resolve()
         any_live = False
         slugs: list[str] = []
+        blockers: list[dict] = []
         for entry in entries:
             data = registry.load_entry_state(entry)
             if data is None:
@@ -116,11 +164,23 @@ def _scan_entries(entries) -> tuple[bool, list[str]]:
             status = data.get("status")
             if status not in st.TERMINAL_STATUSES:
                 any_live = True
-            if status == st.STATUS_RUNNING and Path(entry.project_root).resolve() == cwd:
+            is_cwd = Path(entry.project_root).resolve() == cwd
+            if status == st.STATUS_RUNNING and is_cwd:
                 slugs.append(entry.plan_slug)
-        return (any_live, slugs)
+            if is_cwd:
+                for b in st.open_blockers(data):
+                    blockers.append(
+                        {
+                            "slug": entry.plan_slug,
+                            "phase_id": b["phase_id"],
+                            "id": b["id"],
+                            "question": b.get("question", ""),
+                            "options": list(b.get("options", [])),
+                        }
+                    )
+        return (any_live, slugs, blockers)
     except Exception:
-        return (True, [])
+        return (True, [], [])
 
 
 def _per_plan_arming_block(slugs: list[str]) -> str:
@@ -146,6 +206,66 @@ def _per_plan_arming_block(slugs: list[str]) -> str:
     return intro + "\n".join(blocks) + "\n"
 
 
+def _render_blocker(b: dict) -> str:
+    """One blocker as slug/phase/id + question (truncated) + numbered options."""
+    question = b.get("question") or ""
+    if len(question) > MAX_QUESTION_CHARS:
+        question = question[:MAX_QUESTION_CHARS].rstrip() + " …(truncated)"
+    options = b.get("options") or []
+    opts = (
+        "\n".join(f"  [{i}] {opt}" for i, opt in enumerate(options))
+        if options
+        else "  (no preset options — answer with free text)"
+    )
+    if len(opts) > MAX_OPTIONS_CHARS:
+        opts = opts[:MAX_OPTIONS_CHARS].rstrip() + _TRUNC_MARKER
+    return BLOCKER_TEMPLATE.format(
+        slug=b["slug"],
+        phase=b["phase_id"],
+        blocker_id=b["id"],
+        question=question,
+        options_list=opts,
+    )
+
+
+def _blockers_block(blockers: list[dict], budget: int) -> str:
+    """Render up to MAX_BLOCKERS open blockers + a `--blocker` routing
+    instruction, keeping the section within `budget` chars.
+
+    Budget-aware because the dashboard / per-plan / protocol blocks are already
+    assembled when this runs; the caller passes the room that remains under
+    MAX_CONTEXT_CHARS so the whole additionalContext stays bounded. Entries are
+    dropped (not mid-truncated) once they would overrun, and the reply
+    instruction is reserved so it always survives.
+    """
+    if not blockers:
+        return ""
+    total = len(blockers)
+    room = budget - len(BLOCKER_SECTION_HEADER) - len(BLOCKER_REPLY_INSTRUCTION) - _BLOCKER_FOOTER_RESERVE
+    parts: list[str] = []
+    shown = 0
+    for b in blockers[:MAX_BLOCKERS]:
+        entry = _render_blocker(b)
+        if len(entry) > room:
+            if shown:
+                break
+            # First entry alone overruns even after per-field truncation
+            # (pathological options): hard-truncate it so the reserved reply
+            # instruction — appended AFTER these entries — always survives.
+            entry = entry[: max(0, room - len(_TRUNC_MARKER))].rstrip() + _TRUNC_MARKER
+        parts.append(entry)
+        room -= len(entry)
+        shown += 1
+    not_shown = total - shown
+    footer = ""
+    if not_shown > 0:
+        footer = (
+            f"\n... and {not_shown} more open blocker(s) not shown — run "
+            "`clu blockers list --project . --plan <slug>` for the rest.\n"
+        )
+    return BLOCKER_SECTION_HEADER + "\n".join(parts) + footer + BLOCKER_REPLY_INSTRUCTION
+
+
 def _log_path() -> Path:
     from end_of_line._xdg_guard import clu_config_dir  # local — avoid module-load cost
 
@@ -168,15 +288,19 @@ def main() -> int:
         try:
             from end_of_line import registry  # local — avoid module-load cost
 
-            emit, slugs = _scan_entries(registry.entries())
+            emit, slugs, blockers = _scan_entries(registry.entries())
         except Exception:
-            emit, slugs = True, []
-        if not (emit or slugs):
+            emit, slugs, blockers = True, [], []
+        if not (emit or slugs or blockers):
             return 0
         additional_context = INSTRUCTION
         if slugs:
             additional_context += _per_plan_arming_block(slugs)
             additional_context += TASK_LIST_PROTOCOL_INSTRUCTION
+        if blockers:
+            additional_context += _blockers_block(
+                blockers, MAX_CONTEXT_CHARS - len(additional_context)
+            )
         payload = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",

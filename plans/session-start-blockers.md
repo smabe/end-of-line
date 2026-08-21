@@ -256,3 +256,25 @@ narrower claim that survives, with the real fix named as a follow-up.
   An unknown `--blocker` id refuses (UNKNOWN_TASK) and names the open ids rather
   than falling through to fuzzy routing. Free text stores verbatim; a bare digit
   still maps through the option list inside `op_answer_blocker`.
+- 2026-08-21 (surface): The sub-plan's two instructions — "scope the walk to
+  `registry.entries_for_project(cwd)`" and "collect open blockers inside the
+  loop that already holds `data`" — reconcile only one way. `_scan_entries` must
+  keep walking `registry.entries()` host-wide, because the dashboard `any_live`
+  emit gate covers every registered plan on the host (proven by
+  `test_no_active_plans_omits_per_plan_block`, which keeps the dashboard when a
+  live plan sits in another project). So blocker COLLECTION is scoped to cwd
+  *within* that existing walk (`is_cwd` filter), not by a second
+  `entries_for_project` pass — which would re-open the cwd plans' SQLite
+  databases a second time, the exact per-row double-read the plan forbids for
+  `open_blockers_with_details`. Folding adds zero DB opens.
+- 2026-08-21 (surface): FOLLOW-UP for the operator to file (could NOT file the
+  GH issue from the worker — `gh` hit `tls: failed to verify certificate` in the
+  sandbox). Code-review of this phase surfaced a residual sharp edge in the
+  answer-scope phase's `cmd_answer` (`cli.py:4895`, NOT touched by this diff):
+  when a bare-digit reply is AMBIGUOUS because two *sibling* blockers on ONE plan
+  tie on `last_notified_at` (same-tick raise, or legacy events with no
+  blocker_id → `""`), the error says "pass --plan to disambiguate", but `--plan`
+  routes to the FIRST sibling in row order and silently answers the wrong one —
+  only `--blocker <q-N>` targets the intended blocker. Fix: the AMBIGUOUS message
+  should name `--blocker <q-N>` for same-plan siblings, with a sibling-tie test
+  in `tests/test_answer_scoping.py`.

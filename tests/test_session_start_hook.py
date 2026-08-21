@@ -372,5 +372,171 @@ class SessionStartActivePlansTest(unittest.TestCase):
         self.assertLess(len(ctx), 9500)
 
 
+# ---- open-blocker surfacing at session start ------------------------------
+
+
+class SessionStartBlockerSurfaceTest(unittest.TestCase):
+    """Hook renders this project's OPEN blockers (question + numbered options +
+    a `--blocker` routing instruction) so the operator can answer in-session.
+
+    The affordance the retired inbox surface used to provide, rebuilt as a
+    state read at session start (no consume-once machinery).
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._base = Path(self._tmp.name)
+        self._project = self._base / "project"
+        self._project.mkdir()
+        (self._project / "plans" / ".orchestrator").mkdir(parents=True)
+        self._xdg_patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self._base)})
+        self._xdg_patch.start()
+        self.addCleanup(self._xdg_patch.stop)
+
+    def _blocker(
+        self,
+        bid: str,
+        question: str,
+        options: list[str],
+        *,
+        phase: str = "impl",
+        answer: str | None = None,
+    ) -> dict:
+        return {
+            "id": bid,
+            "phase_id": phase,
+            "type": "decision",
+            "question": question,
+            "options": list(options),
+            "context": "",
+            "asked_at": "2026-08-21T00:00:00Z",
+            "answer": answer,
+            "answered_at": None if answer is None else "2026-08-21T01:00:00Z",
+        }
+
+    def _write_plan(
+        self,
+        slug: str,
+        *,
+        status: str = st.STATUS_RUNNING,
+        blockers: list[dict] | None = None,
+        project: Path | None = None,
+    ) -> None:
+        project = project or self._project
+        registry.register(project, slug)
+        state_path = project / "plans" / ".orchestrator" / f"{slug}.state.json"
+        data = st.empty_state(slug, "plans")
+        data["status"] = status
+        data["blockers"] = list(blockers or [])
+        write_state(state_path, data)
+
+    def _run_hook(self) -> tuple[int, str]:
+        out = io.StringIO()
+        with (
+            mock.patch.object(os, "getcwd", return_value=str(self._project.resolve())),
+            mock.patch.object(sys, "stdin", io.StringIO("")),
+            mock.patch.object(sys, "stdout", out),
+        ):
+            rc = clu_session_start.main()
+        raw = out.getvalue()
+        ctx = json.loads(raw)["hookSpecificOutput"]["additionalContext"] if raw else ""
+        return rc, ctx
+
+    def test_open_blocker_is_surfaced_with_options(self) -> None:
+        self._write_plan(
+            "with-blocker",
+            blockers=[self._blocker("q-1", "Bcrypt or argon2 for hashing?", ["bcrypt", "argon2"])],
+        )
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertIn("Bcrypt or argon2 for hashing?", ctx)
+        self.assertIn("bcrypt", ctx)
+        self.assertIn("argon2", ctx)
+        self.assertIn("q-1", ctx)
+
+    def test_paused_plan_blocker_is_still_surfaced(self) -> None:
+        # The SLA case: an over-24h blocker PAUSES its plan (a terminal
+        # status). The blocker that has waited longest is exactly the one that
+        # most needs surfacing, so it must NOT sit behind the liveness gate.
+        self._write_plan(
+            "sla-paused",
+            status=st.STATUS_PAUSED,
+            blockers=[self._blocker("q-1", "Which migration order is safe?", ["a-then-b", "b-then-a"])],
+        )
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertIn("Which migration order is safe?", ctx)
+        self.assertIn("a-then-b", ctx)
+
+    def test_blockers_from_other_projects_are_not_surfaced(self) -> None:
+        other = self._base / "other-project"
+        other.mkdir()
+        (other / "plans" / ".orchestrator").mkdir(parents=True)
+        self._write_plan(
+            "foreign",
+            project=other,
+            blockers=[self._blocker("q-1", "FOREIGN-QUESTION-marker", ["x", "y"])],
+        )
+        # Something in THIS cwd must emit, or output is empty by design.
+        self._write_plan("local-live")
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("FOREIGN-QUESTION-marker", ctx)
+
+    def test_answered_blocker_is_not_surfaced(self) -> None:
+        self._write_plan(
+            "answered",
+            blockers=[
+                self._blocker("q-1", "ANSWERED-QUESTION-marker", ["x", "y"], answer="x"),
+            ],
+        )
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ANSWERED-QUESTION-marker", ctx)
+        self.assertNotIn("Open blockers", ctx)
+
+    def test_instruction_names_the_blocker_flag(self) -> None:
+        self._write_plan(
+            "flag",
+            blockers=[self._blocker("q-1", "pick one", ["x", "y"])],
+        )
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertIn("--blocker", ctx)
+        self.assertIn("clu answer", ctx)
+
+    def test_many_blockers_are_capped_and_output_stays_under_9500(self) -> None:
+        long_q = "Should we " + ("reticulate the splines " * 40)  # ~900 chars
+        blockers = [self._blocker(f"q-{i}", f"{long_q} #{i}", ["yes", "no"]) for i in range(15)]
+        self._write_plan("many", blockers=blockers)
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertLessEqual(len(ctx), 9500)
+        # 15 open, MAX_BLOCKERS=10 shown → 5 not shown, and the section says so.
+        self.assertIn("5 more open blocker", ctx)
+
+    def test_no_blockers_emits_no_blocker_section(self) -> None:
+        self._write_plan("clean")  # running, no blockers
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertIn("clu operator dashboard", ctx)  # dashboard still emits
+        self.assertNotIn("Open blockers", ctx)
+
+    def test_single_blocker_with_huge_options_stays_under_9500_and_keeps_instruction(self) -> None:
+        # One blocker whose OPTIONS (not just question) are pathologically
+        # long must not blow the ceiling — and the reply instruction, which is
+        # appended AFTER the entries, must survive so the operator can still
+        # answer. A host-side 10k truncation cutting the `--blocker` line is
+        # the exact failure this guards against.
+        huge = [("choice-" + "z" * 5000) for _ in range(6)]
+        self._write_plan("huge", blockers=[self._blocker("q-1", "pick one", huge)])
+        rc, ctx = self._run_hook()
+        self.assertEqual(rc, 0)
+        self.assertLessEqual(len(ctx), 9500)
+        self.assertIn("--blocker", ctx)
+        self.assertIn("clu answer", ctx)
+
+
 if __name__ == "__main__":
     unittest.main()

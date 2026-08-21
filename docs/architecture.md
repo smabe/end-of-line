@@ -109,6 +109,33 @@ lost to that channel. `quiet_hours` ships unset for exactly that
 reason; a client-side do-not-disturb keeps the message while staying
 silent.
 
+### Open blockers at session start
+
+The forward-only cursor leaves one gap: a blocker raised *before* this
+conversation started is already in the past, so the Monitor never
+replays it. The same SessionStart hook closes that gap as **state**, not
+as a replayed event. Alongside the Monitor-arming instruction it reads
+`state.open_blockers` for every plan registered to the session's project
+and renders each one — question, numbered options, and blocker id —
+followed by the routing line `clu answer --project . --plan <slug>
+--blocker <q-N> <answer>`. The `--blocker` form (all three of
+`--project` / `--plan` / `--blocker` required together) answers exactly
+that blocker: a bare digit picks its option, free text stores verbatim.
+
+Two properties are deliberate. The blocker read is scoped to the
+session's project and rides the single host-wide registry walk the
+dashboard emit-gate already makes — a separate `entries_for_project`
+pass would re-open those plans' databases a second time, on a path with
+a 5-second timeout. And it **bypasses the liveness gate**: `open_blockers`
+is collected regardless of plan status, because a paused plan is
+terminal and an SLA-breached blocker is exactly what pauses a plan
+(`supervisor.py` blocker-SLA escalation), so gating blockers on liveness
+would hide the one that has waited longest. Up to `MAX_BLOCKERS` (10)
+render and the section is held under 9500 chars; overflow is reported as
+a not-shown count. The hook never revives the retired inbox's
+consume-once machinery: open-blocker state disappears the moment the
+blocker is answered, so there is nothing to claim or dedupe.
+
 ### The retired inbox surface
 
 `notify.notify` also inserts a row into the host database's `inbox`

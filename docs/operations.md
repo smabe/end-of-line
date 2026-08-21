@@ -1901,6 +1901,22 @@ hook emits `additionalContext` instructing the session to arm
 `Monitor(command="clu watch --all --operator", persistent=True,
 description="clu operator dashboard")` unless one is already in flight.
 
+The same hook also surfaces **open blockers for the current project** —
+each blocker's question, numbered options, and blocker id — followed by
+the routing line `clu answer --project . --plan <slug> --blocker <q-N>
+<answer>`. This is scoped to the session's project (one SQLite read per
+that project's plans, riding the walk the dashboard gate already makes)
+and bypasses the liveness gate on purpose: a paused plan is terminal,
+and an SLA-breached blocker is exactly what pauses a plan, so gating
+blockers on liveness would hide the one that has waited longest. Up to
+`MAX_BLOCKERS` (10) render, the section is capped under 9500 chars, and
+any surplus is reported as a not-shown count. It closes the pre-session
+case the retired inbox surface used to cover: a question raised before
+this conversation started can now be answered inside it. A blocker
+raised *mid-session* still arrives only as a `phase_blocked` line on the
+live Monitor (no options); run `clu blockers list` to see its options,
+or answer by id once you have them.
+
 The marker records both fields when both hooks are installed:
 
 ```bash

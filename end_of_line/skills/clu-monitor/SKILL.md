@@ -19,6 +19,15 @@ host. After running this once per machine, the operator can queue plans
 and keep working; wedges surface as they happen rather than on the next
 prompt.
 
+The same hook also **surfaces open blockers for the current project** at
+session start — each blocker's question, numbered options, and id, plus
+the routing line `clu answer --project . --plan <slug> --blocker <q-N>
+<answer>`. The Monitor stream is forward-only, so it never replays a
+blocker raised before the session began; this state read covers that
+gap. When more than one blocker is open the instruction tells the
+session to ask the operator which one they mean and pass its
+`--blocker <q-N>` rather than guess.
+
 The `UserPromptSubmit` inbox surface is **retired** and no longer
 installs. Live events reach the session through this dashboard Monitor
 and away events through the notify channels, which leaves the inbox no
@@ -141,9 +150,13 @@ operator-approval checkpoint from user-level CLAUDE.md.
   `git status` for uncommitted work; propose `clu force-complete`
   (work on disk) / `clu release-claim` (worker dead) / `clu retry`
   (clean exit), wait for approval.
-- **`phase_blocked`** — already handled by the existing blocker flow
-  (`_build_blockers_section` shows the question + options and routes
-  the operator's natural-language reply through `clu answer`).
+- **`phase_blocked`** — the live Monitor line names the blocker but
+  carries no options. Its options and reply routing come from the
+  SessionStart hook's open-blocker section (described above), which
+  renders the question + numbered options and the
+  `clu answer … --blocker <q-N>` line for every open blocker in the
+  project. For a blocker raised mid-session, `clu blockers list` shows
+  the options on demand.
 
 Registry at `end_of_line/hooks/clu_inbox_surface.py::WEDGE_INSTRUCTION_BLOCKS`
 — adding a new wedge class is one entry, not a four-step ritual.
