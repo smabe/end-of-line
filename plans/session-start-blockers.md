@@ -234,4 +234,25 @@ narrower claim that survives, with the real fix named as a follow-up.
 
 ## Findings log
 
-_(empty at plan time — workers append cross-phase findings as phases run)_
+- 2026-08-21 (answer-scope): The Produce bullet "`route_reply`'s slug branch
+  compares the entry's resolved `project_root`" is superseded by the locked
+  decision it sits under — a reply string carries no project, so `route_reply`
+  has nothing to compare against without a signature change, and the summary +
+  master both say the signature stays fixed. Scoping is done ENTIRELY by
+  pre-filtering the entry list in `cmd_answer` (`entries_for_project` vs
+  `entries`). `notify_base.py` and `notify_inbound.py` were NOT touched;
+  `OpenBlocker` kept its field set, so the `==` row recovery at
+  `state_locator.py:62` needed no change. The 12 two-arg `route_reply` tests
+  stay green.
+- 2026-08-21 (answer-scope): `find_blocker_for_reply(entries, reply_text)`
+  already takes the entry list as its first arg — the "give it a way to receive
+  an already-scoped list" step needed no new parameter; the caller just passes
+  the narrowed list. No locator signature change, so both inbound pollers'
+  in-process call sites are untouched.
+- 2026-08-21 (answer-scope): For the surface phase — the explicit-addressing
+  invocation is `clu answer --project P --plan S --blocker q-N <text|index>`.
+  `--blocker` REQUIRES both `--plan` and `--project` (a slug alone can't name
+  the owning project); each missing flag refuses with `ExitCode.UNKNOWN_TASK`.
+  An unknown `--blocker` id refuses (UNKNOWN_TASK) and names the open ids rather
+  than falling through to fuzzy routing. Free text stores verbatim; a bare digit
+  still maps through the option list inside `op_answer_blocker`.

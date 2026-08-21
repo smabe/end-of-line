@@ -1053,7 +1053,8 @@ def main(argv: list[str] | None = None) -> int:
         "--project",
         type=Path,
         default=None,
-        help="Project root (ignored; kept for backward compat).",
+        help="Project root. When passed, resolution is scoped to this project's "
+        "plans; omitted, it stays host-wide (the terminal default).",
     )
     p_answer.add_argument(
         "--plan",
@@ -1061,8 +1062,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Plan slug to disambiguate a bare-digit reply. Optional.",
     )
     p_answer.add_argument(
+        "--blocker",
+        default=None,
+        help="Blocker id (q-N) to answer exactly. With --plan and --project, "
+        "bypasses reply routing and answers that blocker directly — the only "
+        "way to store free text rather than an option index.",
+    )
+    p_answer.add_argument(
         "answer",
-        help='Option index ("0", "1", …)',
+        nargs="+",
+        help='Option index ("0", "1", …), or free text when --blocker is given '
+        "(unquoted multi-word text is joined with spaces)",
     )
 
     p_spawn = sub.add_parser(
@@ -4857,8 +4867,28 @@ def cmd_release_claim(args, cfg: ProjectConfig, state_path: Path) -> int:
 
 
 def cmd_answer(args) -> int:
-    reply_text = args.answer if args.plan is None else f"{args.plan} {args.answer}"
-    result = state_locator.find_blocker_for_reply(registry.entries(), reply_text)
+    # `answer` is nargs="+", so unquoted multi-word free text (`--blocker q-1 use
+    # argon2`) arrives as a list — join it back into one string. A bare digit is
+    # a one-element list that joins to itself, so the reply path is unaffected.
+    answer_text = " ".join(args.answer)
+    # --blocker names exactly one blocker: skip reply routing and answer it
+    # directly. This is the session-start hook's path, and the only way to
+    # store a free-text answer — index translation lives inside the op and
+    # fires only for a bare digit.
+    if args.blocker is not None:
+        return _answer_blocker_direct(args, answer_text)
+    # Scope by PRE-FILTERING the entry list, never inside route_reply (a reply
+    # string carries a slug and nothing else — no project to compare against).
+    # --project narrows the pool to one project so a same-slug collision across
+    # projects cannot arise; omitted, it stays host-wide for the terminal and
+    # the Discord poller, which have no cwd to scope by.
+    entries = (
+        registry.entries_for_project(args.project)
+        if args.project is not None
+        else registry.entries()
+    )
+    reply_text = answer_text if args.plan is None else f"{args.plan} {answer_text}"
+    result = state_locator.find_blocker_for_reply(entries, reply_text)
     if result.variant == "AMBIGUOUS":
         for cand in result.candidates:
             print(f"  {cand.plan_slug}: {cand.blocker_id}", file=sys.stderr)
@@ -4879,6 +4909,66 @@ def cmd_answer(args) -> int:
     )
     print(f"Answered {blocker_id}: {resolved}")
     return ExitCode.OK
+
+
+def _answer_blocker_direct(args, answer_text: str) -> int:
+    """Answer the blocker `--blocker` names, bypassing reply routing entirely.
+
+    Needs both `--plan` (which slug) and `--project` (which project owns it) —
+    a slug alone is ambiguous across projects, and there is no cwd-independent
+    way to resolve the owning project from the registry, so we refuse rather
+    than guess. The op does the option-index translation inside its own
+    transaction, so a bare digit still maps to an option and free text stores
+    verbatim.
+    """
+    if args.plan is None:
+        return _die(
+            ExitCode.UNKNOWN_TASK, "--blocker requires --plan to name the plan"
+        )
+    if args.project is None:
+        return _die(
+            ExitCode.UNKNOWN_TASK,
+            "--blocker requires --project — the slug alone cannot say which "
+            "project owns the blocker",
+        )
+    try:
+        st.validate_slug(args.plan, kind="plan slug")
+        cfg = load_project_config(args.project)
+        state_path = cfg.state_path(args.plan)
+    except (st.InvalidSlug, OSError, ValueError) as exc:
+        # ValueError covers a malformed .orchestrator.json (json.JSONDecodeError)
+        # or a rejected notify channel — the same set state_locator's own
+        # config-load guards against (state_locator.py:98).
+        return _die(ExitCode.UNKNOWN_TASK, str(exc))
+    orch_dir, slug = st.key_for(state_path)
+    try:
+        resolved = plan_store.op_answer_blocker(
+            orch_dir, slug, blocker_id=args.blocker, answer=answer_text
+        )
+    except FileNotFoundError:
+        return _die(ExitCode.UNKNOWN_TASK, f"no such plan {args.plan!r} in {args.project}")
+    except KeyError:
+        return _die(
+            ExitCode.UNKNOWN_TASK,
+            f"no open blocker {args.blocker!r} on {args.plan}; "
+            f"open: {_open_blocker_ids(orch_dir, slug)}",
+        )
+    print(f"Answered {args.blocker}: {resolved}")
+    return ExitCode.OK
+
+
+def _open_blocker_ids(orch_dir: Path, slug: str) -> list[str]:
+    """Open blocker ids for an error message. Best-effort — an unreadable store
+    yields an empty list rather than masking the original refusal."""
+    try:
+        data = plan_store.snapshot(orch_dir, slug)
+    except (FileNotFoundError, *db.DEGRADABLE_ERRORS, st.SchemaVersionMismatch, ValueError):
+        # Mirror state_locator._load_open_blockers (state_locator.py:109): a
+        # store from a newer clu raises SchemaVersionMismatch/SchemaTooNew, and
+        # this runs on the ERROR path — it must not turn a clean refusal into a
+        # traceback of its own.
+        return []
+    return [b["id"] for b in st.open_blockers(data)]
 
 
 @_translate_claim_mismatch
