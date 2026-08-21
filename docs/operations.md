@@ -2447,7 +2447,7 @@ and the next `phase_started` for the same phase starts fresh from zero.
 | `clu queue add <slug>... [--front] [--project P]` | Append (or `--front` prepend) one or more plan slugs to the project's queue. Multi-arg is atomic — any validation failure rejects the whole batch |
 | `clu queue list [--project P]` (or bare `clu queue`) | Show pending queue + recent failures |
 | `clu queue remove <slug> [--project P]` | Drop a pending slug (moves it to history) |
-| `clu answer [--project P] [--plan S] [--blocker <id>] <text\|index>` | Resolve a blocker by hand (instead of via iMessage). `--project` scopes resolution to that project (omitted → host-wide); with `--plan` + `--blocker` it addresses one blocker exactly and accepts free text, otherwise `<index>` routes by reply grammar |
+| `clu answer [--project P] [--plan S] [--blocker <id>] <text\|index>` | Resolve a blocker by hand (instead of via iMessage). `--project` scopes resolution to that project (omitted → host-wide). `--project` + `--plan` + `--blocker` together (all three required) address one blocker exactly — a digit picks that blocker's option, non-numeric text stores verbatim; otherwise `<index>` routes by reply grammar |
 | `clu blockers list --project P --plan S` | Read-only: list open blockers (id, phase, asked-at, question, numbered options) |
 | `clu blockers show --project P --plan S <id>` | Read-only: full payload for one blocker (question, options, context, answer if set) + related events |
 | `clu logs --project P --plan S [--follow]` | Tail the active worker's log (falls back to the newest log if idle) |

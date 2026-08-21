@@ -13,7 +13,7 @@ from __future__ import annotations
 import contextlib
 import io
 
-from end_of_line import registry
+from end_of_line import db, registry
 from end_of_line import state as st
 from end_of_line.cli import ExitCode
 from end_of_line.cli import main as cli_main
@@ -148,6 +148,23 @@ class AnswerScopingTestCase(CluTestCase):
         )
         self.assertEqual(rc, ExitCode.OK)
         self.assertEqual(self._answer_of("q-1", p, "plan-a"), "go with argon2")
+
+    def test_blocker_on_missing_store_creates_no_stray_db(self) -> None:
+        # A typo'd plan/project must refuse WITHOUT materializing an empty
+        # .orchestrator/clu.db — the direct path opens a write connection, which
+        # would otherwise mkdir + create the store as a side effect.
+        project = self.tmp_path / "empty-proj"
+        project.mkdir()
+        orch_dir = project / "plans" / ".orchestrator"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = cli_main(
+                ["answer", "--project", str(project), "--plan", "ghost",
+                 "--blocker", "q-1", "x"]
+            )
+        self.assertEqual(rc, ExitCode.UNKNOWN_TASK)
+        self.assertFalse(db.project_db_path(orch_dir).exists())
+        self.assertFalse(orch_dir.exists())
 
     def test_unknown_blocker_id_is_refused(self) -> None:
         # A bad --blocker must not fall through to fuzzy routing; it refuses,

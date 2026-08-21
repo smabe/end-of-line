@@ -1064,9 +1064,9 @@ def main(argv: list[str] | None = None) -> int:
     p_answer.add_argument(
         "--blocker",
         default=None,
-        help="Blocker id (q-N) to answer exactly. With --plan and --project, "
-        "bypasses reply routing and answers that blocker directly — the only "
-        "way to store free text rather than an option index.",
+        help="Blocker id (q-N) to answer exactly; requires --plan and --project. "
+        "Bypasses reply routing and answers that blocker directly — a bare digit "
+        "still picks an option, and non-numeric text stores verbatim.",
     )
     p_answer.add_argument(
         "answer",
@@ -4918,8 +4918,9 @@ def _answer_blocker_direct(args, answer_text: str) -> int:
     a slug alone is ambiguous across projects, and there is no cwd-independent
     way to resolve the owning project from the registry, so we refuse rather
     than guess. The op does the option-index translation inside its own
-    transaction, so a bare digit still maps to an option and free text stores
-    verbatim.
+    transaction: a purely-numeric answer maps to that option index (so a literal
+    number cannot be stored against an options-bearing blocker), and any
+    non-numeric answer stores verbatim — which is what "free text" means here.
     """
     if args.plan is None:
         return _die(
@@ -4941,11 +4942,19 @@ def _answer_blocker_direct(args, answer_text: str) -> int:
         # config-load guards against (state_locator.py:98).
         return _die(ExitCode.UNKNOWN_TASK, str(exc))
     orch_dir, slug = st.key_for(state_path)
+    # Check the store exists with a FILESYSTEM probe before the write. The op
+    # opens a write connection, which materializes .orchestrator/clu.db as a
+    # side effect (db.connect → _ensure_private mkdirs + creates the file), so a
+    # typo'd plan/project would leave a stray empty database behind. The read /
+    # reply path never creates one (readonly `mode=ro` open), so match it here.
+    if not db.project_db_path(orch_dir).exists():
+        return _die(ExitCode.UNKNOWN_TASK, f"no such plan {args.plan!r} in {args.project}")
     try:
         resolved = plan_store.op_answer_blocker(
             orch_dir, slug, blocker_id=args.blocker, answer=answer_text
         )
     except FileNotFoundError:
+        # DB exists but this slug does not — no store gets created, so no litter.
         return _die(ExitCode.UNKNOWN_TASK, f"no such plan {args.plan!r} in {args.project}")
     except KeyError:
         return _die(

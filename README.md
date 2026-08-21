@@ -238,7 +238,7 @@ Workers can also chain a follow-up plan into the project queue mid-phase via `cl
 | `clu demo [down] [--serve]` | Verify-the-install smoke test: stand up four synthetic `demo-*` workers (busy / idle / blocked / dead) through clu's real pipeline so `clu top` / `clu serve` light up with production-shaped rows. `--serve` also opens the web dashboard. Ctrl-C or `clu demo down` tears it down; the demo fleet never notifies |
 | `clu tick [--project P]` | One supervisor decision step on one plan; spawns a worker if a phase is ready. `--project` scopes to all registered plans in one project (push-dispatch from `clu complete` uses this). `--dry-tick` skips spawn (debug only) |
 | `clu tick-all` | Tick every registered plan once (host-scoped; what cron runs) |
-| `clu answer [--project P] [--plan S] [--blocker q-N] <text\|index>` | Resolve a blocker by hand (instead of via iMessage). `--project` scopes resolution to one project (omitted, host-wide); `--plan --blocker` names one blocker exactly and lets you answer with free text |
+| `clu answer [--project P] [--plan S] [--blocker q-N] <text\|index>` | Resolve a blocker by hand (instead of via iMessage). `--project` scopes resolution to one project (omitted → host-wide). To address one blocker exactly, pass `--project` + `--plan` + `--blocker` together (all three required); a digit then picks that blocker's option and non-numeric text stores verbatim |
 | `clu pause [--reason ...]` | Halt dispatching new phases |
 | `clu resume` | Un-pause |
 | `clu retry [--phase X]` | Clear max-attempts on a halted phase and resume |

@@ -128,18 +128,18 @@ def _hydrate_open_blockers(data: dict, entry: PlanEntry) -> list[OpenBlocker]:
     # recent one. Two open siblings share a plan but not a question; giving both
     # the plan-wide latest ts makes them compare EQUAL in _pick_by_last_pinged,
     # which refuses a tie — so a bare digit for either deadlocks forever. Events
-    # carry blocker_id (plan_store.op_add_blocker), so this is a lookup, not a
-    # schema change. Walk newest-first; the first hit per id is its latest ping,
-    # and the first phase_blocked seen is the plan-wide latest — the fallback for
-    # any (legacy) event that predates the blocker_id field, so an id-less event
-    # keeps the OLD plan-wide behavior instead of collapsing to "" and re-tying.
+    # carry blocker_id (plan_store.op_add_blocker is the sole writer and always
+    # stamps it, plan_store.py:1035), so this is a lookup, not a schema change:
+    # last_by_blocker covers every real blocker and the "" fallback below never
+    # fires for current data. The fallback is "" (not the plan-wide latest) on
+    # purpose — an id-less event can only come from a plan whose history predates
+    # the blocker_id field, and "" sorts such a blocker LAST rather than tying it
+    # with a newer real sibling, which is the direction that keeps a mixed
+    # legacy/new plan resolvable instead of re-deadlocked.
     last_by_blocker: dict[str, str] = {}
-    plan_latest = ""
     for evt in reversed(data["events"]):
         if evt.get("type") != st.EVENT_PHASE_BLOCKED:
             continue
-        if not plan_latest:
-            plan_latest = evt.get("ts", "")
         bid = evt.get("blocker_id")
         if bid is not None and bid not in last_by_blocker:
             last_by_blocker[bid] = evt.get("ts", "")
@@ -149,7 +149,7 @@ def _hydrate_open_blockers(data: dict, entry: PlanEntry) -> list[OpenBlocker]:
             plan_slug=entry.plan_slug,
             blocker_id=b["id"],
             options_count=len(b.get("options", [])),
-            last_notified_at=last_by_blocker.get(b["id"], plan_latest),
+            last_notified_at=last_by_blocker.get(b["id"], ""),
         )
         for b in open_qs
     ]

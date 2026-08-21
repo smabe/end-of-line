@@ -56,7 +56,9 @@ class AnswerCwdDefaultTestCase(unittest.TestCase):
         self.assertIn("Answered q-1: yes", out)
 
     def test_answer_with_explicit_project_still_works(self) -> None:
-        """Explicit --project accepted (backward compat); locator uses registry."""
+        """Explicit --project scopes resolution to that project's registry
+        entries (see tests/test_answer_scoping.py for the cross-project
+        distinction); the single-project happy path still resolves."""
         rc, out, _ = self._run(
             "--project",
             str(self.project),

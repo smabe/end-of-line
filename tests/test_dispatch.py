@@ -468,8 +468,17 @@ class BuildWorkerEnvBashTimeoutTestCase(CluTestCase):
         )
 
     def test_phase_dispatch_sets_configured_ceiling(self) -> None:
+        from unittest import mock
+
         cfg = self._cfg(bash_max_timeout_ms=600_000)
-        env = build_worker_env(cfg, plan_slug="p", phase_id="a", token="tok")
+        # build_worker_env inherits an ambient BASH_MAX_TIMEOUT_MS via setdefault
+        # (see test_inherited_ceiling_is_not_overwritten). Clear it so this test
+        # exercises the CONFIGURED-value path deterministically — otherwise it
+        # fails whenever the suite runs inside a clu-dispatched worker, which
+        # exports the dispatch ceiling and is exactly when `clu verify` runs.
+        with mock.patch.dict(os.environ):
+            os.environ.pop("BASH_MAX_TIMEOUT_MS", None)
+            env = build_worker_env(cfg, plan_slug="p", phase_id="a", token="tok")
         assert env is not None
         self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], "600000")
 
@@ -477,10 +486,15 @@ class BuildWorkerEnvBashTimeoutTestCase(CluTestCase):
         # Build the expected value from the real dataclass default rather than
         # retyping the number, so this pins whatever DispatchSpec() actually is.
         import dataclasses
+        from unittest import mock
 
         cfg = self._cfg()
-        env = build_worker_env(cfg, plan_slug="p", phase_id="a", token="tok")
         expected = str(dataclasses.replace(cfg.dispatch).bash_max_timeout_ms)
+        # Clear an inherited ambient value so the default path is what's tested,
+        # not whatever a dispatched-worker parent happened to export.
+        with mock.patch.dict(os.environ):
+            os.environ.pop("BASH_MAX_TIMEOUT_MS", None)
+            env = build_worker_env(cfg, plan_slug="p", phase_id="a", token="tok")
         assert env is not None
         self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], expected)
         self.assertEqual(expected, "1800000")
