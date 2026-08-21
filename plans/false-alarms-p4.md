@@ -17,6 +17,18 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 
 ## Work
 
+> **Line hints re-anchored at `95a2d82` (after p1, p2 and p3 shipped).** Anchor on the SYMBOL; these are secondary. Three phases have landed in `cli.py` and `state.py` since this shard was written, and the `cli.py` hints below are the ones that moved most:
+> `monitor.load_marker` → `monitor.py:40` · `monitor.is_scheduled` → `monitor.py:58` (both unmoved) ·
+> `_maybe_print_monitor_tip` → `cli.py:82` (unmoved) with call sites now at `cli.py:2208` (`cmd_init`) and `cli.py:3772` (`cmd_queue_add`) — the shard says `:2177` and `:3741` ·
+> `_hook_settings_path` → `cli.py:2699` (shard says `:2668`) · `_entry_command` → `cli.py:2729` (shard says `:2699`) · `_INBOX_HOOK_BASENAME` → `cli.py:2750` (shard says `:2721`) ·
+> `cmd_install_hook` → `cli.py:2784` (shard says `:2753`) · `cmd_uninstall_hook` → `cli.py:2863` ·
+> `_print_quiet_hours_coverage_health` → `cli.py:3302`, with its basename derivation at `:3324` (shard says `:3287-3297`).
+>
+> **Two doc citations resolve elsewhere than the shard says — both claims are real, the numbers are not:**
+> the `UserPromptSubmit` mislabel is `docs/contract.md:391`, not `:347` (and note `:420` ALSO says `UserPromptSubmit`, correctly — that one describes the inbox surface, which genuinely is a `UserPromptSubmit` hook, so do not "fix" it). The non-TTY refusal claim is `docs/operations.md:1579`, not `:1552-1554`.
+>
+> **Also new since this shard was written:** p3 added a `quiet-span` worker callback and p1 added four `worker_idle_*` config thresholds. Neither touches this phase's surfaces, but `cli.py` is a shared file — expect the hunks around your edits to look unfamiliar.
+
 - `end_of_line/monitor.py` — replace `is_scheduled` (`:58-59`) with per-surface derivation reading `settings.json`. Keep `load_marker` for install metadata; retire the "NO rows means not installed" contract in the module docstring (`:12`), which is the claim that encoded the bug. Note the module docstring also calls the marker "advisory, never load-bearing" — that was false the moment `_maybe_print_monitor_tip` branched on it, and it becomes true again with this change.
 
   ```python

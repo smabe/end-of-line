@@ -196,7 +196,7 @@ suppression bound. Both were invisible because every test exercised the value's 
 its zero. **p3 and p4 now carry a Done criterion:** every config threshold a phase adds or reads is
 tested at its zero / disabled value, with the test stating which direction is safe.
 
-**p3 SHIPPED 2026-08-21** — workers now declare their quiet spans instead of being inferred at.
+**p3 SHIPPED 2026-08-21 `95a2d82`** — workers now declare their quiet spans instead of being inferred at.
 Full gate: 2450/2450 tests, basedpyright 0 errors. The +37 test delta matches the 37 added, which
 is the evidence they actually ran rather than being excluded.
 
