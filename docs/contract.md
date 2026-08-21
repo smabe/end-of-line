@@ -386,9 +386,35 @@ There is none, and the absence is deliberate. The queue's auto-repair subsystem 
 
 Deleted with it: the `KIND_QUEUE_CORRUPT` / `KIND_QUEUE_REPAIRED` / `KIND_QUEUE_REPAIR_FAILED` notify kinds, `ExitCode.REPAIR_DECLINED`, and `dispatch.dispatch_repair_worker`. A `dispatch.repair_command` left in an `.orchestrator.json` is **ignored**, with a one-line stderr deprecation note — see "`.orchestrator.json` top-level schema" below.
 
-## Background-monitoring marker
+## Background monitoring — the predicate and the install record
 
-Rows in the host database's `monitor` table — a key/value table, because the marker is a handful of scalars whose names change more often than their shape. Account-wide, not per-project: one `UserPromptSubmit` hook covers every plan on the host. **No rows = monitoring not set up**; `clu init` and `clu queue add` emit a one-line tip recommending `/clu-monitor` when the marker is absent and stdout is a TTY.
+Two separate things, and keeping them apart is the contract.
+
+### What decides "is the hook installed"
+
+**`~/.claude/settings.json`, read fresh on every ask.** It is the file Claude Code reads, so it is the only thing that decides whether a hook fires. `monitor.hook_state(surface, settings_path=None)` derives the answer from it and returns one of three states:
+
+| State | Means | Produced by |
+|---|---|---|
+| `PRESENT` | an entry for this surface's script is in the file | a matching `command` string |
+| `ABSENT` | the file is readable and has no such entry — including no file at all, which means Claude Code loads no user hooks | a readable file without the entry |
+| `UNREADABLE` | clu could not parse it and does not know | locked file, malformed JSON, a `hooks` block of the wrong shape |
+
+**`UNREADABLE` is never conflated with `ABSENT`.** Each consumer maps it deliberately and they disagree on purpose: the `/clu-monitor` tip stays SILENT on `UNREADABLE` (being wrong means nagging an operator whose hook works), while `clu doctor`'s quiet-hours coverage check WARNS on it (being wrong means a blocker nobody sees).
+
+The predicate is **per surface** — the SessionStart operator dashboard and the opt-in `--inbox` `UserPromptSubmit` surface are different hooks with independent lifecycles, and an inbox-only install does not report the dashboard as installed. Matching is by the hook script's **basename** (`clu_session_start.py` / `clu_inbox_surface.py`), never its absolute path, so a clu that moved recognises its own hook instead of appending a duplicate beside it.
+
+Presence in this file is not proof the hook RUNS: `disableAllHooks`, `allowManagedHooksOnly`, and hooks merged from project or managed settings can all override it. It is what the file says, which is strictly more than the install record ever knew.
+
+`clu install-hook --check` prints this answer per surface and writes nothing — the supported way to ask without installing.
+
+### The install record (metadata, not a predicate)
+
+Rows in the host database's `monitor` table — a key/value table, because it is a handful of scalars whose names change more often than their shape. Account-wide, not per-project: one hook covers every plan on the host. It records **when** the install happened and **which** settings file it wrote into — the one fact `settings.json` cannot supply, and what `/clu-monitor` reports back to the operator.
+
+**The rows decide nothing.** Their presence is not "installed" and their absence is not "not installed"; both readings were live bugs. `clu init` and `clu queue add` emit their `/clu-monitor` tip when the DERIVED predicate says `ABSENT` and stdout is a TTY.
+
+Each surface owns its own rows — `session_start_hook_path` / `session_start_installed_at` for the dashboard, `hook_path` / `hook_installed_at` for the inbox — plus the shared `settings_json_path`. `monitor.clear_surface_marker(surface)` drops one surface's rows and leaves the other's, so removing one hook no longer erases what clu knows about the other; the shared path goes with the last surface out.
 
 `monitor.load_marker()` returns:
 
@@ -403,17 +429,21 @@ Rows in the host database's `monitor` table — a key/value table, because the m
 
 | Field | Meaning |
 |---|---|
-| `hook_installed_at` | ISO UTC timestamp of the marker write |
-| `hook_path` | Absolute path to the bundled hook script resolved at install time |
+| `hook_installed_at` | ISO UTC timestamp of the inbox surface's install |
+| `hook_path` | Absolute path to the inbox hook script resolved at install time |
+| `session_start_installed_at` | ISO UTC timestamp of the dashboard's FIRST install — a no-op re-run does not bump it |
+| `session_start_hook_path` | Absolute path to the SessionStart hook script resolved at install time |
 | `settings_json_path` | Absolute path to the `settings.json` the installer wrote into |
+
+The two `*_hook_path` rows are a record of where the script was AT INSTALL TIME, not a claim about where it is now. Nothing matches against them — recognition is by basename against `settings.json`.
 
 `schema_version` is projected onto the read, not stored — the durable version is the host database's `PRAGMA user_version`.
 
-Idempotency: `clu install-hook` (which `/clu-monitor` shells out to) checks `settings.json` for an existing entry whose command matches `hook_path` before adding a new one, then writes these rows on success. A failed install leaves the marker absent so the next attempt retries cleanly. To reset (e.g. after a manual edit to `settings.json`), run `clu uninstall-hook` — it clears the rows — and re-run `/clu-monitor`.
+Idempotency: `clu install-hook` (which `/clu-monitor` shells out to) looks for an existing entry whose command names the hook script's basename before adding one, dedupes any duplicates an older absolute-path install left, and records these rows on success. Nothing needs resetting after a manual edit to `settings.json` — the next read derives the answer from the file — but `clu uninstall-hook` still drops the rows for every surface the file no longer installs.
 
-A leftover `~/.config/clu/monitor.json` from before the migration is **inert**: nothing reads it, in either the v1 (`/schedule`-based) or v2 (hook) shape, so a host carrying one still reads as un-monitored and `/clu-monitor` reinstalls cleanly. The quarantine sweep in operations.md moves it aside.
+A leftover `~/.config/clu/monitor.json` from before the migration is **inert**: nothing reads it, in either the v1 (`/schedule`-based) or v2 (hook) shape. The quarantine sweep in operations.md moves it aside.
 
-Helpers in `end_of_line/monitor.py`: `is_scheduled`, `load_marker`, `record_hook_installed`, `clear_marker`.
+Helpers in `end_of_line/monitor.py`: `Surface`, `HookState`, `hook_state`, `entry_matches`, `load_marker`, `record_hook_installed`, `record_session_start_installed`, `clear_surface_marker`, `clear_marker`.
 
 ## Inbox events
 

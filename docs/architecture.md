@@ -92,8 +92,19 @@ Claude Code sessions through the **operator dashboard**: a persistent
 Monitor on `clu watch --all --operator`, armed by a SessionStart hook
 (`end_of_line/hooks/clu_session_start.py`). The hook is installed
 through `clu install-hook` (or the `/clu-monitor` skill, which is its
-user-facing wrapper); a marker in the host database's `monitor` table
-records the install for idempotency.
+user-facing wrapper).
+
+**What decides whether it is installed is `~/.claude/settings.json`** —
+the file Claude Code reads — and clu derives that answer fresh on every
+ask (`monitor.hook_state`), per hook, in three states so that a settings
+file it cannot parse is reported as *unknown* rather than as *not
+installed*. Idempotency comes from the same read: install looks for its
+own entry, matched on the hook script's basename, before adding one.
+The `monitor` table in the host database records **when** the install
+happened and which settings file it wrote into — metadata, not a
+predicate. It used to be the predicate, and it drifted in both
+directions; `contract.md` § "Background monitoring" has the full
+contract.
 
 The dashboard streams **forward only**. `clu watch` sets its cursor to
 the current end of each plan's event log when it starts, so it reports

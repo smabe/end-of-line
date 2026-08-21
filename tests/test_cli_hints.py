@@ -1,13 +1,17 @@
 """CLI tip emission + CLAUDE.md injection prompt (phase `cli-hints`).
 
 Covers the four-layer discoverability hardening from #19 phase 2:
-  - `/clu-monitor` tip after `clu init` / `clu queue add` (TTY + marker-absent gate)
+  - `/clu-monitor` tip after `clu init` / `clu queue add`
+    (TTY + the SessionStart hook missing from settings.json)
   - Interactive CLAUDE.md `## clu` injection on first init
   - `--inject-claude-md` / `--no-claude-md` flag overrides
   - Decline marker semantics (per-project, opt-out persistence)
 
-All tests run in an isolated XDG dir so the real `~/.config/clu/monitor.json`
-is never touched.
+The tip is gated on the DERIVED predicate, not on the install marker: the
+marker is a cache of a fact that lives in `~/.claude/settings.json`, and the
+two diverge in both directions. All tests run in an isolated XDG dir AND an
+isolated HOME, so neither the real host database nor the operator's real
+settings.json is ever touched.
 """
 
 from __future__ import annotations
@@ -95,6 +99,24 @@ class _BaseHintsCase(unittest.TestCase):
             str(self.project),
         )
 
+    def _write_settings(self, hooks: dict | None = None, *, raw: str | None = None) -> Path:
+        """Seed the isolated HOME's settings.json — what the tip reads.
+
+        `isolate_monitor_marker` patches HOME as well as XDG_CONFIG_HOME, so
+        `Path.home()` here is this test's temp dir and never the operator's.
+        """
+        path = Path.home() / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw if raw is not None else json.dumps({"hooks": hooks or {}}))
+        return path
+
+    def _session_start_hooks(self) -> dict:
+        return {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "py /a/clu_session_start.py"}]}
+            ]
+        }
+
 
 # ---------------------------------------------------------------------------
 # cmd_init tip
@@ -102,17 +124,48 @@ class _BaseHintsCase(unittest.TestCase):
 
 
 class InitTipTestCase(_BaseHintsCase):
-    def test_init_prints_monitor_tip_when_marker_absent_and_tty(self) -> None:
+    def test_init_prints_monitor_tip_when_the_hook_is_absent_and_tty(self) -> None:
         rc, out = self._init()
         self.assertEqual(rc, 0)
         self.assertIn("/clu-monitor", out)
         self.assertIn("background notifications", out)
 
-    def test_init_suppresses_tip_when_marker_present(self) -> None:
-        monitor.record_hook_installed(
-            "/abs/hook.py",
-            "/home/x/.claude/settings.json",
+    def test_init_suppresses_tip_when_the_hook_is_in_settings_json(self) -> None:
+        # THE live divergence, and what this test used to get wrong: it
+        # suppressed the tip by writing an INBOX marker row, which is neither
+        # the dashboard surface nor the source of truth. An entry in
+        # settings.json with an EMPTY marker table is the real machine state.
+        self._write_settings(self._session_start_hooks())
+        self.assertIsNone(monitor.load_marker())
+        rc, out = self._init()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("/clu-monitor", out)
+
+    def test_init_still_tips_when_only_a_marker_row_says_installed(self) -> None:
+        # The reverse divergence: the operator hand-removed the entry, the
+        # marker survived. This used to be silently trusted, leaving clu quiet
+        # about a hook that is not firing.
+        monitor.record_session_start_installed("/a/clu_session_start.py", "/a/settings.json")
+        self._write_settings({})
+        rc, out = self._init()
+        self.assertEqual(rc, 0)
+        self.assertIn("/clu-monitor", out)
+
+    def test_init_still_tips_when_only_the_inbox_surface_is_installed(self) -> None:
+        # Per-surface: the opt-in UserPromptSubmit hook is not the dashboard.
+        self._write_settings(
+            {"UserPromptSubmit": [{"type": "command", "command": "py /a/clu_inbox_surface.py"}]}
         )
+        rc, out = self._init()
+        self.assertEqual(rc, 0)
+        self.assertIn("/clu-monitor", out)
+
+    def test_init_stays_silent_when_settings_json_cannot_be_read(self) -> None:
+        # SAFE DIRECTION: "cannot tell" must not read as "not installed".
+        # Nagging an operator whose hook IS installed — because their
+        # settings.json happens to be mid-edit — is the exact false assertion
+        # this predicate exists to stop, so UNREADABLE prints nothing.
+        self._write_settings(raw="not json {{{")
         rc, out = self._init()
         self.assertEqual(rc, 0)
         self.assertNotIn("/clu-monitor", out)
@@ -139,19 +192,24 @@ class QueueAddTipTestCase(_BaseHintsCase):
         _write_plan(self.project, "b")
         _write_plan(self.project, "c")
 
-    def test_queue_add_prints_monitor_tip_when_marker_absent_and_tty(self) -> None:
+    def test_queue_add_prints_monitor_tip_when_the_hook_is_absent_and_tty(self) -> None:
         rc, out = self._queue_add("a")
         self.assertEqual(rc, ExitCode.OK)
         self.assertIn("/clu-monitor", out)
 
-    def test_queue_add_suppresses_tip_when_marker_present(self) -> None:
-        monitor.record_hook_installed(
-            "/abs/hook.py",
-            "/home/x/.claude/settings.json",
-        )
+    def test_queue_add_suppresses_tip_when_the_hook_is_in_settings_json(self) -> None:
+        self._write_settings(self._session_start_hooks())
+        self.assertIsNone(monitor.load_marker())
         rc, out = self._queue_add("a")
         self.assertEqual(rc, ExitCode.OK)
         self.assertNotIn("/clu-monitor", out)
+
+    def test_queue_add_still_tips_when_only_a_marker_row_says_installed(self) -> None:
+        monitor.record_session_start_installed("/a/clu_session_start.py", "/a/settings.json")
+        self._write_settings({})
+        rc, out = self._queue_add("a")
+        self.assertEqual(rc, ExitCode.OK)
+        self.assertIn("/clu-monitor", out)
 
     def test_queue_add_suppresses_tip_when_stdout_not_tty(self) -> None:
         self._stdout_tty_flag = False

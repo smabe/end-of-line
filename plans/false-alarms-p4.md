@@ -51,6 +51,12 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 
 - `tests/test_monitor.py` / `tests/test_cli_hints.py` / `tests/test_install_hook.py` — derived-predicate cases: hook present + marker empty → installed, no tip (the live divergence); marker present + entry absent → NOT installed (the reverse case, which today is silently trusted); unreadable settings → `UNREADABLE`, no tip, no crash; an inbox-only install does not report the dashboard as installed. **`tests/test_cli_hints.py:112` currently suppresses the dashboard tip by writing an INBOX marker row** — that test encodes the conflation and must be corrected, not preserved.
 
+- `end_of_line/cli.py` — **`--check` added at execution, operator-confirmed at the p4 review gate.** The Work list requires the skill's step-1 check to point at "a supported CLI surface" and none existed: `clu doctor` refuses without a project `.orchestrator.json`, and every other hook path mutates. A read-only reporter had to exist for the described work to be possible. Operator chose to keep the `install-hook --check` spelling over a separate `clu hook-status`.
+- `docs/architecture.md` — **added at execution.** Said the marker "records the install for idempotency", which the code now contradicts; the plan-level criterion requires a cold reader of this file to state installed-ness correctly.
+- `docs/_outline.md` — **added at execution.** Its one-line `monitor.py` description named only the marker.
+- `end_of_line/skills_manifest.json` — **added at execution.** The currency guard hard-fails when a bundled SKILL.md changes without it (same as p2 and p3).
+- `tests/test_xdg_guard.py`, `tests/test_monitor_migration.py`, `tests/test_watch_tip.py`, `tests/test_doctor.py`, `tests/test_session_start_hook.py` — **added at execution.** Every one either called the deleted `is_scheduled` or asserted through it; `test_watch_tip` was additionally seeding an install marker to silence a tip the marker no longer silences.
+
 - Consumes: `_entry_command(entry: dict) -> str | None` (`cli.py:2699`); `_INBOX_HOOK_BASENAME` (`cli.py:2721`); `_hook_settings_path() -> Path` (`cli.py:2668`); `monitor.load_marker(path: Path | None) -> dict | None`
 - Produces: `monitor.hook_state(surface, settings_path) -> HookState`; a shared basename matcher in `cli.py` consumed by both `_maybe_print_monitor_tip` and `_print_quiet_hours_coverage_health`
 
@@ -60,6 +66,34 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 - **A note on vocabulary, carried in by the p2 sweep:** this phase's "marker" is the monitor-hook install marker row in the HOST database. p2's "marker" is the active-tool activity stamp on a claim. They are unrelated, and nothing in this shard is falsified by p2 — but the shared word is a trap for anyone reading both shards, so keep this phase's usage explicitly qualified.
 
 ## Decisions & findings
+
+### Finding: the shared matcher could NOT live in `cli.py`, and the `Produces:` line was structurally impossible  *(status: active)*
+- The Work list specifies "a shared basename matcher in `cli.py` consumed by both". `cli.py` imports `monitor` (`cli.py:51`) and `hook_state` must do the matching, so `monitor` importing `cli` would be a cycle — **verified at review** by reading both modules' imports, not by trusting the report. The matcher lives in `monitor.py` and all consumers call it there.
+- **Recorded as an interface departure rather than silently rewritten.** The substance the operator approved — ONE matcher, shared, single source of truth — shipped exactly. Only its address differs, and the plan named an address that cannot hold it.
+
+### Finding: the install path is a THIRD consumer the shard did not count  *(status: active)*
+- The shard names two consumers. `cmd_install_hook` / `cmd_uninstall_hook` also need "is this entry ours" once matching is basename-based, making three. That strengthens the factoring case rather than weakening it — and it is why `_entry_mentions_hook_path` could be deleted outright rather than kept beside the new matcher.
+
+### Finding: a MISSING settings.json is ABSENT; an unparseable one is UNREADABLE  *(status: active)*
+- These are different facts and the phase splits them. No user settings file means Claude Code loads no user hooks — the absence IS the answer. Anything merely unparseable (locked file, malformed JSON, a `hooks` block of the wrong shape) is `UNREADABLE`, because "cannot tell" reading as "not installed" is the exact conflation this phase replaced.
+
+### Finding: the two consumers map UNREADABLE in OPPOSITE directions, deliberately  *(status: active)*
+- The `clu init` / `clu queue add` tip stays SILENT on `UNREADABLE`: being wrong there means nagging an operator whose hook works, which is the bug this phase exists to kill. The doctor's quiet-hours check WARNS on it: being wrong there means a blocker nobody ever sees. Cheap warning versus silent failure — they resolve the same uncertainty in opposite directions on purpose.
+- Documented in both call sites and in `docs/contract.md`, because it reads as an inconsistency and is not.
+
+### Finding: `clear_marker` deleting all rows was LATENT, not live  *(status: active)*
+- `cmd_uninstall_hook` removes both surfaces in one pass, so no shipped path ever removed just one. The per-surface clear is proved at unit level instead. Its one non-obvious rule: `settings_json_path` belongs to no surface, so it leaves with the LAST surface out — otherwise a full uninstall leaves a marker row describing nothing.
+- Uninstall uses one rule covering both its paths ("clear the rows of every surface `settings.json` no longer installs") rather than two, so the early-return behaviour when there is no settings file at all is not silently dropped.
+
+### Finding: install RECOGNISES but does not rewrite  *(status: active)*
+- When basename matching finds an entry at a path clu would not have chosen, the entry is left exactly as the operator has it — only the message changes, to name the path actually installed rather than clu's resolved path, which would assert something false. Duplicates prune first-wins, so the survivor is the oldest: the one whose date the install record holds.
+
+### Finding: the zero-value criterion is genuinely vacuous here — checked, not assumed  *(status: active)*
+- This phase adds no config threshold and reads none; `config.py` is absent from the diff and `monitor.py` references no config at all. The structural analogue is the three-state predicate, so `UNREADABLE` was tested in five shapes with the assertion that it is NOT `ABSENT` — which is precisely the mutation p1 and p2 were missing.
+
+### Finding: running the phase's own gate had a side effect on the operator's machine  *(status: active)*
+- `clu init` auto-syncs bundled skills, so exercising the gate end-to-end rewrote `~/.claude/skills/` with this phase's uncommitted `clu-monitor`. Harmless once committed, and `clu-phase` was already drifted beforehand. The scratch plan registered to do it was unregistered afterwards — **verified at review: the host registry is empty and the marker table is still empty.**
+- Worth knowing before anyone runs a `clu init` gate again: it is not a read-only operation.
 
 ### Decision: derive the predicate instead of reconciling the cache  *(status: active)*
 - **Rationale:** of the four candidates #116 lists, only derivation satisfies all three of its acceptance criteria. "Reconcile on read" (re-stamp the marker when the entry is present) fixes the observed direction but still TRUSTS a marker whose entry has been removed, which is the worse direction — clu stays silent about a hook that is not firing. A `clu doctor` check helps only an operator who runs `doctor`, and the nagging continues meanwhile. Deriving makes both divergence directions unrepresentable rather than detected.

@@ -80,12 +80,22 @@ _MONITOR_TIP = "\n  Tip: run /clu-monitor for background notifications on halts 
 
 
 def _maybe_print_monitor_tip() -> None:
-    """Print the /clu-monitor tip if monitoring isn't scheduled and stdout
-    is a TTY. Silent otherwise — worker subprocesses pipe stdout to a log
-    file, so this naturally suppresses there."""
+    """Print the /clu-monitor tip if the operator dashboard hook is missing
+    from settings.json and stdout is a TTY. Silent otherwise — worker
+    subprocesses pipe stdout to a log file, so this naturally suppresses
+    there, and worker-driven `clu queue add --token` depends on that.
+
+    Asks the SessionStart surface specifically: the opt-in `--inbox` hook is
+    a different hook with its own lifecycle, and an inbox-only install must
+    not read as a dashboard install.
+
+    ABSENT is the ONLY state that prints. `UNREADABLE` — a locked or
+    malformed settings.json — stays silent, because "cannot tell" reading as
+    "not installed" is the exact conflation this predicate replaced.
+    """
     if not sys.stdout.isatty():
         return
-    if monitor.is_scheduled():
+    if monitor.hook_state(monitor.Surface.SESSION_START) is not monitor.HookState.ABSENT:
         return
     print(_MONITOR_TIP, end="")
 
@@ -712,6 +722,15 @@ def main(argv: list[str] | None = None) -> int:
         "dashboard Monitor and away events through the notify "
         "channels, so the inbox has no gap left to cover. The code "
         "stays on disk — this flag is how it comes back.",
+    )
+    p_install_hook.add_argument(
+        "--check",
+        action="store_true",
+        default=False,
+        dest="check_only",
+        help="Report which clu hooks ~/.claude/settings.json installs and "
+        "when each was recorded, then exit. Writes nothing — the supported "
+        "way to ask 'is the monitor hook installed?' without installing it.",
     )
     p_install_hook.add_argument(
         "--session-start",
@@ -2697,7 +2716,10 @@ def cmd_install_skill(args) -> int:
 
 
 def _hook_settings_path() -> Path:
-    return Path.home() / ".claude" / "settings.json"
+    # One resolution for the file clu installs into AND derives its
+    # hook-installed answer from — `monitor` owns it because the predicate
+    # lives there and this module already imports that one.
+    return monitor.default_settings_path()
 
 
 def _resolve_hook_script_path(script_name: str = "clu_inbox_surface.py") -> str:
@@ -2726,35 +2748,6 @@ def _hook_command(hook_path: str) -> str:
     return f"{sys.executable} -u {hook_path}"
 
 
-def _entry_command(entry: dict) -> str | None:
-    """Pull the `command` string from a settings.json hook entry.
-
-    Both shapes are valid:
-      flat:   {"type": "command", "command": "..."}
-      nested: {"matcher"?: ..., "hooks": [{"type": "command", "command": "..."}]}
-    """
-    if "command" in entry:
-        return entry.get("command")
-    inner = entry.get("hooks")
-    if isinstance(inner, list) and inner:
-        first = inner[0]
-        if isinstance(first, dict):
-            return first.get("command")
-    return None
-
-
-# Matched against an installed hook's command string. The BASENAME, not the
-# resolved absolute path: an operator whose clu moved (reinstall, new venv,
-# a second checkout) still has a working inbox hook, and reporting it as
-# missing would send them to fix something that isn't broken.
-_INBOX_HOOK_BASENAME = "clu_inbox_surface.py"
-
-
-def _entry_mentions_hook_path(entry: dict, hook_path: str) -> bool:
-    cmd = _entry_command(entry) or ""
-    return hook_path in cmd
-
-
 def _detect_nested_style(hooks: dict) -> bool:
     """True if any existing hook entry uses the nested-array shape.
 
@@ -2781,6 +2774,45 @@ def _build_hook_entry(command: str, *, nested: bool) -> dict:
     return {"type": "command", "command": command}
 
 
+def _ensure_surface_entry(
+    hooks: dict,
+    surface: monitor.Surface,
+    script_path: str,
+    *,
+    nested: bool,
+) -> tuple[bool, str]:
+    """Leave exactly one entry for `surface` in `hooks`. Returns (changed, message).
+
+    Recognition is by BASENAME (`monitor.entry_matches`), so a clu that moved
+    — a pipx reinstall, a new venv, a second checkout — finds its own hook
+    instead of appending a second one beside it. The entry is recognised, not
+    rewritten: the path in it is the operator's, and it still works.
+
+    Duplicates a previous absolute-path install already appended are removed,
+    and ONLY those: settings.json is the operator's file, so clu prunes its
+    own leftovers and touches nothing else.
+    """
+    entries = hooks.get(surface.event)
+    if not isinstance(entries, list):
+        entries = []
+        hooks[surface.event] = entries
+
+    matches = [e for e in entries if monitor.entry_matches(e, surface)]
+    if not matches:
+        entries.append(_build_hook_entry(_hook_command(script_path), nested=nested))
+        return True, f"Installed {surface.event} hook → {script_path}"
+
+    keep = matches[0]
+    found = monitor.entry_script_path(keep, surface) or script_path
+    message = f"{surface.event} hook already installed at {found}"
+    duplicates = len(matches) - 1
+    if not duplicates:
+        return False, message
+    entries[:] = [e for e in entries if e is keep or not monitor.entry_matches(e, surface)]
+    plural = "y" if duplicates == 1 else "ies"
+    return True, f"{message} (removed {duplicates} duplicate entr{plural})"
+
+
 def cmd_install_hook(args) -> int:
     """Register the clu operator-dashboard hook in `~/.claude/settings.json`.
 
@@ -2790,10 +2822,15 @@ def cmd_install_hook(args) -> int:
     inbox surface — off by default because live events reach the
     session through the dashboard Monitor and away events through the
     notify channels, leaving the inbox no gap to cover. Both entries
-    are idempotent on absolute hook_path. Refuses on malformed
-    settings.json (don't try to repair). Writes the marker on success.
+    are idempotent on the hook script's BASENAME, so a moved clu
+    recognises its own hook rather than duplicating it. `--check`
+    reports what is installed and writes nothing. Refuses on malformed
+    settings.json (don't try to repair). Records install metadata on
+    success — metadata only: what decides "installed" is the file.
     """
     settings_path = _hook_settings_path()
+    if args.check_only:
+        return _print_hook_report(settings_path)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
 
     if settings_path.exists():
@@ -2813,18 +2850,11 @@ def cmd_install_hook(args) -> int:
     changed = False
 
     session_start_path = _resolve_hook_script_path("clu_session_start.py")
-    ss_command = _hook_command(session_start_path)
-    ss = hooks.get("SessionStart")
-    if not isinstance(ss, list):
-        ss = []
-        hooks["SessionStart"] = ss
-    already_ss = any(_entry_mentions_hook_path(e, session_start_path) for e in ss)
-    if not already_ss:
-        ss.append(_build_hook_entry(ss_command, nested=nested))
-        changed = True
-        print(f"Installed SessionStart hook → {session_start_path}")
-    else:
-        print(f"SessionStart hook already installed at {session_start_path}")
+    ss_changed, ss_message = _ensure_surface_entry(
+        hooks, monitor.Surface.SESSION_START, session_start_path, nested=nested
+    )
+    changed = changed or ss_changed
+    print(ss_message)
 
     if args.install_session_start:
         # It used to compose with a default that installed the inbox surface;
@@ -2838,15 +2868,11 @@ def cmd_install_hook(args) -> int:
     hook_path: str | None = None
     if args.install_inbox:
         hook_path = _resolve_hook_script_path()
-        command = _hook_command(hook_path)
-        ups = hooks.setdefault("UserPromptSubmit", [])
-        already_ups = any(_entry_mentions_hook_path(e, hook_path) for e in ups)
-        if not already_ups:
-            ups.append(_build_hook_entry(command, nested=nested))
-            changed = True
-            print(f"Installed UserPromptSubmit hook → {hook_path}")
-        else:
-            print(f"UserPromptSubmit hook already installed at {hook_path}")
+        ups_changed, ups_message = _ensure_surface_entry(
+            hooks, monitor.Surface.INBOX, hook_path, nested=nested
+        )
+        changed = changed or ups_changed
+        print(ups_message)
 
     if changed:
         tmp = settings_path.with_suffix(".tmp")
@@ -2860,16 +2886,50 @@ def cmd_install_hook(args) -> int:
     return ExitCode.OK
 
 
-def cmd_uninstall_hook(args) -> int:
-    """Remove the clu hook entry, leaving the operator's other hooks alone.
+_HOOK_REPORT_WORDS = {
+    monitor.HookState.PRESENT: "installed",
+    monitor.HookState.ABSENT: "not installed",
+    monitor.HookState.UNREADABLE: "unknown (settings.json could not be read)",
+}
 
-    Matches by absolute hook_path so unrelated UserPromptSubmit entries
-    (the operator's own work) survive. Clears the marker on success.
-    Idempotent — running on a host without the hook installed is OK.
+
+def _print_hook_report(settings_path: Path) -> int:
+    """Read-only: which clu hooks does settings.json install, and when.
+
+    The supported answer to "is the monitor hook installed?". `/clu-monitor`
+    asks this before deciding whether to install, and it must not have to
+    import a private module to find out — an internal representation change
+    silently broke that skill once already.
+
+    Installed-ness comes from settings.json; the timestamp comes from the
+    marker and is labelled `recorded` rather than presented as proof, since
+    the marker is metadata about a past install and decides nothing.
+    """
+    marker = monitor.load_marker() or {}
+    print(f"Settings: {settings_path}")
+    for surface in monitor.Surface:
+        state = monitor.hook_state(surface, settings_path)
+        line = f"{surface.event}: {_HOOK_REPORT_WORDS[state]}"
+        if state is monitor.HookState.PRESENT:
+            recorded = marker.get(surface.installed_at_key)
+            if recorded:
+                line += f" (recorded {recorded})"
+        print(line)
+    return ExitCode.OK
+
+
+def cmd_uninstall_hook(args) -> int:
+    """Remove the clu hook entries, leaving the operator's other hooks alone.
+
+    Matches by the hook script's BASENAME — the same recognition install
+    uses — so an entry left behind by a clu that has since moved is removed
+    rather than orphaned, and unrelated entries (the operator's own work)
+    survive either way. Idempotent: running on a host without the hooks
+    installed is OK.
     """
     settings_path = _hook_settings_path()
     if not settings_path.exists():
-        _clear_monitor_marker()
+        _reconcile_monitor_marker(settings_path)
         return ExitCode.OK
     try:
         data = json.loads(settings_path.read_text())
@@ -2879,62 +2939,62 @@ def cmd_uninstall_hook(args) -> int:
             f"settings.json malformed; refusing to edit {settings_path}.",
         )
 
-    hook_path = _resolve_hook_script_path()
-    session_start_path = _resolve_hook_script_path("clu_session_start.py")
     hooks_block = data.setdefault("hooks", {})
 
     changed = False
-    ups = hooks_block.get("UserPromptSubmit") or []
-    if not isinstance(ups, list):
-        ups = []
-    filtered_ups = [e for e in ups if not _entry_mentions_hook_path(e, hook_path)]
-    ups_removed = len(filtered_ups) != len(ups)
-    if ups_removed:
-        hooks_block["UserPromptSubmit"] = filtered_ups
+    for surface in monitor.Surface:
+        entries = hooks_block.get(surface.event) or []
+        if not isinstance(entries, list):
+            entries = []
+        kept = [e for e in entries if not monitor.entry_matches(e, surface)]
+        if len(kept) == len(entries):
+            continue
+        hooks_block[surface.event] = kept
         changed = True
-        print(f"Uninstalled UserPromptSubmit hook ({hook_path})")
+        print(f"Uninstalled {surface.event} hook ({surface.basename})")
 
-    ss = hooks_block.get("SessionStart") or []
-    if not isinstance(ss, list):
-        ss = []
-    filtered_ss = [e for e in ss if not _entry_mentions_hook_path(e, session_start_path)]
-    ss_removed = len(filtered_ss) != len(ss)
-    if ss_removed:
-        hooks_block["SessionStart"] = filtered_ss
-        changed = True
-        print(f"Uninstalled SessionStart hook ({session_start_path})")
-
-    if not (ups_removed or ss_removed):
+    if not changed:
         print("No clu hooks present in settings.json")
 
     if changed:
         tmp = settings_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, settings_path)
-    _clear_monitor_marker()
+    _reconcile_monitor_marker(settings_path)
     return ExitCode.OK
 
 
-def _clear_monitor_marker() -> None:
-    """Clear the monitor marker, reporting rather than crashing if it can't.
+def _reconcile_monitor_marker(settings_path: Path) -> None:
+    """Drop install metadata for every surface settings.json no longer installs.
 
-    Clearing used to be an `unlink` that swallowed "already gone" and could
-    not realistically fail. The marker now lives in the host database, so a
-    contended or unreadable store raises — and the hook entry has ALREADY been
-    removed from settings.json by the time this runs. A traceback there would
-    leave the operator with a half-finished uninstall and no idea which half.
-    Silence would be worse still: the marker survives, so `is_scheduled()`
-    keeps answering True about a hook that is gone. So: say so, and exit OK.
+    One rule, applied per surface, so removing one hook never erases what clu
+    knows about the other — `clear_marker` deleted every row, which is why
+    uninstalling the inbox used to wipe the dashboard's install date too. A
+    surface clu cannot read the state of (`UNREADABLE`) keeps its rows: the
+    metadata is harmless and guessing is not.
+
+    Reports rather than crashes when it can't write. Clearing used to be an
+    `unlink` that swallowed "already gone" and could not realistically fail;
+    the marker now lives in the host database, so a contended or unreadable
+    store raises — and the hook entries have ALREADY been removed from
+    settings.json by the time this runs. A traceback there would leave the
+    operator with a half-finished uninstall and no idea which half. The rows
+    no longer decide anything, so an uncleared one is stale metadata rather
+    than a false "installed" answer, but it is still what `/clu-monitor`
+    prints back.
     """
-    try:
-        monitor.clear_marker()
-    except db.DEGRADABLE_ERRORS as exc:
-        print(
-            f"hook removed, but the monitor marker could not be cleared "
-            f"({type(exc).__name__}: {exc}) — `clu install-hook` will report it "
-            f"as still installed until this is retried",
-            file=sys.stderr,
-        )
+    for surface in monitor.Surface:
+        if monitor.hook_state(surface, settings_path) is not monitor.HookState.ABSENT:
+            continue
+        try:
+            monitor.clear_surface_marker(surface)
+        except db.DEGRADABLE_ERRORS as exc:
+            print(
+                f"hook removed, but the {surface.event} install record could not be "
+                f"cleared ({type(exc).__name__}: {exc}) — `clu install-hook --check` "
+                f"will keep reporting its install date until this is retried",
+                file=sys.stderr,
+            )
 
 
 _DOCTOR_PROBE_SCRIPT = (
@@ -3309,25 +3369,16 @@ def _print_quiet_hours_coverage_health(cfg: ProjectConfig) -> None:
     Quiet hours set + inbox hook not installed = a blocker raised inside the
     window with no session running reaches no surface at all.
 
-    Quiet when clean, like the other doctor printers. An absent or unreadable
-    settings.json counts as "not installed": the warning is cheap and the
-    failure mode it names is silent.
+    Quiet when clean, like the other doctor printers. Anything but a
+    confirmed install warns — including `UNREADABLE`, which is the OPPOSITE
+    of how `_maybe_print_monitor_tip` treats that state, and deliberately so.
+    The tip's cost of being wrong is nagging an operator whose hook works;
+    this warning's cost of being wrong is a blocker nobody ever sees. Cheap
+    warning, silent failure: warn.
     """
     if not cfg.notify.quiet_hours:
         return
-    settings_path = _hook_settings_path()
-    installed = False
-    try:
-        data = json.loads(settings_path.read_text())
-        entries = data.get("hooks", {}).get("UserPromptSubmit") or []
-        installed = any(
-            _INBOX_HOOK_BASENAME in (_entry_command(e) or "")
-            for e in entries
-            if isinstance(e, dict)
-        )
-    except (OSError, json.JSONDecodeError, AttributeError):
-        installed = False
-    if installed:
+    if monitor.hook_state(monitor.Surface.INBOX) is monitor.HookState.PRESENT:
         return
     start, end = cfg.notify.quiet_hours
     print(f"\nQuiet hours {start}–{end} are set, but nothing catches what they suppress:")

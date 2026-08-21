@@ -1104,47 +1104,75 @@ old regex-over-raw-bytes rescue existed for cannot occur.
 
 ### `monitor.py`
 
-Background-monitoring marker (account-wide, not per-project): rows in the
-host database's key/value `monitor` table. The `clu install-hook` CLI writes
-them after registering the `UserPromptSubmit` hook in
-`~/.claude/settings.json`; clu CLI commands read them to suppress monitoring
-tips when the hook is already in place. Tolerant by design — no rows, an
-absent or busy store, and a newer schema all surface as `None` / `False` so
-the install workflow re-runs cleanly.
+Two questions about clu's monitoring hooks, deliberately kept apart.
+**Is it installed** is DERIVED from `~/.claude/settings.json` on every ask,
+because that file is what Claude Code reads and therefore what decides
+whether a hook fires. **When was it installed** is the marker: rows in the
+host database's key/value `monitor` table, account-wide, written by
+`clu install-hook`. The marker is metadata; it decides nothing.
+
+Tolerant on both sides — a locked, missing, or malformed settings file
+answers with a state rather than raising, and no rows / a busy store / a
+newer schema all surface as `None`.
 
 **Key types and functions**
 
+- `Surface` — the two hooks clu installs, each carrying its settings.json
+  `event` key, the bundled script's `basename`, and the `path_key` /
+  `installed_at_key` marker rows it owns (`marker_keys` pairs them).
+  `SESSION_START` is the operator dashboard installed by default;
+  `INBOX` the retired `UserPromptSubmit` surface behind `--inbox`.
+- `HookState` — `PRESENT` / `ABSENT` / `UNREADABLE`. Three, not two, so
+  "cannot tell" never reads as "not installed".
+- `hook_state(surface, settings_path=None)` → `HookState` — the predicate.
+  `settings_path` is the test seam and tests MUST pass it: the default
+  resolves through `Path.home()`, not the XDG dir, so it escapes
+  `CLU_TEST_MODE` isolation.
+- `entry_matches(entry, surface)` → `bool` — the one basename matcher, used
+  by the predicate and by install/uninstall. Non-dict junk answers `False`.
+- `entry_command(entry)` / `entry_script_path(entry, surface)` — read the
+  command out of either settings.json array shape, and pull the script path
+  back out of it for operator-facing messages.
+- `default_settings_path()` → `Path` — `~/.claude/settings.json`.
 - `SCHEMA_VERSION = 2` — projected onto the marker dict readers are handed;
   v1 was the broken `/schedule`-based install. A leftover v1 or v2
-  `monitor.json` FILE is inert — nothing reads it — so a host carrying one
-  still reads as un-monitored and `/clu-monitor` reinstalls cleanly.
+  `monitor.json` FILE is inert — nothing reads it.
 - `LEGACY_MARKER_FILENAME = "monitor.json"` — the retired file's name, kept
   only so the quarantine sweep in `operations.md` has something to point at.
 - `load_marker(path=None)` → `dict | None` — the marker rows as a dict,
   `None` when there are no rows or the store cannot be read
   (`db.DEGRADABLE_ERRORS`). `path` names the host DATABASE.
-- `is_scheduled(path=None)` → `bool` — `True` iff `load_marker` returns
-  a dict. The single predicate every CLI suppression branch keys off.
-- `record_hook_installed(hook_path, settings_json_path, *, path=None)` —
-  one `INSERT OR REPLACE` transaction. Carries no field from a legacy
-  marker: the rows are all there is.
-- `clear_marker(path=None)` — delete the rows; idempotent. Invoked by
-  `clu uninstall-hook` after `settings.json` is pruned. Unlike the unlink it
-  replaced, this CAN fail (a contended or unreadable store), and the caller
-  reports that rather than leaving the operator with a half-finished
-  uninstall.
+- `record_hook_installed(hook_path, settings_json_path, *, path=None)` /
+  `record_session_start_installed(...)` — per-key upserts, so neither
+  surface's stamp erases the other's. The session-start install time is
+  FIRST-observation-wins: a no-op re-run must not report the date of the
+  last check as the install date.
+- `clear_surface_marker(surface, path=None)` — drop ONE surface's rows.
+  `settings_json_path` belongs to no surface, so it goes with the last one
+  out. Invoked per surface by `clu uninstall-hook`.
+- `clear_marker(path=None)` — delete every row; idempotent. Both clears CAN
+  fail (a contended or unreadable store) where the unlink they replaced
+  could not, and the caller reports that rather than leaving the operator
+  with a half-finished uninstall.
 
 **Invariants and gotchas**
 
-- The marker is advisory, not load-bearing. A drifted marker (e.g.
-  operator hand-edited `settings.json` to remove the hook) makes the
-  CLI suppress the install tip wrongly until `clu uninstall-hook` is
-  run. v2 trusts the marker — coupling clu to `settings.json`
-  introspection on every CLI invocation would be wasted I/O.
-- `record_hook_installed` follows the "write after side effect"
-  ordering: `clu install-hook` updates `settings.json` first and only
-  writes the marker on success. A failed install leaves the marker
-  absent so the next attempt retries cleanly.
+- The marker really is advisory now. Branching on it was what made it
+  load-bearing, and both directions of drift were live bugs: an entry in
+  `settings.json` with an empty marker table nagged forever, and a marker
+  row surviving a hand-edited `settings.json` was silently trusted about a
+  hook that was not firing. Deriving makes both unrepresentable.
+- Matching is by BASENAME, never absolute path. Path matching is why a clu
+  reinstalled into a new venv appended a duplicate entry beside a working
+  one, and why uninstall then orphaned the older one.
+- `PRESENT` proves the entry is in the FILE, not that the hook RUNS —
+  `disableAllHooks`, `allowManagedHooksOnly` and settings merged from other
+  scopes all override it. Operator-facing wording should not overclaim.
+- `UNREADABLE` is mapped per consumer and the two disagree on purpose: the
+  `/clu-monitor` tip stays silent on it, `clu doctor`'s quiet-hours check
+  warns on it. Pick by which way being wrong hurts.
+- `record_*` follows the "write after side effect" ordering: `clu
+  install-hook` updates `settings.json` first and only records afterwards.
 - The marker shares the host database with the registry, the inbox and the
   sidecars — same XDG resolution, one file (`$XDG_CONFIG_HOME/clu/clu.db`).
 
@@ -1152,8 +1180,8 @@ the install workflow re-runs cleanly.
 
 - `operations.md` § "Background monitoring" for the user-facing setup
   + reset workflow.
-- `contract.md` § "Background-monitoring marker" for the marker shape and
-  what a leftover legacy file does (nothing).
+- `contract.md` § "Background monitoring" for what decides installed-ness,
+  the marker shape, and what a leftover legacy file does (nothing).
 - `cli.cmd_install_hook` / `cli.cmd_uninstall_hook` for the install
   workflow that writes/clears this marker.
 - `end_of_line/skills/clu-monitor/SKILL.md` for the skill that shells

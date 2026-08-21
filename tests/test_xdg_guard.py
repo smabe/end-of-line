@@ -68,9 +68,12 @@ class XdgGuardRaisesTestCase(unittest.TestCase):
                 self.assertIn("CluTestCase", str(ctx.exception))
 
     def test_guard_raises_on_monitor_in_test_mode(self):
+        # `load_marker` is the monitor read that still opens the host
+        # database; the hook-installed predicate reads settings.json and is
+        # guarded by injecting its path instead.
         with mock.patch.dict(os.environ, self._real_xdg_test_mode()):
             with self.assertRaises(RuntimeError) as ctx:
-                monitor.is_scheduled()
+                monitor.load_marker()
             self.assertIn("CluTestCase", str(ctx.exception))
 
 

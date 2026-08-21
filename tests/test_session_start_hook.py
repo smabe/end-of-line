@@ -194,8 +194,9 @@ class InstallSessionStartFlagTests(SessionStartInstallTestBase):
         self.assertIn("clu_session_start.py", m["session_start_hook_path"])
 
     def test_install_no_flag_sets_the_session_start_marker_field(self) -> None:
-        # `/clu-monitor` keys idempotence off the marker, so the default
-        # install has to stamp one even with the inbox surface retired.
+        # `/clu-monitor` reports the install DATE back to the operator, and
+        # settings.json cannot supply it — so the default install has to
+        # record one even with the inbox surface retired.
         rc, _, _ = self._install()
         self.assertEqual(rc, int(ExitCode.OK))
         m = must(monitor.load_marker())

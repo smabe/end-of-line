@@ -59,14 +59,12 @@ class LegacyMarkerFileTests(unittest.TestCase):
 
     def test_a_leftover_v1_file_does_not_make_the_host_monitored(self) -> None:
         self._write_v1()
-        self.assertFalse(monitor.is_scheduled())
         self.assertIsNone(monitor.load_marker())
 
     def test_a_leftover_v2_file_does_not_make_the_host_monitored(self) -> None:
         # No JSON import: the file is inert, and the fleet-quiet precondition
         # makes "reinstall the hook" the correct answer on first run.
         self._write_v2()
-        self.assertFalse(monitor.is_scheduled())
         self.assertIsNone(monitor.load_marker())
 
     def test_installing_over_a_legacy_file_carries_none_of_its_fields(self) -> None:
@@ -80,7 +78,6 @@ class LegacyMarkerFileTests(unittest.TestCase):
         self.assertEqual(data["settings_json_path"], "/home/x/.claude/settings.json")
         self.assertNotIn("schedule_id", data)
         self.assertNotIn("cadence", data)
-        self.assertTrue(monitor.is_scheduled())
 
 
 if __name__ == "__main__":

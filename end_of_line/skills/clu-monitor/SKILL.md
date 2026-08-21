@@ -4,8 +4,8 @@ description: |
   Use proactively when the user is starting autonomous plan execution
   with clu (after `clu queue add` or `clu init`) and the monitor hook
   is not installed on this machine. Also use when the user says "monitor clu", "notify me when X
-  completes", or describes walking away. Idempotent — checks the marker
-  first and short-circuits if the hook is already installed.
+  completes", or describes walking away. Idempotent — checks
+  settings.json first and short-circuits if the hook is already installed.
 user_invocable: true
 ---
 
@@ -34,9 +34,13 @@ and away events through the notify channels, which leaves the inbox no
 gap to cover. Its code is still on disk and `clu install-hook --inbox`
 wires it back up if a gap ever reappears.
 
-The marker rows in clu's host database (`~/.config/clu/clu.db`) are the
-source of truth for "is the hook already installed." `clu install-hook`
-writes the marker; `clu uninstall-hook` clears it. A leftover
+**`~/.claude/settings.json` is the source of truth for "is the hook
+already installed."** It is the file Claude Code reads, so it is what
+decides whether the hook fires. clu also keeps an install RECORD in its
+host database (`~/.config/clu/clu.db`) — that is metadata: when the
+install happened and which settings file it wrote into. It decides
+nothing, and a machine where the two disagree is normal. Ask
+`clu install-hook --check`, never the record. A leftover
 `~/.config/clu/monitor.json` file from an older clu is inert — nothing
 reads it, in either schema — so ignore one if you see it.
 
@@ -44,26 +48,46 @@ reads it, in either schema — so ignore one if you see it.
 
 ### 1. Check whether the hook is already installed
 
+<!-- skilltest -->
 ```bash
-python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
+clu install-hook --check
 ```
 
-Read the printed dict:
+Read-only; it writes nothing. Output looks like:
 
-- **A marker** (`schema_version: 2`, `session_start_hook_path`,
-  `session_start_installed_at`): the hook is installed. Print:
+```
+Settings: /Users/you/.claude/settings.json
+SessionStart: installed (recorded 2026-08-21T03:00:00Z)
+UserPromptSubmit: not installed
+```
 
-  > Hook already installed at `<session_start_hook_path>` (installed
-  > `<session_start_installed_at>`). Settings: `<settings_json_path>`.
-  > To reinstall, run `clu uninstall-hook` then re-run `/clu-monitor`.
+The `SessionStart` line is the one that matters — that is the operator
+dashboard. `UserPromptSubmit` is the retired inbox surface and is
+expected to read `not installed`.
 
-  Exit. Do NOT touch settings.json.
+- **`SessionStart: installed`**: the hook is in settings.json. Print:
 
-- **`None`**: no marker — either a clean machine, or one whose only
-  monitoring was the legacy `/schedule` install (which has not been
-  functional for a long time). Either way this is a clean slate:
-  proceed to step 2. If the operator previously scheduled a routine by
-  hand, tell them to delete it via `/schedule delete <id>`.
+  > Hook already installed. Settings: `<Settings path>`. The install was
+  > recorded `<recorded timestamp, if the line has one>`. To reinstall,
+  > run `clu uninstall-hook` then re-run `/clu-monitor`.
+
+  Exit. Do NOT touch settings.json. A missing `recorded …` is not a
+  problem — it only means clu has no record of the install (a hook added
+  by hand, or a record cleared since), and the entry in settings.json is
+  what makes it fire.
+
+- **`SessionStart: not installed`**: a clean slate — either a fresh
+  machine, or one whose only monitoring was the legacy `/schedule`
+  install (which has not been functional for a long time). Proceed to
+  step 2. If the operator previously scheduled a routine by hand, tell
+  them to delete it via `/schedule delete <id>`.
+
+- **`SessionStart: unknown (settings.json could not be read)`**: clu
+  could not parse the file — do NOT treat this as "not installed" and do
+  NOT install over it. Tell the operator to fix
+  `~/.claude/settings.json` (most often a syntax error mid-edit) and
+  re-run `/clu-monitor`. Installing here would either duplicate a
+  working hook or fail outright.
 
 ### 2. Install the hook
 
@@ -84,14 +108,17 @@ This is the canonical install path:
   the bundled `clu_session_start.py` script, preserving any existing
   hooks and matching the operator's nested-vs-flat array style.
 - With `--inbox`, ALSO adds a `UserPromptSubmit` entry for the retired
-  inbox surface. Both entries are idempotent on absolute hook path;
-  re-runs are no-ops.
-- Refuses to run in non-TTY contexts (workers shouldn't install
-  user-level hooks).
+  inbox surface. Both entries are idempotent on the hook script's
+  BASENAME, so a clu that moved (reinstall, new venv, second checkout)
+  is recognised rather than duplicated; re-runs are no-ops, and any
+  duplicates an older absolute-path install left are pruned.
+- Runs fine without a TTY — that is what lets you invoke it from Bash
+  here.
 - Refuses on malformed settings.json rather than guessing how to
   repair — surfaces a clear error.
-- Writes the marker rows on success (with `hook_path` populated only
-  when `--inbox` was used).
+- Records the install on success (with `hook_path` populated only when
+  `--inbox` was used). The record is metadata; what makes the hook fire
+  is the entry in settings.json.
 
 Capture the output. If `clu install-hook` exits non-zero, report the
 error verbatim to the user with one-line diagnosis (most common: the
@@ -218,12 +245,14 @@ lines as plain text rather than ignoring them.
 - **settings.json malformed.** `clu install-hook` refuses with a clear
   message. Tell the operator to fix the JSON manually
   (`~/.claude/settings.json`) and re-run `/clu-monitor`.
-- **No TTY (running in a worker subprocess).** `clu install-hook`
-  refuses with "install-hook requires an interactive shell". This is
-  intentional — workers must not install user-level hooks. If you see
-  this in a worker log, route the message back to the operator
-  explicitly via `clu block` or surface it in the completion summary.
+- **`settings.json` unreadable.** `clu install-hook --check` reports
+  `unknown (settings.json could not be read)` rather than "not
+  installed" — three states, on purpose, so a locked or half-edited file
+  never sends you to reinstall a working hook. Do not install over it;
+  ask the operator to fix the file.
+- **The install record disagrees with settings.json.** Normal, and not
+  an error either way. The file decides; the record is only a date.
+  Never report installed-ness from `monitor.load_marker()`.
 - **Leftover `~/.config/clu/monitor.json`.** Inert in either schema —
-  nothing reads it. `clu install-hook` writes the marker rows and carries
-  no field out of the file. No operator action needed; the quarantine
+  nothing reads it. No operator action needed; the quarantine
   recipe in `docs/operations.md` moves it aside.

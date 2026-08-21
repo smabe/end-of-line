@@ -1,14 +1,16 @@
-"""Tests for `clu install-hook` / `clu uninstall-hook` — register the
-UserPromptSubmit hook script in `~/.claude/settings.json`.
+"""Tests for `clu install-hook` / `clu uninstall-hook` — register clu's
+hook scripts in `~/.claude/settings.json`.
 
 Settings.json format detection: the operator's machine may already have
 hook entries in either nested-array `{matcher?, hooks: [{type, command,
 timeout?}]}` shape or flat-array `{type, command}` shape. Install must
 detect and preserve whichever style is already present.
 
-Idempotency contract: install detects an existing entry by absolute
-hook_path match (the path baked into the entry's `command`), not by
-fuzzy name match. Re-running install is a no-op.
+Idempotency contract: install detects an existing entry by the hook
+script's BASENAME, not its absolute path. Absolute-path matching is why a
+clu reinstalled into a new venv appended a duplicate entry beside the one
+already working, and why uninstall then orphaned the old one. Re-running
+install is a no-op; re-running it from a NEW path is also a no-op.
 """
 
 from __future__ import annotations
@@ -81,19 +83,21 @@ class FreshInstallTests(InstallHookTestBase):
         self.assertIn("settings_json_path", m)
         self.assertTrue(m["hook_installed_at"].endswith("Z"))
 
-    def test_marker_crosses_a_process_boundary(self) -> None:
-        # The marker's whole job is to be read by a LATER invocation — the CLI
-        # hint, `/clu-monitor`'s short-circuit. In-process assertions would
-        # pass against a value cached in this interpreter, so this one asks a
-        # fresh python, exactly the way the next `clu` command will.
+    def test_the_answer_crosses_a_process_boundary(self) -> None:
+        # The predicate's whole job is to be read by a LATER invocation — the
+        # CLI hint, `/clu-monitor`'s short-circuit. In-process assertions
+        # would pass against a value cached in this interpreter, so this one
+        # asks a fresh python, exactly the way the next `clu` command will.
+        # It reads settings.json now rather than the marker, so removing the
+        # ENTRY is what has to flip the answer.
         rc, _, err = self._run_install()
         self.assertEqual(rc, int(ExitCode.OK), msg=err)
-        self.assertEqual(self._is_scheduled_in_a_fresh_process(), "True")
+        self.assertEqual(self._hook_state_in_a_fresh_process(), "PRESENT")
 
-        monitor.clear_marker()
-        self.assertEqual(self._is_scheduled_in_a_fresh_process(), "False")
+        self.settings.write_text(json.dumps({"hooks": {}}))
+        self.assertEqual(self._hook_state_in_a_fresh_process(), "ABSENT")
 
-    def _is_scheduled_in_a_fresh_process(self) -> str:
+    def _hook_state_in_a_fresh_process(self) -> str:
         env = dict(os.environ)
         env["PYTHONPATH"] = (
             str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", "")
@@ -102,7 +106,8 @@ class FreshInstallTests(InstallHookTestBase):
             [
                 sys.executable,
                 "-c",
-                "from end_of_line import monitor; print(monitor.is_scheduled())",
+                "from end_of_line import monitor; "
+                "print(monitor.hook_state(monitor.Surface.INBOX).name)",
             ],
             capture_output=True,
             text=True,
@@ -246,27 +251,54 @@ class UninstallTests(InstallHookTestBase):
         their_cmd = remaining[0]["hooks"][0]["command"]
         self.assertEqual(their_cmd, "echo theirs")
 
-    def test_uninstall_clears_marker(self) -> None:
+    def test_uninstall_clears_the_install_record(self) -> None:
         rc, _, _ = self._run_install()
         self.assertEqual(rc, int(ExitCode.OK))
-        self.assertTrue(monitor.is_scheduled())
+        self.assertIsNotNone(monitor.load_marker())
         rc, _, _ = self._run_uninstall()
         self.assertEqual(rc, int(ExitCode.OK))
-        self.assertFalse(monitor.is_scheduled())
+        self.assertIsNone(monitor.load_marker())
 
-    def test_uninstall_survives_a_marker_it_cannot_clear(self) -> None:
+    def test_uninstall_survives_a_record_it_cannot_clear(self) -> None:
         # Clearing used to be an unlink that could not realistically fail. The
-        # marker now lives in the host database, and the hook entry is already
+        # record now lives in the host database, and the hook entry is already
         # gone from settings.json by the time it is cleared — so a raise here
         # would leave a half-finished uninstall reported as a traceback.
         rc, _, _ = self._run_install()
         self.assertEqual(rc, int(ExitCode.OK))
-        with mock.patch.object(monitor, "clear_marker", side_effect=db.DbBusy("host db busy")):
+        with mock.patch.object(
+            monitor, "clear_surface_marker", side_effect=db.DbBusy("host db busy")
+        ):
             rc, _, err = self._run_uninstall()
         self.assertEqual(rc, int(ExitCode.OK))
-        self.assertIn("monitor marker could not be cleared", err)
+        self.assertIn("install record could not be cleared", err)
         # The hook entry itself is gone — the half that matters succeeded.
         self.assertNotIn("clu_inbox_surface", self.settings.read_text())
+
+    def test_uninstall_removes_an_entry_left_by_a_clu_that_has_since_moved(self) -> None:
+        # Absolute-path matching orphaned exactly this entry: install from a
+        # new venv appended a second one, and uninstall then removed only the
+        # new one, leaving a dead hook firing on every prompt.
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"type": "command", "command": "/old/py -u /old/clu_inbox_surface.py"}
+                        ],
+                        "SessionStart": [
+                            {"type": "command", "command": "/old/py -u /old/clu_session_start.py"}
+                        ],
+                    }
+                }
+            )
+        )
+        rc, out, _ = self._run_uninstall()
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertNotIn("clu_inbox_surface", self.settings.read_text())
+        self.assertNotIn("clu_session_start", self.settings.read_text())
+        self.assertNotIn("No clu hooks present", out)
 
     def test_uninstall_idempotent_when_absent(self) -> None:
         # No settings.json, no marker.
@@ -294,6 +326,187 @@ class UninstallTests(InstallHookTestBase):
             data["hooks"]["PreToolUse"][0]["command"],
             "echo pre",
         )
+
+class BasenameRecognitionTests(InstallHookTestBase):
+    """A clu that moved must recognise its own hook, not duplicate it.
+
+    Absolute-path matching is why a reinstall into a new venv appended a
+    second entry beside a working one; both then fired on every event, and
+    uninstall (also path-matched) orphaned the older one.
+    """
+
+    def _seed(self, hooks: dict) -> None:
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text(json.dumps({"hooks": hooks}, indent=2))
+
+    def _ss_entries(self) -> list:
+        data = json.loads(self.settings.read_text())
+        return data.get("hooks", {}).get("SessionStart", [])
+
+    def _install(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["install-hook", *args])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_install_recognises_the_same_hook_at_a_different_path(self) -> None:
+        self._seed(
+            {
+                "SessionStart": [
+                    {"type": "command", "command": "/old/venv/py -u /old/co/clu_session_start.py"}
+                ]
+            }
+        )
+        rc, out, err = self._install()
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertEqual(len(self._ss_entries()), 1)
+        self.assertIn("already installed", out)
+
+    def test_the_already_installed_message_names_the_path_actually_installed(self) -> None:
+        # Printing clu's own resolved path would assert something false —
+        # the entry that exists points somewhere else.
+        self._seed(
+            {
+                "SessionStart": [
+                    {"type": "command", "command": "/old/venv/py -u /old/co/clu_session_start.py"}
+                ]
+            }
+        )
+        _, out, _ = self._install()
+        self.assertIn("/old/co/clu_session_start.py", out)
+
+    def test_install_does_not_rewrite_the_entry_it_recognises(self) -> None:
+        # Recognise, do not repoint: settings.json is the operator's file and
+        # the path in it still works.
+        self._seed(
+            {
+                "SessionStart": [
+                    {"type": "command", "command": "/old/venv/py -u /old/co/clu_session_start.py"}
+                ]
+            }
+        )
+        before = self.settings.read_text()
+        self._install()
+        self.assertEqual(self.settings.read_text(), before)
+
+    def test_install_dedupes_entries_a_previous_install_left(self) -> None:
+        self._seed(
+            {
+                "SessionStart": [
+                    {"type": "command", "command": "/a/py -u /a/clu_session_start.py"},
+                    {"type": "command", "command": "/b/py -u /b/clu_session_start.py"},
+                    {"type": "command", "command": "/c/py -u /c/clu_session_start.py"},
+                ]
+            }
+        )
+        rc, out, err = self._install()
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        entries = self._ss_entries()
+        self.assertEqual(len(entries), 1)
+        # The FIRST one survives — the oldest install, the one whose date the
+        # marker records.
+        self.assertIn("/a/clu_session_start.py", entries[0]["command"])
+        self.assertIn("removed 2 duplicate entries", out)
+
+    def test_deduping_leaves_the_operators_own_entries_alone(self) -> None:
+        # settings.json is theirs. Pruning clu's leftovers is defensible;
+        # touching anything else is not.
+        self._seed(
+            {
+                "SessionStart": [
+                    {"type": "command", "command": "echo theirs"},
+                    {"type": "command", "command": "/a/py -u /a/clu_session_start.py"},
+                    {"type": "command", "command": "/b/py -u /b/clu_session_start.py"},
+                    {"type": "command", "command": "echo also theirs"},
+                ]
+            }
+        )
+        self._install()
+        commands = [e["command"] for e in self._ss_entries()]
+        self.assertEqual(
+            commands,
+            ["echo theirs", "/a/py -u /a/clu_session_start.py", "echo also theirs"],
+        )
+
+    def test_installing_twice_from_two_paths_leaves_one_entry(self) -> None:
+        # The end-to-end shape of the bug: install, move clu, install again.
+        self._install()
+        entry = self._ss_entries()[0]
+        command = entry.get("command") or entry["hooks"][0]["command"]
+        moved = command.replace("clu_session_start.py", "elsewhere/clu_session_start.py")
+        self._seed({"SessionStart": [{"type": "command", "command": moved}]})
+        self._install()
+        self.assertEqual(len(self._ss_entries()), 1)
+
+
+class CheckOnlyTests(InstallHookTestBase):
+    """`clu install-hook --check` — the supported read-only answer."""
+
+    def _check(self) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["install-hook", "--check"])
+        return rc, out.getvalue(), err.getvalue()
+
+    def _install(self, *args: str) -> int:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return main(["install-hook", *args])
+
+    def test_check_reports_not_installed_on_a_clean_machine(self) -> None:
+        rc, out, err = self._check()
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertIn("SessionStart: not installed", out)
+        self.assertIn("UserPromptSubmit: not installed", out)
+
+    def test_check_writes_nothing(self) -> None:
+        self.assertFalse(self.settings.exists())
+        self._check()
+        self.assertFalse(self.settings.exists())
+        self.assertIsNone(monitor.load_marker())
+
+    def test_check_reports_installed_after_an_install(self) -> None:
+        self.assertEqual(self._install(), int(ExitCode.OK))
+        _, out, _ = self._check()
+        self.assertIn("SessionStart: installed", out)
+        self.assertIn("UserPromptSubmit: not installed", out)
+        self.assertIn("recorded", out)
+
+    def test_check_reports_installed_with_no_install_record_at_all(self) -> None:
+        # THE live divergence: the entry is in settings.json and the monitor
+        # table is empty. The answer comes from the file.
+        self.assertEqual(self._install(), int(ExitCode.OK))
+        monitor.clear_marker()
+        _, out, _ = self._check()
+        self.assertIn("SessionStart: installed", out)
+        self.assertNotIn("recorded", out)
+
+    def test_check_reports_not_installed_when_only_a_record_survives(self) -> None:
+        # The reverse divergence: the operator hand-removed the entry.
+        self.assertEqual(self._install(), int(ExitCode.OK))
+        self.settings.write_text(json.dumps({"hooks": {}}))
+        _, out, _ = self._check()
+        self.assertIn("SessionStart: not installed", out)
+
+    def test_check_says_unknown_rather_than_not_installed_on_a_bad_file(self) -> None:
+        # SAFE DIRECTION: "cannot tell" must never be reported as "not
+        # installed" — that is the answer that sends `/clu-monitor` off to
+        # install a hook that is already there.
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text("not json {{{")
+        rc, out, err = self._check()
+        self.assertEqual(rc, int(ExitCode.OK), msg=err)
+        self.assertIn("SessionStart: unknown", out)
+        self.assertNotIn("not installed", out)
+
+    def test_check_does_not_refuse_on_a_malformed_file(self) -> None:
+        # The INSTALL path refuses (it would have to guess how to repair);
+        # a read-only report has nothing to repair and must stay usable.
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text("not json {{{")
+        rc, _, _ = self._check()
+        self.assertEqual(rc, int(ExitCode.OK))
+        self.assertEqual(self.settings.read_text(), "not json {{{")
+
 
 class DefaultSurfaceTests(InstallHookTestBase):
     """The inbox surface is retired: `install-hook` arms the operator

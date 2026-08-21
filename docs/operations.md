@@ -1571,18 +1571,39 @@ Settings: /Users/you/.claude/settings.json
 ```
 
 Account-wide, not per-project — one hook covers every clu-managed plan
-on the host. The marker rows in the host database record the install so
-re-running `/clu-monitor` is idempotent.
+on the host. Re-running `/clu-monitor` is idempotent because the install
+looks for its own entry in `settings.json` first, matching on the hook
+script's basename — so a clu that has since moved (a reinstall, a new
+venv, a second checkout) is recognised rather than duplicated.
 
-Under the hood, `/clu-monitor` shells out to `clu install-hook`. You
-can run that directly from a TTY if you want to skip the skill (the
-CLI refuses non-TTY contexts to prevent worker subprocesses from
-silently modifying the user's settings.json).
+Under the hood, `/clu-monitor` shells out to `clu install-hook`. You can
+run that directly if you want to skip the skill; it works in a non-TTY
+context too, which is what lets Claude Code's Bash tool run it on your
+behalf.
 
 ### Status, reset, uninstall
 
 ```bash
-# Check installed
+# Check installed — read-only, writes nothing
+$ clu install-hook --check
+Settings: /Users/you/.claude/settings.json
+SessionStart: installed (recorded 2026-08-21T03:00:00Z)
+UserPromptSubmit: not installed
+```
+
+The answer comes from `~/.claude/settings.json`, which is what Claude Code
+reads and therefore what decides whether the hook fires. Three answers are
+possible per hook: `installed`, `not installed`, and `unknown
+(settings.json could not be read)` — a locked or malformed file is never
+reported as "not installed", because that is the answer that sends you off
+to reinstall something already working.
+
+The `recorded` timestamp comes from clu's own install record in the host
+database. It says when clu last installed the hook, not whether it is
+installed now — an install that predates a hand-edit still shows a date.
+
+```bash
+# The raw install record (debug)
 $ python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
 {'schema_version': 2, 'session_start_installed_at': '2026-08-21T03:00:00Z',
  'session_start_hook_path': '/Users/.../end_of_line/hooks/clu_session_start.py',
@@ -1593,10 +1614,14 @@ $ python3 -c "from end_of_line import monitor; print(monitor.load_marker())"
 $ python3 -c "from end_of_line import inbox; print(inbox.read_unprocessed())"
 
 # Full uninstall
-$ clu uninstall-hook   # removes the hook entry from settings.json AND
-                       # clears the marker rows. It reports rather than
-                       # crashes if the marker cannot be cleared.
+$ clu uninstall-hook   # removes clu's hook entries from settings.json AND
+                       # drops the install record for every hook the file no
+                       # longer installs. It reports rather than crashes if
+                       # a record cannot be cleared.
 ```
+
+Nothing needs "resetting" after you hand-edit `settings.json`: the next
+`clu` command derives its answer from the file you just edited.
 
 To discard pending inbox events, mark them processed rather than deleting a
 directory:
@@ -1628,9 +1653,9 @@ NOT inbox writes.
 
 A `~/.config/clu/monitor.json` from before the marker moved into the host
 database is **inert** in either shape — v1 (the broken `/schedule`-based
-install from #19) or v2 (the hook install). Nothing reads it, so a host
-carrying one reads as un-monitored, the CLI tip fires, and `/clu-monitor`
-reinstalls cleanly. Nothing is migrated out of it; the quarantine sweep
+install from #19) or v2 (the hook install). Nothing reads it: whether the
+hook is installed is read out of `~/.claude/settings.json`, and a leftover
+file changes that answer not at all. Nothing is migrated out of it; the quarantine sweep
 below moves it aside. If you previously scheduled a routine manually,
 delete it via `/schedule delete <id>` first.
 
@@ -1669,10 +1694,23 @@ If Claude didn't see the event, check:
 ### CLI tips
 
 `clu init` and `clu queue add` print a one-line tip recommending
-`/clu-monitor` when the marker is absent. The tip is suppressed when:
+`/clu-monitor` when the `SessionStart` dashboard hook is missing from
+`~/.claude/settings.json`. Those two commands only — it is not a
+per-invocation nag. The tip is suppressed when:
 
-- Monitoring is already installed (v2 marker present), OR
+- The hook IS in `settings.json` (matched by script basename, so a clu
+  that moved still counts), OR
+- clu cannot read `settings.json` at all — "cannot tell" is not "not
+  installed", and nagging an operator whose hook works is exactly the
+  false assertion this replaced, OR
+- The opt-in `--inbox` surface is what is installed and the dashboard is
+  not: the two hooks are asked about separately, OR
 - Output is not a TTY (workers see no tip — keeps log files clean)
+
+The install record in the host database does not enter into it. It used
+to, and both directions of drift were bugs: an entry present with no
+record nagged forever, and a record surviving a hand-edited
+`settings.json` kept clu quiet about a hook that was not firing.
 
 ### Project CLAUDE.md integration
 
@@ -1964,7 +2002,18 @@ raised *mid-session* still arrives only as a `phase_blocked` line on the
 live Monitor (no options); run `clu blockers list` to see its options,
 or answer by id once you have them.
 
-The marker records both fields when both hooks are installed:
+The two hooks are reported separately, because they have separate
+lifecycles — the dashboard installs by default, the inbox only under
+`--inbox`:
+
+```bash
+$ clu install-hook --check
+Settings: /Users/you/.claude/settings.json
+SessionStart: installed (recorded 2026-08-21T03:00:00Z)
+UserPromptSubmit: installed (recorded 2026-08-21T03:00:00Z)
+```
+
+The install record carries both surfaces' fields when both are installed:
 
 ```bash
 $ python3 -c "from end_of_line import monitor; print(monitor.load_marker())"

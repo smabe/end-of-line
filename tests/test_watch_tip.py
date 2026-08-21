@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -39,9 +40,23 @@ class WatchTipTestCase(unittest.TestCase):
         isolate_monitor_marker(self, self.tmp_path)
         self.project = _make_project(self.tmp_path / "proj")
         _write_plan(self.project, "foo")
-        # Mark monitor as scheduled so the monitor tip stays silent in most
-        # tests — we only want to exercise the watch tip behaviour.
-        monitor.record_hook_installed("/abs/hook.py", "/home/x/.claude/settings.json")
+        # Put the dashboard hook in the isolated HOME's settings.json so the
+        # monitor tip stays silent in most tests — we only want to exercise
+        # the watch tip behaviour. That file, not the install marker, is what
+        # the tip reads.
+        settings = Path.home() / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [
+                            {"type": "command", "command": "py /a/clu_session_start.py"}
+                        ]
+                    }
+                }
+            )
+        )
         # Register the project so queue-add commands can find it.
         registry.register(self.project, "foo")
 
@@ -110,7 +125,10 @@ class WatchTipTestCase(unittest.TestCase):
 
     def test_existing_monitor_tip_still_prints(self) -> None:
         """Both watch + monitor tips coexist; monitor tip behaviour unchanged."""
-        with mock.patch("end_of_line.monitor.is_scheduled", return_value=False):
+        with mock.patch(
+            "end_of_line.monitor.hook_state",
+            return_value=monitor.HookState.ABSENT,
+        ):
             rc, out = self._run(
                 "init",
                 "--project",

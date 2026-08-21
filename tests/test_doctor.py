@@ -626,6 +626,48 @@ class QuietHoursCoverageTests(unittest.TestCase):
         self._install_inbox_hook()
         self.assertNotIn("quiet hours", self._run().lower())
 
+    def test_quiet_hours_with_an_unreadable_settings_json_warns(self) -> None:
+        # SAFE DIRECTION, and the OPPOSITE of the /clu-monitor tip's: an
+        # unreadable settings.json warns here. Being wrong costs the operator
+        # one line of doctor output; being silently wrong costs them a
+        # blocker nobody ever sees.
+        self._write_cfg(["22:00", "08:00"])
+        self.settings.write_text("not json {{{")
+        self.assertIn("quiet hours", self._run().lower())
+
+    def test_quiet_hours_with_the_inbox_hook_at_another_path_is_quiet(self) -> None:
+        # Basename matching: a clu that moved still has a working hook.
+        self._write_cfg(["22:00", "08:00"])
+        self.settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"type": "command", "command": "/old/py -u /old/clu_inbox_surface.py"}
+                        ]
+                    }
+                }
+            )
+        )
+        self.assertNotIn("quiet hours", self._run().lower())
+
+    def test_quiet_hours_with_only_the_dashboard_hook_warns(self) -> None:
+        # Per-surface: the SessionStart dashboard is not the inbox catch-up
+        # surface, and this warning is specifically about the latter.
+        self._write_cfg(["22:00", "08:00"])
+        self.settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [
+                            {"type": "command", "command": "py /a/clu_session_start.py"}
+                        ]
+                    }
+                }
+            )
+        )
+        self.assertIn("quiet hours", self._run().lower())
+
     def test_no_quiet_hours_is_quiet(self) -> None:
         self._write_cfg(None)
         self.assertNotIn("quiet hours", self._run().lower())

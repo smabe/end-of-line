@@ -20,7 +20,7 @@
 - If it fails: the span leaks or the notice proves too noisy → keep p1's inference as the sole path and drop the declaration; p1 and p2 already stand alone
 - Shard: `plans/false-alarms-p3.md`
 
-**Phase p4 — hook-installed predicate: derive it from the file that decides it**
+**Phase p4 — hook-installed predicate: derive it from the file that decides it**  — ✅ SHIPPED
 - Enters when: p3 committed (both touch `cli.py`; serialized to avoid a conflict)
 - Done signal: on THIS machine — hook present in `settings.json`, `monitor` table empty — `clu init` prints no install tip and the `/clu-monitor` check reports installed
 - If it fails: no gate — fix-forward
@@ -235,7 +235,54 @@ removed a bound. p3 added `worker_quiet_span_ceiling_minutes` and got it right t
 zero is the SHORTEST-silence setting, not an unbounded one, mutation-checked against the p2-shaped
 mistake. The criterion carried onto p4 stays, though p4 is expected to satisfy it vacuously.
 
-NEXT phase: **p4** — read `plans/false-alarms-p4.md` FIRST.
+**p4 SHIPPED 2026-08-21** — installed-ness is derived from the file that decides it.
+Full gate: 2491/2491 tests, basedpyright 0 errors.
+
+**Spec check at p4** — 1/1 task evidenced · none unclaimed · +8 files added at execution
+(`docs/architecture.md`, `docs/_outline.md`, `skills_manifest.json`, and five test files that
+called or asserted through the deleted `is_scheduled`), +1 surface added at execution and
+operator-confirmed at the review gate (`clu install-hook --check`).
+**One interface DEPARTURE, recorded rather than rewritten:** the `Produces:` line places the shared
+basename matcher in `cli.py`, and that address is structurally impossible — `cli.py:51` imports
+`monitor`, and `hook_state` must do the matching, so the reverse import is a cycle (verified at
+review by reading both modules). The substance approved — ONE matcher, shared, single source of
+truth — shipped exactly; only its module differs. The plan named an address that cannot hold it.
+
+**Review at p4 — no defects found; what was actually checked.** Verified the import-cycle claim
+first-hand. Probed the one real hazard the new predicate introduces: `hook_state` defaults through
+`Path.home()`, which escapes the project's XDG test isolation, so a test that forgot to inject a
+path would read the developer's real `settings.json` and pass or fail by machine. Ran the five
+affected suites twice under opposite host states — a HOME whose settings.json has NO clu hooks, and
+one that has BOTH — and got 141 tests OK identically, so the isolation is real rather than assumed.
+
+**The phase gate was observed live on this machine, with a control.** Real state: `SessionStart`
+present in `~/.claude/settings.json`, `monitor` table empty — the exact divergence #116 describes.
+`clu install-hook --check` reports `SessionStart: installed`, and the tip prints NOTHING under a
+real TTY. Control, same code path with HOME pointed at a directory holding no settings.json: the
+tip fires. So the silence is the predicate answering correctly, not the TTY guard passing for the
+wrong reason.
+
+**Downstream sweep at p4** — no unshipped shards remain; this is the plan's last phase, so the
+shard half of the sweep is complete by exhaustion rather than by inspection.
+code: p4 pinned installed-ness to `settings.json`, which obsoleted the marker-based idempotency
+claims that earlier work had shipped in `monitor.py`'s docstring, `docs/architecture.md`,
+`docs/_outline.md` and a comment in `tests/test_session_start_hook.py` — every one corrected inside
+p4's own commit, which is the guard this question exists to find. The deleted `is_scheduled` had
+seven call sites across five test files; all repointed rather than kept alive.
+
+**Plan-level Done criteria — all met, each verified this session rather than assumed:**
+`python3 -m unittest discover -s tests` green at every phase commit (2394 · 2413 · 2450 · 2491) and
+basedpyright 0 errors. Both issues close: #115 by p3, #116 by p4. All four contradicting comments
+named in Background findings are gone — grepped: the `%cpu` claim survives only in its corrected
+form ("NOT instantaneous"), the `dispatch.py` tree-awareness claim is absent, both falsely-documented
+state helpers are deleted outright, and the subagent-env claim is gone. No `lsof` invocation remains
+anywhere in `end_of_line/`. A cold reader of `docs/architecture.md` and `docs/contract.md` can state
+what the idle watchdog samples, how a worker declares a quiet span, and what decides monitor-hook
+installed-ness. And the standing invariant holds: **both suppressions this plan added expire on
+their own clock, and each has a test proving the EXPIRED case still alerts** — p2's bounded activity
+marker and p3's quiet span.
+
+**The plan is complete.** Ready for `/plan ship false-alarms`.
 
 The decisions binding p4, pulled inline so a compaction that drops the shard still leaves them visible:
 1. **The marker row is a write-only cache of a fact that lives in `~/.claude/settings.json`** — the file is the source of truth, and the predicate is derived from it rather than from the cache. Verified live on this machine at the p3 sweep: hook present, marker table empty.
@@ -393,7 +440,7 @@ The three decisions that bound p1 (shipped — kept as the record of why it did 
 - `end_of_line/config.py` — P1, P3 — P1 four idle thresholds mirroring the stuck-tool pattern; P3 the quiet-span ceiling
 - `end_of_line/plan_store.py` — P1, P2, P3 — P1 drops `lsof` from the tick-transaction comment (added at execution); P2 window invalidation at the real activity write site; P3 the span write op
 - `end_of_line/cli.py` — P1, P2, P3, P4 — P1 formats the now-float `Descendant` fields in `clu doctor`'s stuck-tool row (added at execution); P2 logs a dropped activity stamp instead of discarding it (no new flag — see p2's locked decisions); P3 adds the `clu quiet-span` worker callback; P4 replaces the hook-installed predicate and its two call sites
-- `end_of_line/monitor.py` — P4 — per-surface predicates derived from `settings.json`; marker demoted to install metadata
+- `end_of_line/monitor.py` — P4 — also gains the shared basename matcher, which could not live in `cli.py` as planned (import cycle); per-surface predicates derived from `settings.json`; marker demoted to install metadata
 - `end_of_line/skills/clu-phase/SKILL.md` — P2, P3 — P2 corrects the false env-inheritance claim at :350 and states the marker's real coverage limit; P3 adds the declare-before-review step and the best-effort operator notice
 - `end_of_line/skills/clu-monitor/SKILL.md` — P4 — the "marker rows are the source of truth" claim is corrected
 - `docs/architecture.md` — P1, P2, P3 — P2 corrects the claim that the activity stamp cannot false-trip a precondition (added at execution); P1 corrects what the watchdog samples (`:50-52`) and drops the stale `lsof` mention (`:191`); P3 adds the span as a suppression condition in the idle band
@@ -401,6 +448,8 @@ The three decisions that bound p1 (shipped — kept as the record of why it did 
 - `docs/operations.md` — P1, P2, P4 — P1 warns that raising `StartInterval` at or past the max sample gap silently disables idle detection (added at review, operator-decided); the activity-hook recipe's coverage limit; the unimplemented `isatty` refusal claim
 - `tests/test_quiet_span.py` — P3 — new: span suppression, expiry, ceiling clamp, token rejection
 - `end_of_line/dispatch.py` — P1 — comment-only: `:296` claims tree-awareness exists "so this doesn't false-fire WORKER_IDLE", which was never true of the socket check and is moot once it is deleted
+- `docs/_outline.md` — P4 — added at execution: its `monitor.py` line named only the marker
+- `tests/test_xdg_guard.py`, `tests/test_monitor_migration.py`, `tests/test_watch_tip.py`, `tests/test_doctor.py`, `tests/test_session_start_hook.py` — P4 — added at execution: all called or asserted through the deleted `is_scheduled`
 - `CLAUDE.md` — P3 — added at review: the token-bearing callback enumeration omitted `quiet-span` and `activity`
 - `end_of_line/skills_manifest.json` — P2, P3 — regenerated whenever a bundled SKILL.md changes
 - `end_of_line/activity_hook.py` — P2 — added at execution: the other entry point that discarded a dropped-stamp return
