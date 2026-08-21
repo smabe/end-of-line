@@ -164,7 +164,7 @@ covers a long tool call; a Bash call SHORTER than that leaves a hole contiguity 
 clear is what covers any-length tool calls. The two read as interchangeable and are not, so p2
 now carries a Done criterion pinning the short-call case.
 
-**p2 SHIPPED 2026-08-21** — the activity marker can no longer silence the idle watchdog forever.
+**p2 SHIPPED 2026-08-21 `8a3c0c2`** — the activity marker can no longer silence the idle watchdog forever.
 Full gate: 2413/2413 tests, basedpyright 0 errors.
 
 **Spec check at p2** — 1/1 task evidenced · interfaces conform · none unclaimed · +6 files added

@@ -19,6 +19,16 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 >
 > 1. **The compare-and-set claim below is half right, and the wrong half is the one to act on.** p2 checked it: `active_tool_started_at` was ALREADY in both watchdogs' CAS sets (`supervisor.py:611` and `:750`), so nothing was owed there. What p2 actually had to add ran the other way — its `op_activity` START became a SECOND writer of `cpu_samples`, so the tick's own sample append needed `require_claim_field("cpu_samples")` or a tick in flight would write the cleared history straight back. **Ask both questions for `quiet_span`:** does the field gate suppression (→ it joins both CAS sets), and does this phase's write CLEAR or overwrite anything another writer also touches (→ that writer needs a precondition).
 > 2. **p2's predicate is the pattern to copy, including its trap.** `activity_marker_suppresses` is read-site bounded with no new writer, exactly as this shard asks for. But its bound is DERIVED from `stuck_tool_threshold_seconds`, and that config value has a documented "0 disables it" meaning — which made the suppression unbounded again and handed back the silence switch. Fixed by falling back to `state.ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS` rather than dropping the bound. `worker_quiet_span_ceiling_minutes` is the same shape of value: decide NOW what `0` means for it, and make the safe direction the one that shortens silence.
+> **Line hints re-anchored at `8a3c0c2` (after p1 and p2 shipped).** Anchor on the SYMBOL; these are secondary:
+> `_emit_worker_idle` → `supervisor.py:655` · `_emit_stuck_tool` → `supervisor.py:546` ·
+> `_CLAIM_OWN_KEYS` / the `flags` split → `plan_store.py:115` and `:558` (the `:558` cite in the
+> Work list below is still exact) · `activity_marker_suppresses` → `state.py:1045` ·
+> `ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS` → `state.py:320`.
+> The two watchdogs' compare-and-set sets are `supervisor.py:611-612` (stuck-tool) and
+> `:765-766` (idle), with the sample precondition at `:733`.
+> Note `cpu_samples` is in `_CLAIM_JSON` (`plan_store.py:114`) — it has its own column, so it is
+> NOT an example of the `flags` catch-all this phase's span write will use.
+>
 > 3. **`op_activity` now writes four fields on a START**, not one — the marker, `cpu_samples`, and the two `worker_idle_notified` fields. If this phase's span write needs to interact with the idle window (it should not — a span suppresses rather than voids), read `plan_store.op_activity` first to see the merge shape `_claim_assignments` gives you.
 
 - `end_of_line/cli.py` — a new token-validated worker callback declaring a quiet span. `--token` required and validated against the live claim, exactly like every other callback; `state.validate_slug` on the phase id before any path join; `ExitCode` for every exit.
