@@ -3,7 +3,7 @@
 import unittest
 
 from end_of_line import state as st
-from end_of_line.watch import project_event_task
+from end_of_line.watch import _TASK_STATUS_MAP, project_event_task
 from tests import must
 
 
@@ -215,7 +215,106 @@ class MsgEscapingTest(unittest.TestCase):
         self.assertIn("\\\\", must(out))
 
 
+class MsgNewlineFramingTest(unittest.TestCase):
+    """A newline in operator text must not break the one-line msg="…" framing.
+
+    `_task_line` interpolates msg raw into `msg="{msg}"`; a raw newline closes
+    the record early and the consumer drops the tail as a non-TASK_* line.
+    """
+
+    def test_a_newline_in_a_question_stays_on_one_line(self):
+        out = must(
+            project_event_task(
+                _evt(
+                    st.EVENT_PHASE_BLOCKED,
+                    phase="design",
+                    blocker_id="blk-1",
+                    question="line one\nline two",
+                ),
+                "my-plan",
+            )
+        )
+        # No raw newline survived into the emitted record.
+        self.assertNotIn("\n", out)
+        # The newline is present as its two-character escape instead.
+        self.assertIn("\\n", out)
+        # msg=" is closed by a matching quote — the record's last char.
+        self.assertTrue(out.endswith('"'))
+
+    def test_a_carriage_return_is_escaped_too(self):
+        out = must(
+            project_event_task(
+                _evt(
+                    st.EVENT_PHASE_BLOCKED,
+                    phase="design",
+                    blocker_id="blk-1",
+                    question="line one\rline two",
+                ),
+                "my-plan",
+            )
+        )
+        self.assertNotIn("\r", out)
+        self.assertIn("\\r", out)
+
+    def test_escaping_survives_a_quote_and_a_newline_together(self):
+        # _escape_msg chains str.replace; a newline emits a backslash, so the
+        # backslash pass must run first or the escape is itself double-escaped.
+        out = must(
+            project_event_task(
+                _evt(
+                    st.EVENT_PHASE_BLOCKED,
+                    phase="design",
+                    blocker_id="blk-1",
+                    question='say "hi"\nthen leave',
+                ),
+                "my-plan",
+            )
+        )
+        self.assertNotIn("\n", out)
+        self.assertIn('\\"', out)
+        self.assertIn("\\n", out)
+        self.assertTrue(out.endswith('"'))
+
+    def test_every_task_status_map_key_emits_exactly_one_line(self):
+        # Iterate the live map so a newly-added key without escaping is a visible
+        # failure, not a silent gap. Newlines go in every operator-text field
+        # _task_msg_for interpolates (question / signature / reason); phase and
+        # blocker_id are validated slugs and never carry a newline.
+        for event_type in _TASK_STATUS_MAP:
+            evt = _evt(
+                event_type,
+                phase="design",
+                blocker_id="blk-1",
+                question="q line\ntwo",
+                signature="sig line\ntwo",
+                reason="reason line\ntwo",
+                attempts=2,
+            )
+            out = project_event_task(evt, "my-plan")
+            self.assertIsNotNone(out, f"{event_type} produced no line")
+            self.assertNotIn("\n", must(out), f"{event_type} leaked a raw newline")
+
+
 class MsgTruncationTest(unittest.TestCase):
+    def test_existing_msg_cap_is_unchanged(self):
+        # The cap is pinned unchanged by the neighbor below on plain input; this
+        # phase must not move it. What IS new is the interaction: _trunc runs on
+        # the raw question (a newline is one char) BEFORE _escape_msg expands it
+        # to two, so a long, newline-bearing question stays both capped and on
+        # one line. Guarding that interaction — not re-duplicating the plain cap.
+        long_q = "X" * 50 + "\n" + "Y" * 100
+        out = must(
+            project_event_task(
+                _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="blk-1", question=long_q),
+                "my-plan",
+            )
+        )
+        self.assertIn("…", out)  # still truncated
+        self.assertNotIn("\n", out)  # still one line
+        self.assertIn("\\n", out)  # the newline survived as its escape
+        msg_content = out.split('msg="', 1)[1].rstrip('"')
+        self.assertLessEqual(len(msg_content), 120)  # loose bound intact, not tightened
+
     def test_long_question_truncated_to_100_chars(self):
         long_q = "X" * 120
         out = project_event_task(

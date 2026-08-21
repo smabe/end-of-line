@@ -315,7 +315,15 @@ _PLAN_SCOPED_EVENTS: frozenset[str] = frozenset(
 
 
 def _escape_msg(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+    # Backslash pass MUST stay first: the \n / \r passes emit backslashes, and a
+    # later backslash pass would double-escape them. Newlines are escaped, not
+    # stripped, so the operator's wording survives on the one-line msg="…" record.
+    return (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
 
 
 def _task_line(
