@@ -3226,7 +3226,7 @@ def _print_stuck_tool_health(
             cmd = d.command if len(d.command) <= 80 else d.command[:79] + "…"
             print(
                 f"  {slug}/{phase}  worker={worker_pid}  pid={d.pid}  "
-                f"elapsed={d.elapsed_seconds}s  cpu={d.cpu_seconds}s  {cmd}"
+                f"elapsed={d.elapsed_seconds:g}s  cpu={d.cpu_seconds:g}s  {cmd}"
             )
     if no_marker_claims:
         print(

@@ -434,16 +434,22 @@ the apply has committed.
   notification fires before the claim is cleared.
 - `_emit_worker_idle(data, config, side_notifies)` — wedge gap-fill:
   fires `EVENT_WORKER_IDLE` once per claim when the worker is PID-alive
-  but doing nothing (no active Bash tool, CPU ≤1% over ≥10 min, no open
-  Anthropic API socket). CPU is sampled across the **whole worker
-  process tree** — `walk_worker_tree(claim.pid)` for the pid set, then
-  ONE `ps -p <pids> -o %cpu=` summed — not `claim.pid` alone, so a
-  worker idling at ~0% while a child (test run, build) burns CPU does
-  not false-fire. Instantaneous %cpu stays the metric
-  (`append_cpu_sample` / `worker_idle_window_satisfied` unchanged);
-  `Descendant.cpu_seconds` is cumulative time and deliberately unused.
-  `ps_output` (the `%cpu=` output), `tree_ps_output` (the walk
-  snapshot), and `lsof_output` are test seams.
+  but doing nothing (no active Bash tool, and the worker's process tree
+  accrued ≤`worker_idle_cpu_delta_threshold_seconds` of processor time
+  across an uninterrupted `worker_idle_window_minutes`). The metric is
+  **cumulative** processor time read as a delta across the window, not
+  instantaneous `%cpu` — `man ps` defines `%cpu` as a decaying average
+  over up to a minute, which a healthy worker waiting on the model sits
+  under anyway. It is summed across the **whole worker process tree**
+  (one `ps -eo pid,ppid,etime,time,command` snapshot: the root's own
+  line plus every `walk_worker_tree` descendant), because `claim.pid`
+  is the PTY shim and the shim only copies bytes. A `ps` that cannot
+  be read, or that the worker pid is missing from, appends NO sample —
+  "cannot judge" is not "measured zero". `tree_ps_output` is the test
+  seam. There is no socket check: `lsof -p <pid> -i` measured 15.29s
+  against its own 1s timeout so it never completed, and idle Claude
+  Code sessions hold the same API sockets as busy ones, so no repaired
+  form could discriminate.
 - `_local_now()` — indirection so tests can pin wall-clock time for
   quiet-hours assertions.
 

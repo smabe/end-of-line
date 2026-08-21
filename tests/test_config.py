@@ -355,3 +355,57 @@ class CoolantFieldTests(_ConfigTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerIdleThresholdTests(_ConfigTestBase):
+    """The four idle-watchdog thresholds, and the zero they must all reject.
+
+    Every one of them is a detector bound, so zero is never "disabled" — it
+    is a predicate that answers before it has evidence. `min_samples` is the
+    sharpest case: `worker_idle_window_satisfied` guards on
+    `len(samples) < min_samples` and then indexes the newest stamp, so a zero
+    minimum lets an empty history reach the index and raise.
+    """
+
+    def test_defaults_are_the_signed_off_values(self) -> None:
+        self._write({})
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.worker_idle_window_minutes, 10.0)
+        self.assertEqual(cfg.worker_idle_max_sample_gap_seconds, 60.0)
+        self.assertEqual(cfg.worker_idle_cpu_delta_threshold_seconds, 1.0)
+        self.assertEqual(cfg.worker_idle_min_samples, 3)
+
+    def test_overrides_are_read(self) -> None:
+        self._write(
+            {
+                "worker_idle_window_minutes": 4.5,
+                "worker_idle_max_sample_gap_seconds": 90,
+                "worker_idle_cpu_delta_threshold_seconds": 0.25,
+                "worker_idle_min_samples": 8,
+            }
+        )
+        cfg = load_project_config(self.root)
+        self.assertEqual(cfg.worker_idle_window_minutes, 4.5)
+        self.assertEqual(cfg.worker_idle_max_sample_gap_seconds, 90.0)
+        self.assertEqual(cfg.worker_idle_cpu_delta_threshold_seconds, 0.25)
+        self.assertEqual(cfg.worker_idle_min_samples, 8)
+
+    def test_every_threshold_rejects_zero_and_negatives(self) -> None:
+        for key in (
+            "worker_idle_window_minutes",
+            "worker_idle_max_sample_gap_seconds",
+            "worker_idle_cpu_delta_threshold_seconds",
+            "worker_idle_min_samples",
+        ):
+            for bad in (0, -1):
+                with self.subTest(key=key, value=bad):
+                    self._write({key: bad})
+                    with self.assertRaises(ConfigError):
+                        load_project_config(self.root)
+
+    def test_min_samples_rejects_bools_and_non_ints(self) -> None:
+        for bad in (True, 2.5, "3"):
+            with self.subTest(value=bad):
+                self._write({"worker_idle_min_samples": bad})
+                with self.assertRaises(ConfigError):
+                    load_project_config(self.root)

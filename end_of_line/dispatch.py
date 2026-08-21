@@ -292,10 +292,10 @@ def dispatch_for_tick(
     # command STRING as one argv element and runs it through `sh -c` itself —
     # so dropping shell=True here preserves command/quoting semantics, and the
     # plan-slug cmdline marker still rides in the shim's argv. The shim becomes
-    # claim.pid (the worker is its child); phase idle-treewalk made the idle
-    # watchdog tree-aware so this doesn't false-fire WORKER_IDLE. Repair
-    # workers stay on the direct shell path below — short-lived, not
-    # wedge-prone. See end_of_line/_pty_spawn_shim.py.
+    # claim.pid and the real worker is its CHILD, so every watchdog that reads
+    # claim.pid must walk the tree to see the worker at all — the shim itself
+    # only copies bytes. Repair workers stay on the direct shell path below —
+    # short-lived, not wedge-prone. See end_of_line/_pty_spawn_shim.py.
     shim_argv = [sys.executable, _PTY_SHIM_PATH, "--", cmd]
     popen_kwargs: dict = dict(
         cwd=cwd,

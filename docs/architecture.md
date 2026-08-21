@@ -48,9 +48,9 @@ wedges mid-stream would otherwise leave a 0-byte log exactly when the
 post-mortem needs it; the shim allocates a pty so output streams into the
 log line-by-line. The shim is the process the supervisor tracks — it becomes
 `claim.pid`, the worker is its descendant — so the watchdog stack (stuck-tool
-tree walk, idle-CPU sum, killpg reapers, cmdline marker) operates on the shim
-pid; the idle watchdog was made tree-aware (phase `idle-treewalk`) precisely
-so the shim's own near-zero CPU doesn't false-fire `WORKER_IDLE`.
+tree walk, cumulative tree-CPU delta, killpg reapers, cmdline marker) operates
+on the shim pid and must walk the tree from it: the shim only copies bytes, so
+its own processor time says nothing about whether the worker is alive.
 
 ## Storage topology
 
@@ -188,7 +188,7 @@ debugging session that asks "why didn't this tick advance?" reduces to
 "which rule fired first?".
 
 **Snapshot, decide, apply.** The tick cannot be one transaction: its decisions
-rest on `ps`, `lsof` and a process-group reap that polls for seconds, and WAL
+rest on `ps` and a process-group reap that polls for seconds, and WAL
 allows exactly one writer — a transaction held across that work would starve
 every worker callback in the project. So the tick takes ONE snapshot, walks the
 chain holding **no transaction at all**, accumulates its changes in a delta,

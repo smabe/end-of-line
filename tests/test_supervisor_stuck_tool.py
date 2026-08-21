@@ -38,12 +38,15 @@ class ParseDurationTestCase(unittest.TestCase):
         # 2 days, 1 hour, 30 min, 0 sec = 2*86400 + 3600 + 1800 = 178200
         self.assertEqual(_parse_duration("2-01:30:00"), 178200)
 
-    def test_fractional_seconds_truncated(self) -> None:
-        # CPU time format `0:00.05` should round down to 0 sec.
-        self.assertEqual(_parse_duration("0:00.05"), 0)
+    def test_fractional_seconds_preserved(self) -> None:
+        # CPU time format `0:00.05` keeps its centiseconds: the idle
+        # watchdog separates a waiting worker from a dormant one by
+        # sub-second movement in cumulative processor time, so truncating
+        # here would erase the whole signal.
+        self.assertAlmostEqual(_parse_duration("0:00.05"), 0.05)
 
     def test_fractional_with_minutes(self) -> None:
-        self.assertEqual(_parse_duration("1:23.45"), 83)
+        self.assertAlmostEqual(_parse_duration("1:23.45"), 83.45)
 
     def test_empty_returns_zero(self) -> None:
         self.assertEqual(_parse_duration(""), 0)
@@ -82,7 +85,7 @@ class ParsePsOutputTestCase(unittest.TestCase):
         worker = next(p for p in procs if p.pid == 78233)
         self.assertEqual(worker.parent_pid, 1)
         self.assertEqual(worker.elapsed_seconds, 12 * 60 + 28)
-        self.assertEqual(worker.cpu_seconds, 30)
+        self.assertAlmostEqual(worker.cpu_seconds, 30.5)
         self.assertIn("claude --print", worker.command)
 
     def test_ignores_malformed_lines(self) -> None:

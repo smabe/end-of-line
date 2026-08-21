@@ -60,6 +60,16 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 
 - `tests/test_state.py` — predicate cases: contiguity rejection, recency rejection, cumulative-delta pass/fail, age-based retention.
 
+- `end_of_line/notify.py` — **added at execution.** `render_worker_idle` asserted "no open Anthropic socket, CPU ≤1% across the window" in the notification itself; deleting the socket check makes the operator-facing warning state a check it never ran, which is the exact defect this plan exists to remove. Wording confirmed by the operator at the p1 review gate. The `lsof` investigate hint below it stays — that is advice for a human, not a clu invocation.
+
+- `end_of_line/cli.py` — **added at execution.** `clu doctor`'s stuck-tool row interpolates `Descendant` fields directly, so the `int → float` change would have printed `elapsed=780.0s`. One line, `:g` formatting.
+
+- `tests/test_supervisor_stuck_tool.py` — **added at execution.** Three tests asserted the exact truncation this phase deletes; they fail by construction against the new parse.
+
+- `tests/test_config.py` — **added at review.** The four new thresholds had no load-path coverage at all, which is how a validator mismatch reached the diff (see the review finding below).
+
+- `docs/operations.md` — **added at review.** The contiguity rule silently disables the watchdog at tick cadences at or above the max sample gap; the caution sits beside the `StartInterval` guidance that sets that cadence.
+
 - Consumes: `walk_worker_tree(root_pid: int, *, ps_output: str | None) -> list[Descendant]`; `Descendant.cpu_seconds`; `st.append_cpu_sample(claim: dict, cpu: float, now: datetime) -> None`; `_record_claim(delta, claim, field)`
 - Produces: `state.worker_idle_window_satisfied(claim, now, *, min_samples: int, window_min: float, max_sample_gap: float, cpu_delta_threshold: float) -> bool`; `supervisor._parse_duration(raw: str) -> float`; `Descendant.cpu_seconds: float`
 
@@ -74,6 +84,31 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 - **Rationale:** the cap is not a memory bound, it is an accidental calibration. 20 samples at 30s spans 570s against a 600s window, so the predicate is unsatisfiable under continuous sampling; at a faster cadence the cap would evict before the span could ever be reached, and at a slower one `min_samples` becomes the real gate. Age-based retention makes correctness independent of tick rate, which is the only property that survives an operator changing `StartInterval`.
 - **Alternatives considered:** cap = 21 (the exact arithmetic minimum) or 22 with jitter margin — rejected: it re-derives a magic number from a cadence the operator can change, and leaves the same class of bug one config edit away.
 - **Evidence:** `state.py:301-304`, `state.py:942-965`, `supervisor.py:703,710`, `docs/operations.md:169`.
+
+### Addendum: every surviving `lsof` reference, grepped at resume (2026-08-21, HEAD `ca84108`)  *(status: active)*
+- The Work list names the `lsof` branch itself. `grep -rn lsof end_of_line/ docs/ tests/` at resume found five more sites the list does not name, and the ones marked EDIT are required by the described work — edit them and report, per the worker brief:
+  - **EDIT** `end_of_line/supervisor.py:5` — module docstring cites "`lsof` with 1s" as one of the slow probes the tick cannot hold a lock across. Drop the `lsof` item; `ps` and the reap keep the sentence true.
+  - **EDIT** `end_of_line/plan_store.py:1478` — the same sentence, duplicated as a comment. Same fix.
+  - **EDIT** `docs/reference.md:446` — documents `lsof_output` as a test seam; the seam is being deleted.
+  - **EDIT** `tests/test_supervisor_tick_restructure.py:369` — passes `lsof_output="nothing"` into `_emit_worker_idle`; it will not compile against the new signature. Its `:7` and `:117` docstrings also describe an `lsof` probe seam.
+  - **KEEP** `end_of_line/notify.py:238` — this is operator-facing advice in a notification ("`lsof -p {pid} -i` for sockets"), telling a human how to investigate. It is not a clu invocation and stays valid.
+- The Done criterion "no `lsof` invocation remains anywhere in `end_of_line/`" is satisfied by deleting the branch alone; the sites above are stale prose the same change falsifies.
+
+### Finding: the Work list under-predicted by five files, and two of them are a planning defect  *(status: active)*
+- **What the plan should have seen.** Changing `_parse_duration`'s return type to float was in the Work list; every *rendering* surface that formats a `Descendant` field was not. The plan traced the type change to its one comparison consumer (`_emit_stuck_tool`) and stopped there, so `cli.py`'s doctor row and the three truncation assertions in `tests/test_supervisor_stuck_tool.py` were invisible to it. Likewise, deleting the socket check was scoped as a code deletion without asking which operator-facing STRINGS describe that check — `notify.py` was the answer.
+- **Rule for the remaining phases:** when a phase changes a type or deletes a mechanism, grep for the field NAME and for the mechanism's vocabulary across rendering and notification surfaces, not only across call sites that compute with it.
+
+### Finding: review caught a crash the full green gate did not  *(status: active)*
+- `worker_idle_min_samples` was loaded through `_validate_non_negative_int`, which accepts 0, while its three sibling float thresholds used `_validate_positive_float`, which rejects 0 with an explicit rationale. With a zero minimum, `worker_idle_window_satisfied`'s `len(samples) < min_samples` guard passes on an empty history and the next line indexes `stamps[-1]` — **probed: `IndexError: list index out of range`**, which crashes the supervisor tick.
+- Reachable in production: the loader accepts `worker_idle_min_samples: 0` from `.orchestrator.json` (probed), and `cpu_samples` is empty on any tick where `ps` cannot be read or the worker pid is absent from the snapshot.
+- **Fixed in the same commit:** added `_validate_positive_int` and rewired the threshold to it; made the predicate refuse an empty history on its own terms rather than via a caller-supplied minimum; added load-path tests for all four thresholds and an empty-history predicate test.
+- **Why it survived 2389 green tests:** the new thresholds had no config-load coverage whatsoever, so nothing exercised the validator that was wrong. A threshold added to `ProjectConfig` needs a load test, not only a use-site test.
+
+### Finding: the contiguity rule is coupled to the tick cadence, and fails silently  *(status: active — operator decision recorded)*
+- The contiguity rule rejects any window with an adjacent gap wider than `worker_idle_max_sample_gap_seconds` (60.0). At the documented 30s `StartInterval` default that is 2× margin. At 60s — this project's own pre-tick-on-action default (`docs/operations.md`) — gaps sit exactly on the ceiling and ordinary cron jitter pushes them over, so the window is never satisfied and the watchdog goes permanently deaf. Past 60s it never fires at all.
+- The failure is indistinguishable from "no worker was ever idle", which is the silent-wedge outcome the master's plan-level Done criteria name as the one way this work could end up worse than what it replaces.
+- **Operator decision (p1 review gate): document it, do not add a detector.** A caution now sits beside the `StartInterval` guidance in `docs/operations.md`. Changing the threshold was not on the table — it is signed off, so a retune would be an approach switch. A `clu doctor` check was declined as behaviour this phase was not scoped for.
+- This machine is at `StartInterval 30` (verified), so nothing is broken today; the trap is latent.
 
 ## Failure modes to anticipate
 

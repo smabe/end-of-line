@@ -2,7 +2,7 @@
 
 ## Phase map  *(the arc and the gates — work detail lives in each shard)*
 
-**Phase p1 — idle watchdog: replace the signal, fix the window**  *(gate: the detector must become capable of a TRUE positive)*
+**Phase p1 — idle watchdog: replace the signal, fix the window**  *(gate: the detector must become capable of a TRUE positive)*  — ✅ SHIPPED
 - Enters when: start here
 - Done signal: a busy worker driven through 20 real ticks emits no `worker_idle`; a dormant one does — both proven by observed event logs, not by hand-seeded samples
 - If it fails: the cumulative-CPU signal doesn't separate the cases in practice → stop, return to research with the measured overlap as the sharper question. Do NOT tune thresholds to force a pass.
@@ -125,9 +125,56 @@ probes run in the drafting session (the hook-event probe, the subagent-token pro
 measurements). Their verbatim output is recorded in Diagnosis and Background findings rather
 than being asserted, so they are closed by evidence in the file, not left open.
 
-NEXT phase: **p1** — read `plans/false-alarms-p1.md` FIRST.
+### Execution record
 
-The three decisions binding p1, pulled inline so a compaction that drops the shard still leaves them visible:
+**p1 SHIPPED 2026-08-21** — gate met with margin. The phase's branch-on-failure was the real
+question (does cumulative tree CPU separate a wedge from a healthy worker?), and it does: driven
+through 25 real ticks, a dormant tree moved 0.0000s while the LIGHTEST live rate measured
+(0.15s/tick) moved 3.3000s against a 1.0s threshold — 3.3× clear. Full gate: 2394/2394 tests,
+basedpyright 0 errors.
+
+**Spec check at p1** — 1/1 task evidenced · interfaces conform · none unclaimed · +5 files added
+at execution (`notify.py`, `cli.py`, `docs/reference.md`, `tests/test_supervisor_stuck_tool.py`,
+`tests/test_supervisor_tick_restructure.py`), +2 at review (`tests/test_config.py`,
+`docs/operations.md`), all re-evidenced. One interface note: `append_cpu_sample` gained a
+required keyword-only `retain_seconds` — it appears on p1's `Consumes:` line in its pre-change
+form, but p1's own Work section is what authorised changing its retention rule, so the shipped
+signature implements the approved text rather than departing from it. The `Produces:` line —
+`worker_idle_window_satisfied` with its four keyword thresholds, which p2 and p3 both consume —
+shipped exactly as approved.
+
+**Review at p1 — 2 findings, both confirmed by probe, both applied in the same commit.**
+(1) `worker_idle_min_samples` was wired to the non-negative validator, so `0` loaded cleanly and
+then crashed the tick with `IndexError` on an empty sample history — fixed with a positive-int
+validator plus an empty-history guard in the predicate, and the load-path tests that were missing
+entirely. (2) The contiguity rule silently disables the watchdog at tick cadences at or above the
+max sample gap; **operator decision: document it, no detector** — the caution now sits beside the
+`StartInterval` guidance in `docs/operations.md`. Threshold retune was never on the table (signed
+off). Also operator-confirmed at this gate: the reworded idle notification, which had been
+asserting a socket check that no longer exists.
+
+**Downstream sweep at p1** — p2 1 finding carried in + 1 Done criterion added · p3 clean ·
+p4 clean · code: p1 is the plan's first phase, so no earlier-phase source exists to have been
+obsoleted; grepped the tree for anything else gating on the deleted socket check and found only
+the operator-facing `lsof` hint in `notify.py`, which is advice for a human and stays.
+
+The p2 carry-in is the one that matters: **p2's `cpu_samples` clear is NOT redundant with p1's
+contiguity rule.** Contiguity voids a window whose sampling hole exceeds `max_sample_gap`, which
+covers a long tool call; a Bash call SHORTER than that leaves a hole contiguity accepts. p2's
+clear is what covers any-length tool calls. The two read as interchangeable and are not, so p2
+now carries a Done criterion pinning the short-call case.
+
+NEXT phase: **p2** — read `plans/false-alarms-p2.md` FIRST.
+
+The decisions binding p2, pulled inline so a compaction that drops the shard still leaves them visible:
+1. **No new CLI flag and no hook-config change.** The probe removed the reason for one: `PostToolUseFailure` never fires, so there is no failure event to wire. The marker's AGE BOUND is the sole mechanism that closes the leak.
+2. **The age bound derives from `config.stuck_tool_threshold_seconds`**, so the two watchdogs cannot disagree about when a tool call has gone on too long.
+3. **Any new field gating suppression joins BOTH watchdogs' compare-and-set sets** — `_emit_worker_idle` and `_emit_stuck_tool` — or a mid-tick state change stops voiding a stale emit.
+4. **Carried from p1:** the `cpu_samples` clear on tool START covers the short-call case p1's contiguity rule cannot. Do not delete it as redundant.
+
+*(Superseded — p1 is shipped. Its binding decisions are recorded in `plans/false-alarms-p1.md`.)*
+
+The three decisions that bound p1 (shipped — kept as the record of why it did what it did):
 1. The `lsof` suppression is **deleted**, not repaired — measured 15.29s against a 1s timeout, so it has never completed; and idle sessions hold the same Anthropic sockets as busy ones, so no repaired form discriminates.
 2. Liveness becomes **cumulative processor-time delta across the worker tree**, measured across the whole window, with fractional seconds preserved. Instantaneous `%cpu` is retired.
 3. Samples are retained **by age, not by count** — this is what removes the cadence coupling that makes the current predicate unsatisfiable.
@@ -255,16 +302,21 @@ The three decisions binding p1, pulled inline so a compaction that drops the sha
 - `end_of_line/supervisor.py` — P1, P3 — P1 deletes the `lsof` branch, adds cumulative-CPU sampling and the fractional duration parse; P3 adds the quiet-span suppression check
 - `end_of_line/state.py` — P1, P2, P3 — P1 the window predicate (age retention, contiguity, recency); P2 deletes two uncalled functions and bounds the marker; P3 adds `quiet_span_active`
 - `end_of_line/config.py` — P1, P3 — P1 four idle thresholds mirroring the stuck-tool pattern; P3 the quiet-span ceiling
-- `end_of_line/plan_store.py` — P2, P3 — P2 window invalidation at the real activity write site; P3 the span write op
-- `end_of_line/cli.py` — P2, P3, P4 — P2 logs a dropped activity stamp instead of discarding it (no new flag — see p2's locked decisions); P3 adds the `clu quiet-span` worker callback; P4 replaces the hook-installed predicate and its two call sites
+- `end_of_line/plan_store.py` — P1, P2, P3 — P1 drops `lsof` from the tick-transaction comment (added at execution); P2 window invalidation at the real activity write site; P3 the span write op
+- `end_of_line/cli.py` — P1, P2, P3, P4 — P1 formats the now-float `Descendant` fields in `clu doctor`'s stuck-tool row (added at execution); P2 logs a dropped activity stamp instead of discarding it (no new flag — see p2's locked decisions); P3 adds the `clu quiet-span` worker callback; P4 replaces the hook-installed predicate and its two call sites
 - `end_of_line/monitor.py` — P4 — per-surface predicates derived from `settings.json`; marker demoted to install metadata
 - `end_of_line/skills/clu-phase/SKILL.md` — P2, P3 — P2 corrects the false env-inheritance claim at :350 and states the marker's real coverage limit; P3 adds the declare-before-review step and the best-effort operator notice
 - `end_of_line/skills/clu-monitor/SKILL.md` — P4 — the "marker rows are the source of truth" claim is corrected
 - `docs/architecture.md` — P1, P3 — P1 corrects what the watchdog samples (`:50-52`) and drops the stale `lsof` mention (`:191`); P3 adds the span as a suppression condition in the idle band
 - `docs/contract.md` — P2, P3, P4 — claim-field documentation; the new worker callback; the `UserPromptSubmit` mislabel at :347
-- `docs/operations.md` — P2, P4 — the activity-hook recipe's coverage limit; the unimplemented `isatty` refusal claim
+- `docs/operations.md` — P1, P2, P4 — P1 warns that raising `StartInterval` at or past the max sample gap silently disables idle detection (added at review, operator-decided); the activity-hook recipe's coverage limit; the unimplemented `isatty` refusal claim
 - `tests/test_quiet_span.py` — P3 — new: span suppression, expiry, ceiling clamp, token rejection
 - `end_of_line/dispatch.py` — P1 — comment-only: `:296` claims tree-awareness exists "so this doesn't false-fire WORKER_IDLE", which was never true of the socket check and is moot once it is deleted
+- `end_of_line/notify.py` — P1 — added at execution: `render_worker_idle` asserted the socket check in the operator-facing warning itself
+- `docs/reference.md` — P1 — added at execution: the `_emit_worker_idle` entry documented `%cpu`, the socket check and two deleted test seams
+- `tests/test_config.py` — P1 — added at review: the four new thresholds had no load-path coverage, which is how a validator mismatch reached the diff
+- `tests/test_supervisor_stuck_tool.py` — P1 — added at execution: three tests asserted the truncation this phase deletes
+- `tests/test_supervisor_tick_restructure.py` — P1 — added at execution: passed the deleted `lsof_output` seam, and its idle fixture failed the new contiguity rule
 - `tests/test_supervisor_worker_idle.py` — P1 — real-tick drives replace hand-seeded sample fixtures
 - `tests/test_state.py` — P1 — window predicate cases
 - `tests/test_activity_marker.py` — P2 — new: failure-path clearing and marker age bounding

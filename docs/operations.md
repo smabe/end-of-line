@@ -171,6 +171,16 @@ every `StartInterval` seconds (default **30** as of this feature, was
 push happened: external state mutations, lease expirations, or
 operator activity outside the CLI.
 
+> **Raising `StartInterval` past ~45s silently disables idle detection.**
+> The worker-idle watchdog samples once per tick and requires the samples in
+> its window to be contiguous — no adjacent gap wider than
+> `worker_idle_max_sample_gap_seconds` (default 60). At the 30s default that
+> leaves 2× margin. At 60s the gaps sit exactly on the ceiling, so ordinary
+> cron jitter pushes them over it and the window is never satisfied; past
+> 60s it never is. The failure is silent and looks identical to "no worker
+> was ever idle". Raise the cadence and you must raise
+> `worker_idle_max_sample_gap_seconds` with it.
+
 **Project-scoped tick (`clu tick --project P`).** Omitting `--plan`
 ticks every plan registered to project P, then runs the cross-plan
 rule chain (queue advance, auto-archive, worktree conflict scan).

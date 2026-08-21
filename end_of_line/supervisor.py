@@ -2,7 +2,7 @@
 
 Shape: **snapshot → detect → apply**, and the split is a correctness
 requirement rather than tidiness. Detection shells out — `ps` with a 5s
-timeout, `lsof` with 1s, a process-group reap that polls for seconds — and the
+timeout, a process-group reap that polls for seconds — and the
 project database allows exactly ONE writer, so a transaction held across that
 work would starve every worker callback in the project. So the tick reads one
 snapshot, decides while holding nothing at all, and applies every change in a
@@ -86,39 +86,50 @@ STUCK_TOOL_DRIFT_SECONDS = 5
 class Descendant:
     pid: int
     parent_pid: int
-    elapsed_seconds: int
-    cpu_seconds: int
+    elapsed_seconds: float
+    cpu_seconds: float
     command: str
 
 
-def _parse_duration(raw: str) -> int:
-    """Parse a `ps` duration to integer seconds, truncating fractions.
+def _parse_duration(raw: str) -> float:
+    """Parse a `ps` duration to seconds, PRESERVING fractions.
 
     Handles both etime ([[dd-]hh:]mm:ss) and CPU time ([hh:]mm:ss[.cc]).
-    Returns 0 for empty input or the literal "-" that ps emits for
+    Returns 0.0 for empty input or the literal "-" that ps emits for
     unmeasurable fields.
+
+    The centiseconds matter: the idle watchdog separates a worker waiting on
+    the model from one doing nothing at all by how much processor time the
+    tree accrues between ticks, and that difference is fractions of a second
+    (measured: 0.15s / 0.26s / 1.27s over 30s for live processes, 0.00s for a
+    dormant one). Truncating to whole seconds erases the entire signal.
     """
     s = raw.strip()
     if not s or s == "-":
-        return 0
+        return 0.0
     days = 0
     if "-" in s:
         days_str, s = s.split("-", 1)
         try:
             days = int(days_str)
         except ValueError:
-            return 0
+            return 0.0
+    fraction = 0.0
     if "." in s:
-        s = s.split(".", 1)[0]
+        s, frac_str = s.split(".", 1)
+        try:
+            fraction = float(f"0.{frac_str}")
+        except ValueError:
+            return 0.0
     parts = s.split(":")
     try:
         nums = [int(p) for p in parts]
     except ValueError:
-        return 0
+        return 0.0
     while len(nums) < 3:
         nums.insert(0, 0)
     h, m, sec = nums[-3], nums[-2], nums[-1]
-    return days * 86400 + h * 3600 + m * 60 + sec
+    return days * 86400 + h * 3600 + m * 60 + sec + fraction
 
 
 def _parse_ps_output(raw: str) -> list[Descendant]:
@@ -602,6 +613,12 @@ def _emit_stuck_tool(
         st.mark_tool_stuck_emitted(claim, d.pid, st.utcnow())
         _record_claim(delta, claim, "stuck_tool_emitted_at")
         command_excerpt = d.command[:200]
+        # `ps` reports ELAPSED at whole-second resolution, so the float
+        # `_parse_duration` now returns is integral here. Emit it as an int so
+        # the event payload keeps the shape its readers (`clu watch`, the
+        # inbox dashboard) already render. CPU time is the opposite case —
+        # its centiseconds are real, and the idle watchdog depends on them.
+        elapsed_whole = int(d.elapsed_seconds)
         _delta_event(
             delta,
             data,
@@ -611,7 +628,7 @@ def _emit_stuck_tool(
             worker_pid=pid,
             descendant_pid=d.pid,
             command=command_excerpt,
-            elapsed_seconds=d.elapsed_seconds,
+            elapsed_seconds=elapsed_whole,
             cpu_seconds=d.cpu_seconds,
         )
         delta.inbox_events.append(
@@ -621,14 +638,14 @@ def _emit_stuck_tool(
                 "project_root": project_root,
                 "summary": (
                     f"Worker on {plan_slug}/{phase_id} stuck in subprocess "
-                    f"for {d.elapsed_seconds}s ({command_excerpt[:60]})"
+                    f"for {elapsed_whole}s ({command_excerpt[:60]})"
                 ),
                 "details": {
                     "phase_id": phase_id,
                     "worker_pid": pid,
                     "descendant_pid": d.pid,
                     "command": command_excerpt,
-                    "elapsed_seconds": d.elapsed_seconds,
+                    "elapsed_seconds": elapsed_whole,
                     "cpu_seconds": d.cpu_seconds,
                 },
             }
@@ -641,20 +658,22 @@ def _emit_worker_idle(
     side_notifies: list[tuple[str, str]],
     *,
     delta: TickDelta,
-    ps_output: str | None = None,
     tree_ps_output: str | None = None,
-    lsof_output: str | None = None,
 ) -> None:
     """Fire EVENT_WORKER_IDLE once per claim when the worker is PID-alive but
-    doing nothing: no active Bash tool, CPU ≤1% over ≥10 min, no open
-    Anthropic API socket.
+    doing nothing: no active Bash tool, and the worker's whole process tree
+    accrued almost no processor time across an uninterrupted ~10-minute window.
 
-    CPU is sampled across the whole worker process tree, not claim.pid alone —
-    a wedged worker can idle at ~0% while a child (test run, build) burns CPU,
-    and sampling the root only would miss it and false-fire. Detection only —
-    no auto-kill. `ps_output` (the `ps -p <pids> -o %cpu=` output),
-    `tree_ps_output` (the `walk_worker_tree` snapshot), and `lsof_output` are
-    test seams; production callers leave all None to shell out.
+    The metric is CUMULATIVE processor time, sampled once per tick and read as
+    a DELTA across the window — not instantaneous `%cpu`, which `man ps`
+    defines as "a decaying average over up to a minute of previous (real)
+    time" and which a healthy worker waiting on the model sits under anyway.
+    It is summed across the tree rather than read from `claim.pid` alone: the
+    pid clu tracks is the PTY shim, whose own CPU is near zero while its
+    `claude` child does the work.
+
+    Detection only — no auto-kill. `tree_ps_output` is a test seam;
+    production callers leave it None to shell out.
     """
     claim = data.get("current_claim")
     if not claim:
@@ -665,69 +684,53 @@ def _emit_worker_idle(
     if claim.get("active_tool_started_at"):
         return
 
-    # Sample this tick's CPU across the worker's whole process tree. The tree
-    # walk supplies the pid set (root + descendants); ONE `ps -p <pids> -o
-    # %cpu=` reads instantaneous %cpu for the set, which we sum. The root pid
-    # is always in the set, so the pid list is never empty. (Descendant pids
-    # that die between the walk and the ps just drop out of ps's output — we
-    # sum whatever survives. Descendant.cpu_seconds from the tree is cumulative
-    # CPU time, a different quantity — deliberately not used here.)
+    # ONE `ps` snapshot serves both halves of the sample: `walk_worker_tree`
+    # picks the descendants out of it, and the root's own line is read
+    # directly — the walker excludes the root by contract, and the shim IS
+    # the root, so dropping it would measure everything except the process
+    # most likely to be wedged.
     now = st._now_utc()
-    descendants = walk_worker_tree(pid, ps_output=tree_ps_output)
-    tree_pids = [pid] + [d.pid for d in descendants]
-    if ps_output is not None:
-        raw_cpu = ps_output
-    else:
-        try:
-            result = subprocess.run(
-                ["ps", "-p", ",".join(str(p) for p in tree_pids), "-o", "%cpu="],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            raw_cpu = result.stdout
-        except (subprocess.TimeoutExpired, OSError):
-            raw_cpu = ""
-    cpu_pct: float | None = None
-    for line in raw_cpu.splitlines():
-        token = line.strip()
-        if not token:
-            continue
-        try:
-            value = float(token)
-        except ValueError:
-            continue
-        cpu_pct = (cpu_pct or 0.0) + value
+    snapshot = tree_ps_output if tree_ps_output is not None else capture_ps_snapshot()
+    descendants = walk_worker_tree(pid, ps_output=snapshot)
+    root_cpu: float | None = None
+    for proc in _parse_ps_output(snapshot):
+        if proc.pid == pid:
+            root_cpu = proc.cpu_seconds
+            break
 
-    if cpu_pct is not None:
-        st.append_cpu_sample(claim, cpu_pct, now)
+    if root_cpu is not None:
+        # Descendants that died between the parse and now simply are not in
+        # this snapshot — the sum is of whatever `ps` saw in one instant, and
+        # a shrinking sum is caught downstream as a negative delta.
+        tree_cpu_seconds = root_cpu + sum(d.cpu_seconds for d in descendants)
+        st.append_cpu_sample(
+            claim,
+            tree_cpu_seconds,
+            now,
+            retain_seconds=(
+                config.worker_idle_window_minutes * 60.0
+                + config.worker_idle_max_sample_gap_seconds
+            ),
+        )
         # The sample rides the delta with no precondition of its own: the tick
         # is the only writer of `cpu_samples`, and the compare-and-set on
         # `claimed_by` already refuses to stamp a claim that moved. The EMIT
         # below is what gets guarded.
         _record_claim(delta, claim, "cpu_samples")
+    # A `ps` we could not read (or one the worker pid is missing from) is
+    # "cannot judge", not "measured zero" — no sample is appended, and the
+    # resulting hole fails the next window's contiguity check on its own.
 
-    if not st.worker_idle_window_satisfied(claim, now):
+    if not st.worker_idle_window_satisfied(
+        claim,
+        now,
+        min_samples=config.worker_idle_min_samples,
+        window_min=config.worker_idle_window_minutes,
+        max_sample_gap=config.worker_idle_max_sample_gap_seconds,
+        cpu_delta_threshold=config.worker_idle_cpu_delta_threshold_seconds,
+    ):
         return
     if st.worker_idle_already_emitted(claim):
-        return
-
-    # API-socket heuristic suppression.
-    if lsof_output is not None:
-        lsof_text = lsof_output
-    else:
-        try:
-            lsof_result = subprocess.run(
-                ["lsof", "-p", str(pid), "-i"],
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-            lsof_text = lsof_result.stdout
-        except (subprocess.TimeoutExpired, OSError):
-            # Can't check; emit anyway (false negative > false positive).
-            lsof_text = ""
-    if "anthropic" in lsof_text.lower():
         return
 
     plan_slug = data["plan_slug"]
@@ -770,7 +773,7 @@ def _emit_worker_idle(
             "project_root": project_root,
             "summary": (
                 f"Worker on {plan_slug}/{phase_id} idle for ~{low_cpu_minutes:.0f}min "
-                f"(pid {pid}, no tool, no API socket, CPU ≤1%)"
+                f"(pid {pid}, no tool, no CPU movement across the window)"
             ),
             "details": {
                 "phase_id": phase_id,

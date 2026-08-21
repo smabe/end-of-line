@@ -378,102 +378,173 @@ class TestClaimWorkerAlive(unittest.TestCase):
         )
 
 
+_BASE = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
+
+
+def _cum_samples(
+    count: int,
+    *,
+    step_seconds: float = 30.0,
+    start_cpu: float = 100.0,
+    per_step: float = 0.0,
+    base: _dt.datetime = _BASE,
+) -> list[dict]:
+    """Contiguous CUMULATIVE-CPU samples: `count` stamps `step_seconds` apart.
+
+    `per_step` is how much processor time the tree accrues between samples —
+    0.0 is the dormant worker the detector exists to catch.
+    """
+    return [
+        {
+            "ts": (base + _dt.timedelta(seconds=i * step_seconds)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "cpu": start_cpu + i * per_step,
+        }
+        for i in range(count)
+    ]
+
+
 class AppendCpuSampleTestCase(unittest.TestCase):
     def _claim(self) -> dict:
         return {}
 
     def test_appends_sample(self) -> None:
         claim = self._claim()
-        now = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
-        st.append_cpu_sample(claim, 0.5, now)
+        st.append_cpu_sample(claim, 0.5, _BASE, retain_seconds=660.0)
         self.assertEqual(len(claim["cpu_samples"]), 1)
         self.assertEqual(claim["cpu_samples"][0]["cpu"], 0.5)
 
-    def test_trims_to_cap(self) -> None:
+    def test_retires_samples_older_than_the_retention_window(self) -> None:
         claim = self._claim()
-        cap = st.WORKER_IDLE_SAMPLE_CAP
-        for i in range(cap + 5):
-            now = _dt.datetime(2026, 1, 1, 12, i, 0, tzinfo=_dt.UTC)
-            st.append_cpu_sample(claim, float(i), now)
-        self.assertEqual(len(claim["cpu_samples"]), cap)
-        # Last sample should be the most recent
-        self.assertEqual(claim["cpu_samples"][-1]["cpu"], float(cap + 4))
+        for i in range(40):
+            st.append_cpu_sample(
+                claim,
+                float(i),
+                _BASE + _dt.timedelta(seconds=30 * i),
+                retain_seconds=660.0,
+            )
+        stamps = [st.parse_iso(s["ts"]) for s in claim["cpu_samples"]]
+        newest = stamps[-1]
+        self.assertTrue(all((newest - t).total_seconds() <= 660.0 for t in stamps))
+        # 660s of 30s-spaced history is 23 samples (t-660 .. t inclusive) —
+        # more than the 20 the old count cap allowed, which is the whole point.
+        self.assertEqual(len(stamps), 23)
 
-    def test_keeps_most_recent_on_trim(self) -> None:
+    def test_retention_is_independent_of_tick_cadence(self) -> None:
+        # Halving the cadence must not halve the history: 15s spacing keeps
+        # twice as many samples covering the SAME wall-clock span.
         claim = self._claim()
-        cap = st.WORKER_IDLE_SAMPLE_CAP
-        for i in range(cap + 3):
-            now = _dt.datetime(2026, 1, 1, 12, i, 0, tzinfo=_dt.UTC)
-            st.append_cpu_sample(claim, float(i), now)
-        # Oldest samples (0, 1, 2) should be gone
-        cpus = [s["cpu"] for s in claim["cpu_samples"]]
-        self.assertNotIn(0.0, cpus)
-        self.assertNotIn(1.0, cpus)
-        self.assertNotIn(2.0, cpus)
+        for i in range(80):
+            st.append_cpu_sample(
+                claim,
+                float(i),
+                _BASE + _dt.timedelta(seconds=15 * i),
+                retain_seconds=660.0,
+            )
+        stamps = [st.parse_iso(s["ts"]) for s in claim["cpu_samples"]]
+        self.assertEqual((stamps[-1] - stamps[0]).total_seconds(), 660.0)
+
+    def test_absolute_cap_guards_unbounded_growth(self) -> None:
+        # Every sample inside the retention window, so only the growth guard
+        # can bound the list.
+        claim = self._claim()
+        for i in range(st.WORKER_IDLE_SAMPLE_CAP + 60):
+            st.append_cpu_sample(claim, float(i), _BASE, retain_seconds=660.0)
+        self.assertEqual(len(claim["cpu_samples"]), st.WORKER_IDLE_SAMPLE_CAP)
+        self.assertEqual(claim["cpu_samples"][-1]["cpu"], float(st.WORKER_IDLE_SAMPLE_CAP + 59))
 
 
 class WorkerIdleWindowSatisfiedTestCase(unittest.TestCase):
-    def _samples(self, count: int, span_minutes: float, cpu: float = 0.5) -> list[dict]:
-        base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
-        if count == 1:
-            return [{"ts": base.isoformat(), "cpu": cpu}]
-        step = (span_minutes * 60) / (count - 1)
-        return [
-            {
-                "ts": (_dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
-                       + _dt.timedelta(seconds=i * step)).isoformat(),
-                "cpu": cpu,
-            }
-            for i in range(count)
-        ]
+    """The window predicate: span, contiguity, recency, cumulative delta."""
 
-    def _now(self, span_minutes: float = 12.0) -> _dt.datetime:
-        return _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC) + _dt.timedelta(
-            minutes=span_minutes
-        )
+    def _satisfied(self, samples: list[dict], now: _dt.datetime, **over) -> bool:
+        kwargs: dict = {
+            "min_samples": 3,
+            "window_min": 10.0,
+            "max_sample_gap": 60.0,
+            "cpu_delta_threshold": 1.0,
+        }
+        kwargs.update(over)
+        return st.worker_idle_window_satisfied({"cpu_samples": samples}, now, **kwargs)
 
-    def test_satisfied_with_sufficient_samples_and_span(self) -> None:
+    def _now(self, seconds_after_base: float) -> _dt.datetime:
+        return _BASE + _dt.timedelta(seconds=seconds_after_base)
 
-        claim = {"cpu_samples": self._samples(6, 12.0)}
-        now = self._now(12.0)
-        self.assertTrue(st.worker_idle_window_satisfied(claim, now))
+    def test_satisfied_when_dormant_across_a_contiguous_window(self) -> None:
+        samples = _cum_samples(21)  # 21 × 30s = 600s of span
+        self.assertTrue(self._satisfied(samples, self._now(600)))
 
     def test_not_satisfied_too_few_samples(self) -> None:
+        samples = _cum_samples(2, step_seconds=600.0)
+        self.assertFalse(self._satisfied(samples, self._now(600)))
 
-        claim = {"cpu_samples": self._samples(3, 12.0)}
-        now = self._now(12.0)
-        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+    def test_span_is_measured_between_observed_samples_not_to_now(self) -> None:
+        # 20 samples at 30s span only 570s — the arithmetic that made the old
+        # predicate unsatisfiable under continuous sampling. `now` running on
+        # past the newest sample must NOT stretch the observed span.
+        samples = _cum_samples(20)
+        self.assertFalse(self._satisfied(samples, self._now(570)))
 
-    def test_not_satisfied_span_too_short(self) -> None:
-        # 5 samples but only 8 minutes of span — below the 10-min window
-        claim = {"cpu_samples": self._samples(5, 8.0)}
-        now = self._now(8.0)
-        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+    def test_not_satisfied_when_a_gap_breaks_contiguity(self) -> None:
+        # The historical false-alarm shape: quiet samples, an interruption
+        # longer than the max gap (positive evidence the worker was WORKING),
+        # then more quiet samples. The union spans the window; the history
+        # does not.
+        head = _cum_samples(11)  # t=0 .. t=300
+        tail = _cum_samples(11, base=_BASE + _dt.timedelta(seconds=420))  # t=420 .. 720
+        self.assertFalse(self._satisfied(head + tail, self._now(720)))
+        # Same shape with the gap closed IS satisfied — proving the gap, not
+        # the sample count or the span, is what rejected it.
+        self.assertTrue(self._satisfied(_cum_samples(25), self._now(720)))
 
-    def test_not_satisfied_high_cpu(self) -> None:
-        # One sample above the threshold poisons the window
-        samples = self._samples(6, 12.0, cpu=0.5)
-        samples[3]["cpu"] = 30.0
-        claim = {"cpu_samples": samples}
-        now = self._now(12.0)
-        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+    def test_not_satisfied_when_the_newest_sample_is_stale(self) -> None:
+        # Sampling stopped two minutes ago: whatever the worker is doing now,
+        # this window is no longer evidence about it.
+        samples = _cum_samples(21)
+        self.assertFalse(self._satisfied(samples, self._now(600 + 120)))
+
+    def test_not_satisfied_when_cumulative_cpu_advanced(self) -> None:
+        # 0.25s of processor time per 30s tick — the measured live-worker rate.
+        samples = _cum_samples(21, per_step=0.25)
+        self.assertFalse(self._satisfied(samples, self._now(600)))
+
+    def test_boundary_delta_exactly_at_threshold(self) -> None:
+        samples = _cum_samples(21, per_step=1.0 / 20)
+        self.assertTrue(self._satisfied(samples, self._now(600)))
+
+    def test_boundary_delta_just_above_threshold(self) -> None:
+        samples = _cum_samples(21, per_step=1.01 / 20)
+        self.assertFalse(self._satisfied(samples, self._now(600)))
+
+    def test_negative_delta_is_cannot_judge_not_very_quiet(self) -> None:
+        # A recycled pid or a descendant exiting mid-window shrinks the
+        # cumulative sum. That reads as "less than zero CPU used", which is
+        # not evidence of idleness — it is evidence the sum changed meaning.
+        samples = _cum_samples(21)
+        samples[-1]["cpu"] = 1.0
+        self.assertFalse(self._satisfied(samples, self._now(600)))
 
     def test_not_satisfied_empty_samples(self) -> None:
-        claim: dict = {}
-        now = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_dt.UTC)
-        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+        self.assertFalse(st.worker_idle_window_satisfied(
+            {},
+            _BASE,
+            min_samples=3,
+            window_min=10.0,
+            max_sample_gap=60.0,
+            cpu_delta_threshold=1.0,
+        ))
 
-    def test_boundary_exactly_at_threshold(self) -> None:
-        # cpu exactly at threshold (1.0) should satisfy
-        claim = {"cpu_samples": self._samples(6, 12.0, cpu=1.0)}
-        now = self._now(12.0)
-        self.assertTrue(st.worker_idle_window_satisfied(claim, now))
+    def test_empty_history_is_refused_even_with_a_zero_minimum(self) -> None:
+        # The predicate indexes the newest stamp, so an empty history must be
+        # refused on its own terms and not via the caller's minimum. Config
+        # rejects a zero minimum; this pins the function itself.
+        self.assertFalse(self._satisfied([], self._now(600), min_samples=0))
 
-    def test_boundary_just_above_threshold(self) -> None:
-        # cpu just above threshold should NOT satisfy
-        claim = {"cpu_samples": self._samples(6, 12.0, cpu=1.01)}
-        now = self._now(12.0)
-        self.assertFalse(st.worker_idle_window_satisfied(claim, now))
+    def test_corrupt_timestamp_is_not_satisfied(self) -> None:
+        samples = _cum_samples(21)
+        samples[5]["ts"] = "not-a-timestamp"
+        self.assertFalse(self._satisfied(samples, self._now(600)))
 
 
 class TestWorkerDeathMarker(unittest.TestCase):

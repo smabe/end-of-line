@@ -1475,7 +1475,7 @@ def op_archive_events(orch_dir: Path, slug: str) -> int:
 
 # --- the supervisor tick ------------------------------------------------------
 #
-# The tick cannot be one transaction. Its decisions rest on `ps`, `lsof` and a
+# The tick cannot be one transaction. Its decisions rest on `ps` and a
 # process-group reap that polls for seconds, and WAL allows exactly one writer —
 # so a transaction held across that work starves every callback in the project.
 #

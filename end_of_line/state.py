@@ -265,8 +265,9 @@ EVENT_PHASE_WORKER_DEAD = "phase_worker_dead"
 # elapsed_seconds, cpu_seconds. Deduped per descendant_pid via
 # current_claim.stuck_tool_emitted_at — at most one emit per (claim, leaf).
 EVENT_TOOL_STUCK = "tool_stuck"
-# Supervisor detected worker PID alive but CPU-idle with no active Bash tool
-# and no open Anthropic API socket — classic silent wedge. Detection only;
+# Supervisor detected worker PID alive but CPU-idle with no active Bash tool:
+# the worker's whole process tree accrued almost no processor time across an
+# uninterrupted window — classic silent wedge. Detection only;
 # operator-approval checkpoint from user-CLAUDE.md applies.
 # Fields: plan, phase, pid, low_cpu_minutes. Deduped via worker_idle_notified.
 EVENT_WORKER_IDLE = "worker_idle"
@@ -298,10 +299,16 @@ BLOCKER_REPLAN = "blocked_replan"
 SIGNAL_TERM = "SIGTERM"
 SIGNAL_TERM_THEN_KILL = "SIGTERM+SIGKILL"
 
-# Maximum CPU samples kept per claim in current_claim.cpu_samples. Caps the
-# claim row's JSON column — at 30s tick cadence this covers ~10 minutes of
-# history.
-WORKER_IDLE_SAMPLE_CAP = 20
+# Absolute ceiling on current_claim.cpu_samples — an unbounded-growth guard on
+# the claim row's JSON column, and NOTHING ELSE. Retention is by AGE
+# (`append_cpu_sample`'s `retain_seconds`), because a count cap silently
+# couples the window to the tick cadence: the old cap of 20 at the 30s cadence
+# held 570 seconds of history against a 600-second window requirement, which
+# made the idle predicate unsatisfiable under continuous sampling and
+# satisfiable only after a sampling GAP — i.e. only when the worker had
+# demonstrably been working. Keep this generous enough that it never becomes
+# the retention rule again.
+WORKER_IDLE_SAMPLE_CAP = 200
 
 
 @dataclass
@@ -931,38 +938,99 @@ def mark_worker_death_reported(claim: dict, now: _dt.datetime) -> None:
     claim["worker_death_reported_at"] = now.strftime(_ISO_FMT)
 
 
-def append_cpu_sample(claim: dict, cpu_pct: float, now: _dt.datetime) -> None:
-    """Append a CPU sample and trim to WORKER_IDLE_SAMPLE_CAP."""
+def append_cpu_sample(
+    claim: dict,
+    cpu_seconds: float,
+    now: _dt.datetime,
+    *,
+    retain_seconds: float,
+) -> None:
+    """Append one CUMULATIVE-CPU sample and retire the ones that aged out.
+
+    `cpu_seconds` is the processor time the worker's whole process tree has
+    consumed since launch — a monotonically rising total, not a rate. The
+    window predicate reads the DELTA across it; a single sample means nothing
+    on its own.
+
+    Retention is by age: anything older than `retain_seconds` before this
+    sample is dropped, so how much history survives depends on wall time
+    rather than on how often the supervisor happens to tick.
+    `WORKER_IDLE_SAMPLE_CAP` is only the unbounded-growth backstop.
+    """
     samples: list[dict] = claim.setdefault("cpu_samples", [])
-    samples.append({"ts": now.strftime(_ISO_FMT), "cpu": cpu_pct})
-    if len(samples) > WORKER_IDLE_SAMPLE_CAP:
-        del samples[: len(samples) - WORKER_IDLE_SAMPLE_CAP]
+    samples.append({"ts": now.strftime(_ISO_FMT), "cpu": cpu_seconds})
+    cutoff = now - _dt.timedelta(seconds=retain_seconds)
+    kept: list[dict] = []
+    for sample in samples:
+        try:
+            ts = parse_iso(sample["ts"])
+        except (KeyError, ValueError, TypeError):
+            # An unparseable stamp can never satisfy the predicate and can
+            # never age out on its own; drop it rather than wedge the list.
+            continue
+        if ts >= cutoff:
+            kept.append(sample)
+    if len(kept) > WORKER_IDLE_SAMPLE_CAP:
+        del kept[: len(kept) - WORKER_IDLE_SAMPLE_CAP]
+    samples[:] = kept
 
 
 def worker_idle_window_satisfied(
     claim: dict,
     now: _dt.datetime,
     *,
-    min_samples: int = 5,
-    window_min: float = 10.0,
-    cpu_threshold: float = 1.0,
+    min_samples: int,
+    window_min: float,
+    max_sample_gap: float,
+    cpu_delta_threshold: float,
 ) -> bool:
-    """True when the CPU sample window shows an idle worker.
+    """True when the sample history is EVIDENCE that the worker did nothing.
 
-    Requires ≥min_samples, oldest sample within the window covers ≥window_min
-    minutes back from now, and every sample ≤cpu_threshold.
+    Four independent conditions, and each one exists because its absence
+    produced a false alarm:
+
+    * **span** — `samples[-1] - samples[0]` covers ≥ `window_min` minutes.
+      Measured between OBSERVED samples, never from `now`, because the caller
+      appends with `now` immediately before asking: measuring to `now` counts
+      an interval that was never sampled.
+    * **contiguity** — no adjacent gap exceeds `max_sample_gap`. A hole means
+      sampling was suppressed, and sampling is suppressed exactly when a tool
+      call is running — so a hole is positive evidence the worker was WORKING,
+      not evidence it was idle.
+    * **recency** — the newest sample is no older than `max_sample_gap`. A
+      window that stopped updating says nothing about the present.
+    * **quiet** — the tree's cumulative processor time rose by no more than
+      `cpu_delta_threshold` across the whole window. A NEGATIVE delta (a
+      recycled pid, or a descendant exiting mid-window) means the sum changed
+      meaning, so it reads as "cannot judge" rather than "extremely quiet".
     """
     samples: list[dict] = claim.get("cpu_samples") or []
-    if len(samples) < min_samples:
-        return False
-    if any(s["cpu"] > cpu_threshold for s in samples):
+    # `not samples` is not folded into the `min_samples` comparison: this
+    # function indexes the newest stamp below, so an empty history must be
+    # refused on its own terms rather than on a caller-supplied minimum that
+    # could be zero. Config rejects a zero minimum, but this predicate is
+    # public and its other callers are not config-bound.
+    if not samples or len(samples) < min_samples:
         return False
     try:
-        oldest_ts = parse_iso(samples[0]["ts"])
-    except (KeyError, ValueError):
+        stamps = [parse_iso(s["ts"]) for s in samples]
+        cpus = [float(s["cpu"]) for s in samples]
+    except (KeyError, ValueError, TypeError):
         return False
-    span_minutes = (now - oldest_ts).total_seconds() / 60.0
-    return span_minutes >= window_min
+
+    if (stamps[-1] - stamps[0]).total_seconds() < window_min * 60.0:
+        return False
+    if any(
+        (later - earlier).total_seconds() > max_sample_gap
+        for earlier, later in zip(stamps, stamps[1:])
+    ):
+        return False
+    if (now - stamps[-1]).total_seconds() > max_sample_gap:
+        return False
+    delta = cpus[-1] - cpus[0]
+    if delta < 0:
+        return False
+    return delta <= cpu_delta_threshold
 
 
 def mark_active_tool_start(claim: dict, at: str) -> None:

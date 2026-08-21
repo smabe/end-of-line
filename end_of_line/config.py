@@ -149,6 +149,21 @@ class ProjectConfig:
     # threshold to 0 disables detection.
     stuck_tool_threshold_seconds: int = 300
     stuck_tool_cpu_threshold_seconds: int = 5
+    # Worker-idle detection thresholds. The supervisor samples the CUMULATIVE
+    # processor time of the worker's whole process tree once per tick; a tree
+    # that accrues no more than `worker_idle_cpu_delta_threshold_seconds`
+    # across an uninterrupted `worker_idle_window_minutes` of samples is
+    # flagged idle. `worker_idle_max_sample_gap_seconds` is both the
+    # contiguity rule (a longer hole between samples is positive evidence the
+    # worker WAS working, so the window is void) and the recency rule (a
+    # window whose newest sample is older than this says nothing about now).
+    # These are deliberately tuned to miss a wedge rather than cry wolf: a
+    # missed wedge costs one lease expiry, a false alarm costs the operator's
+    # trust in every warning clu emits.
+    worker_idle_window_minutes: float = 10.0
+    worker_idle_max_sample_gap_seconds: float = 60.0
+    worker_idle_cpu_delta_threshold_seconds: float = 1.0
+    worker_idle_min_samples: int = 3
 
     def orchestrator_dir(self) -> Path:
         """The project's `.orchestrator/` directory — the key every store takes.
@@ -288,6 +303,28 @@ def _validate_non_negative_int(raw: dict, key: str, default: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ConfigError(f"{key}: must be non-negative int, got {value!r}")
     return value
+
+
+def _validate_positive_int(raw: dict, key: str, default: int) -> int:
+    # Same bool guard as the non-negative validator, and the same reason as
+    # `_validate_positive_float` for excluding zero: a detector's minimum
+    # sample count of 0 is not "no minimum", it is a predicate answering
+    # before it has any evidence to answer from.
+    value = raw.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ConfigError(f"{key}: must be a positive int, got {value!r}")
+    return value
+
+
+def _validate_positive_float(raw: dict, key: str, default: float) -> float:
+    # Same bool guard as the int validator. Zero is rejected rather than
+    # merely warned about: every caller is a detector threshold, and a zero
+    # window or gap turns the predicate into "always satisfied" — a silent
+    # alarm storm rather than a disabled check.
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ConfigError(f"{key}: must be a positive number, got {value!r}")
+    return float(value)
 
 
 def global_config_path() -> Path:
@@ -453,5 +490,25 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             raw,
             "stuck_tool_cpu_threshold_seconds",
             5,
+        ),
+        worker_idle_window_minutes=_validate_positive_float(
+            raw,
+            "worker_idle_window_minutes",
+            10.0,
+        ),
+        worker_idle_max_sample_gap_seconds=_validate_positive_float(
+            raw,
+            "worker_idle_max_sample_gap_seconds",
+            60.0,
+        ),
+        worker_idle_cpu_delta_threshold_seconds=_validate_positive_float(
+            raw,
+            "worker_idle_cpu_delta_threshold_seconds",
+            1.0,
+        ),
+        worker_idle_min_samples=_validate_positive_int(
+            raw,
+            "worker_idle_min_samples",
+            3,
         ),
     )

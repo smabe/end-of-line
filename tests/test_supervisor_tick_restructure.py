@@ -4,7 +4,7 @@ Four things are pinned here, and each one is a property the old shape did NOT
 have:
 
 1. **No subprocess runs inside a transaction.** The tick used to hold the state
-   lock across `ps`, `lsof` and a reap that polls for seconds. Under one
+   lock across `ps` and a reap that polls for seconds. Under one
    project-wide write lock that starves every callback in the project, so a SQL
    trace asserts every seam fires outside the BEGIN..COMMIT window.
 2. **A concurrent write discards the tick, and nothing half-lands.** The
@@ -63,6 +63,14 @@ PS_WEDGED = (
     "81681 78233    00:12:00    00:00:01 xcodebuild -scheme App test\n"
 )
 
+# The same worker with no descendants, and a cumulative CPU total matching the
+# flat sample history `_state_worker_idle` seeds — the idle emitter reads the
+# ROOT's own line out of this snapshot, so the pid must be present in it.
+PS_IDLE_WORKER = (
+    "  PID  PPID     ELAPSED        TIME COMMAND\n"
+    "78233     1    02:00:00    00:00:12.50 claude --print\n"
+)
+
 
 def _iso_in(minutes: float) -> str:
     return (_dt.datetime.now(_dt.UTC) + _dt.timedelta(minutes=minutes)).strftime(
@@ -113,8 +121,8 @@ class TickRestructureTestCase(CluTestCase):
     def _sql_trace(self):
         """Record every SQL statement and every subprocess seam, in order.
 
-        The seams are marked rather than executed: `walk_worker_tree`, the CPU
-        `ps`, the `lsof` probe and the group reap each drop a `SEAM:` line into
+        The seams are marked rather than executed: `walk_worker_tree`, the
+        tree `ps` snapshot and the group reap each drop a `SEAM:` line into
         the same list the trace callback writes to, so "did this shell out
         while a transaction was open" becomes a question about one ordered log.
         """
@@ -166,7 +174,7 @@ class TickRestructureTestCase(CluTestCase):
     def test_no_subprocess_seam_runs_inside_an_open_transaction(self) -> None:
         # Two fixtures, because the seams are mutually exclusive in one tick:
         # the stuck-tool walk needs an active Bash window, the worker-idle
-        # `ps`/`lsof` probes need the absence of one. Both leases are expired,
+        # `ps` snapshot needs the absence of one. Both leases are expired,
         # so both ticks also reap AFTER committing.
         cases = [
             (
@@ -359,15 +367,13 @@ class TickRestructureTestCase(CluTestCase):
             ):
                 _emit_stuck_tool(data, self.cfg, delta=delta)
         elif name == "worker_idle":
-            with mock.patch.object(supervisor, "walk_worker_tree", lambda *a, **k: []):
-                _emit_worker_idle(
-                    data,
-                    self.cfg,
-                    side,
-                    delta=delta,
-                    ps_output="0.2\n",
-                    lsof_output="nothing",
-                )
+            _emit_worker_idle(
+                data,
+                self.cfg,
+                side,
+                delta=delta,
+                tree_ps_output=PS_IDLE_WORKER,
+            )
         elif name == "detect_stalled":
             _detect_stalled(data, delta=delta)
         else:  # pragma: no cover - guards a typo in the table below
@@ -614,7 +620,10 @@ def _state_stuck_tool() -> dict:
 
 def _state_worker_idle() -> dict:
     data = st.empty_state("test-plan", "plans")
-    base = _dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=12)
+    # 21 CONTIGUOUS cumulative-CPU samples 30s apart: 600s of observed span,
+    # no gap wider than the 60s contiguity rule, and a flat total. Spacing
+    # them any wider satisfies the span while failing contiguity.
+    base = _dt.datetime.now(_dt.UTC) - _dt.timedelta(seconds=600)
     data["current_claim"] = {
         "phase_id": "a",
         "claimed_by": "session-x",
@@ -623,8 +632,11 @@ def _state_worker_idle() -> dict:
         "last_heartbeat_at": utcnow_minus(60),
         "pid": 78233,
         "cpu_samples": [
-            {"ts": (base + _dt.timedelta(minutes=2 * i)).strftime("%Y-%m-%dT%H:%M:%SZ"), "cpu": 0.3}
-            for i in range(6)
+            {
+                "ts": (base + _dt.timedelta(seconds=30 * i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "cpu": 12.5,
+            }
+            for i in range(21)
         ],
     }
     return data

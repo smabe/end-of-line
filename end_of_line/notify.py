@@ -233,7 +233,8 @@ def render_worker_idle(
 ) -> str:
     return (
         f"😴 {plan_slug}/{phase_id} (pid {pid}): worker idle for ~{low_cpu_minutes:.0f}min.\n"
-        f"No active Bash tool, no open Anthropic socket, CPU ≤1% across the window.\n"
+        f"No active Bash tool, and its process tree burned almost no CPU "
+        f"across the whole window.\n"
         f"Investigate: `kill -0 {pid}` confirms alive; `ps -p {pid}` for CPU; "
         f"`lsof -p {pid} -i` for sockets.\n"
         f"If wedged: `clu release-claim --plan {plan_slug} --phase {phase_id}` to free it."
