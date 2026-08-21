@@ -10,6 +10,7 @@ from end_of_line.state_blocker import (
     KIND_STUCK_BLOCKER,
     process_answered_blockers,
     render_blocker,
+    render_option_block,
     render_stalled,
     stuck_blocker_repings,
 )
@@ -174,6 +175,35 @@ class TestRenderFunctions(unittest.TestCase):
         self.assertIn("Alpha", body)
         self.assertIn("Beta", body)
         self.assertIn("my-plan", body)
+
+    def test_render_blocker_output_is_unchanged_by_the_extraction(self) -> None:
+        # Characterization: pins render_blocker's EXACT bytes so the shared
+        # option-block extraction cannot drift the Discord notification body by
+        # so much as a character. Written before the refactor, per the plan.
+        body = render_blocker("my-plan", "q-1", "phase-a", "Which approach?", ["Alpha", "Beta"])
+        self.assertEqual(
+            body,
+            "❓ my-plan/q-1 [phase-a]\n"
+            "Which approach?\n"
+            "[0] Alpha\n"
+            "[1] Beta\n"
+            "\n"
+            "Reply: `my-plan <number>` or just the number if this is the "
+            "only open question.\n"
+            "Terminal: clu answer --plan my-plan <choice>",
+        )
+
+    def test_render_option_block_numbers_each_option(self) -> None:
+        block = render_option_block(["Alpha", "Beta", "Gamma"])
+        self.assertEqual(block, "[0] Alpha\n[1] Beta\n[2] Gamma")
+
+    def test_render_option_block_empty_when_no_options(self) -> None:
+        self.assertEqual(render_option_block([]), "")
+
+    def test_render_option_block_truncates_per_option(self) -> None:
+        block = render_option_block(["x" * 200], per_option_limit=10)
+        self.assertLessEqual(len(block), len("[0] ") + 10)
+        self.assertIn("…", block)
 
     def test_render_stalled_includes_phase_and_plan_slug(self) -> None:
         body = render_stalled("my-plan", "phase-a", 1800.0)

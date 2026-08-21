@@ -36,6 +36,20 @@ def _truncate_at_word(s: str, max_len: int) -> str:
     return s[:cut].rstrip() + "…"
 
 
+def render_option_block(options: list[str], per_option_limit: int = _OPTION_TRUNCATE) -> str:
+    """Numbered, per-option-truncated option lines — one per line, no trailing
+    newline. Empty string when there are no options.
+
+    Shared by the Discord blocker body (`render_blocker`) and watch's live
+    blocked line, so the two surfaces number and truncate options identically.
+    """
+    if not options:
+        return ""
+    return "\n".join(
+        f"[{i}] {_truncate_at_word(o, per_option_limit)}" for i, o in enumerate(options)
+    )
+
+
 def process_answered_blockers(
     data: dict[str, Any],
 ) -> tuple[list[tuple[str, str]], str | None]:
@@ -111,10 +125,8 @@ def render_blocker(
 ) -> str:
     q = _truncate_at_word(question, _QUESTION_TRUNCATE)
     answer_cmd = f"clu answer --plan {plan_slug} <choice>"
-    if options:
-        opts_block = "\n".join(
-            f"[{i}] {_truncate_at_word(o, _OPTION_TRUNCATE)}" for i, o in enumerate(options)
-        )
+    opts_block = render_option_block(options)
+    if opts_block:
         middle = f"{q}\n{opts_block}\n\n"
     else:
         middle = f"{q}\n\n"

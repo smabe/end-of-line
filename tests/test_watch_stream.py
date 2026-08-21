@@ -479,6 +479,69 @@ class StreamLoopNativeReadTest(CluTestCase):
         self.assertEqual(sink.getvalue(), "")
 
 
+class StreamLoopBlockedReadTest(CluTestCase):
+    """The enriched blocked line re-reads plan state — but ONLY on a blocked
+    event. The idle poll's "one PRAGMA, no query" contract (watch.py:659-660)
+    depends on the snapshot staying inside the blocked branch."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.tmp_path / "project"
+        self.state_path = self.project / "plans" / ".orchestrator" / "my-plan.state.json"
+        _make_state(self.state_path, "my-plan", claim_phase="design")
+
+    def _count_snapshots(self, inject, *, json_mode: bool = False) -> int:
+        calls: list = []
+        real = plan_store.snapshot
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return real(*args, **kwargs)
+
+        sink = io.StringIO()
+        with mock.patch.object(plan_store, "snapshot", spy):
+            stream_loop(
+                [self.state_path],
+                sink=sink,
+                json_mode=json_mode,
+                poll_interval=0,
+                max_ticks=1,
+                _before_first_tick=inject,
+            )
+        return len(calls)
+
+    def _inject_blocked(self):
+        return lambda: _append_event(
+            self.state_path,
+            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="q-1", question="Q?"),
+        )
+
+    def test_json_mode_blocked_event_does_not_re_read(self) -> None:
+        # json dumps the raw event and never renders the enriched block, so the
+        # options re-read is pure waste there — only the baseline snapshot runs.
+        n = self._count_snapshots(self._inject_blocked(), json_mode=True)
+        self.assertEqual(n, 1, "json mode re-read plan state for a blocked event")
+
+    def test_idle_poll_does_not_read_plan_state(self) -> None:
+        # A non-blocked event batch: the only snapshot is the one-time baseline.
+        non_blocked = self._count_snapshots(
+            lambda: _append_event(
+                self.state_path, _evt(st.EVENT_PHASE_COMPLETED, phase="design")
+            )
+        )
+        self.assertEqual(non_blocked, 1, "a non-blocked poll re-read plan state")
+
+        # A blocked event pays for exactly one extra snapshot to recover the
+        # options — proving the read is gated on the blocked branch, not per tick.
+        blocked = self._count_snapshots(
+            lambda: _append_event(
+                self.state_path,
+                _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="q-1", question="Q?"),
+            )
+        )
+        self.assertEqual(blocked, 2, "the blocked event did not re-read plan state exactly once")
+
+
 class StreamLoopSigintTest(CluTestCase):
     def test_sigint_returns_ok(self) -> None:
         project = self.tmp_path / "project"

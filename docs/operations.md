@@ -1710,6 +1710,27 @@ On startup, `clu watch` prints a `[snapshot]` baseline per plan
 (current status + active phase), then streams any new events as the
 state files change. SIGINT exits cleanly.
 
+A blocker raised mid-session is answerable straight from the stream:
+the `BLOCKED` line keeps its `slug/phase: BLOCKED q-N — question`
+grammar, then carries the numbered options and the exact answer command
+on the lines below it (text and `--operator` modes only; `--task-list`
+keeps its single structured line):
+
+```
+my-feature/design: BLOCKED q-1 — Use Postgres or SQLite?
+[0] Postgres
+[1] SQLite
+Answer: clu answer --project . --plan my-feature --blocker q-1 <answer>
+```
+
+The options come from plan state, re-read only when a blocked event
+arrives (an idle poll still costs one PRAGMA and no query). The answer
+command sits on its own line and is never truncated — the question
+shrinks first. Lines carry no leading indentation because the Monitor
+transport strips it. `<answer>` is an option number (0-indexed) or free
+text; `--project .` resolves to the session's project root, so run the
+command from that project (or substitute the project path).
+
 **Pairing with Claude's Monitor tool** — when a Claude Code session
 starts a clu plan, arm `Monitor` immediately after `clu queue add`:
 

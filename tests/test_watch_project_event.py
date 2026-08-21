@@ -3,12 +3,28 @@
 import unittest
 
 from end_of_line import state as st
-from end_of_line.watch import project_event
+from end_of_line.watch import project_event, project_event_task
 from tests import must
 
 
 def _evt(type_, **fields):
     return {"type": type_, "ts": "2026-05-17T10:00:00Z", **fields}
+
+
+def _blocker(**over):
+    b = {
+        "id": "q-1",
+        "phase_id": "design",
+        "type": "input",
+        "question": "Use postgres or sqlite?",
+        "options": ["postgres", "sqlite"],
+        "context": "",
+        "asked_at": "2026-05-17T10:00:00Z",
+        "answer": None,
+        "answered_at": None,
+    }
+    b.update(over)
+    return b
 
 
 class DefaultVisibleEventsTest(unittest.TestCase):
@@ -460,6 +476,89 @@ class EdgeCasesTest(unittest.TestCase):
         self.assertIn("orphan reaped", out)
         self.assertIn("pid=12345", out)
         self.assertIn("signaled=SIGTERM", out)
+
+
+class BlockedRenderTest(unittest.TestCase):
+    """The mid-session blocked line, enriched with the blocker record: the
+    numbered options and the scoped answer command below the stream's first
+    line."""
+
+    def _render(self, *, blocker, **evt_fields):
+        evt = _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="q-1", **evt_fields)
+        return must(project_event(evt, "my-plan", operator=True, blocker=blocker))
+
+    def test_blocked_render_keeps_the_stream_line_grammar(self) -> None:
+        out = self._render(blocker=_blocker(), question="Use postgres or sqlite?")
+        first = out.splitlines()[0]
+        self.assertTrue(
+            first.startswith("my-plan/design: BLOCKED "),
+            f"first line lost the stream grammar: {first!r}",
+        )
+
+    def test_blocked_render_includes_numbered_options(self) -> None:
+        out = self._render(blocker=_blocker(options=["postgres", "sqlite"]))
+        self.assertIn("[0] postgres", out)
+        self.assertIn("[1] sqlite", out)
+
+    def test_blocked_render_includes_the_scoped_answer_command(self) -> None:
+        out = self._render(blocker=_blocker())
+        self.assertIn("clu answer", out)
+        self.assertIn("--project", out)
+        self.assertIn("--plan my-plan", out)
+        self.assertIn("--blocker q-1", out)
+
+    def test_blocked_render_uses_no_leading_indentation(self) -> None:
+        out = self._render(blocker=_blocker())
+        for line in out.splitlines():
+            self.assertFalse(
+                line.startswith((" ", "\t")),
+                f"leading whitespace is stripped in transit: {line!r}",
+            )
+
+    def test_a_long_question_shrinks_before_the_answer_command_is_lost(self) -> None:
+        out = self._render(blocker=_blocker(), question="A" * 400)
+        # The command lives on its own reserved line — an oversized question
+        # never crowds it out.
+        self.assertIn("clu answer --project", out)
+        self.assertIn("--blocker q-1", out)
+
+    def test_every_option_renders_no_cap(self) -> None:
+        opts = [f"opt{i}" for i in range(8)]
+        out = self._render(blocker=_blocker(options=opts))
+        for i in range(8):
+            self.assertIn(f"[{i}] opt{i}", out)
+
+    def test_blocker_with_no_options_still_renders_question_and_command(self) -> None:
+        out = self._render(blocker=_blocker(options=[]), question="Free text please?")
+        self.assertIn("Free text please?", out)
+        self.assertIn("clu answer", out)
+        self.assertIn("--blocker q-1", out)
+        # No empty option marker leaked in.
+        self.assertNotIn("[0]", out)
+
+    def test_blocked_without_a_record_is_the_bare_first_line(self) -> None:
+        # The two existing test harnesses and any caller that cannot supply a
+        # record still get the single-line render — the record is optional.
+        out = must(
+            project_event(
+                _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="q-1", question="Q?"),
+                "my-plan",
+            )
+        )
+        self.assertEqual(out, "my-plan/design: BLOCKED q-1 — Q?")
+
+    def test_task_list_mode_blocked_line_is_unchanged(self) -> None:
+        # The protocol path never carries the enriched render — it stays one
+        # structured line. Pin it so the enrichment cannot leak across.
+        out = project_event_task(
+            _evt(st.EVENT_PHASE_BLOCKED, phase="design", blocker_id="q-1", question="Use pg?"),
+            "my-plan",
+        )
+        self.assertEqual(
+            out,
+            'TASK_UPDATE task=my-plan/design parent=my-plan status=in_progress '
+            'msg="BLOCKED q-1 — Use pg?"',
+        )
 
 
 if __name__ == "__main__":

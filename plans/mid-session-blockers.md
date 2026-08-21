@@ -257,4 +257,21 @@ options regardless — so the cap was speculative generality and was removed.
 
 ## Findings log
 
-_(empty at plan time — workers append cross-phase findings as phases run)_
+- **2026-08-21 (blocked-render):** the blocker-row lookup uses `blocker_id`
+  across ALL blockers, not `state.open_blockers`. The sub-plan named
+  `open_blockers`, but the demo smoke test (acceptance §3) replays the whole
+  lifecycle — the blocker is answered and consumed before `clu watch`'s single
+  poll reads it — so `open_blockers` (answer-is-None) would return nothing and
+  the demo golden could not carry the options the acceptance requires. An
+  unfiltered by-id lookup renders the options for the event being projected
+  regardless of answered-state, which is also more robust for any replay or a
+  poll that lands just after the operator answered. Live streaming is
+  unaffected: a `phase_blocked` event is rendered the moment it arrives, when
+  the blocker is still open.
+- **2026-08-21 (blocked-render):** the answer command emits a literal
+  `--project .` (mirroring `clu_session_start.py:83`), NOT the resolved project
+  path. A real path would embed a per-run temp dir in the demo golden and break
+  its determinism; `.` keeps the golden stable and matches the session-start
+  form. Cost: under `clu watch --all` spanning projects, `.` resolves to the
+  operator's cwd, so the command must be run from (or re-pointed at) the plan's
+  project — the same limitation the session-start hook already ships with.

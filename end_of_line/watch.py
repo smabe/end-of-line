@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
-from . import db, plan_store
+from . import db, plan_store, state_blocker
 from . import state as st
 from .plan_parser import parse_sessions_index
 
@@ -110,13 +110,26 @@ def _phase_prefix(slug: str, e: dict[str, Any]) -> str:
     return slug
 
 
-def _fmt_blocked(slug: str, e: dict[str, Any]) -> str:
+def _fmt_blocked(slug: str, e: dict[str, Any], blocker: dict[str, Any] | None = None) -> str:
     bid = e.get("blocker_id", "?")
     q = _trunc(e.get("question"))
     prefix = _phase_prefix(slug, e)
-    if q:
-        return f"{prefix}: BLOCKED {bid} — {q}"
-    return f"{prefix}: BLOCKED {bid}"
+    first = f"{prefix}: BLOCKED {bid} — {q}" if q else f"{prefix}: BLOCKED {bid}"
+    if blocker is None:
+        # No record supplied (bare projector call, or the row could not be
+        # re-read): fall back to the single-line stream grammar.
+        return first
+    lines = [first]
+    opts_block = state_blocker.render_option_block(blocker.get("options") or [])
+    if opts_block:
+        lines.append(opts_block)
+    # The answer command is a reserved line, mirroring the session-start hook's
+    # footer (`clu_session_start.py:83`): `--project . --plan … --blocker …` is
+    # the only form `--blocker` accepts (`cli.py:4932`). It sits on its own line
+    # and is never truncated — the question above shrank first (via `_trunc`).
+    # No leading indentation: leading whitespace is stripped in Monitor transit.
+    lines.append(f"Answer: clu answer --project . --plan {slug} --blocker {bid} <answer>")
+    return "\n".join(lines)
 
 
 _FORMATTERS: dict[str, Callable[[str, dict[str, Any]], str]] = {
@@ -697,7 +710,15 @@ def stream_loop(
                     if task_list_mode:
                         line_or_none = project_event_task(evt, slug, verbose=verbose)
                     else:
-                        line_or_none = project_event(evt, slug, verbose=verbose, operator=operator)
+                        blocker_record = None
+                        # json mode dumps the raw event and never renders the
+                        # enriched block, so skip the re-read there — only the
+                        # human-readable render consumes the record.
+                        if evt.get("type") == st.EVENT_PHASE_BLOCKED and not json_mode:
+                            blocker_record = _blocker_for_event(keys[path], evt)
+                        line_or_none = project_event(
+                            evt, slug, verbose=verbose, operator=operator, blocker=blocker_record
+                        )
                     if line_or_none is None:
                         continue
                     if json_mode:
@@ -720,12 +741,35 @@ def stream_loop(
     return 0
 
 
+def _blocker_for_event(key: tuple[Path, str], evt: dict[str, Any]) -> dict[str, Any] | None:
+    """Re-read plan state to recover the blocker row (question + options) a
+    `phase_blocked` event references, by `blocker_id`.
+
+    Called ONLY on a blocked event, never per idle tick — the idle poll's
+    "one PRAGMA, no query" contract (the poll loop's idle-case comment) depends
+    on this staying inside the blocked branch. Looks the row up across all
+    blockers rather than only the open ones: a replay (or a poll that lands just
+    after the operator answered) still renders the options for the event it is
+    projecting. Returns None if the row is gone or the store is momentarily
+    unreadable — the caller then falls back to the bare first line.
+    """
+    bid = evt.get("blocker_id")
+    if not bid:
+        return None
+    try:
+        data = plan_store.snapshot(*key)
+    except (*_RETRY_PLAN_ERRORS, *_SKIP_PLAN_ERRORS):
+        return None
+    return next((b for b in data.get("blockers", []) if b.get("id") == bid), None)
+
+
 def project_event(
     event: dict[str, Any],
     plan_slug: str,
     *,
     verbose: bool = False,
     operator: bool = False,
+    blocker: dict[str, Any] | None = None,
 ) -> str | None:
     t = event.get("type")
     if not isinstance(t, str):
@@ -737,5 +781,11 @@ def project_event(
         # like stalled_claim_notified render at default volume.
     elif t in _VERBOSE_ONLY and not verbose:
         return None
+    if t == st.EVENT_PHASE_BLOCKED:
+        # The blocked line carries the record (options + answer command) when
+        # the poll loop could re-read it; without one it renders the bare first
+        # line. Still registered in _FORMATTERS so the operator-visible guard
+        # (every operator-visible event has a formatter) holds.
+        return _fmt_blocked(plan_slug, event, blocker)
     fmt = _FORMATTERS.get(t)
     return fmt(plan_slug, event) if fmt else None
