@@ -235,7 +235,7 @@ removed a bound. p3 added `worker_quiet_span_ceiling_minutes` and got it right t
 zero is the SHORTEST-silence setting, not an unbounded one, mutation-checked against the p2-shaped
 mistake. The criterion carried onto p4 stays, though p4 is expected to satisfy it vacuously.
 
-**p4 SHIPPED 2026-08-21** — installed-ness is derived from the file that decides it.
+**p4 SHIPPED 2026-08-21 `a2021a0`** — installed-ness is derived from the file that decides it.
 Full gate: 2491/2491 tests, basedpyright 0 errors.
 
 **Spec check at p4** — 1/1 task evidenced · none unclaimed · +8 files added at execution
