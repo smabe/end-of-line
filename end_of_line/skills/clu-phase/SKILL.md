@@ -347,10 +347,44 @@ Three parts of the snippet are load-bearing:
   `clu activity` errors (e.g. stale token after lease expiry); the
   worker shouldn't see the noise.
 
-Subagent (Task tool) Bash invocations are NOT covered: Claude Code's
-subagent contexts don't inherit parent env, so `CLU_TOKEN` is unset
-inside subagent hooks → they short-circuit. Lease expiry remains the
-safety net for wedges inside subagents.
+Subagent (Task tool) Bash invocations ARE covered. This doc previously
+said they weren't, on the theory that subagent contexts don't inherit
+parent env — probed and disproved on Claude Code 2.1.238: a `PreToolUse`
+hook firing inside an Explore subagent (its payload carried `agent_id`,
+which the hook docs say is present only inside a subagent call) received
+`CLU_TOKEN` intact, so the guard opens and the marker gets stamped like
+any other Bash call.
+
+### What the hook does NOT cover, and why nothing can be wired to fix it
+
+**The marker is cleared only when the Bash command SUCCEEDS.** Probed on
+2.1.238 with all three tool-exit events registered on matcher `Bash`:
+
+| Command | Events fired | Marker |
+|---|---|---|
+| `echo ok` (exit 0) | `PreToolUse`, `PostToolUse` | cleared |
+| `exit 3` | `PreToolUse` only | left stamped |
+| `ls /nonexistent` (exit 1) | `PreToolUse` only | left stamped |
+| denied by `--allowedTools` | `PreToolUse`, `PostToolUse` | cleared |
+
+`PostToolUseFailure` did not fire in **any** of those cases despite being
+registered. So there is no failure event to add here: a failing test run,
+a failing build, or a `grep` that matches nothing leaves the marker
+stamped until the next Bash call overwrites it — permanently, when the
+failing command was the phase's last.
+
+**Do not try to close this by wiring another hook event.** What makes it
+harmless is that the supervisor stops believing a marker older than
+`stuck_tool_threshold_seconds` (default 300s) — the same window the
+stuck-tool detector uses, so the two watchdogs cannot disagree about
+whether a tool is still running. Setting that threshold to 0 disables
+stuck-tool detection only; the marker's bound falls back to 300s. Past that age the idle watchdog resumes
+sampling and can warn about a genuinely wedged worker again. A stamp that
+never expired was a silence switch: one failed test run and the watchdog
+went deaf for the rest of the phase.
+
+Lease expiry is still the outermost safety net, for a worker that dies
+without either watchdog seeing it.
 
 ## When in doubt: block, don't bail
 

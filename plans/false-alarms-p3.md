@@ -15,6 +15,12 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 
 ## Work
 
+> **Carried in by the p2 sweep — three things this shard was written before knowing.**
+>
+> 1. **The compare-and-set claim below is half right, and the wrong half is the one to act on.** p2 checked it: `active_tool_started_at` was ALREADY in both watchdogs' CAS sets (`supervisor.py:611` and `:750`), so nothing was owed there. What p2 actually had to add ran the other way — its `op_activity` START became a SECOND writer of `cpu_samples`, so the tick's own sample append needed `require_claim_field("cpu_samples")` or a tick in flight would write the cleared history straight back. **Ask both questions for `quiet_span`:** does the field gate suppression (→ it joins both CAS sets), and does this phase's write CLEAR or overwrite anything another writer also touches (→ that writer needs a precondition).
+> 2. **p2's predicate is the pattern to copy, including its trap.** `activity_marker_suppresses` is read-site bounded with no new writer, exactly as this shard asks for. But its bound is DERIVED from `stuck_tool_threshold_seconds`, and that config value has a documented "0 disables it" meaning — which made the suppression unbounded again and handed back the silence switch. Fixed by falling back to `state.ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS` rather than dropping the bound. `worker_quiet_span_ceiling_minutes` is the same shape of value: decide NOW what `0` means for it, and make the safe direction the one that shortens silence.
+> 3. **`op_activity` now writes four fields on a START**, not one — the marker, `cpu_samples`, and the two `worker_idle_notified` fields. If this phase's span write needs to interact with the idle window (it should not — a span suppresses rather than voids), read `plan_store.op_activity` first to see the merge shape `_claim_assignments` gives you.
+
 - `end_of_line/cli.py` — a new token-validated worker callback declaring a quiet span. `--token` required and validated against the live claim, exactly like every other callback; `state.validate_slug` on the phase id before any path join; `ExitCode` for every exit.
 
   ```
@@ -49,8 +55,12 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 
 - `tests/test_quiet_span.py` *(new)* — an open unexpired span suppresses; an EXPIRED span does not (the leak this design refuses to build); a span with no `--end` still expires; a declared duration above the ceiling is clamped; a forged or stale token is rejected.
 
-- Consumes: `plan_store` claim-write helpers and the `_CLAIM_OWN_KEYS` / `flags` split (`plan_store.py:558`); `state.validate_slug`; `ExitCode`; `state.worker_idle_window_satisfied(claim, now, *, min_samples: int, window_min: float, max_sample_gap: float, cpu_delta_threshold: float) -> bool` (produced by p1); the bounded-suppression predicate produced by p2
+- Consumes: `plan_store` claim-write helpers and the `_CLAIM_OWN_KEYS` / `flags` split (`plan_store.py:558`); `state.validate_slug`; `ExitCode`; `state.worker_idle_window_satisfied(claim, now, *, min_samples: int, window_min: float, max_sample_gap: float, cpu_delta_threshold: float) -> bool` (produced by p1); `state.activity_marker_suppresses(claim: dict, now: datetime, *, max_age_seconds: float) -> bool` (produced by p2 — this is the concrete name of what this line called "the bounded-suppression predicate")
 - Produces: `clu quiet-span` worker callback; `state.quiet_span_active(claim: dict, now: datetime) -> bool`; `current_claim.quiet_span` record
+
+## Done criteria addendum  *(escalated to plan level by the p2 sweep)*
+
+- **Every config threshold this phase adds or reads is tested at its ZERO / disabled value, and the test states which direction is safe.** This class of defect has now appeared in two consecutive phases and was caught by review both times, never by the suite: p1 wired `worker_idle_min_samples` to a validator that accepted `0`, and the predicate then indexed an empty list (crash); p2 derived the marker bound from a threshold whose `0` means "disabled", making the suppression unbounded (silence switch). Both were invisible because the tests exercised the value's USE site and never its zero. A threshold with no zero-value test does not satisfy this phase.
 
 ## Decisions & findings
 

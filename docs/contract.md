@@ -69,6 +69,35 @@ Plan state is normalized across six tables in the project database. The full DDL
     // filename. Absent when the command omits the placeholder (Claude Code
     // then picks its own id and `clu top` falls back to cwd-matching).
     "session_id": "bb35bdb6-70d5-46f7-8b3c-2c8a686566ea",
+    // Optional. The active-tool window: stamped by `clu activity
+    // --start-bash` (PreToolUse) and cleared by `--end-bash`
+    // (PostToolUse). Present means "a Bash tool call is running", but
+    // only while FRESH — a command that exits nonzero fires no closing
+    // event (and `PostToolUseFailure` never fires at all), so the stamp
+    // can outlive its tool call indefinitely. Both watchdogs bound it at
+    // `stuck_tool_threshold_seconds`: `tool_stuck` scopes its descendant
+    // walk to processes younger than the window, and `worker_idle` treats
+    // the stamp as suppressing only until that age. Suppresses while
+    // fresh, not absolutely. `stuck_tool_threshold_seconds = 0` disables
+    // `tool_stuck` only; the marker's bound falls back to 300s, so one
+    // watchdog being switched off never deafens the other.
+    "active_tool_started_at": "ISO8601",
+    // Optional, tick-written. The idle watchdog's evidence: one
+    // {"ts": ISO8601_Z, "cpu": float} sample per tick, where `cpu` is the
+    // CUMULATIVE processor time of the worker's whole process tree. Read
+    // as a DELTA across the window; a single sample means nothing. Retired
+    // by AGE (window + max sample gap), with a 200-entry growth cap. TWO
+    // writers: the tick appends, and a tool START empties it — a tool call
+    // is positive proof that the quiet span the samples describe did not
+    // happen.
+    "cpu_samples": [{"ts": "ISO8601", "cpu": 12.34}],
+    // Optional dedup markers, both once-per-claim. `worker_idle_notified`
+    // is re-armed by a tool START, so a worker that goes quiet again can
+    // be warned about again; `stuck_tool_emitted_at` is keyed by
+    // descendant pid (JSON object keys are strings).
+    "worker_idle_notified": false,
+    "worker_idle_notified_at": "ISO8601",
+    "stuck_tool_emitted_at": {"81681": "ISO8601"},
     // Optional, lazy-init. Absent until the worker stamps via `clu verify`
     // or `clu attest`. Each entry: {"at": ISO8601_Z, "commit_sha": str}.
     // Stamp is "stale" if commit_sha != current HEAD.

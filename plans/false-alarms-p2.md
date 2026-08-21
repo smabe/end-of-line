@@ -17,6 +17,23 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 
 ## Work
 
+> **Line hints re-anchored at `3c5d969` (after p1 shipped).** p1 rewrote `supervisor.py` and
+> `state.py`, so every `:NNN` below that names those two files was measured against the
+> pre-p1 tree. Current positions, confirmed by grep this session — anchor on the SYMBOL, these
+> are secondary:
+> `_emit_worker_idle`'s early return on `active_tool_started_at` → `supervisor.py:684` (was
+> :665-666) · `mark_active_tool_start` → `state.py:1036` (was :968) · `clear_active_tool` →
+> `state.py:1049` (was :981) · `stamp_activity_marker` → `state.py:1059` · `op_activity` →
+> `plan_store.py:770` (was :791) · `cmd_activity` → `cli.py:6749` (the discarded `False`
+> return is inside it; was cited as :6771) · the activity-hook recipe → `docs/operations.md:721`
+> (was :708-720; p1 inserted a cadence caution above it). `config.py:150`
+> (`stuck_tool_threshold_seconds`) is unmoved.
+>
+> **Also new since this shard was written:** p1 added four `worker_idle_*` thresholds to
+> `ProjectConfig` and a `_validate_positive_int` helper beside `_validate_positive_float`. If
+> this phase adds a threshold of its own, use those validators — a detector bound of zero is
+> what crashed the tick in p1's review.
+
 - `end_of_line/cli.py` — **no new flag.** The probe removed the reason for one: there is no failure event to wire it to. `clu activity` keeps `--start-bash` / `--end-bash` exactly as they are, `--token` stays required and validated against the live claim. One change only: `cmd_activity` currently DISCARDS `stamp_activity_marker`'s `False` return (`:6771`), so a stamp dropped under store contention leaves no trace at all — log it rather than continuing silently.
 
 - `end_of_line/plan_store.py` — `op_activity` (`:791-792`) is the real write site. Two changes: (a) on a START, invalidate the accumulated idle window by clearing `cpu_samples` and re-arming `worker_idle_notified` — a tool call is positive proof of activity, so the window it would otherwise contribute to is void; (b) the CAS set must include whatever new field gates suppression, per the master's Background findings, or a state change mid-tick stops voiding a stale emit.
@@ -33,6 +50,14 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 
 - `tests/test_activity_marker.py` *(new)* — a marker past its age bound stops suppressing; a START voids an accumulated window; a dropped stamp is logged rather than silent.
 
+- `end_of_line/supervisor.py` — **added at execution.** The phase says to bound the marker "at the read site", and the read site is `_emit_worker_idle`'s early return; the predicate lives in `state.py` but the call site is here. Also carries the new `cpu_samples` precondition (see findings).
+- `end_of_line/activity_hook.py` — **added at execution.** The OTHER entry point discarding the same `False` return, and the one the bundled recipe actually wires — logging only in `cmd_activity` would leave the hot path silent.
+- `tests/test_state_stuck_tool.py` — **added at execution.** Four tests called the deleted helpers; their behaviours are ported to the real `op_activity` path, per this phase's own instruction not to resurrect the functions to keep a test green.
+- `docs/reference.md` — **added at execution.** Named both deleted symbols, and described the idle gate as "no active Bash tool" rather than "no FRESH marker".
+- `docs/architecture.md` — **added at execution.** Asserted that the activity stamp "touch[es] only their own claim columns, so they cannot false-trip a precondition" — the opposite of true once a START clears `cpu_samples`, and deliberately so.
+- `end_of_line/skills_manifest.json` — **added at execution.** `tests/test_skill_sync.py` hard-fails when a bundled SKILL.md's hash is missing; regenerated via `scripts/gen_skill_manifest.py`.
+- `tests/test_activity_marker.py` — **also carries the review fix**: the zero-bound test as first written pinned the defect as intended behaviour.
+
 - Consumes: `plan_store.op_activity(...)` (`plan_store.py:791`); `state.stamp_activity_marker(state_path, *, token: str, phase: str, action: str, timeout_seconds: float | None) -> bool`; `state.worker_idle_window_satisfied(claim, now, *, min_samples: int, window_min: float, max_sample_gap: float, cpu_delta_threshold: float) -> bool` (produced by p1)
 - Produces: a bounded-suppression predicate consumed by `_emit_worker_idle`
 
@@ -47,6 +72,19 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 - **Rationale:** they are not merely unused — their docstrings describe them as the live activity write path, so a future contributor reading `state.py` to understand the marker learns something false. That is worse than absence.
 - **Alternatives considered:** keep them and correct the docstrings (rejected — dead code with accurate comments is still dead code that the next reader must rule out); route `op_activity` through them to make the docstrings true (rejected — it would add an indirection whose only purpose is to justify keeping the functions).
 - **Evidence:** `state.py:968,981`; grep for callers across `end_of_line/` returns nothing outside `state.py`; `plan_store.py:792` is the raw-SQL write.
+
+### Finding: the plan predicted the wrong compare-and-set need, in the wrong direction  *(status: active)*
+- The Work list said "the CAS set must include whatever new field gates suppression". Checked at execution: there IS no new field — suppression is still gated on `active_tool_started_at`, and that was already in both watchdogs' CAS sets (`supervisor.py:611`, `:750`). The real need ran the other way. `op_activity`'s START became a **second writer of `cpu_samples`**, so the tick's own sample append needed a precondition of its own or a tick already in flight would write the cleared history straight back and resurrect the window the START had just voided.
+- p1 shipped a comment asserting "the tick is the only writer of `cpu_samples`". True when written, false the moment this phase landed — rewritten in the same commit.
+- **Cost, recorded because it is real:** `_emit_worker_idle` runs on every tick with a live claim, so nearly every such tick now carries a `cpu_samples` precondition, and a Bash START landing inside the tick's think-window discards that whole tick (`idle / concurrent_write`, re-derived on the next cron tick). It cannot affect dispatch — `_emit_worker_idle` returns before recording anything when there is no claim.
+
+### Finding: review caught a silence switch the phase had reintroduced by inheritance  *(status: active)*
+- The age bound is derived from `stuck_tool_threshold_seconds`, which `config.py:148` documents as "Setting threshold to 0 disables detection" and which the non-negative validator accepts. As first written, `activity_marker_suppresses` read `max_age_seconds <= 0` as "no bound" and returned True for any stamped marker — **probed: a 30-day-old marker suppressed with `bound=0` and did not with `bound=300`.** So an operator disabling stuck-tool detection silently disabled the idle watchdog's protection too, restoring the exact deafness this phase exists to close, in violation of the master's plan-level invariant that no suppression this plan adds can be left open indefinitely.
+- The first-written test PINNED the defect as intended behaviour, which is why the suite stayed green.
+- **Fixed in the same commit:** a disabled sibling detector falls back to `state.ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS` (300, equal to the config default) rather than dropping the bound. The shard's "do not mint an unrelated number" rule was written so the two watchdogs cannot disagree about whether a tool is still running — with the sibling detector switched off there is no second watchdog to disagree with, so that rationale does not reach this branch. Four doc claims stating the old behaviour were corrected with it.
+
+### Finding: dropped-stamp logging lands where the recipes discard it  *(status: active)*
+- Both shipped hook recipes end in `2>/dev/null` (a locked decision — a hook exiting 2 BLOCKS the Bash call), so the new stderr trace is invisible during normal worker operation. It reaches an operator who runs `clu activity` or the hook module by hand. This is the intended shape, recorded so nobody later concludes the logging is broken.
 
 ## Failure modes to anticipate
 

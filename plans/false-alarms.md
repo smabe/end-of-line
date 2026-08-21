@@ -8,7 +8,7 @@
 - If it fails: the cumulative-CPU signal doesn't separate the cases in practice → stop, return to research with the measured overlap as the sharper question. Do NOT tune thresholds to force a pass.
 - Shard: `plans/false-alarms-p1.md`
 
-**Phase p2 — activity marker: close the leak, delete the dead path**
+**Phase p2 — activity marker: close the leak, delete the dead path**  — ✅ SHIPPED
 - Enters when: p1 committed (p2 relies on p1's window predicate existing)
 - Done signal: a stale activity marker can no longer silence the watchdog forever — proven by a claim past the age bound emitting `worker_idle` where today it stays silent
 - If it fails: no gate — fix-forward
@@ -164,7 +164,48 @@ covers a long tool call; a Bash call SHORTER than that leaves a hole contiguity 
 clear is what covers any-length tool calls. The two read as interchangeable and are not, so p2
 now carries a Done criterion pinning the short-call case.
 
-NEXT phase: **p2** — read `plans/false-alarms-p2.md` FIRST.
+**p2 SHIPPED 2026-08-21** — the activity marker can no longer silence the idle watchdog forever.
+Full gate: 2413/2413 tests, basedpyright 0 errors.
+
+**Spec check at p2** — 1/1 task evidenced · interfaces conform · none unclaimed · +6 files added
+at execution (`supervisor.py`, `activity_hook.py`, `tests/test_state_stuck_tool.py`,
+`docs/reference.md`, `docs/architecture.md`, `skills_manifest.json`), all re-evidenced. The
+`Produces:` line named "a bounded-suppression predicate consumed by `_emit_worker_idle`" in prose
+and shipped as `state.activity_marker_suppresses(claim, now, *, max_age_seconds)` — conforming,
+and now named concretely on p3's `Consumes:` line so the next phase is not left resolving prose.
+
+**Review at p2 — 1 finding, confirmed by probe, applied in the same commit.** The age bound is
+derived from `stuck_tool_threshold_seconds`, whose documented `0` means "detector disabled" — read
+as "no bound", which made the suppression unbounded again and handed back the silence switch this
+phase exists to remove, against the master's own plan-level invariant. Probed: a 30-day-old marker
+suppressed at `bound=0`, did not at `bound=300`. The first-written test pinned the defect as
+intended behaviour, which is why the suite was green. Fixed with a fallback bound equal to the
+config default, plus four doc claims that stated the old behaviour.
+
+**Downstream sweep at p2** — p3 3 findings carried in + `Consumes:` line resolved to the concrete
+symbol + 1 Done criterion added · p4 1 Done criterion added + 1 vocabulary caution ·
+code: p2 pinned `cpu_samples` to two writers, which obsoleted p1's shipped comment asserting the
+tick was its only writer and the precondition-free append that rested on it — both corrected in
+p2's own commit, which is the guard this question exists to find.
+
+**Escalated to plan level by this sweep — a finding CLASS, not an instance.** Two consecutive
+phases shipped a config threshold whose ZERO value silently removed a bound, and review caught
+both while the full suite stayed green: p1's `worker_idle_min_samples` accepted `0` and crashed
+the tick on an empty history; p2 inherited `stuck_tool_threshold_seconds = 0` and lost its
+suppression bound. Both were invisible because every test exercised the value's USE site and none
+its zero. **p3 and p4 now carry a Done criterion:** every config threshold a phase adds or reads is
+tested at its zero / disabled value, with the test stating which direction is safe.
+
+NEXT phase: **p3** — read `plans/false-alarms-p3.md` FIRST.
+
+The decisions binding p3, pulled inline so a compaction that drops the shard still leaves them visible:
+1. **A declared span is a LEASE, not a pair** — it carries an expected duration and expires on its own clock. This is the plan's most expensive lesson: the same "trust the close event" design was disqualified via subagent hooks AND found already broken in the shipped activity marker. A span that can be left open forever is a silence switch. Do not build one.
+2. **This does NOT replace p1's inference — it sits in front of it.** Old skill versions, crashed workers and non-`/clu-phase` dispatches all exist, so p1 stays the floor.
+3. **The 45-minute ceiling is operator-signed-off and configurable.** It is the only bound on how much silence a worker can claim, so changing it is an approach switch.
+4. **Messaging the operator is BEST-EFFORT and never load-bearing** — no live session is the normal case, and a failed send must never fail a phase or change what the supervisor decides.
+5. **Carried from p2:** decide what `0` means for the ceiling before writing it, and make the safe direction the one that SHORTENS silence.
+
+*(Superseded — p2 is shipped. Its binding decisions are recorded in `plans/false-alarms-p2.md`.)*
 
 The decisions binding p2, pulled inline so a compaction that drops the shard still leaves them visible:
 1. **No new CLI flag and no hook-config change.** The probe removed the reason for one: `PostToolUseFailure` never fires, so there is no failure event to wire. The marker's AGE BOUND is the sole mechanism that closes the leak.
@@ -299,7 +340,7 @@ The three decisions that bound p1 (shipped — kept as the record of why it did 
 
 ## Files touched (overview)
 
-- `end_of_line/supervisor.py` — P1, P3 — P1 deletes the `lsof` branch, adds cumulative-CPU sampling and the fractional duration parse; P3 adds the quiet-span suppression check
+- `end_of_line/supervisor.py` — P1, P2, P3 — P2 moves the idle gate onto the freshness predicate and adds the `cpu_samples` precondition (added at execution); P1 deletes the `lsof` branch, adds cumulative-CPU sampling and the fractional duration parse; P3 adds the quiet-span suppression check
 - `end_of_line/state.py` — P1, P2, P3 — P1 the window predicate (age retention, contiguity, recency); P2 deletes two uncalled functions and bounds the marker; P3 adds `quiet_span_active`
 - `end_of_line/config.py` — P1, P3 — P1 four idle thresholds mirroring the stuck-tool pattern; P3 the quiet-span ceiling
 - `end_of_line/plan_store.py` — P1, P2, P3 — P1 drops `lsof` from the tick-transaction comment (added at execution); P2 window invalidation at the real activity write site; P3 the span write op
@@ -307,12 +348,16 @@ The three decisions that bound p1 (shipped — kept as the record of why it did 
 - `end_of_line/monitor.py` — P4 — per-surface predicates derived from `settings.json`; marker demoted to install metadata
 - `end_of_line/skills/clu-phase/SKILL.md` — P2, P3 — P2 corrects the false env-inheritance claim at :350 and states the marker's real coverage limit; P3 adds the declare-before-review step and the best-effort operator notice
 - `end_of_line/skills/clu-monitor/SKILL.md` — P4 — the "marker rows are the source of truth" claim is corrected
-- `docs/architecture.md` — P1, P3 — P1 corrects what the watchdog samples (`:50-52`) and drops the stale `lsof` mention (`:191`); P3 adds the span as a suppression condition in the idle band
+- `docs/architecture.md` — P1, P2, P3 — P2 corrects the claim that the activity stamp cannot false-trip a precondition (added at execution); P1 corrects what the watchdog samples (`:50-52`) and drops the stale `lsof` mention (`:191`); P3 adds the span as a suppression condition in the idle band
 - `docs/contract.md` — P2, P3, P4 — claim-field documentation; the new worker callback; the `UserPromptSubmit` mislabel at :347
 - `docs/operations.md` — P1, P2, P4 — P1 warns that raising `StartInterval` at or past the max sample gap silently disables idle detection (added at review, operator-decided); the activity-hook recipe's coverage limit; the unimplemented `isatty` refusal claim
 - `tests/test_quiet_span.py` — P3 — new: span suppression, expiry, ceiling clamp, token rejection
 - `end_of_line/dispatch.py` — P1 — comment-only: `:296` claims tree-awareness exists "so this doesn't false-fire WORKER_IDLE", which was never true of the socket check and is moot once it is deleted
+- `end_of_line/activity_hook.py` — P2 — added at execution: the other entry point that discarded a dropped-stamp return
+- `end_of_line/skills_manifest.json` — P2 — added at execution: the skill-sync test hard-fails on a missing bundled-SKILL hash
+- `tests/test_state_stuck_tool.py` — P2 — added at execution: four tests called the helpers p2 deletes
 - `end_of_line/notify.py` — P1 — added at execution: `render_worker_idle` asserted the socket check in the operator-facing warning itself
+- `docs/reference.md` — P1, P2 — P2 drops the two deleted symbols and restates the idle gate (added at execution);
 - `docs/reference.md` — P1 — added at execution: the `_emit_worker_idle` entry documented `%cpu`, the socket check and two deleted test seams
 - `tests/test_config.py` — P1 — added at review: the four new thresholds had no load-path coverage, which is how a validator mismatch reached the diff
 - `tests/test_supervisor_stuck_tool.py` — P1 — added at execution: three tests asserted the truncation this phase deletes

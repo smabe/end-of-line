@@ -310,6 +310,15 @@ SIGNAL_TERM_THEN_KILL = "SIGTERM+SIGKILL"
 # the retention rule again.
 WORKER_IDLE_SAMPLE_CAP = 200
 
+# Age bound for the active-tool marker when the stuck-tool detector is DISABLED
+# (`stuck_tool_threshold_seconds = 0`). Normally the bound IS that threshold, so
+# the two watchdogs cannot disagree about whether a tool is still running — but
+# with the sibling detector off there is no threshold to borrow, and leaving the
+# marker unbounded would mean disabling one watchdog silently deafens another.
+# Equal to the config default, so turning stuck-tool detection off changes only
+# stuck-tool detection.
+ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS = 300
+
 
 @dataclass
 class ReapResult:
@@ -1033,27 +1042,55 @@ def worker_idle_window_satisfied(
     return delta <= cpu_delta_threshold
 
 
-def mark_active_tool_start(claim: dict, at: str) -> None:
-    """Stamp `active_tool_started_at` — the start of the current Bash tool call.
+def activity_marker_suppresses(
+    claim: dict,
+    now: _dt.datetime,
+    *,
+    max_age_seconds: float,
+) -> bool:
+    """True while the claim's active-tool marker is FRESH enough to believe.
 
-    Called from `clu activity --start-bash`, which is wired as Claude Code's
-    PreToolUse hook for the Bash tool. Stuck-tool detection uses this window
-    to scope which descendants are candidates: anything alive longer than
-    (now - active_tool_started_at) pre-dates the call and is session infra,
-    not stuck inside the active tool. Overwrites freely — every Bash call
-    just slides the window forward.
+    `active_tool_started_at` is stamped by the PreToolUse hook and cleared by
+    PostToolUse — but PostToolUse does not fire for a Bash command that exits
+    NONZERO, and `PostToolUseFailure` does not fire at all (probed on Claude
+    Code 2.1.238 with all three events registered). So every failing test run,
+    failing build and empty `grep` leaves this stamped, and it stays stamped
+    until the next Bash call overwrites it — forever, when the failing call
+    was the phase's last. Read as bare truthiness, that is a silence switch
+    for the idle watchdog.
+
+    Nothing can be wired to close it, so it EXPIRES instead. The bound is the
+    caller's `stuck_tool_threshold_seconds`, deliberately not a number of its
+    own: past it the sibling stuck-tool detector already considers the call
+    long enough to be wedged, and two watchdogs disagreeing about whether a
+    tool is still running is the state this shares one number to avoid.
+
+    Three edges, each the safe direction of its own failure:
+
+    * **`max_age_seconds <= 0`** — the stuck-tool detector is DISABLED, so
+      there is no sibling window to derive a bound from, and both readings of
+      "no window" are wrong in opposite directions. Zero seconds would make
+      every live Bash call read as an idle worker; NO bound would hand back
+      the silence switch this predicate exists to remove, so disabling one
+      watchdog would silently deafen another. It falls back to
+      `ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS` instead, which equals the
+      config default — so nobody who left the detector alone sees a change.
+    * **A stamp whose age cannot be computed** does not suppress. It cannot be
+      shown to be fresh, and an unbounded silence is the failure this exists to
+      close. `_emit_stuck_tool` is where the operator hears about it.
+    * **A stamp in the future** (clock skew between the worker writing and the
+      supervisor reading) is "just started", never "very old".
     """
-    claim["active_tool_started_at"] = at
-
-
-def clear_active_tool(claim: dict) -> None:
-    """Clear `active_tool_started_at` — Bash tool call finished cleanly.
-
-    Called from `clu activity --end-bash` (PostToolUse). Idempotent so a
-    stale Post (e.g. worker crashed mid-call, next worker fires Post with
-    no matching Start) doesn't raise.
-    """
-    claim.pop("active_tool_started_at", None)
+    marker = claim.get("active_tool_started_at")
+    if not marker:
+        return False
+    if max_age_seconds <= 0:
+        max_age_seconds = ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS
+    try:
+        age = (now - parse_iso(marker)).total_seconds()
+    except (ValueError, TypeError):
+        return False
+    return age < max_age_seconds
 
 
 def stamp_activity_marker(

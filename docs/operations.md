@@ -727,6 +727,22 @@ worker env at Popen time, so the hook's `[ -n "$CLU_TOKEN" ]` guard
 opens exactly for clu-dispatched sessions and short-circuits everywhere
 else.
 
+**Know the recipe's one coverage limit before you debug around it: the
+marker is cleared only when the Bash command SUCCEEDS.** `PostToolUse`
+does not fire for a command that exits nonzero, and `PostToolUseFailure`
+does not fire at all (probed with all three events registered on claude
+2.1.238), so a failing test run, a failing build, or a `grep` that
+matches nothing leaves `active_tool_started_at` stamped until the next
+Bash call overwrites it. There is no event to add that would close this,
+and adding one is the wrong instinct — what makes it harmless is that the
+supervisor stops believing a marker older than
+`stuck_tool_threshold_seconds` (default 300s), the same window
+`tool_stuck` uses. Past that age the idle watchdog resumes sampling.
+Setting `stuck_tool_threshold_seconds` to 0 disables `tool_stuck`
+detection only — the marker's age bound falls back to 300s (the same
+value the default would have given it) rather than disappearing, so
+turning one watchdog off cannot silently deafen the other.
+
 ### The allowlist, entry by entry
 
 | Entry | Why the worker needs it |

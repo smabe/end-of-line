@@ -661,8 +661,14 @@ def _emit_worker_idle(
     tree_ps_output: str | None = None,
 ) -> None:
     """Fire EVENT_WORKER_IDLE once per claim when the worker is PID-alive but
-    doing nothing: no active Bash tool, and the worker's whole process tree
-    accrued almost no processor time across an uninterrupted ~10-minute window.
+    doing nothing: no FRESH active-Bash marker, and the worker's whole process
+    tree accrued almost no processor time across an uninterrupted ~10-minute
+    window.
+
+    "Fresh" is the whole of `state.activity_marker_suppresses`. A marker read
+    as bare truthiness suppresses forever, because a Bash command that exits
+    nonzero fires no closing hook event — so a single failing test run used to
+    make this watchdog deaf for the rest of the phase.
 
     The metric is CUMULATIVE processor time, sampled once per tick and read as
     a DELTA across the window — not instantaneous `%cpu`, which `man ps`
@@ -681,7 +687,14 @@ def _emit_worker_idle(
     pid = claim.get("pid")
     if not pid:
         return
-    if claim.get("active_tool_started_at"):
+    now = st._now_utc()
+    # An active Bash call means the worker is demonstrably working — but only
+    # while the marker is FRESH. A nonzero-exit command leaves it stamped with
+    # no event able to clear it, and believing it forever is how one failed
+    # test run silences this watchdog for the rest of the phase.
+    if st.activity_marker_suppresses(
+        claim, now, max_age_seconds=config.stuck_tool_threshold_seconds
+    ):
         return
 
     # ONE `ps` snapshot serves both halves of the sample: `walk_worker_tree`
@@ -689,7 +702,6 @@ def _emit_worker_idle(
     # directly — the walker excludes the root by contract, and the shim IS
     # the root, so dropping it would measure everything except the process
     # most likely to be wedged.
-    now = st._now_utc()
     snapshot = tree_ps_output if tree_ps_output is not None else capture_ps_snapshot()
     descendants = walk_worker_tree(pid, ps_output=snapshot)
     root_cpu: float | None = None
@@ -712,10 +724,13 @@ def _emit_worker_idle(
                 + config.worker_idle_max_sample_gap_seconds
             ),
         )
-        # The sample rides the delta with no precondition of its own: the tick
-        # is the only writer of `cpu_samples`, and the compare-and-set on
-        # `claimed_by` already refuses to stamp a claim that moved. The EMIT
-        # below is what gets guarded.
+        # The sample declares its own precondition because the tick is NOT the
+        # only writer of `cpu_samples` any more: a tool START clears the whole
+        # history (`plan_store.op_activity`), on the grounds that a tool call
+        # is positive proof the window it would otherwise contribute to is
+        # void. Unguarded, a tick already in flight would write that history
+        # straight back and resurrect the window the START threw away.
+        delta.require_claim_field("cpu_samples")
         _record_claim(delta, claim, "cpu_samples")
     # A `ps` we could not read (or one the worker pid is missing from) is
     # "cannot judge", not "measured zero" — no sample is appended, and the

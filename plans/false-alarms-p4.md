@@ -42,6 +42,11 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 - Consumes: `_entry_command(entry: dict) -> str | None` (`cli.py:2699`); `_INBOX_HOOK_BASENAME` (`cli.py:2721`); `_hook_settings_path() -> Path` (`cli.py:2668`); `monitor.load_marker(path: Path | None) -> dict | None`
 - Produces: `monitor.hook_state(surface, settings_path) -> HookState`; a shared basename matcher in `cli.py` consumed by both `_maybe_print_monitor_tip` and `_print_quiet_hours_coverage_health`
 
+## Done criteria addendum  *(escalated to plan level by the p2 sweep)*
+
+- **Every config threshold this phase adds or reads is tested at its ZERO / disabled value, and the test states which direction is safe.** Vacuous if this phase adds none — but check rather than assume, because the class has now bitten twice (p1: a minimum-sample count of `0` crashed the tick; p2: a `0` meaning "detector disabled" silently removed a suppression bound), and both times the full suite was green.
+- **A note on vocabulary, carried in by the p2 sweep:** this phase's "marker" is the monitor-hook install marker row in the HOST database. p2's "marker" is the active-tool activity stamp on a claim. They are unrelated, and nothing in this shard is falsified by p2 — but the shared word is a trap for anyone reading both shards, so keep this phase's usage explicitly qualified.
+
 ## Decisions & findings
 
 ### Decision: derive the predicate instead of reconciling the cache  *(status: active)*

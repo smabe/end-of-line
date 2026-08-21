@@ -208,8 +208,15 @@ A whole-plan version counter would be blind here: it cannot tell "the claim was
 released" from "a heartbeat landed", so it would abort most watchdog ticks
 against exactly the plans a watchdog is watching. The two highest-frequency
 writers — the heartbeat every ~120s and the activity stamp on every Bash call —
-write no events and touch only their own claim columns, so they cannot false-
-trip a precondition they were not judged against. If a fact HAS moved, the
+write no events, so neither can false-trip a precondition it was not judged
+against. The heartbeat touches one column. An activity START touches three: the
+marker, plus the idle watchdog's `cpu_samples` history and its
+`worker_idle_notified` dedup flag, because a tool call is positive proof that
+the quiet span those samples describe did not happen. That is a precondition
+trip on purpose, not a false one — a tick already deciding "this worker is
+idle" was deciding against a window the Bash call just voided.
+
+If a fact HAS moved, the
 apply raises `TickConflict`, nothing is written, the tick reports
 `idle / concurrent_write`, and the next cron tick re-derives from fresh state.
 A detection path needing a guarantee none of the five gives ADDS a field rather

@@ -230,8 +230,18 @@ database.
   `mark_heartbeat_loop_failing_notified` — the once-per-condition dedup
   flags the watchdogs stamp on a claim.
 - `append_cpu_sample`, `worker_idle_window_satisfied`,
-  `mark_active_tool_start`, `clear_active_tool`, `stamp_activity_marker` —
-  the idle / stuck-tool detector's inputs.
+  `activity_marker_suppresses`, `stamp_activity_marker` — the idle /
+  stuck-tool detector's inputs. `activity_marker_suppresses(claim, now, *,
+  max_age_seconds)` is the bounded read of `active_tool_started_at`: true
+  only while the marker is FRESH, because a Bash command that exits nonzero
+  fires no closing hook event and nothing can be wired to clear it. Callers
+  pass `stuck_tool_threshold_seconds`, so the two watchdogs share one idea of
+  how long a tool call may run; `0` (detection disabled) falls back to
+  `ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS` rather than removing the bound —
+  neither reading of "no window" is safe, since zero seconds makes every live
+  Bash call look idle and no bound restores the silence switch. A
+  stamp whose age cannot be parsed does not suppress — it cannot be shown to
+  be fresh, and unbounded silence is what the predicate exists to prevent.
 - `completed_phase_ids(data)`, `open_blockers(data)`,
   `phase_has_open_blocker(data, phase_id)` — projections. Centralized so
   the predicates can't drift between callers.
@@ -434,9 +444,15 @@ the apply has committed.
   notification fires before the claim is cleared.
 - `_emit_worker_idle(data, config, side_notifies)` — wedge gap-fill:
   fires `EVENT_WORKER_IDLE` once per claim when the worker is PID-alive
-  but doing nothing (no active Bash tool, and the worker's process tree
-  accrued ≤`worker_idle_cpu_delta_threshold_seconds` of processor time
-  across an uninterrupted `worker_idle_window_minutes`). The metric is
+  but doing nothing (no FRESH active-Bash marker, and the worker's
+  process tree accrued ≤`worker_idle_cpu_delta_threshold_seconds` of
+  processor time across an uninterrupted `worker_idle_window_minutes`).
+  "Fresh" is `state.activity_marker_suppresses` — a marker older than
+  `stuck_tool_threshold_seconds` stops suppressing, because a Bash
+  command that exits nonzero leaves one stamped that no hook event will
+  ever clear. The sample write declares `cpu_samples` as a precondition:
+  `plan_store.op_activity` clears the history on a tool START, and a tick
+  already in flight would otherwise write it straight back. The metric is
   **cumulative** processor time read as a delta across the window, not
   instantaneous `%cpu` — `man ps` defines `%cpu` as a decaying average
   over up to a minute, which a healthy worker waiting on the model sits

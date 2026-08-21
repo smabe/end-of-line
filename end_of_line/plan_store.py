@@ -778,6 +778,18 @@ def op_activity(
 ) -> bool:
     """Stamp (`start`) or clear (`end`) the active-tool window on the claim.
 
+    A START also VOIDS the idle watchdog's accumulated window — it clears
+    `cpu_samples` and re-arms `worker_idle_notified`. A tool call is positive
+    proof of activity, so the quiet span the samples describe did not happen;
+    and a worker that went quiet, got warned about, then did something is
+    eligible to be warned about again. This is deliberately not redundant with
+    the contiguity rule in `state.worker_idle_window_satisfied`: that rule
+    voids a window whose sampling HOLE exceeds `max_sample_gap`, which covers
+    a long tool call, while a call shorter than the gap leaves a hole
+    contiguity accepts. The clear is what covers a tool call of ANY length.
+    An END clears nothing — the samples taken after it are the ones the next
+    window is legitimately built from.
+
     Returns False when the write was DROPPED because the store was busy past
     `timeout_s` — the PreToolUse hook's contract: never freeze the worker's
     Bash call over a marker. A stale token is a different thing entirely and
@@ -785,12 +797,34 @@ def op_activity(
     """
     if action not in ("start", "end"):
         raise ValueError(f"action must be 'start' or 'end', got {action!r}")
-    value = st.utcnow() if action == "start" else None
     try:
         with _plan_txn(orch_dir, slug, timeout_s=timeout_s) as cur:
+            if action == "end":
+                columns: list[str] = ["active_tool_started_at"]
+                values: list[Any] = [None]
+            else:
+                # A START writes across a column and the `flags` catch-all, so
+                # it needs the row it is merging into — the same shape
+                # `op_stamp_claim_fields` uses, still one UPDATE inside one
+                # transaction.
+                row = cur.execute(
+                    "SELECT * FROM claims WHERE plan_slug = ?", (slug,)
+                ).fetchone()
+                if row is None or row["claimed_by"] != token or row["phase_id"] != phase:
+                    raise _claim_mismatch(cur, slug, token, phase)
+                columns, values = _claim_assignments(
+                    row,
+                    {
+                        "active_tool_started_at": st.utcnow(),
+                        "cpu_samples": [],
+                        "worker_idle_notified": False,
+                        "worker_idle_notified_at": None,
+                    },
+                )
+            assignments = ", ".join(f"{col} = ?" for col in columns)
             cur.execute(
-                f"UPDATE claims SET active_tool_started_at = ? WHERE {_CLAIM_CAS}",
-                (value, slug, token, phase),
+                f"UPDATE claims SET {assignments} WHERE {_CLAIM_CAS}",
+                (*values, slug, token, phase),
             )
             if cur.rowcount == 0:
                 raise _claim_mismatch(cur, slug, token, phase)

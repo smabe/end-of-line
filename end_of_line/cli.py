@@ -6761,20 +6761,31 @@ def cmd_activity(args, cfg: ProjectConfig, state_path: Path) -> int:
     rather drop the marker update than freeze the worker's Bash
     invocation. `stamp_activity_marker` returns False when it dropped one;
     we still exit 0 to keep the operator-side UX consistent with the
-    hook-side `|| true` semantics.
+    hook-side `|| true` semantics. It is reported on stderr rather than
+    discarded: a dropped START leaves the idle watchdog sampling through a
+    Bash call it should have paused for, and a dropped END leaves a marker
+    that suppresses until the age bound expires it — both are worth a trace
+    when an operator is working out why a watchdog said what it said.
     """
     if not (args.start_bash or args.end_bash):
         return _die(
             ExitCode.INVALID_VALUE,
             "clu activity: one of --start-bash / --end-bash required",
         )
-    st.stamp_activity_marker(
+    action = "start" if args.start_bash else "end"
+    stamped = st.stamp_activity_marker(
         state_path,
         token=args.token,
         phase=args.phase,
-        action="start" if args.start_bash else "end",
+        action=action,
         timeout_seconds=2.0,
     )
+    if not stamped:
+        print(
+            f"clu activity: {action} marker dropped — the store was busy for "
+            f"2.0s on plan={args.plan} phase={args.phase}",
+            file=sys.stderr,
+        )
     return ExitCode.OK
 
 

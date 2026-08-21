@@ -65,13 +65,24 @@ def main(argv: list[str] | None = None) -> int:
     state_path = _resolve_state_path(Path(args.project).resolve(), args.plan)
     action = "start" if args.start_bash else "end"
     try:
-        st.stamp_activity_marker(
+        stamped = st.stamp_activity_marker(
             state_path,
             token=args.token,
             phase=args.phase,
             action=action,
             timeout_seconds=2.0,
         )
+        if not stamped:
+            # A contended store drops the update rather than freezing the
+            # worker's Bash call — but a drop that leaves no trace is a
+            # watchdog behaving inexplicably later. The snippet's `2>/dev/null`
+            # keeps this out of the worker's transcript by design; it is here
+            # for the operator who runs the module by hand.
+            print(
+                f"activity_hook: {action} marker dropped — the store was busy "
+                f"for 2.0s on plan={args.plan} phase={args.phase}",
+                file=sys.stderr,
+            )
     except st.ClaimMismatch as exc:
         # Stale token (claim released, phase advanced, supervisor reaped).
         # The hook snippet's `|| true` masks the non-zero exit so the
