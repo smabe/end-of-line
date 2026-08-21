@@ -127,7 +127,7 @@ than being asserted, so they are closed by evidence in the file, not left open.
 
 ### Execution record
 
-**p1 SHIPPED 2026-08-21** — gate met with margin. The phase's branch-on-failure was the real
+**p1 SHIPPED 2026-08-21 `f4b2550`** — gate met with margin. The phase's branch-on-failure was the real
 question (does cumulative tree CPU separate a wedge from a healthy worker?), and it does: driven
 through 25 real ticks, a dormant tree moved 0.0000s while the LIGHTEST live rate measured
 (0.15s/tick) moved 3.3000s against a 1.0s threshold — 3.3× clear. Full gate: 2394/2394 tests,
