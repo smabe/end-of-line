@@ -216,6 +216,31 @@ the quiet span those samples describe did not happen. That is a precondition
 trip on purpose, not a false one — a tick already deciding "this worker is
 idle" was deciding against a window the Bash call just voided.
 
+A third writer joins them: `clu quiet-span`, the worker's own declaration that
+it is about to look wedged on purpose — a `/code-review`, a full test gate.
+This is a SUPPRESSION CONDITION inside the idle watchdog, not a new action in
+the chain above: the tick samples, decides and emits at most one thing exactly
+as before, and what changes is only that `_emit_worker_idle` holds its alert
+while the claim carries an unexpired `quiet_span`. The field therefore joins
+both watchdogs' precondition sets alongside `active_tool_started_at` — a
+declaration landing between the decision and the write has to void the emit it
+contradicts, or it loses the race it exists to win.
+
+The span is a LEASE with an `expires_at` on it, never half of an open/close
+pair, and the reason is that every close-event mechanism examined in this area
+has failed in the field: the activity marker's own closing hook does not fire
+for a Bash command that exits nonzero. A suppression that waits for a message
+to arrive eventually becomes permanent, and a permanently deaf wedge detector
+is worse than the false alarms the declaration removes. The trade that buys is
+stated rather than discovered: **a worker that wedges INSIDE its own declared
+span is detected when the span expires** — up to
+`worker_quiet_span_ceiling_minutes` (default 45) later — instead of after
+`worker_idle_window_minutes`. Sampling continues throughout the span, so the
+window is already built the moment it expires and the alert lands on the next
+tick rather than a further window after that. Setting the ceiling to `0` grants
+no declarable silence at all: the SHORT direction, deliberately, so the knob
+that limits suppression can never be the switch that removes it.
+
 If a fact HAS moved, the
 apply raises `TickConflict`, nothing is written, the tick reports
 `idle / concurrent_write`, and the next cron tick re-derives from fresh state.

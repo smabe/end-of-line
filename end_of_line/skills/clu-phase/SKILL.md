@@ -165,6 +165,62 @@ whose authoritative test runner is an MCP tool (e.g. Xcode
 shell — see `docs/conventions.md` for the policy rationale. The
 simplify mandate is unaffected.
 
+**Before the review, declare the quiet span.** A `/code-review` is
+minutes of near-zero process CPU with no Bash call open — the exact
+shape of a wedged worker — and the supervisor's idle watchdog will
+otherwise warn the operator about you. Say what you are about to do
+instead of leaving it to be inferred:
+```bash
+clu quiet-span --project "$PROJECT_ROOT" --plan "$PLAN" \
+    --phase "$PHASE" --token "$TOKEN" \
+    --reason code-review --expected-minutes 20
+```
+The span is a LEASE, not a pair. It expires on its own clock at
+`--expected-minutes` — clamped to the project's
+`worker_quiet_span_ceiling_minutes` (45 by default; `0` means this
+project grants no declared silence at all) — whether or not you ever
+close it, so a worker that dies mid-review can't leave the watchdog
+deaf. Declare a realistic duration: a span longer than the work is
+silence the operator paid for and didn't need. When the review
+finishes, close it early:
+```bash
+clu quiet-span --project "$PROJECT_ROOT" --plan "$PLAN" \
+    --phase "$PHASE" --token "$TOKEN" --end
+```
+`--end` can only ever SHORTEN the span; skipping it costs the operator
+the rest of the declared time, not the watchdog. The same declaration
+fits any other stretch you know will look idle — a full test gate, a
+long build. It is additive, never a gate: if it exits non-zero because
+the operator's `clu` predates the subcommand, note it and carry on —
+the supervisor falls back to judging you on process activity.
+
+**Then, best-effort, tell the operator's live session.** Call
+`ListAgents`. If it lists an interactive session for this project, send
+ONE short `SendMessage` naming the plan, the phase, and how long you
+expect to be quiet:
+
+> `clu $PLAN/$PHASE: going quiet ~20 min for /code-review.`
+
+Naming the plan and phase isn't decoration — `ListAgents` resolves
+peers by name across the whole machine, so a message that lands in an
+unrelated session has to read as an obvious misroute rather than as a
+confusing interruption.
+
+Fire-and-forget, and every clause of that matters:
+- **If nothing is listed, skip it silently.** No peer session is the
+  NORMAL case — clu exists for the operator being away — so an absent
+  session is not a problem, not worth a log line, and not worth a
+  retry.
+- **Never retry, never block on it, never treat a send failure as a
+  phase failure.** The notice changes nothing the supervisor decides;
+  the `clu quiet-span` callback above is the part that does.
+- **Only for spans of 10 minutes or more.** Ten minutes is the idle
+  watchdog's own window, so a shorter span couldn't have produced the
+  warning the notice exists to pre-empt — and several workers
+  announcing every small pause turns the operator's session into a
+  ticker.
+- **One line.** It interrupts whatever they're doing.
+
 **If your diff exceeds threshold** (>1 file OR ~30 lines by
 default; per-project override in `.orchestrator.json:quality.simplify_threshold`)
 — run `/code-review`, then stamp:

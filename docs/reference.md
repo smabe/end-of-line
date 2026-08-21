@@ -242,6 +242,21 @@ database.
   Bash call look idle and no bound restores the silence switch. A
   stamp whose age cannot be parsed does not suppress — it cannot be shown to
   be fresh, and unbounded silence is what the predicate exists to prevent.
+- `build_quiet_span(reason, expected_minutes, now, *, ceiling_minutes)` and
+  `quiet_span_active(claim, now)` — the worker-DECLARED half of idle
+  suppression, in front of the inference above rather than instead of it. The
+  builder stamps `{"reason", "started_at", "expires_at"}` with
+  `expires_at = started_at + min(expected_minutes, ceiling_minutes)`, so the
+  declaration is a LEASE that ends on clu's clock whether or not the worker
+  lives to close it. The predicate takes no threshold argument because the
+  bound rides IN the record; every shape it cannot date (absent, non-object,
+  missing or unparseable `expires_at`) answers False, which hands the claim
+  back to the evidence-based window rather than granting endless silence.
+  `ceiling_minutes = 0` clamps every span to zero length — the SHORT
+  direction, so an operator disabling declared silence gets a watchdog that
+  still speaks. Default ceiling: `QUIET_SPAN_CEILING_DEFAULT_MINUTES` (45),
+  which `config.worker_quiet_span_ceiling_minutes` defaults to so the two
+  cannot drift.
 - `completed_phase_ids(data)`, `open_blockers(data)`,
   `phase_has_open_blocker(data, phase_id)` — projections. Centralized so
   the predicates can't drift between callers.
@@ -307,6 +322,13 @@ resolved path escaping `<project>/<plan_dir>/.orchestrator/`.
   auto-backgrounded (#106). Default `1_800_000` (30 min), against the
   invariant `gate duration < ceiling < lease TTL`. Validated by
   `_validate_non_negative_int` (rejects non-int, negative, and bool).
+- `ProjectConfig.worker_quiet_span_ceiling_minutes: int` — cap on a
+  worker-declared quiet span (`clu quiet-span`), default
+  `state.QUIET_SPAN_CEILING_DEFAULT_MINUTES` (45). Validated by
+  `_validate_non_negative_int`, NOT the positive validators the four
+  `worker_idle_*` thresholds use: those are detector bounds where zero is a
+  predicate answering without evidence, while this is a cap on suppression
+  whose zero is meaningful and safe — no worker may declare any silence.
 - `ProjectConfig.orchestrator_dir()` — `<project>/<plan_dir>/.orchestrator/`,
   the directory that holds `clu.db` and `logs/`. Every store function is
   keyed by this DIR rather than a file, so one place knows the filename.
@@ -450,7 +472,16 @@ the apply has committed.
   "Fresh" is `state.activity_marker_suppresses` — a marker older than
   `stuck_tool_threshold_seconds` stops suppressing, because a Bash
   command that exits nonzero leaves one stamped that no hook event will
-  ever clear. The sample write declares `cpu_samples` as a precondition:
+  ever clear. A second suppression sits in front of the inference:
+  `state.quiet_span_active`, the worker's own declaration over
+  `clu quiet-span` that it is about to look wedged on purpose. It is
+  checked AFTER the sample append rather than beside the marker test, and
+  the placement is the behaviour — sampling continues through the span, so
+  a worker that wedged inside its own review is reported on the tick after
+  the span expires instead of a further `worker_idle_window_minutes` later.
+  `quiet_span` joins `active_tool_started_at` in BOTH watchdogs'
+  precondition sets, so a declaration landing mid-tick voids the emit it
+  contradicts. The sample write declares `cpu_samples` as a precondition:
   `plan_store.op_activity` clears the history on a tool START, and a tick
   already in flight would otherwise write it straight back. The metric is
   **cumulative** processor time read as a delta across the window, not
@@ -2039,9 +2070,21 @@ operator (`tick`, `status`, `pause`, `resume`, `retry`, `init`,
   single-plan (`--plan`) and batch (`--all-done`) ship paths.
   Returns `(success: bool, message: str)`.
 - Worker-side commands: `cmd_complete`, `cmd_block`, `cmd_spawn`,
-  `cmd_heartbeat`, `cmd_task_done`, `cmd_verify`, `cmd_attest`. All
+  `cmd_heartbeat`, `cmd_task_done`, `cmd_verify`, `cmd_attest`,
+  `cmd_activity`, `cmd_quiet_span`. All
   require `--token` matching the live claim (except `cmd_verify` in
   operator mode), all wear `@_translate_claim_mismatch`.
+- `cmd_quiet_span(args)` — the worker declares (or clears) a stretch of
+  expected silence so the idle watchdog holds its alert:
+  `--reason <label> --expected-minutes <n>`, or `--end`. Builds the record
+  through `state.build_quiet_span` (clamped to
+  `worker_quiet_span_ceiling_minutes`) and writes it with ONE
+  `plan_store.op_stamp_claim_fields`, which lands it in the claim's `flags`
+  catch-all — no column, no migration. `--end` writes null and can only
+  SHORTEN the span; the span expires on its own clock regardless, so a
+  worker that dies mid-review cannot leave the watchdog deaf. A missing
+  reason, a non-positive duration, or `--end` combined with either is
+  `INVALID_VALUE` rather than a silent clamp.
 - `cmd_verify(args)` — runs `quality.verify_command` (falling back
   to `test_command`) via `subprocess.run`. Captures HEAD SHA before
   the command starts (so a mid-test commit can't slip a stale SHA

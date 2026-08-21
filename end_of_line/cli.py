@@ -1236,6 +1236,36 @@ def main(argv: list[str] | None = None) -> int:
         help="PostToolUse(Bash): clear active_tool_started_at",
     )
 
+    p_quiet_span = sub.add_parser(
+        "quiet-span",
+        help=(
+            "Worker declares a stretch of expected silence (code review, "
+            "full test gate) so the idle watchdog holds its alert. Expires "
+            "on its own clock — --end is a courtesy, never the mechanism."
+        ),
+    )
+    add_common(p_quiet_span)
+    p_quiet_span.add_argument("--token", required=True, help="Worker claim token")
+    p_quiet_span.add_argument("--phase", required=True)
+    p_quiet_span.add_argument(
+        "--reason",
+        default="",
+        help="Short label for what the worker is about to do (e.g. code-review)",
+    )
+    p_quiet_span.add_argument(
+        "--expected-minutes",
+        dest="expected_minutes",
+        type=int,
+        default=None,
+        help="How long the worker expects to be quiet; clamped to "
+        "`worker_quiet_span_ceiling_minutes` (default 45)",
+    )
+    p_quiet_span.add_argument(
+        "--end",
+        action="store_true",
+        help="Clear the span early. The span expires without this.",
+    )
+
     p_logs = sub.add_parser(
         "logs",
         help="Tail the active worker's log (or newest log in the dir if idle)",
@@ -1602,6 +1632,7 @@ def main(argv: list[str] | None = None) -> int:
         "notify-heartbeat-failure": cmd_notify_heartbeat_failure,
         "notify-worker-dead": cmd_notify_worker_dead,
         "activity": cmd_activity,
+        "quiet-span": cmd_quiet_span,
         "register": cmd_register,
         "pause": cmd_pause,
         "resume": cmd_resume,
@@ -6786,6 +6817,88 @@ def cmd_activity(args, cfg: ProjectConfig, state_path: Path) -> int:
             f"2.0s on plan={args.plan} phase={args.phase}",
             file=sys.stderr,
         )
+    return ExitCode.OK
+
+
+@_translate_claim_mismatch
+def cmd_quiet_span(args, cfg: ProjectConfig, state_path: Path) -> int:
+    """Worker callback: declare (or clear) a stretch of expected silence.
+
+    The supervisor's idle watchdog infers whether a worker is working from the
+    processor time its tree burns. A code review or a full test gate is a
+    stretch where that inference is wrong in the expensive direction — the
+    worker is waiting on the model, moving almost no CPU, and looks exactly
+    like a wedge. The worker knows which one it is, so it says so here instead
+    of being guessed at.
+
+    What it declares is a LEASE. `expires_at` is stamped from clu's clock at
+    declaration time and clamped to the project's ceiling, so the span ends on
+    schedule whether or not `--end` is ever called: a worker that dies inside
+    its own review does not leave the watchdog deaf. `--end` only shortens it.
+
+    Token-validated against the live claim like every other worker callback —
+    a span is a licence to silence an operator-facing alert, so a forged or
+    released token must not be able to write one.
+    """
+    try:
+        st.validate_slug(args.phase, kind="phase id")
+    except st.InvalidSlug as exc:
+        return _die(ExitCode.INVALID_SLUG, str(exc))
+
+    if args.end:
+        if args.reason or args.expected_minutes is not None:
+            return _die(
+                ExitCode.INVALID_VALUE,
+                "clu quiet-span: --end takes neither --reason nor --expected-minutes",
+            )
+        span: dict | None = None
+    else:
+        if not args.reason:
+            return _die(
+                ExitCode.INVALID_VALUE,
+                "clu quiet-span: --reason is required (or pass --end to clear)",
+            )
+        if args.expected_minutes is None or args.expected_minutes <= 0:
+            # Not clamped to zero silently: a worker that meant to declare a
+            # span and got the flag wrong should hear about it, and a
+            # zero-length span is indistinguishable from no span at all.
+            return _die(
+                ExitCode.INVALID_VALUE,
+                "clu quiet-span: --expected-minutes must be a positive number "
+                "of minutes",
+            )
+        requested = args.expected_minutes
+        span = st.build_quiet_span(
+            # Bounded like every other worker-supplied string that lands in a
+            # claim row (cf. the stuck-tool command excerpt) — the reason is a
+            # label for an operator, not a payload.
+            args.reason[:200],
+            requested,
+            st._now_utc(),
+            ceiling_minutes=cfg.worker_quiet_span_ceiling_minutes,
+        )
+
+    plan_store.op_stamp_claim_fields(
+        *st.key_for(state_path),
+        token=args.token,
+        phase=args.phase,
+        fields={"quiet_span": span},
+    )
+
+    if span is None:
+        print(f"quiet-span {args.phase}: cleared")
+        return ExitCode.OK
+    # Say so when the project ceiling shortened the declaration: a worker that
+    # asked for 90 minutes and silently got 45 would otherwise plan the rest of
+    # its phase around silence it does not have.
+    clamped = (
+        " (clamped to the project ceiling)"
+        if requested > cfg.worker_quiet_span_ceiling_minutes
+        else ""
+    )
+    print(
+        f"quiet-span {args.phase}: {span['reason']} until {span['expires_at']}{clamped}"
+    )
     return ExitCode.OK
 
 

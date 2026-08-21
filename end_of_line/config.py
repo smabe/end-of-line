@@ -164,6 +164,17 @@ class ProjectConfig:
     worker_idle_max_sample_gap_seconds: float = 60.0
     worker_idle_cpu_delta_threshold_seconds: float = 1.0
     worker_idle_min_samples: int = 3
+    # Ceiling on a worker-declared quiet span (`clu quiet-span`), in minutes.
+    # A worker about to go quiet on purpose — a code review, a full test gate
+    # — declares it and the idle watchdog holds its alert until the span
+    # expires. This is the ONLY bound on how much silence one declaration can
+    # buy, so raising it widens the window in which a genuine wedge goes
+    # unreported by exactly that much. `0` means workers may declare NO
+    # silence: every span expires the instant it is written and the watchdog
+    # judges on evidence alone. Zero is deliberately the SHORTEST-silence
+    # setting rather than an "unbounded" one — a limit whose off switch
+    # removes the limit is the defect this plan already shipped twice.
+    worker_quiet_span_ceiling_minutes: int = st.QUIET_SPAN_CEILING_DEFAULT_MINUTES
 
     def orchestrator_dir(self) -> Path:
         """The project's `.orchestrator/` directory — the key every store takes.
@@ -510,5 +521,13 @@ def load_project_config(project_root: Path) -> ProjectConfig:
             raw,
             "worker_idle_min_samples",
             3,
+        ),
+        # Non-negative rather than positive, unlike the four idle thresholds
+        # above: this is a CAP on suppression, not a detector bound, so its
+        # zero is meaningful and safe — "no worker may declare any silence".
+        worker_quiet_span_ceiling_minutes=_validate_non_negative_int(
+            raw,
+            "worker_quiet_span_ceiling_minutes",
+            st.QUIET_SPAN_CEILING_DEFAULT_MINUTES,
         ),
     )

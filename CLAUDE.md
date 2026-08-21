@@ -32,8 +32,10 @@ For the *why* behind each, see
   hood / Tests / `Co-Authored-By:` trailer.
 - **`ExitCode` IntEnum, never bare ints.** Use `_die(ExitCode.X, msg)`.
 - **`--token` on every worker callback** (`complete / block / spawn /
-  task-done / heartbeat / verify / attest`); validated against the
-  live claim.
+  task-done / heartbeat / verify / attest / activity / quiet-span`);
+  validated against the live claim. The list is the current set, not a
+  closed one — a NEW callback inherits the rule, it does not escape it by
+  being absent here.
 - **`state.validate_slug` on every external `plan` / `phase_id`** before
   any path join. Regex `^[a-z0-9][a-z0-9_-]{0,63}$`.
 - **`EVENT_*` constants, never raw strings.** A typo silently breaks

@@ -98,6 +98,21 @@ Plan state is normalized across six tables in the project database. The full DDL
     "worker_idle_notified": false,
     "worker_idle_notified_at": "ISO8601",
     "stuck_tool_emitted_at": {"81681": "ISO8601"},
+    // Optional. A worker-DECLARED stretch of expected silence, written by
+    // `clu quiet-span` (token-validated) and cleared by `--end` or by
+    // being overwritten. `worker_idle` holds its alert while the span is
+    // unexpired. A LEASE, not half of a pair: `expires_at` is stamped from
+    // clu's clock at declaration time and clamped to
+    // `worker_quiet_span_ceiling_minutes` (default 45; `0` grants no
+    // declarable silence at all), so the span ends on schedule whether or
+    // not `--end` is ever called — a worker that dies mid-review cannot
+    // leave the watchdog deaf, which is the failure every close-event
+    // design in this area has actually produced. `--end` can only shorten
+    // it. `reason` is a worker-supplied label for the operator, truncated
+    // to 200 chars. The trade this buys is explicit: a worker that wedges
+    // INSIDE its own span is detected when the span expires rather than
+    // after `worker_idle_window_minutes`.
+    "quiet_span": {"reason": "code-review", "started_at": "ISO8601", "expires_at": "ISO8601"},
     // Optional, lazy-init. Absent until the worker stamps via `clu verify`
     // or `clu attest`. Each entry: {"at": ISO8601_Z, "commit_sha": str}.
     // Stamp is "stale" if commit_sha != current HEAD.
@@ -574,16 +589,30 @@ A worker is a fresh process that runs ONE phase. It must:
    ```
    Without heartbeats the supervisor can't tell "running" from "dead" until
    the 60-min lease expires.
-3. **On success**, before exit:
+3. **Before any stretch it knows will look idle** — a `/code-review`, a full
+   test gate, a long build — declare it, so the idle watchdog holds its alert
+   instead of inferring a wedge from near-zero process CPU:
+   ```bash
+   clu quiet-span --project P --plan S --phase X --token <token> \
+     --reason code-review --expected-minutes 20
+   ```
+   The declaration is a LEASE. It expires on clu's clock at
+   `--expected-minutes`, clamped to `worker_quiet_span_ceiling_minutes`
+   (default 45; `0` means no declarable silence), whether or not the worker
+   lives to call `clu quiet-span ... --end` — which only ever shortens it.
+   Additive and never a gate: a worker that declares nothing is still judged
+   on process activity, so an old skill against a new clu (or the reverse)
+   degrades to inference rather than failing.
+4. **On success**, before exit:
    ```bash
    clu complete --project P --plan S --phase X --commit <sha> [...]
    ```
-4. **On a /code-review finding the worker chooses NOT to fix in this phase**, before completing:
+5. **On a /code-review finding the worker chooses NOT to fix in this phase**, before completing:
    ```bash
    clu spawn --project P --plan S --source simplify --phase X --title "..." --description "..."
    ```
    Never file as a GH issue. Spawned tasks are first-class members of the plan.
-5. **To chain a follow-up plan into the project queue mid-phase** (v2 worker-enqueue):
+6. **To chain a follow-up plan into the project queue mid-phase** (v2 worker-enqueue):
    ```bash
    clu queue add <slug> --project P --plan S --phase X --token <token> [--reason "..."]
    ```
@@ -595,14 +624,14 @@ A worker is a fresh process that runs ONE phase. It must:
    - Idempotency: if the slug is already pending or in-flight → silently no-op (prints position); if in history → exits `STATUS_TRANSITION` (7) — hitting this is a worker bug.
    - On success: emits `EVENT_QUEUE_APPENDED` in the source plan's events; fingerprints the token (`sha256(token)[:8]`) onto the queue entry (raw token never persisted); exits 0.
    - `@_translate_claim_mismatch` wraps the worker path so a bad token exits 4 (`CLAIM_MISMATCH`).
-6. **On blocked ambiguity**:
+7. **On blocked ambiguity**:
    ```bash
    clu block --project P --plan S --phase X \
      --question "..." --option A --option B --context "..." \
      [--type blocked_replan]
    ```
    This releases the claim and writes the blocker.
-7. **On unrecoverable failure**: just exit. The lease expires and the supervisor retries (up to `max_attempts_per_phase`).
+8. **On unrecoverable failure**: just exit. The lease expires and the supervisor retries (up to `max_attempts_per_phase`).
 
 ## Cron snippet
 

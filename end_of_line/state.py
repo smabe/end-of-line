@@ -319,6 +319,15 @@ WORKER_IDLE_SAMPLE_CAP = 200
 # stuck-tool detection.
 ACTIVITY_MARKER_FALLBACK_BOUND_SECONDS = 300
 
+# Default ceiling on a worker-declared quiet span, in minutes — the ONLY bound
+# on how much silence a worker can buy by declaring one, so an operator raising
+# it is widening the window in which a wedge goes unreported. Lives here rather
+# than inline in `config.py` because the config default and this number must
+# never drift apart: the clamp that enforces the ceiling reads the config value,
+# and a second literal would let the two disagree silently.
+# Operator sign-off 2026-08-21 (`plans/false-alarms.md`, Status): 45.
+QUIET_SPAN_CEILING_DEFAULT_MINUTES = 45
+
 
 @dataclass
 class ReapResult:
@@ -1091,6 +1100,81 @@ def activity_marker_suppresses(
     except (ValueError, TypeError):
         return False
     return age < max_age_seconds
+
+
+def build_quiet_span(
+    reason: str,
+    expected_minutes: float,
+    now: _dt.datetime,
+    *,
+    ceiling_minutes: float,
+) -> dict:
+    """The claim record for a worker-declared stretch of expected silence.
+
+    A worker about to run a code review or a full test gate knows it is going
+    to look wedged for the next N minutes. It says so once, here, instead of
+    leaving the supervisor to infer it from process CPU — but what it says is
+    a LEASE, not one half of a pair. `expires_at` is stamped at declaration
+    time from clu's own clock, so the span ends whether or not the worker
+    lives to call `--end`, and a worker that dies mid-review does not leave
+    the watchdog deaf.
+
+    Two clamps, both toward LESS silence:
+
+    * `ceiling_minutes` caps the declaration, so a worker cannot buy unlimited
+      silence by declaring a ten-hour review. A ceiling of **0 means workers
+      may declare no silence at all** — the span is written and expires the
+      instant it is created, so `quiet_span_active` is false from the first
+      read. That is the disabled setting, and it disables the SUPPRESSION
+      rather than the bound: the opposite reading ("no ceiling") would make a
+      config value meant to limit silence the switch that removes the limit.
+    * A negative or zero `expected_minutes` clamps to zero for the same
+      reason. The callback rejects one before reaching here; this function is
+      public and its next caller might not.
+
+    `started_at` is recorded even though nothing reads it for the expiry
+    decision: it is what tells an operator reading `clu state dump` when the
+    worker went quiet and for how long it claimed it would.
+    """
+    minutes = max(0.0, min(float(expected_minutes), float(ceiling_minutes)))
+    return {
+        "reason": reason,
+        "started_at": now.strftime(_ISO_FMT),
+        "expires_at": (now + _dt.timedelta(minutes=minutes)).strftime(_ISO_FMT),
+    }
+
+
+def quiet_span_active(claim: dict, now: _dt.datetime) -> bool:
+    """True while the claim carries a declared quiet span that has NOT expired.
+
+    Read-site bounded, like `activity_marker_suppresses` and for the same
+    reason — every close-event design this plan examined has failed in the
+    field, so a suppression that waits for a message to arrive is a
+    suppression that eventually becomes permanent. The bound here rides IN the
+    record (`expires_at`, stamped and clamped at declaration time by
+    `build_quiet_span`) rather than being supplied by the caller, which is why
+    this predicate needs no threshold argument: there is no reading of a
+    quiet-span claim under which "how long is it good for" is the reader's
+    question to answer.
+
+    Every malformed shape answers FALSE — no span, a non-object, a missing or
+    unparseable `expires_at`. That is the safe direction: false means the idle
+    watchdog goes on to judge the worker on p1's evidence, which is the floor
+    this phase sits in front of rather than replaces. True on a shape nobody
+    can date would be silence with no end, which is the one outcome this
+    design refuses.
+    """
+    span = claim.get("quiet_span")
+    if not isinstance(span, dict):
+        return False
+    expires_at = span.get("expires_at")
+    if not isinstance(expires_at, str) or not expires_at:
+        return False
+    try:
+        expiry = parse_iso(expires_at)
+    except (ValueError, TypeError):
+        return False
+    return now < expiry
 
 
 def stamp_activity_marker(

@@ -65,6 +65,11 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 
 - `tests/test_quiet_span.py` *(new)* — an open unexpired span suppresses; an EXPIRED span does not (the leak this design refuses to build); a span with no `--end` still expires; a declared duration above the ceiling is clamped; a forged or stale token is rejected.
 
+- `end_of_line/skills_manifest.json` — **added at execution.** `tests/test_skill_sync.py` hard-fails when a bundled SKILL.md's current hash is missing; regenerated via `scripts/gen_skill_manifest.py`. p2 hit the same thing.
+- `docs/reference.md` — **added at execution.** Its `_emit_worker_idle` entry ENUMERATES the suppression conditions and its `state.py` section enumerates the detector's inputs, so leaving them would ship doc lines the code contradicts — which the master's plan-level Done criteria forbid.
+- `CLAUDE.md` — **added at review.** Its token-bearing callback enumeration omitted the new `quiet-span` (and the pre-existing `activity`). The stated RULE was still true, but a list a future session could read as closed is how a callback ships without token validation; both names added, plus one line saying the list is current rather than closed.
+- **`end_of_line/plan_store.py` is named in this Work list and was deliberately NOT edited** — see the reuse finding below. A reviewer diffing against this list will find it untouched, and that is the correct outcome.
+
 - Consumes: `plan_store` claim-write helpers and the `_CLAIM_OWN_KEYS` / `flags` split (`plan_store.py:558`); `state.validate_slug`; `ExitCode`; `state.worker_idle_window_satisfied(claim, now, *, min_samples: int, window_min: float, max_sample_gap: float, cpu_delta_threshold: float) -> bool` (produced by p1); `state.activity_marker_suppresses(claim: dict, now: datetime, *, max_age_seconds: float) -> bool` (produced by p2 — this is the concrete name of what this line called "the bounded-suppression predicate")
 - Produces: `clu quiet-span` worker callback; `state.quiet_span_active(claim: dict, now: datetime) -> bool`; `current_claim.quiet_span` record
 
@@ -83,6 +88,29 @@ See the master `plans/false-alarms.md`. The decisions binding this phase:
 - **Rationale:** it is the highest-signal channel available when the operator is present — it carries the reason and the expected duration into the session they are actually looking at — and it is worthless when they are absent, which is clu's design centre. Treating it as an enhancement rather than a mechanism is what lets it be both.
 - **Alternatives considered:** route the notice through the existing notify channels instead (rejected — Discord already covers away, and duplicating a live-session notice there is the noise this phase is trying not to create); make the send mandatory (rejected — no peer session is the normal case, so a mandatory send fails constantly by design).
 - **Evidence:** probes recorded in the master's Background findings; `ListAgents` returned no interactive peer for other machines' sessions, and returned this repo's session by name.
+
+### Finding: the new `op_*` this shard asked for already existed  *(status: active)*
+- The Work list asked for "ONE `op_*` writing the span onto the claim … lands in the `flags` catch-all … never read-modify-write." `plan_store.op_stamp_claim_fields` (`plan_store.py:836`) already satisfies every one of those properties: compare-and-set on token AND phase, the `flags` merge via `_claim_assignments`, one `BEGIN IMMEDIATE` through `_plan_txn`, and `ClaimMismatch` raised on a forged token rather than a silent `False`. `cmd_notify_heartbeat_failure` already calls it in exactly this shape.
+- **Verified independently at review** by reading the function, not by trusting the report. A new single-call-site op would have been duplicated machinery, which the project's own reuse rule names as the wrong trade.
+- **What a future phase should take from this:** the shard predicted a new write path because it reasoned from the FIELD being new. The field was new; the write shape was not.
+
+### Finding: the span check sits AFTER the sample append, and the placement is the behaviour  *(status: active)*
+- The obvious position is beside the activity-marker test at the top of `_emit_worker_idle` — and it would have been wrong. The marker check returns BEFORE sampling, so copying its position would throw the idle window away for the span's whole duration, and a worker that wedged inside a 45-minute review would then go unreported for a further `worker_idle_window_minutes` AFTER the span ended.
+- Checking after the append keeps sampling continuous, so the window is already built the instant the span expires and the alert lands on the next tick. This is also what makes the shard's own stated trade true — detection latency is the span length, not the span plus the window.
+
+### Finding: `quiet_span` in the STUCK-TOOL compare-and-set set is deliberate conservatism  *(status: active)*
+- A declared span says the worker expects to be quiet; it does not say its subprocess may hang. So unlike `active_tool_started_at`, the span genuinely does not gate stuck-tool detection, and requiring it there voids an otherwise-valid stuck-tool emit when a declaration lands mid-tick.
+- Kept anyway, per the master's Background-findings rule, because the cost is bounded — no dedup marker is written, so the next tick re-derives and emits — and a precondition set one watchdog maintains while the other does not is one nobody can reason about later.
+- **Recorded because it is the one line in this phase where the plan's rule and the local mechanics do not line up.** A future phase relaxing it should relax it deliberately, not discover the asymmetry and assume it was an oversight.
+
+### Finding: the ceiling bounds ONE declaration, not cumulative silence  *(status: active)*
+- Nothing stops a live worker re-declaring a fresh span every N minutes indefinitely. The master's invariant still holds, and the distinction is the point: the invariant forbids suppression that stays open with NOBODY ACTING — a dead or wedged worker leaving the watchdog deaf — and a renewal requires a live worker making a token-validated call each time, which is itself evidence of the liveness being asserted. A wedged worker cannot renew.
+- The ceiling is also enforced at WRITE time, so lowering it does not shorten spans already open; maximum exposure is the remainder of one already-declared span. Read-site enforcement was rejected because it would require passing config into `quiet_span_active`, contradicting the `Produces:` signature the plan approved. The record carries its own bound, which is the structural difference from p2's marker.
+
+### Finding: zero means the SHORTEST silence, and three mutants prove it  *(status: active)*
+- `worker_quiet_span_ceiling_minutes = 0` means workers may declare NO silence: the clamp produces `expires_at == started_at`, so the span is expired on arrival and the watchdog judges on evidence alone. The callback still SUCCEEDS at ceiling 0 rather than erroring, because the worker contract has to degrade to p1's inference rather than start failing phases.
+- Validated non-negative rather than positive, unlike p1's four thresholds, and the distinction is real: this is a CAP on suppression, not a detector bound, so its zero is meaningful and safe in a way a detector's zero is not.
+- Mutation-checked at execution: the p2-shaped mutant (`ceiling <= 0` → unbounded) fails 3 tests; the unbounded-suppression mutant (`quiet_span_active` true whenever a span exists) fails 9, including both halves of the phase gate. Probed again at review: ceiling 0 expires on arrival, a 600-minute request clamps to 45, and all five malformed span shapes answer False.
 
 ## Failure modes to anticipate
 

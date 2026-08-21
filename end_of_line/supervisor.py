@@ -609,6 +609,14 @@ def _emit_stuck_tool(
         # The candidate window came from `active_tool_started_at`: a new Bash
         # call starting mid-tick slides that window, so this emit is void.
         delta.require_claim_field("active_tool_started_at")
+        # `quiet_span` does not gate THIS detector — a declared span says the
+        # worker expects to be quiet, not that its subprocess is allowed to
+        # hang. It is re-asserted anyway because both watchdogs share one
+        # precondition contract over the fields that suppress either of them:
+        # a set one watchdog maintains and the other does not is a set nobody
+        # can reason about, and the cost of the strictness is one tick's delay
+        # on a race that writes no dedup marker and re-derives immediately.
+        delta.require_claim_field("quiet_span")
         delta.require_claim_field("stuck_tool_emitted_at")
         st.mark_tool_stuck_emitted(claim, d.pid, st.utcnow())
         _record_claim(delta, claim, "stuck_tool_emitted_at")
@@ -661,14 +669,24 @@ def _emit_worker_idle(
     tree_ps_output: str | None = None,
 ) -> None:
     """Fire EVENT_WORKER_IDLE once per claim when the worker is PID-alive but
-    doing nothing: no FRESH active-Bash marker, and the worker's whole process
-    tree accrued almost no processor time across an uninterrupted ~10-minute
-    window.
+    doing nothing: no FRESH active-Bash marker, no unexpired DECLARED quiet
+    span, and the worker's whole process tree accrued almost no processor time
+    across an uninterrupted ~10-minute window.
 
     "Fresh" is the whole of `state.activity_marker_suppresses`. A marker read
     as bare truthiness suppresses forever, because a Bash command that exits
     nonzero fires no closing hook event — so a single failing test run used to
     make this watchdog deaf for the rest of the phase.
+
+    The declared span (`state.quiet_span_active`) is the fast path in front of
+    all of that inference: a worker about to run a code review knows it is
+    going to look wedged and says so over `clu quiet-span`, instead of leaving
+    this function to guess. It is a lease with its own expiry rather than half
+    of an open/close pair, for the same reason the marker is age-bounded — a
+    suppression that waits for a closing message is one that eventually
+    becomes permanent. Every worker that declares nothing is still judged on
+    the evidence below; the declaration sits in front of that floor, never in
+    place of it.
 
     The metric is CUMULATIVE processor time, sampled once per tick and read as
     a DELTA across the window — not instantaneous `%cpu`, which `man ps`
@@ -736,6 +754,19 @@ def _emit_worker_idle(
     # "cannot judge", not "measured zero" — no sample is appended, and the
     # resulting hole fails the next window's contiguity check on its own.
 
+    # A DECLARED quiet span holds the alert — the worker said, through a
+    # token-validated callback, that it was about to look wedged on purpose.
+    # Checked HERE rather than beside the activity-marker test at the top,
+    # and the placement is the behaviour: sampling continues throughout the
+    # span, so the instant it expires the window is already built and a
+    # worker that wedged inside its own review is reported on the next tick.
+    # Suppressing before the append would instead throw the window away, and
+    # the wedge would go unreported for a further `worker_idle_window_minutes`
+    # after the span ended — trading a false alarm for a longer silence, which
+    # is the one direction this plan is not allowed to trade in.
+    if st.quiet_span_active(claim, now):
+        return
+
     if not st.worker_idle_window_satisfied(
         claim,
         now,
@@ -763,6 +794,10 @@ def _emit_worker_idle(
     # "No Bash tool is running" is the premise of the whole judgment — a tool
     # call starting mid-tick means the worker is not idle after all.
     delta.require_claim_field("active_tool_started_at")
+    # And a span declared while the tick was thinking says the same thing in
+    # the worker's own words. Both suppression inputs are re-asserted, or a
+    # declaration landing mid-tick loses the race it exists to win.
+    delta.require_claim_field("quiet_span")
     delta.require_claim_field("worker_idle_notified")
     st.mark_worker_idle_emitted(claim, now)
     _record_claim(delta, claim, "worker_idle_notified", "worker_idle_notified_at")

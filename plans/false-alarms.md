@@ -14,7 +14,7 @@
 - If it fails: no gate — fix-forward
 - Shard: `plans/false-alarms-p2.md`
 
-**Phase p3 — workers declare their quiet spans instead of being guessed at**  *(gate: must not become a silence switch)*
+**Phase p3 — workers declare their quiet spans instead of being guessed at**  — ✅ SHIPPED  *(gate: must not become a silence switch)*
 - Enters when: p2 committed — a real dependency, not just file serialization: p3's span suppression sits beside p2's bounded activity marker in the same predicate and joins the same compare-and-set set
 - Done signal: an open unexpired span suppresses the alert, and an EXPIRED span does not — the second half proving the design cannot be left open forever
 - If it fails: the span leaks or the notice proves too noisy → keep p1's inference as the sole path and drop the declaration; p1 and p2 already stand alone
@@ -196,7 +196,55 @@ suppression bound. Both were invisible because every test exercised the value's 
 its zero. **p3 and p4 now carry a Done criterion:** every config threshold a phase adds or reads is
 tested at its zero / disabled value, with the test stating which direction is safe.
 
-NEXT phase: **p3** — read `plans/false-alarms-p3.md` FIRST.
+**p3 SHIPPED 2026-08-21** — workers now declare their quiet spans instead of being inferred at.
+Full gate: 2450/2450 tests, basedpyright 0 errors. The +37 test delta matches the 37 added, which
+is the evidence they actually ran rather than being excluded.
+
+**Spec check at p3** — 1/1 task evidenced · interfaces conform · none unclaimed · +2 files added
+at execution (`skills_manifest.json`, `docs/reference.md`), +1 at review (`CLAUDE.md`).
+**One Work item was deliberately NOT built and that is the correct outcome:** the shard asked for a
+new `plan_store` op, and `op_stamp_claim_fields` already has all four properties it specified —
+verified at review by reading the function, not by trusting the report. Both `Produces:` signatures
+shipped exactly as approved: `state.quiet_span_active(claim, now) -> bool` and the
+`current_claim.quiet_span` record.
+
+**Review at p3 — no defects found, and here is what was actually checked** (an all-clear and a
+skipped pass must not look alike). Probed: ceiling 0 produces a span expired on arrival, a
+600-minute request clamps to 45, a normal span is active at declaration and inactive past expiry,
+and all five malformed shapes — absent, non-object, empty, missing and unparseable `expires_at` —
+answer False. Traced the compare-and-set machinery to `plan_store.py:1675-1684` and confirmed
+`_read_claim` reconstructs `flags`, so requiring a flags-resident field like `quiet_span` is a real
+precondition rather than a silent no-op. Confirmed `Bash(clu *)` in the hardened allowlist covers
+the new subcommand and `excludedCommands` keeps it sandbox-exempt, so no operator config changes.
+One stale enumeration fixed in `CLAUDE.md`; the worker's judgment to LEAVE the parallel
+enumeration at `docs/contract.md:237` was checked and upheld — that sentence is a historical claim
+about what the SQLite migration did not change, so adding a post-migration callback to it would
+make it false rather than current.
+
+**Downstream sweep at p3** — p4 clean: grepped it for every symbol, command and config name this
+phase introduced, and for the temporal phrasings that go stale by construction; nothing in it is
+falsified. Also re-verified p4's opening premise on THIS machine, since its gate depends on it
+being live: the `SessionStart` hook IS present in `~/.claude/settings.json` and the monitor marker
+table IS empty — the divergence p4 exists to make unrepresentable is real right now.
+code: p3 pinned a third suppression input onto the idle watchdog, which obsoleted the two-condition
+enumerations in `docs/reference.md` that p1 and p2 had shipped — corrected inside p3's own commit,
+which is the guard this question exists to find.
+
+**The escalated finding class held.** p1 and p2 each shipped a threshold whose zero value silently
+removed a bound. p3 added `worker_quiet_span_ceiling_minutes` and got it right the first time —
+zero is the SHORTEST-silence setting, not an unbounded one, mutation-checked against the p2-shaped
+mistake. The criterion carried onto p4 stays, though p4 is expected to satisfy it vacuously.
+
+NEXT phase: **p4** — read `plans/false-alarms-p4.md` FIRST.
+
+The decisions binding p4, pulled inline so a compaction that drops the shard still leaves them visible:
+1. **The marker row is a write-only cache of a fact that lives in `~/.claude/settings.json`** — the file is the source of truth, and the predicate is derived from it rather than from the cache. Verified live on this machine at the p3 sweep: hook present, marker table empty.
+2. **The divergence must become unrepresentable**, not merely corrected once — a predicate that can disagree with the file will disagree again.
+3. **Per-surface predicates**: an inbox-only install must not report the dashboard as installed. The existing test that suppresses the dashboard tip by writing an INBOX marker row encodes exactly that conflation and is to be CORRECTED, not preserved.
+4. **`Fixes #116` belongs to this phase.** #115 is already closed by p3's commit, which was the last of the three phases completing it — do not re-close it here.
+5. **Carried from p1-p3:** any config threshold this phase adds or reads is tested at its zero value. Expected to be vacuous here — check rather than assume.
+
+*(Superseded — p3 is shipped. Its binding decisions are recorded in `plans/false-alarms-p3.md`.)*
 
 The decisions binding p3, pulled inline so a compaction that drops the shard still leaves them visible:
 1. **A declared span is a LEASE, not a pair** — it carries an expected duration and expires on its own clock. This is the plan's most expensive lesson: the same "trust the close event" design was disqualified via subagent hooks AND found already broken in the shipped activity marker. A span that can be left open forever is a silence switch. Do not build one.
@@ -341,7 +389,7 @@ The three decisions that bound p1 (shipped — kept as the record of why it did 
 ## Files touched (overview)
 
 - `end_of_line/supervisor.py` — P1, P2, P3 — P2 moves the idle gate onto the freshness predicate and adds the `cpu_samples` precondition (added at execution); P1 deletes the `lsof` branch, adds cumulative-CPU sampling and the fractional duration parse; P3 adds the quiet-span suppression check
-- `end_of_line/state.py` — P1, P2, P3 — P1 the window predicate (age retention, contiguity, recency); P2 deletes two uncalled functions and bounds the marker; P3 adds `quiet_span_active`
+- `end_of_line/state.py` — P1, P2, P3 — P3 adds `quiet_span_active`, `build_quiet_span` and the ceiling default; P1 the window predicate (age retention, contiguity, recency); P2 deletes two uncalled functions and bounds the marker; P3 adds `quiet_span_active`
 - `end_of_line/config.py` — P1, P3 — P1 four idle thresholds mirroring the stuck-tool pattern; P3 the quiet-span ceiling
 - `end_of_line/plan_store.py` — P1, P2, P3 — P1 drops `lsof` from the tick-transaction comment (added at execution); P2 window invalidation at the real activity write site; P3 the span write op
 - `end_of_line/cli.py` — P1, P2, P3, P4 — P1 formats the now-float `Descendant` fields in `clu doctor`'s stuck-tool row (added at execution); P2 logs a dropped activity stamp instead of discarding it (no new flag — see p2's locked decisions); P3 adds the `clu quiet-span` worker callback; P4 replaces the hook-installed predicate and its two call sites
@@ -353,6 +401,8 @@ The three decisions that bound p1 (shipped — kept as the record of why it did 
 - `docs/operations.md` — P1, P2, P4 — P1 warns that raising `StartInterval` at or past the max sample gap silently disables idle detection (added at review, operator-decided); the activity-hook recipe's coverage limit; the unimplemented `isatty` refusal claim
 - `tests/test_quiet_span.py` — P3 — new: span suppression, expiry, ceiling clamp, token rejection
 - `end_of_line/dispatch.py` — P1 — comment-only: `:296` claims tree-awareness exists "so this doesn't false-fire WORKER_IDLE", which was never true of the socket check and is moot once it is deleted
+- `CLAUDE.md` — P3 — added at review: the token-bearing callback enumeration omitted `quiet-span` and `activity`
+- `end_of_line/skills_manifest.json` — P2, P3 — regenerated whenever a bundled SKILL.md changes
 - `end_of_line/activity_hook.py` — P2 — added at execution: the other entry point that discarded a dropped-stamp return
 - `end_of_line/skills_manifest.json` — P2 — added at execution: the skill-sync test hard-fails on a missing bundled-SKILL hash
 - `tests/test_state_stuck_tool.py` — P2 — added at execution: four tests called the helpers p2 deletes
